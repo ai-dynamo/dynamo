@@ -31,7 +31,10 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 from dynamo.profiler.utils.defaults import EngineType
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
+from dynamo.profiler.utils.profile_common import (
+    ProfilerOperationalConfig,
+    inject_tolerations_into_dgd,
+)
 from dynamo.profiler.utils.profile_decode import (
     profile_decode,
     profile_decode_aiconfigurator,
@@ -57,6 +60,7 @@ async def run_interpolation(
     osl: int,
     sweep_max_context_length: int,
     deployment_clients: list[DynamoDeploymentClient],
+    job_tolerations: list | None = None,
 ) -> None:
     """Generate interpolation curves for the planner based on sweep mode.
 
@@ -84,6 +88,8 @@ async def run_interpolation(
 
     # --- Prefill interpolation ---
     prefill_config = config_modifier.convert_config(disagg_config, EngineType.PREFILL)
+    if job_tolerations:
+        prefill_config = inject_tolerations_into_dgd(prefill_config, job_tolerations)
 
     work_dir = f"{ops.output_dir}/selected_prefill_interpolation"
     os.makedirs(work_dir, exist_ok=True)
@@ -146,6 +152,8 @@ async def run_interpolation(
 
     # --- Decode interpolation ---
     decode_config = config_modifier.convert_config(disagg_config, EngineType.DECODE)
+    if job_tolerations:
+        decode_config = inject_tolerations_into_dgd(decode_config, job_tolerations)
 
     work_dir = f"{ops.output_dir}/selected_decode_interpolation"
     os.makedirs(work_dir, exist_ok=True)

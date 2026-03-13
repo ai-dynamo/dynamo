@@ -390,6 +390,7 @@ async def run_profile(
                     osl,
                     sweep_max_context_length,
                     deployment_clients,
+                    job_tolerations=job_tolerations,
                 )
 
         # ---------------------------------------------------------------
