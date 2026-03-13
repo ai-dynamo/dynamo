@@ -132,7 +132,6 @@ class GMSMemorySaverImpl:
             yield
 
     def pause(self, tag: Optional[str] = None) -> None:
-        logger.info("[GMS] pause called (tag=%s, disabled=%s)", tag, self._disabled)
         if self._disabled:
             return
         if tag is None or self._is_weights_tag(tag):
@@ -149,79 +148,24 @@ class GMSMemorySaverImpl:
             self._torch_impl.resume(tag=tag)
 
     def _pause_weights(self) -> None:
-        import os
-
         if self._allocator is None:
-            logger.warning(
-                "[GMS] _pause_weights: allocator is None, skipping unmap (pid=%d)",
-                os.getpid(),
-            )
             return
         if self._allocator.is_unmapped:
-            logger.info(
-                "[GMS] _pause_weights: already unmapped, skipping (pid=%d)", os.getpid()
-            )
             return
-
-        num_mappings = len(self._allocator.mappings)
-        mapped_count = sum(
-            1 for m in self._allocator.mappings.values() if m.handle != 0
-        )
-        total_bytes = self._allocator.total_bytes
-        logger.info(
-            "[GMS] _pause_weights: unmapping %d/%d mappings (%.2f GiB), "
-            "connected=%s, lock=%s (pid=%d)",
-            mapped_count,
-            num_mappings,
-            total_bytes / (1 << 30),
-            self._allocator.is_connected,
-            self._allocator.granted_lock_type,
-            os.getpid(),
-        )
-
+        logger.info("[GMS] Unmapping weights (VA-stable)")
         self._allocator.unmap_all_vas()
         self._allocator.disconnect()
 
-        logger.info(
-            "[GMS] _pause_weights: done. unmapped=%s, connected=%s (pid=%d)",
-            self._allocator.is_unmapped,
-            self._allocator.is_connected,
-            os.getpid(),
-        )
-
     def _resume_weights(self) -> None:
-        import os
-
         if self._allocator is None:
-            logger.warning(
-                "[GMS] _resume_weights: allocator is None (pid=%d)", os.getpid()
-            )
             return
         if not self._allocator.is_unmapped:
-            logger.info(
-                "[GMS] _resume_weights: not unmapped, skipping (pid=%d)", os.getpid()
-            )
             return
-
-        num_mappings = len(self._allocator.mappings)
-        logger.info(
-            "[GMS] _resume_weights: remapping %d VAs (pid=%d)",
-            num_mappings,
-            os.getpid(),
-        )
+        logger.info("[GMS] Remapping weights (VA-stable)")
         from gpu_memory_service.common.types import RequestedLockType
 
         self._allocator.connect(RequestedLockType.RO)
         self._allocator.remap_all_vas()
-
-        logger.info(
-            "[GMS] _resume_weights: done. unmapped=%s, connected=%s, "
-            "total=%.2f GiB (pid=%d)",
-            self._allocator.is_unmapped,
-            self._allocator.is_connected,
-            self._allocator.total_bytes / (1 << 30),
-            os.getpid(),
-        )
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""
