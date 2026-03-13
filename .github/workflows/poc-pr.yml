@@ -140,7 +140,7 @@ jobs:
   vllm-copy-to-acr:
     name: vllm Copy to ACR
     needs: [vllm-test]
-    uses: ./.github/workflows/shared-copy-to-acr.yml
+    uses: ./.github/workflows/shared-copy.yml
     with:
       framework: vllm
       cuda_version: "[ '12.9', '13.0' ]"
@@ -150,7 +150,7 @@ jobs:
   sglang-copy-to-acr:
     name: sglang Copy to ACR
     needs: [sglang-test]
-    uses: ./.github/workflows/shared-copy-to-acr.yml
+    uses: ./.github/workflows/shared-copy.yml
     with:
       framework: sglang
       cuda_version: "[ '12.9', '13.0' ]"
@@ -160,7 +160,7 @@ jobs:
   trtllm-copy-to-acr:
     name: trtllm Copy to ACR
     needs: [trtllm-test]
-    uses: ./.github/workflows/shared-copy-to-acr.yml
+    uses: ./.github/workflows/shared-copy.yml
     with:
       framework: trtllm
       cuda_version: "[ '13.1' ]"
