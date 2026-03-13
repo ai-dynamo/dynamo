@@ -81,6 +81,7 @@ python -m dynamo.mocker \
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
 | `--watermark` | 0.01 | KV cache watermark (fraction reserved) |
 | `--speedup-ratio` | 1.0 | Timing speedup factor |
+| `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
 | `--data-parallel-size` | 1 | Number of DP replicas |
 | `--startup-time` | None | Simulated startup delay (seconds) |
 | `--planner-profile-data` | None | Path to NPZ file with timing data |
