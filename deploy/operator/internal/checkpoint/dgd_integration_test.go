@@ -249,7 +249,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 						fieldPaths[item.Path] = item.FieldRef.FieldPath
 					}
 				}
-				assert.Equal(t, "metadata.annotations['"+consts.AnnotationDynNamespace+"']", fieldPaths[consts.PodInfoFileDynNamespace])
+				assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fieldPaths[consts.PodInfoFileDynNamespace])
 				assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fieldPaths[consts.PodInfoFileDynNamespaceWorkerSuffix])
 			}
 		}

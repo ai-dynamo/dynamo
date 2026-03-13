@@ -487,7 +487,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 		Recorder: record.NewFakeRecorder(10),
 	}
 
-	ref := "friendly-checkpoint"
+	ref := friendlyCheckpointName
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",

@@ -1428,10 +1428,7 @@ func GenerateGrovePodCliqueSet(
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
 			clique.Labels = labels
-			annotations, err := generateAnnotations(
-				component,
-				checkpointInfo,
-			)
+			annotations, err := generateAnnotations(component)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
@@ -1513,6 +1510,12 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
+	// Restore labels are operator-controlled state. Clear any stale or
+	// user-provided values after metadata merge so users cannot force restore
+	// targeting by setting labels directly in the spec.
 	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
 	delete(labels, commonconsts.KubeLabelCheckpointHash)
 
@@ -1524,10 +1527,7 @@ func generateLabels(
 	return labels, nil
 }
 
-func generateAnnotations(
-	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
-	checkpointInfo *checkpoint.CheckpointInfo,
-) (map[string]string, error) {
+func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (map[string]string, error) {
 	annotations := make(map[string]string)
 	if component.Annotations != nil {
 		err := mergo.Merge(&annotations, component.Annotations, mergo.WithOverride)
@@ -1540,12 +1540,6 @@ func generateAnnotations(
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge extraPodMetadata annotations: %w", err)
 		}
-	}
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		if component.DynamoNamespace == nil || *component.DynamoNamespace == "" {
-			return nil, fmt.Errorf("restore target requires a dynamoNamespace")
-		}
-		annotations[commonconsts.AnnotationDynNamespace] = *component.DynamoNamespace
 	}
 	return annotations, nil
 }

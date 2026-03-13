@@ -340,39 +340,6 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
 }
 
-func (s *DynamoComponentDeployment) ResolveDynamoNamespace() (string, error) {
-	if s.Spec.GlobalDynamoNamespace {
-		return commonconsts.GlobalDynamoNamespace, nil
-	}
-
-	parentName := s.GetParentGraphDeploymentName()
-	if parentName != "" {
-		return ComputeDynamoNamespace(false, s.GetNamespace(), parentName), nil
-	}
-
-	if s.Spec.DynamoNamespace != nil && *s.Spec.DynamoNamespace != "" {
-		return *s.Spec.DynamoNamespace, nil
-	}
-
-	return "", fmt.Errorf("DynamoComponentDeployment %s is missing both spec.dynamoNamespace and a parent DynamoGraphDeployment ownerRef", s.Name)
-}
-
-func (s *DynamoComponentDeployment) ResolveEffectiveDynamoNamespace() (string, error) {
-	dynamoNamespace, err := s.ResolveDynamoNamespace()
-	if err != nil {
-		return "", err
-	}
-
-	if (s.Spec.ComponentType == commonconsts.ComponentTypeWorker ||
-		s.Spec.ComponentType == commonconsts.ComponentTypePrefill ||
-		s.Spec.ComponentType == commonconsts.ComponentTypeDecode) &&
-		s.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
-		return dynamoNamespace + "-" + s.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash], nil
-	}
-
-	return dynamoNamespace, nil
-}
-
 // GetDynamoNamespace returns the Dynamo namespace for this component.
 func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())

@@ -407,12 +407,12 @@ func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
 							FieldPath: consts.PodInfoFieldPodNamespace,
 						},
 					},
-					// Restore namespace from annotations and worker suffix from labels
+					// Restore namespace and worker suffix from current pod labels
 					// so the restored process can rebuild its current worker namespace.
 					{
 						Path: consts.PodInfoFileDynNamespace,
 						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.annotations['" + consts.AnnotationDynNamespace + "']",
+							FieldPath: "metadata.labels['" + consts.KubeLabelDynamoNamespace + "']",
 						},
 					},
 					{

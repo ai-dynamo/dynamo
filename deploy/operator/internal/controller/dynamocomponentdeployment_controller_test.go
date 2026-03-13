@@ -50,8 +50,6 @@ import (
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
-const testDGDNamespace = "default-test-dgd"
-
 func TestIsDeploymentReady(t *testing.T) {
 	type args struct {
 		deployment *appsv1.Deployment
@@ -727,10 +725,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						LeaderTemplate: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"instance-id":                        "0",
-									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
-									"role":                               "leader",
-									"nvidia.com/label1":                  "label1",
+									"instance-id":                                   "0",
+									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
+									"role":                                          "leader",
+									"nvidia.com/label1":                             "label1",
+									commonconsts.KubeLabelDynamoNamespace:           "default-test-lws-deploy",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
@@ -868,10 +867,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						WorkerTemplate: corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"instance-id":                        "0",
-									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
-									"role":                               "worker",
-									"nvidia.com/label1":                  "label1",
+									"instance-id":                                   "0",
+									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
+									"role":                                          "worker",
+									"nvidia.com/label1":                             "label1",
+									commonconsts.KubeLabelDynamoNamespace:           "default-test-lws-deploy",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
@@ -1261,10 +1261,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-worker",
 				Namespace: "default",
-				OwnerReferences: []metav1.OwnerReference{{
-					Kind: "DynamoGraphDeployment",
-					Name: "test-dgd",
-				}},
 			},
 			Spec: v1alpha1.DynamoComponentDeploymentSpec{
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -1348,19 +1344,20 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointHash]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint hash, got %q", commonconsts.KubeLabelCheckpointHash, got)
 		}
-		if got := podTemplateSpec.Annotations[commonconsts.AnnotationDynNamespace]; got != testDGDNamespace {
-			t.Fatalf("expected %s annotation to be %q, got %q", commonconsts.AnnotationDynNamespace, testDGDNamespace, got)
-		}
 	})
 
-	t.Run("restore target falls back to parent graph namespace when deprecated field is unset", func(t *testing.T) {
+	t.Run("operator reasserts dynamo namespace label after metadata merge", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
-		dcd.Spec.DynamoNamespace = nil
+		dcd.Spec.ExtraPodMetadata = &v1alpha1.ExtraPodMetadata{
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "wrong-namespace",
+			},
+		}
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,
@@ -1381,8 +1378,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
-		if got := podTemplateSpec.Annotations[commonconsts.AnnotationDynNamespace]; got != testDGDNamespace {
-			t.Fatalf("expected %s annotation to be %q, got %q", commonconsts.AnnotationDynNamespace, testDGDNamespace, got)
+
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != defaultNamespace {
+			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
 		}
 	})
 
@@ -1419,9 +1417,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 		if _, ok := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointHash]; ok {
 			t.Fatalf("did not expect %s label when checkpoint is not ready", commonconsts.KubeLabelCheckpointHash)
-		}
-		if _, ok := podTemplateSpec.Annotations[commonconsts.AnnotationDynNamespace]; ok {
-			t.Fatalf("did not expect %s annotation when checkpoint is not ready", commonconsts.AnnotationDynNamespace)
 		}
 	})
 }

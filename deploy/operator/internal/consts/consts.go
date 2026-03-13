@@ -177,9 +177,6 @@ const (
 	PodInfoFileDynNamespace             = "dyn_namespace"
 	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
 
-	// Annotation keys for DGD info (exposed via Downward API)
-	AnnotationDynNamespace = "nvidia.com/dyn-namespace"
-
 	// Rolling update annotations
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
 

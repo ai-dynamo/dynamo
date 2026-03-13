@@ -1068,9 +1068,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
-	// Restore labels are operator-controlled. Clear any stale/user-provided
-	// value after metadata merge; the controller re-adds it only when the
-	// checkpoint contract below is satisfied.
+	if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
+		podLabels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
+	}
+	// Restore labels are operator-controlled state. Clear any stale or
+	// user-provided values after metadata merge so users cannot force restore
+	// targeting by setting labels directly in the spec.
 	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
 	delete(podLabels, commonconsts.KubeLabelCheckpointHash)
 
@@ -1081,14 +1084,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if checkpointInfo.Hash != "" {
 			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
 		}
-		dynamoNamespace, err := opt.dynamoComponentDeployment.ResolveDynamoNamespace()
-		if err != nil {
-			return nil, err
-		}
-		if podAnnotations == nil {
-			podAnnotations = make(map[string]string)
-		}
-		podAnnotations[commonconsts.AnnotationDynNamespace] = dynamoNamespace
 	}
 
 	// Propagate restart annotation to pod template to trigger rolling restart
@@ -1140,16 +1135,15 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		return deleteStub, true, nil
 	}
 
-	dynamoNamespace, err := dcd.ResolveDynamoNamespace()
-	if err != nil {
-		return nil, false, err
+	if dcd.Spec.DynamoNamespace == nil {
+		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
 	}
 
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		ComponentType:   dcd.Spec.ComponentType,
-		DynamoNamespace: dynamoNamespace,
+		DynamoNamespace: *dcd.Spec.DynamoNamespace,
 		ComponentName:   dcd.Spec.ServiceName,
 		Labels:          r.getKubeLabels(dcd),
 		Annotations:     r.getKubeAnnotations(dcd),

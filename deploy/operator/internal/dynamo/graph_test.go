@@ -6881,6 +6881,30 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointHash])
 }
 
+func TestGenerateLabels_ReassertsDynamoNamespaceAfterMetadataMerge(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "wrong-from-labels",
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoNamespace: "wrong-from-extra-metadata",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
+}
+
 func TestIsWorkerComponent(t *testing.T) {
 	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
 	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}
