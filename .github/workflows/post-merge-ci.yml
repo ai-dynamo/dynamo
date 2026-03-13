@@ -474,6 +474,21 @@ jobs:
       run: |
         docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
+
+  # ============================================================================
+  # ERROR CLASSIFICATION
+  # ============================================================================
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [clean-k8s-builder]
+    uses: ./.github/workflows/classify-errors.yml
+    with:
+      workflow_type: post-merge
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CI_CLASSIFIER_API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack

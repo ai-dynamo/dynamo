@@ -399,3 +399,16 @@ jobs:
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
 
+  # ============================================================================
+  # ERROR CLASSIFICATION
+  # ============================================================================
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [clean-k8s-builder, deploy-cleanup, release-publish]
+    uses: ./.github/workflows/classify-errors.yml
+    with:
+      workflow_type: release
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+

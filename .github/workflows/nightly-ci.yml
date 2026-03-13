@@ -142,6 +142,20 @@ jobs:
         run: |
           docker buildx rm ${{ env.BUILDER_NAME }} || true
 
+  # ============================================================================
+  # ERROR CLASSIFICATION
+  # ============================================================================
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    uses: ./.github/workflows/classify-errors.yml
+    with:
+      workflow_type: nightly
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CI_CLASSIFIER_API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
