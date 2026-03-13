@@ -307,9 +307,15 @@ jobs:
             PUSH_ARGS="--load"
           fi
 
+          NO_CACHE_ARG=""
+          if [ "${{ inputs.no_cache }}" == "true" ]; then
+            NO_CACHE_ARG="--no-cache"
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
+            ${NO_CACHE_ARG} \
             --platform linux/${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
@@ -510,7 +516,7 @@ jobs:
   compliance:
     if: inputs.build_image && inputs.push_image
     needs: [build]
-    name: Compliance ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Compliance cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
     steps:
       - name: Checkout repository
@@ -536,7 +542,7 @@ jobs:
         uses: ./.github/actions/compliance-scan
         with:
           image: ${{ steps.images.outputs.runtime_image }}
-          artifact_name: compliance-${{ inputs.framework }}-cuda${{ steps.images.outputs.cuda_major }}-${{ inputs.platform }}
+          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}-${{ inputs.platform }}
           framework: ${{ inputs.framework }}
           cuda_version: ${{ inputs.cuda_version }}
 

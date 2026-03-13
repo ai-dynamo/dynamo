@@ -30,7 +30,12 @@ pub type NumBlocks = usize;
 /// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>, Vec<BlockHash>, Option<Vec<Vec<u32>>>),
+    Use(
+        Vec<UniqueBlock>,
+        Vec<BlockHash>,
+        Option<Vec<Vec<u32>>>,
+        Option<UniqueBlock>,
+    ),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
     Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),

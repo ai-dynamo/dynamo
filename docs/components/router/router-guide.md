@@ -36,7 +36,8 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
 | `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
-| `--router-queue-threshold <float>` | None (disabled) | Queue threshold fraction; enables priority scheduling via `latency_sensitivity` |
+| `--router-queue-threshold <float>` | `2.0` | Queue threshold fraction; enables priority scheduling via `latency_sensitivity` |
+| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -78,6 +79,7 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
 | `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
+| `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` |
 
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
 For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
@@ -178,7 +180,11 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity. When set, the router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `latency_sensitivity` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. If not set (default), queueing is disabled and requests are dispatched immediately.
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 2.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `latency_sensitivity` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
+
+- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Two policies are available:
+  - **`fcfs`** (first-come first-served): Orders by adjusted arrival time (`priority_jump - arrival_offset`). Optimizes **tail TTFT** — no request waits longer than necessary.
+  - **`wspt`** (weighted shortest processing time, Smith's rule): Orders by `(1 + priority_jump) / isl_tokens`. Optimizes **average TTFT** — short or high-priority requests are scheduled before long low-priority ones, minimizing total weighted completion time.
 
 ### KV Event Transport and Persistence
 
@@ -224,7 +230,9 @@ Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worke
 
 Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
 
-Set `--router-queue-threshold` (e.g. `1.5`) to enable backpressure under very high concurrency workloads. When set, the router holds incoming requests in a priority queue while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
+The `--router-queue-threshold` (default: 2.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. Set to None to disable queueing entirely.
+
+Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize **average** TTFT. WSPT (Smith's rule) schedules short or high-priority requests first, reducing mean latency across the batch. Use the default `fcfs` when you want to minimize **tail** TTFT — no request waits longer than necessary, since ordering is purely by (adjusted) arrival time.
 
 ### Prometheus Metrics
 

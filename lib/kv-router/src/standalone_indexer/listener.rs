@@ -11,8 +11,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SocketSend, SubSocket};
 
-use dynamo_kv_router::protocols::{RouterEvent, WorkerId};
-use dynamo_kv_router::zmq_wire::{KvEventBatch, convert_event};
+use crate::protocols::{RouterEvent, WorkerId};
+use crate::zmq_wire::{KvEventBatch, convert_event};
 
 use super::indexer::Indexer;
 
@@ -375,11 +375,6 @@ async fn zmq_recv_loop(
 mod tests {
     use zeromq::{PubSocket, Socket, SocketRecv, SocketSend, SubSocket};
 
-    /// Verify that the `zeromq` crate buffers a small number of messages in
-    /// TCP kernel buffers when `recv()` is not being called. The PUB socket
-    /// uses `try_send` with a noop waker — once the TCP send buffer is full
-    /// it silently drops messages (per ZMQ spec RFC 29). This test confirms
-    /// that a brief delay (simulating P2P recovery) doesn't lose messages.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmq_buffers_messages_during_brief_delay() {
         let mut pub_socket = PubSocket::new();
@@ -392,8 +387,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for SUB handshake: spawn recv in a background task so the
-        // PUB's accept/subscription processing can proceed concurrently.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SubSocket>(1);
         tokio::spawn(async move {
             let _ = sub_socket.recv().await.unwrap();
@@ -410,8 +403,6 @@ mod tests {
 
         let num_messages = 10u64;
 
-        // Send messages without calling recv() — simulates the brief window
-        // between ZMQ connect and ready signal during P2P recovery.
         for i in 0..num_messages {
             pub_socket
                 .send(i.to_le_bytes().to_vec().into())
@@ -419,10 +410,8 @@ mod tests {
                 .unwrap();
         }
 
-        // Simulate recovery delay
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // All messages should be buffered in TCP kernel buffers
         for i in 0u64..num_messages {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(5), sub_socket.recv())
                 .await
