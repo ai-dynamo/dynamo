@@ -33,7 +33,7 @@ harness = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
-futures-util = "0.3"
+futures-util = { workspace = true }
 indicatif = "0.18"
 rand = { workspace = true }
 reqwest = { workspace = true }

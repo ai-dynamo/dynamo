@@ -64,7 +64,7 @@ chrono = { workspace = true }
 derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
-futures-util = "0.3.31"
+futures-util = { workspace = true }
 hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
