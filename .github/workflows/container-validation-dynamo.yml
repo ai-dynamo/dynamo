@@ -247,7 +247,7 @@ jobs:
           framework: dynamo
           test_type: "pre_merge_sequential"
           platform_arch: amd64
-          enable_mypy: 'false'
+          enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'false'
