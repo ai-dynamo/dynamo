@@ -172,24 +172,13 @@ jobs:
           rm -rf docs-checkout/fern/pages-dev
           mkdir -p docs-checkout/fern/pages-dev
           rsync -a \
-            --exclude='assets' \
             --exclude='blogs' \
-            --exclude='diagrams' \
             --exclude='index.yml' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
           echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
           cp source-checkout/docs/index.yml docs-checkout/fern/versions/dev.yml
-
-          # Sync assets/ directory
-          echo "Syncing assets/ to docs-website branch..."
-          rm -rf docs-checkout/fern/assets
-          cp -r source-checkout/docs/assets docs-checkout/fern/assets
-
-          # Symlink assets into pages-dev/ so relative image paths in markdown resolve correctly
-          # (e.g. ../../assets/img/foo.png from pages-dev/observability/metrics.md)
-          ln -sfn ../assets docs-checkout/fern/pages-dev/assets
 
           # Sync fern.config.json
           echo "Syncing fern.config.json to docs-website branch..."
