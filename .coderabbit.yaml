@@ -28,6 +28,11 @@ reviews:
     unit_tests:
       enabled: false
   path_instructions:
+    - path: "**"
+      instructions: |
+        Flag PRs more than ~25 commits behind main. Recommend rebasing.
+        Exception: stacked PRs targeting another branch are exempt.
+        See .ai/pr-workflow-guidelines.md.
     - path: "**/*.py"
       instructions: "Review against .ai/python-guidelines.md"
     - path: "**/tests/**/*.py"

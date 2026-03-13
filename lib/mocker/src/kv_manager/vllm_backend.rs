@@ -213,7 +213,7 @@ impl KvManager {
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if self.cache.is_at_capacity() {
                         let Some(evicted) = self.cache.evict_inactive() else {
-                            return allocated;
+                            break;
                         };
                         tracing::trace!(
                             "Evicting block from inactive pool: {evicted:?}, dp_rank={}",

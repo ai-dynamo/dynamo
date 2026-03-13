@@ -101,6 +101,30 @@ dynamo-kv-indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-mod
 
 ## HTTP API
 
+### `GET /health` — Liveness check
+
+Returns `200 OK` unconditionally.
+
+```bash
+curl http://localhost:8090/health
+```
+
+### `GET /metrics` — Prometheus metrics
+
+Returns metrics in Prometheus text exposition format. Available when the binary is built with the `metrics` feature (enabled by default via `standalone-indexer`).
+
+```bash
+curl http://localhost:8090/metrics
+```
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `dynamo_kvindexer_request_duration_seconds` | Histogram | `endpoint` | HTTP request latency |
+| `dynamo_kvindexer_requests_total` | Counter | `endpoint`, `method` | Total HTTP requests |
+| `dynamo_kvindexer_errors_total` | Counter | `endpoint`, `status_class` | HTTP error responses (4xx/5xx) |
+| `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
+| `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
+
 ### `POST /register` — Register an endpoint
 
 Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, tenant_id)` pair.
@@ -309,7 +333,7 @@ graph TD
         REG[Worker Registry]
         ZMQ[ZMQ SUB Listeners]
         IDX["Indexer Map<br/>(model, tenant) → Radix Tree"]
-        HTTP[HTTP API<br/>/query /dump /register]
+        HTTP[HTTP API<br/>/query /dump /register /metrics /health]
     end
 
     CLIENT[External Client]

@@ -331,6 +331,16 @@ pub mod model {
     }
 }
 
+/// KV Router configuration environment variables
+pub mod router {
+    /// Queue threshold fraction for prefill token capacity.
+    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+    pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
+
+    /// Scheduling policy for the router queue ("fcfs" or "wspt").
+    pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
+}
+
 /// Event Plane transport environment variables
 pub mod event_plane {
     /// Event transport selection: "zmq" or "nats". Default: "nats"
@@ -481,6 +491,9 @@ mod tests {
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
+            // Router
+            router::DYN_ROUTER_QUEUE_THRESHOLD,
+            router::DYN_ROUTER_QUEUE_POLICY,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
