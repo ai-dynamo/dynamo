@@ -85,7 +85,7 @@ The full list of supported ecosystem components:
 
 ## Performance
 
-Dynamo achieves state-of-the-art LLM performance by composing three core techniques: Disaggregated Serving, KV Cache Aware Routing, and KV Cache Offloading. These techniques are underpinned by NIXL, a low-latency data transfer layer that enables seamless KV cache movement between nodes.
+Dynamo achieves state-of-the-art LLM performance by composing three core techniques: Disaggregated Serving, KV Cache-Aware Routing, and KV Cache Offloading. These techniques are underpinned by NIXL, a low-latency data transfer layer that enables seamless KV cache movement between nodes.
 
 - [KV cache-aware routing](../design-docs/router-design.md) Smartly routes requests based on worker load and existing cache hits. By reusing precomputed KV pairs, it bypasses the prefill compute, starting the decode phase immediately. [Baseten](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#how-baseten-uses-nvidia-dynamo) applied Dynamo KV cache-aware routing and saw 2x faster TTFT and 1.6x throughput on Qwen3 Coder 480B A35B.
 
@@ -153,7 +153,7 @@ Dynamo provides built-in metrics, distributed tracing, and logging for monitorin
 Explore the following resources to go deeper:
 
 - [Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) -- Compose disaggregated serving, routing, and offloading
-- [KV Cache Aware Routing](../components/router/router-guide.md) -- Configure smart request routing
+- [KV Cache-Aware Routing](../components/router/router-guide.md) -- Configure smart request routing
 - [KV Cache Offloading](../components/kvbm/kvbm-guide.md) -- Set up multi-tier memory management
 - [Planner](../components/planner/planner-guide.md) -- Configure SLA-based autoscaling
 - [Kubernetes Deployment](../kubernetes/README.md) -- Deploy at scale with Grove
