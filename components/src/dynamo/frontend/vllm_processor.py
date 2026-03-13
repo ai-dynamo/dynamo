@@ -34,6 +34,12 @@ from dynamo.llm import (
     fetch_model,
 )
 from dynamo.runtime import Client, DistributedRuntime
+from dynamo.vllm.multimodal_utils.hash_utils import (
+    build_block_mm_infos,
+    compute_mm_uuids_from_images,
+    find_image_token_ranges,
+    unwrap_pil_image,
+)
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import random_uuid
@@ -76,6 +82,8 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        block_size: int = 16,
+        mm_image_token_id: int | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -84,6 +92,8 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.block_size = block_size
+        self.mm_image_token_id = mm_image_token_id
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -103,6 +113,17 @@ class VllmProcessor:
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
+
+        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
+        # Normalize missing/null detail before passing to preprocess_chat_request.
+        for msg in request.get("messages", []):
+            for part in (
+                msg.get("content") if isinstance(msg.get("content"), list) else []
+            ):
+                if part.get("type") == "image_url":
+                    img_url = part.setdefault("image_url", {})
+                    if img_url.get("detail") is None:
+                        img_url["detail"] = "auto"
 
         pre = await preprocess_chat_request(
             request,
@@ -184,8 +205,6 @@ class VllmProcessor:
 
         InputProcessor.assign_request_id(vllm_preproc)
 
-        # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
-
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
         if sp.n != 1:
@@ -247,6 +266,71 @@ class VllmProcessor:
             chat_template_kwargs=chat_template_kwargs,
         )
 
+        # --- MM-aware routing info ---
+        mm_routing_info: dict | None = None
+        expanded_tokens = list(vllm_preproc.prompt_token_ids)
+
+        image_urls: list[str] = [
+            part.get("image_url", {}).get("url")
+            for msg in request.get("messages", [])
+            for part in (
+                msg.get("content") if isinstance(msg.get("content"), list) else []
+            )
+            if part.get("type") == "image_url"
+        ]
+        image_urls = [u for u in image_urls if u]
+
+        # Get PIL images already downloaded during preprocess_chat_request.
+        # Unwrap MediaWithBytes so we hash pixel data (not JPEG bytes).
+        pil_images: list = []
+        mm_raw = engine_prompt.get("multi_modal_data")
+        if mm_raw:
+            imgs = mm_raw.get("image")
+            if imgs is not None:
+                raw_list = imgs if isinstance(imgs, list) else [imgs]
+                pil_images = [unwrap_pil_image(img) for img in raw_list]
+
+        logger.debug(
+            "[mm-routing] placeholder_tokens=%d vllm_expanded_tokens=%d "
+            "image_urls=%d pil_images=%d image_token_id=%s",
+            len(tokens),
+            len(expanded_tokens),
+            len(image_urls),
+            len(pil_images),
+            self.mm_image_token_id,
+        )
+
+        if self.is_kv_router and pil_images and self.mm_image_token_id is not None:
+            # Must match the backend's hash path (handlers.py _compute_mm_uuids):
+            # hash unwrapped PIL img.tobytes(), NOT mm_features.mm_hash which may
+            # be derived from MediaWithBytes.original_bytes (raw JPEG).
+            mm_hashes = [
+                int(u[:16], 16) for u in compute_mm_uuids_from_images(pil_images)
+            ]
+            image_ranges = find_image_token_ranges(
+                expanded_tokens, self.mm_image_token_id
+            )
+            if image_ranges and len(image_ranges) == len(mm_hashes):
+                block_mm_infos = build_block_mm_infos(
+                    len(expanded_tokens), self.block_size, mm_hashes, image_ranges
+                )
+                mm_routing_info = {
+                    "routing_token_ids": expanded_tokens,
+                    "block_mm_infos": block_mm_infos,
+                }
+                logger.debug(
+                    "[mm-routing] built mm_routing_info: routing_tokens=%d blocks=%d",
+                    len(expanded_tokens),
+                    len(block_mm_infos),
+                )
+            else:
+                logger.warning(
+                    "[mm-routing] image_ranges count (%d) != mm_hashes count (%d); "
+                    "falling back to text-only routing",
+                    len(image_ranges),
+                    len(mm_hashes),
+                )
+
         async for item in self._generate_and_stream(
             request_id,
             request,
@@ -254,6 +338,8 @@ class VllmProcessor:
             tokens,
             vllm_preproc,
             post,
+            mm_routing_info=mm_routing_info,
+            image_urls=image_urls,
         ):
             yield item
 
@@ -265,17 +351,29 @@ class VllmProcessor:
         tokens: list[int],
         vllm_preproc: EngineCoreRequest,
         post: StreamingPostProcessor,
+        mm_routing_info: dict | None = None,
+        image_urls: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
 
         try:
             if self.is_kv_router:
+                extra_args = {"messages": request.get("messages", [])}
+                # Image URLs let the backend download & process images itself.
+                multi_modal_data = (
+                    {"image_url": [{"RawUrl": u} for u in image_urls]}
+                    if image_urls
+                    else None
+                )
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
                     model=dynamo_preproc["model"],
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    extra_args=extra_args,
+                    multi_modal_data=multi_modal_data,
+                    mm_routing_info=mm_routing_info,
                 )
             else:
                 dynamo_stream = await self.router.generate(
@@ -441,16 +539,39 @@ class EngineFactory:
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
         router: Client | KvRouter
+        block_size = self.config.kv_cache_block_size or 16
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,
-                block_size=self.config.kv_cache_block_size or 16,
+                block_size=block_size,
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
             router = await generate_endpoint.client(
                 router_mode=self.router_config.router_mode
             )
+
+        # Discover image_token_id for MM-aware KV routing.
+        # Used to find image token ranges in vllm_preproc.prompt_token_ids.
+        # vllm processor only loads the tokenizer, not the full AutoProcessor so cannot get the image_token_id directly.
+        mm_image_token_id: int | None = None
+        try:
+            inner_tok = getattr(tokenizer, "tokenizer", tokenizer)
+            mm_image_token_id = getattr(inner_tok, "image_token_id", None)
+            if mm_image_token_id is None:
+                unk_id = getattr(inner_tok, "unk_token_id", None)
+                for tok_str in ["<|image_pad|>", "<image>", "<IMG>"]:
+                    tid = inner_tok.convert_tokens_to_ids(tok_str)
+                    if tid is not None and tid != unk_id:
+                        mm_image_token_id = tid
+                        break
+        except Exception as exc:
+            logger.debug("Could not determine mm_image_token_id: %s", exc)
+        logger.info(
+            "MM image_token_id=%s block_size=%d (None=MM routing disabled)",
+            mm_image_token_id,
+            block_size,
+        )
 
         gen = VllmProcessor(
             tokenizer,
@@ -459,6 +580,8 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            block_size=block_size,
+            mm_image_token_id=mm_image_token_id,
         )
 
         return PythonAsyncEngine(gen.generator, loop)
