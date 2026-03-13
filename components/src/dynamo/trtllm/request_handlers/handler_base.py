@@ -81,7 +81,6 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
-    tokenizer: Optional[object] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -112,16 +111,6 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
-        self._standalone_tokenizer = config.tokenizer
-
-    @property
-    def tokenizer(self):
-        if self.multimodal_processor is not None:
-            return getattr(self.multimodal_processor, "tokenizer", None)
-        if self._standalone_tokenizer is not None:
-            return self._standalone_tokenizer
-        llm = getattr(self.engine, "llm", None)
-        return getattr(llm, "tokenizer", None)
 
     def check_error(self, result: dict) -> bool:
         """
@@ -136,7 +125,7 @@ class HandlerBase(BaseGenerativeHandler):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int, tokenizer=None
+        output, num_output_tokens_so_far: int
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from the TRTLLM output for new tokens.
@@ -144,8 +133,6 @@ class HandlerBase(BaseGenerativeHandler):
         Args:
             output: TRTLLM CompletionOutput object
             num_output_tokens_so_far: Number of tokens already processed
-            tokenizer: Optional tokenizer for decoding token IDs when
-                       decoded_token is not populated by the engine
         Returns:
             Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
             - log_probs: List of log probabilities for each new token
@@ -184,25 +171,22 @@ class HandlerBase(BaseGenerativeHandler):
                 if first_logprob:
                     log_probs.append(float(first_logprob.logprob))
 
+            # Build top_logprobs list for this token position
+            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
-                token_str = getattr(logprob_info, "decoded_token", None)
-                if not token_str and tokenizer:
-                    try:
-                        token_str = tokenizer.decode([tok_id])
-                    except Exception:
-                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": logprob_info.rank
                         if hasattr(logprob_info, "rank")
                         else 0,
                         "token_id": tok_id,
-                        "token": token_str,
-                        "logprob": float(logprob_info.logprob),
-                        "bytes": (
-                            list(token_str.encode("utf-8")) if token_str else None
+                        "token": (
+                            logprob_info.decoded_token
+                            if hasattr(logprob_info, "decoded_token")
+                            else None
                         ),
+                        "logprob": float(logprob_info.logprob),
                     }
                 )
             top_logprobs.append(token_top_logprobs)
@@ -830,7 +814,7 @@ class HandlerBase(BaseGenerativeHandler):
 
                     # Extract logprobs from the output
                     log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far, tokenizer=self.tokenizer
+                        output, num_output_tokens_so_far
                     )
                     if log_probs:
                         out["log_probs"] = log_probs
