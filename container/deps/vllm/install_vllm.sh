@@ -211,8 +211,14 @@ echo "✓ vLLM installation completed"
 # Apply hotfix for multi-node TP init ordering (vLLM PR #35892).
 # Only applies to vLLM 0.17.1 — fail loudly on any other version so the
 # patch + this block get cleaned up when vLLM is bumped.
+# Note: In Docker builds the script is copied to /tmp but deps are bind-mounted
+# at /tmp/deps, so resolve the patch relative to BASH_SOURCE first, then fall
+# back to the bind-mount path.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VLLM_PATCH="${SCRIPT_DIR}/multinode-tp-init-order.patch"
+if [ ! -f "$VLLM_PATCH" ]; then
+    VLLM_PATCH="/tmp/deps/vllm/multinode-tp-init-order.patch"
+fi
 if [ "$VLLM_VER" = "0.17.1" ]; then
     # Patch the cloned repo (used by CPU/XPU source builds)
     echo "Applying vLLM multi-node TP hotfix to cloned repo..."
