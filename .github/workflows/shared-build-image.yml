@@ -24,13 +24,13 @@ on:
 
 jobs:
   build:
-    name: Copy to ACR
     strategy:
       fail-fast: false
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     runs-on: ubuntu-latest
+    name: ${{ matrix.cuda_version }}, ${{ matrix.platform }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
       CUDA_VERSION: ${{ matrix.cuda_version }}

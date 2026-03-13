@@ -24,12 +24,12 @@ on:
 
 jobs:
   build:
-    name: Single GPU Test
     strategy:
       fail-fast: false
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
+    name: ${{ matrix.cuda_version }}, ${{ matrix.platform }}
     runs-on: ubuntu-latest
     env:
       FRAMEWORK: ${{ inputs.framework }}
