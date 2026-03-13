@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -27,6 +28,20 @@ def get_gms_lock_mode(extra_config: dict):
         logger.info("[GMS] gms_read_only=True, forcing RO mode")
         return RequestedLockType.RO
     return RequestedLockType.RW_OR_RO
+
+
+def strip_gms_model_loader_config(load_config, load_format: str):
+    """Copy a loader config with GMS-only keys removed for backend loaders."""
+    extra_config = getattr(load_config, "model_loader_extra_config", {}) or {}
+    return replace(
+        load_config,
+        load_format=load_format,
+        model_loader_extra_config={
+            key: value
+            for key, value in extra_config.items()
+            if not key.startswith("gms_")
+        },
+    )
 
 
 def setup_meta_tensor_workaround() -> None:

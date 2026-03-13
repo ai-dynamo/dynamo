@@ -14,11 +14,12 @@ Usage:
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
-
 import torch
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.utils import setup_meta_tensor_workaround
+from gpu_memory_service.integrations.common.utils import (
+    setup_meta_tensor_workaround,
+    strip_gms_model_loader_config,
+)
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
     patch_torch_memory_saver,
@@ -45,7 +46,10 @@ class GMSModelLoader:
         if self._default_loader is None:
             from sglang.srt.model_loader.loader import DefaultModelLoader
 
-            config = replace(self.load_config, load_format="auto")
+            config = strip_gms_model_loader_config(
+                self.load_config,
+                load_format="auto",
+            )
             self._default_loader = DefaultModelLoader(config)
         return self._default_loader
 
@@ -119,7 +123,10 @@ class GMSModelLoader:
         with meta_device:
             model = get_model(
                 model_config=model_config,
-                load_config=replace(self.load_config, load_format="dummy"),
+                load_config=strip_gms_model_loader_config(
+                    self.load_config,
+                    load_format="dummy",
+                ),
                 device_config=device_config,
             )
 

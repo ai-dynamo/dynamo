@@ -251,6 +251,7 @@ class GMS:
                     size=info.size,
                     aligned_size=info.aligned_size,
                     epoch_id=info.epoch_id,
+                    layout_slot=info.layout_slot,
                 ),
                 -1,
                 False,
@@ -293,6 +294,7 @@ class GMS:
                     aligned_size=info.aligned_size,
                     tag=info.tag,
                     epoch_id=info.epoch_id,
+                    layout_slot=info.layout_slot,
                 ),
                 fd,
                 False,
@@ -319,6 +321,7 @@ class GMS:
                     aligned_size=info.aligned_size,
                     tag=info.tag,
                     epoch_id=info.epoch_id,
+                    layout_slot=info.layout_slot,
                 ),
                 -1,
                 False,
@@ -334,6 +337,7 @@ class GMS:
                             aligned_size=info.aligned_size,
                             tag=info.tag,
                             epoch_id=info.epoch_id,
+                            layout_slot=info.layout_slot,
                         )
                         for info in self._allocations.list_allocations(
                             self._epochs.require_epoch_id(conn.mode),

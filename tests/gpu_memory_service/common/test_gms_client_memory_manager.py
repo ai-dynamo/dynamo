@@ -70,6 +70,7 @@ def _make_mapping(
     *,
     handle: int,
     tag: str = "weights",
+    layout_slot: int = 0,
 ) -> LocalMapping:
     return LocalMapping(
         allocation_id=allocation_id,
@@ -78,6 +79,7 @@ def _make_mapping(
         aligned_size=4096,
         handle=handle,
         tag=tag,
+        layout_slot=layout_slot,
     )
 
 

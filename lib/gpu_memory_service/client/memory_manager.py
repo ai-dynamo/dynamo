@@ -94,6 +94,7 @@ class LocalMapping:
     aligned_size: int
     handle: int  # 0 if unmapped but VA reserved
     tag: str
+    layout_slot: int
 
     def with_handle(self, handle: int) -> "LocalMapping":
         return LocalMapping(
@@ -103,6 +104,7 @@ class LocalMapping:
             self.aligned_size,
             handle,
             self.tag,
+            self.layout_slot,
         )
 
     def with_allocation_id(self, allocation_id: str) -> "LocalMapping":
@@ -113,6 +115,22 @@ class LocalMapping:
             self.aligned_size,
             self.handle,
             self.tag,
+            self.layout_slot,
+        )
+
+    def with_server_identity(
+        self,
+        allocation_id: str,
+        layout_slot: int,
+    ) -> "LocalMapping":
+        return LocalMapping(
+            allocation_id,
+            self.va,
+            self.size,
+            self.aligned_size,
+            self.handle,
+            self.tag,
+            layout_slot,
         )
 
 
@@ -299,7 +317,15 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         return cumem_address_reserve(aligned_size, self.granularity)
 
-    def map_va(self, fd: int, va: int, size: int, allocation_id: str, tag: str) -> int:
+    def map_va(
+        self,
+        fd: int,
+        va: int,
+        size: int,
+        allocation_id: str,
+        tag: str,
+        layout_slot: int,
+    ) -> int:
         """Import FD + cuMemMap + set access + track.
 
         Access is set based on current lock_type. Returns the CUDA handle.
@@ -317,6 +343,7 @@ class GMSClientMemoryManager:
                 aligned_size=aligned_size,
                 handle=handle,
                 tag=tag,
+                layout_slot=layout_slot,
             )
         )
         return handle
@@ -383,20 +410,22 @@ class GMSClientMemoryManager:
             alloc_size = int(info.size)
             aligned_size = int(info.aligned_size)
             alloc_tag = str(getattr(info, "tag", "default"))
+            layout_slot = int(info.layout_slot)
 
             fd = self.export_handle(allocation_id)
             va = self.reserve_va(aligned_size)
-            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag)
+            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
             return va
 
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id = self.allocate_handle(size, tag)
+        alloc_info = self.get_handle_info(alloc_id)
         fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
         va = self.reserve_va(aligned_size)
-        self.map_va(fd, va, size, alloc_id, tag)
+        self.map_va(fd, va, size, alloc_id, tag, int(alloc_info.layout_slot))
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -457,20 +486,35 @@ class GMSClientMemoryManager:
 
         assert self._granted_lock_type is not None
 
+        allocations_by_slot = {
+            int(info.layout_slot): info for info in self.list_handles()
+        }
+
         remapped_count = 0
         total_bytes = 0
-        for va, mapping in list(self._mappings.items()):
+        for va, mapping in sorted(
+            self._mappings.items(), key=lambda item: item[1].layout_slot
+        ):
             if mapping.handle != 0:
                 continue
 
-            alloc_info = self.get_handle_info(mapping.allocation_id)
+            alloc_info = allocations_by_slot.get(mapping.layout_slot)
+            if alloc_info is None:
+                raise StaleMemoryLayoutError(
+                    f"Layout slot {mapping.layout_slot} is missing from the committed epoch"
+                )
             if int(alloc_info.aligned_size) != mapping.aligned_size:
                 raise StaleMemoryLayoutError(
-                    f"Allocation {mapping.allocation_id} size changed: "
+                    f"Layout slot {mapping.layout_slot} size changed: "
                     f"{mapping.aligned_size} vs {int(alloc_info.aligned_size)}"
                 )
+            if str(alloc_info.tag) != mapping.tag:
+                raise StaleMemoryLayoutError(
+                    f"Layout slot {mapping.layout_slot} tag changed: "
+                    f"{mapping.tag} vs {alloc_info.tag}"
+                )
 
-            fd = self.export_handle(mapping.allocation_id)
+            fd = self.export_handle(alloc_info.allocation_id)
             handle = cumem_import_from_shareable_handle_close_fd(fd)
             cumem_map(va, mapping.aligned_size, handle)
             cumem_set_access(
@@ -479,7 +523,13 @@ class GMSClientMemoryManager:
             cuda_synchronize()
             cuda_validate_pointer(va)
 
-            self._mappings[va] = mapping.with_handle(handle)
+            if mapping.allocation_id != alloc_info.allocation_id:
+                self._inverse_mapping.pop(mapping.allocation_id, None)
+            self._mappings[va] = mapping.with_server_identity(
+                alloc_info.allocation_id,
+                int(alloc_info.layout_slot),
+            ).with_handle(handle)
+            self._inverse_mapping[alloc_info.allocation_id] = va
             remapped_count += 1
             total_bytes += mapping.aligned_size
 
@@ -508,7 +558,9 @@ class GMSClientMemoryManager:
             )
 
         reallocated = 0
-        for va, mapping in list(self._mappings.items()):
+        for va, mapping in sorted(
+            self._mappings.items(), key=lambda item: item[1].layout_slot
+        ):
             if mapping.handle != 0:
                 continue
 
@@ -520,10 +572,14 @@ class GMSClientMemoryManager:
                     "GMS reallocation alignment mismatch: "
                     f"{mapping.aligned_size} vs {server_aligned}"
                 )
+            alloc_info = self.get_handle_info(allocation_id)
 
             old_alloc_id = mapping.allocation_id
             self._inverse_mapping.pop(old_alloc_id, None)
-            self._mappings[va] = mapping.with_allocation_id(allocation_id)
+            self._mappings[va] = mapping.with_server_identity(
+                allocation_id,
+                int(alloc_info.layout_slot),
+            )
             self._inverse_mapping[allocation_id] = va
             reallocated += 1
 

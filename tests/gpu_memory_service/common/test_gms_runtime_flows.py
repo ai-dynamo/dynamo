@@ -611,6 +611,39 @@ def test_remap_all_vas_rejects_stale_layout_after_new_epoch_commit(real_gms):
     reader.disconnect()
 
 
+def test_remap_all_vas_accepts_new_epoch_with_same_structural_layout(real_gms):
+    _, socket_path = real_gms
+
+    first_writer = GMSClientMemoryManager(socket_path, device=0)
+    first_writer.connect(RequestedLockType.RW)
+    va = first_writer.create_mapping(size=4096, tag="weights")
+    first_allocation_id = first_writer.mappings[va].allocation_id
+    first_writer.metadata_put("tensor.0", first_allocation_id, 0, b"shape")
+    assert first_writer.commit()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    imported_va = reader.create_mapping(allocation_id=first_allocation_id)
+    reader.unmap_all_vas()
+    reader.disconnect()
+
+    second_writer = GMSClientMemoryManager(socket_path, device=0)
+    second_writer.connect(RequestedLockType.RW)
+    second_va = second_writer.create_mapping(size=4096, tag="weights")
+    second_allocation_id = second_writer.mappings[second_va].allocation_id
+    assert second_allocation_id != first_allocation_id
+    second_writer.metadata_put("tensor.0", second_allocation_id, 0, b"shape")
+    assert second_writer.commit()
+
+    reader.connect(RequestedLockType.RO)
+    reader.remap_all_vas()
+
+    assert reader.mappings[imported_va].va == imported_va
+    assert reader.mappings[imported_va].allocation_id == second_allocation_id
+    assert reader.metadata_get("tensor.0") == (second_allocation_id, 0, b"shape")
+    reader.close()
+
+
 def test_reallocate_all_handles_reuses_preserved_vas_in_new_epoch(real_gms):
     server, socket_path = real_gms
 

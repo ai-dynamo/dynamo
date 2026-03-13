@@ -29,6 +29,8 @@ class SGLangWithGMSProcess(ManagedProcess):
         system_port: int,
         sglang_port: int,
         frontend_port: int,
+        *,
+        read_only_weights: bool = False,
     ):
         self.engine_id = engine_id
         self.system_port = system_port
@@ -36,21 +38,29 @@ class SGLangWithGMSProcess(ManagedProcess):
         log_dir = f"{request.node.name}_{engine_id}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        command = [
+            "python",
+            "-m",
+            "dynamo.sglang",
+            "--model-path",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--load-format",
+            "gms",
+            "--enable-memory-saver",
+            "--mem-fraction-static",
+            "0.9",
+            "--port",
+            str(sglang_port),
+        ]
+        if read_only_weights:
+            command.extend(
+                [
+                    "--model-loader-extra-config",
+                    '{"gms_read_only": true}',
+                ]
+            )
         super().__init__(
-            command=[
-                "python",
-                "-m",
-                "dynamo.sglang",
-                "--model-path",
-                FAULT_TOLERANCE_MODEL_NAME,
-                "--load-format",
-                "gms",
-                "--enable-memory-saver",
-                "--mem-fraction-static",
-                "0.9",
-                "--port",
-                str(sglang_port),
-            ],
+            command=command,
             env={
                 **os.environ,
                 "PATH": f"/usr/local/cuda/bin:{SGLANG_BIN}:{os.environ.get('PATH', '')}",

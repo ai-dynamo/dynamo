@@ -30,6 +30,8 @@ class VLLMWithGMSProcess(ManagedProcess):
         kv_event_port: int,
         nixl_port: int,
         frontend_port: int,
+        *,
+        read_only_weights: bool = False,
     ):
         self.engine_id = engine_id
         self.system_port = system_port
@@ -45,22 +47,30 @@ class VLLMWithGMSProcess(ManagedProcess):
                 "enable_kv_cache_events": True,
             }
         )
+        command = [
+            "python",
+            "-m",
+            "dynamo.vllm",
+            "--model",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--load-format",
+            "gms",
+            "--enforce-eager",
+            "--enable-sleep-mode",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--kv-events-config",
+            kv_events_cfg,
+        ]
+        if read_only_weights:
+            command.extend(
+                [
+                    "--model-loader-extra-config",
+                    json.dumps({"gms_read_only": True}),
+                ]
+            )
         super().__init__(
-            command=[
-                "python",
-                "-m",
-                "dynamo.vllm",
-                "--model",
-                FAULT_TOLERANCE_MODEL_NAME,
-                "--load-format",
-                "gms",
-                "--enforce-eager",
-                "--enable-sleep-mode",
-                "--gpu-memory-utilization",
-                "0.9",
-                "--kv-events-config",
-                kv_events_cfg,
-            ],
+            command=command,
             env={
                 **os.environ,
                 "PATH": f"{DYNAMO_BIN}:{os.environ.get('PATH', '')}",

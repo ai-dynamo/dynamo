@@ -128,16 +128,17 @@ class GMSEpochManager:
         allocations: list[AllocationInfo],
     ) -> str:
         h = hashlib.sha256()
-        for info in sorted(allocations, key=lambda info: info.allocation_id):
+        allocation_slots_by_id: dict[str, int] = {}
+        for info in sorted(allocations, key=lambda info: info.layout_slot):
+            allocation_slots_by_id[info.allocation_id] = info.layout_slot
             h.update(
-                f"{info.allocation_id}:{info.size}:{info.aligned_size}:{info.tag}:{info.epoch_id}".encode()
+                f"{info.layout_slot}:{info.size}:{info.aligned_size}:{info.tag}".encode()
             )
 
         for key in sorted(epoch.metadata):
             entry = epoch.metadata[key]
-            h.update(
-                f"{key}:{entry.allocation_id}:{entry.offset_bytes}:{entry.epoch_id}:".encode()
-            )
+            layout_slot = allocation_slots_by_id[entry.allocation_id]
+            h.update(f"{key}:{layout_slot}:{entry.offset_bytes}:".encode())
             h.update(entry.value)
         return h.hexdigest()
 

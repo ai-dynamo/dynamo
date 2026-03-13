@@ -11,7 +11,6 @@ processes import from GMS metadata (RO).
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,6 +23,7 @@ from gpu_memory_service.integrations.common.utils import (
     finalize_gms_write,
     get_gms_lock_mode,
     setup_meta_tensor_workaround,
+    strip_gms_model_loader_config,
 )
 
 if TYPE_CHECKING:
@@ -53,7 +53,10 @@ def register_gms_loader(load_format: str = "gms") -> None:
         def __init__(self, load_config):
             super().__init__(load_config)
             self.default_loader = DefaultModelLoader(
-                replace(load_config, load_format="auto")
+                strip_gms_model_loader_config(
+                    load_config,
+                    load_format="auto",
+                )
             )
 
         def download_model(self, model_config) -> None:

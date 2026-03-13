@@ -32,6 +32,7 @@ class AllocationInfo:
     handle: int
     tag: str
     epoch_id: int
+    layout_slot: int
     created_at: float
 
 
@@ -60,6 +61,7 @@ class GMSAllocationManager:
 
         self._device = device
         self._allocations: dict[str, AllocationInfo] = {}
+        self._next_layout_slot_by_epoch: dict[int, int] = {}
         cuda_ensure_initialized()
         self._granularity = cumem_get_allocation_granularity(device)
         self._allocation_retry_interval = allocation_retry_interval
@@ -140,16 +142,19 @@ class GMSAllocationManager:
             handle=int(handle),
             tag=tag,
             epoch_id=epoch_id,
+            layout_slot=self._next_layout_slot_by_epoch.get(epoch_id, 0),
             created_at=time.time(),
         )
+        self._next_layout_slot_by_epoch[epoch_id] = info.layout_slot + 1
         self._allocations[info.allocation_id] = info
         logger.debug(
-            "Allocated %s: size=%d, aligned=%d, tag=%s, epoch=%d",
+            "Allocated %s: size=%d, aligned=%d, tag=%s, epoch=%d, slot=%d",
             info.allocation_id,
             size,
             aligned_size,
             tag,
             epoch_id,
+            info.layout_slot,
         )
         return info
 
@@ -191,6 +196,7 @@ class GMSAllocationManager:
                 len(allocation_ids),
                 epoch_id,
             )
+        self._next_layout_slot_by_epoch.pop(epoch_id, None)
         return len(allocation_ids)
 
     def get_allocation(self, allocation_id: str, epoch_id: int) -> AllocationInfo:
@@ -209,6 +215,7 @@ class GMSAllocationManager:
         allocations = [
             info for info in self._allocations.values() if info.epoch_id == epoch_id
         ]
+        allocations.sort(key=lambda info: info.layout_slot)
         if tag is None:
             return allocations
         return [info for info in allocations if info.tag == tag]

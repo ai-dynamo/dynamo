@@ -74,6 +74,7 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     size: int
     aligned_size: int
     epoch_id: int
+    layout_slot: int
 
 
 class ExportAllocationRequest(msgspec.Struct, tag="export_allocation_request"):
@@ -86,6 +87,7 @@ class ExportAllocationResponse(msgspec.Struct, tag="export_allocation_response")
     aligned_size: int
     tag: str
     epoch_id: int
+    layout_slot: int
 
 
 class GetAllocationRequest(msgspec.Struct, tag="get_allocation_request"):
@@ -98,6 +100,7 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     aligned_size: int
     tag: str
     epoch_id: int
+    layout_slot: int
 
 
 class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
