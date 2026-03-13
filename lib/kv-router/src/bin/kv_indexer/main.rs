@@ -13,11 +13,11 @@ use dynamo_kv_router::standalone_indexer::{
     server::{AppState, create_router},
 };
 
-#[cfg(feature = "dynamo-runtime-mode")]
+#[cfg(feature = "indexer-runtime")]
 mod discovery;
-#[cfg(feature = "dynamo-runtime-mode")]
+#[cfg(feature = "indexer-runtime")]
 mod query_engine;
-#[cfg(feature = "dynamo-runtime-mode")]
+#[cfg(feature = "indexer-runtime")]
 mod subscriber;
 
 #[derive(Parser)]
@@ -54,7 +54,7 @@ struct Cli {
     /// Enable Dynamo runtime integration (discovery, event plane, request plane).
     /// When enabled, workers are discovered via MDC and events arrive via the event plane.
     /// Also enables router to configure a remote indexer via the request plane.
-    #[cfg(feature = "dynamo-runtime-mode")]
+    #[cfg(feature = "indexer-runtime")]
     #[arg(long)]
     dynamo_runtime: bool,
 

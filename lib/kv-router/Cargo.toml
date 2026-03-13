@@ -17,7 +17,7 @@ bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
 standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
 indexer-bin = ["standalone-indexer", "dep:clap", "dep:tracing-subscriber"]
 test-endpoints = ["indexer-bin"]
-dynamo-runtime-mode = ["metrics", "standalone-indexer"]
+indexer-runtime = ["metrics", "standalone-indexer"]
 
 [dependencies]
 # repo
