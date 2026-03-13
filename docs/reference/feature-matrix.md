@@ -28,6 +28,7 @@ This document provides a comprehensive compatibility matrix for key Dynamo featu
 | **LoRA** | | | ✅ | [K8s Guide][lora] |
 | **Tool Calling** | ✅ | ✅ | ✅ | [Tool Calling Doc][tools] |
 | **Speculative Decoding** | 🚧 | ✅ | ✅ | Backend READMEs |
+| **Dynamo Snapshot** | ✅ | | ✅ | [Snapshot Docs][snapshot] |
 
 ## 1. vLLM Backend
 
@@ -107,7 +108,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 ---
 
 
-{/* Backend READMEs — paths relative to rendered URL /getting-started/feature-matrix */}
+{/* Backend READMEs — paths relative to rendered URL /resources/feature-matrix */}
 [vllm-readme]: ../backends/v-llm
 [sglang-readme]: ../backends/sg-lang
 [trtllm-readme]: ../backends/tensor-rt-llm
@@ -130,3 +131,6 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
 [vllm-spec]: ../additional-resources/speculative-decoding/speculative-decoding-with-v-llm
 [trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle
+
+{/* Dynamo Snapshot */}
+[snapshot]: ../kubernetes/snapshot/README.md

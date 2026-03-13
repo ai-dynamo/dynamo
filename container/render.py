@@ -9,6 +9,31 @@ from pathlib import Path
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+_VALID_ARCHS = {"amd64", "arm64"}
+
+
+def parse_platform(platform_str: str) -> str:
+    """Normalize a --platform value to the template variable used by Jinja2.
+
+    Accepts Docker-style values (linux/amd64, linux/arm64) or short form (amd64,
+    arm64), and comma-separated lists for multi-arch (linux/amd64,linux/arm64).
+
+    Returns one of: 'amd64', 'arm64', or 'multi'.
+
+    Raises ValueError for unrecognized architecture values.
+    """
+    parts = [p.strip() for p in platform_str.split(",")]
+    archs = [p.split("/")[-1] for p in parts]
+    for arch in archs:
+        if arch not in _VALID_ARCHS:
+            raise ValueError(
+                f"Unrecognized architecture '{arch}' in --platform '{platform_str}'. "
+                f"Valid architectures: {', '.join(sorted(_VALID_ARCHS))}"
+            )
+    if len(archs) > 1:
+        return "multi"
+    return archs[0]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -39,8 +64,15 @@ def parse_args():
     parser.add_argument(
         "--platform",
         type=str,
-        default="amd64",
-        help="Dockerfile platform to use. [amd64, arm64]",
+        default="linux/amd64",
+        help=(
+            "Target platform(s), Docker-style. Examples:\n"
+            "  linux/amd64            single-arch amd64 build\n"
+            "  linux/arm64            single-arch arm64 build\n"
+            "  linux/amd64,linux/arm64  multi-arch build; the rendered Dockerfile uses\n"
+            "                         Docker BuildX TARGETARCH directly (set per platform\n"
+            "                         by: docker buildx build --platform linux/amd64,linux/arm64)"
+        ),
     )
     parser.add_argument(
         "--cuda-version",
@@ -145,7 +177,7 @@ def render(args, context, script_dir):
         framework=args.framework,
         device=args.device,
         target=args.target,
-        platform=args.platform,
+        platform=args.platform,  # normalized: 'amd64', 'arm64', or 'multi'
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
     )
@@ -174,6 +206,9 @@ def render(args, context, script_dir):
 
 def main():
     args = parse_args()
+    # Normalize platform to template variable ('amd64', 'arm64', or 'multi')
+    # and store it back so render() and validate_args() both see the normalized form.
+    args.platform = parse_platform(args.platform)
     validate_args(args)
     # Clear cuda version for non-cuda device
     if args.device != "cuda":

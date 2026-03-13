@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -50,6 +50,7 @@ def pytest_configure(config):
         "vllm: marks tests as requiring vllm",
         "trtllm: marks tests as requiring trtllm",
         "sglang: marks tests as requiring sglang",
+        "lmcache: mark tests as requiring lmcache",
         "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
@@ -142,7 +143,7 @@ def download_models(model_list=None, ignore_weights=False):
         model_list = TEST_MODELS
 
     # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
     if hf_token:
         logging.info("HF_TOKEN found in environment")
     else:
@@ -154,45 +155,50 @@ def download_models(model_list=None, ignore_weights=False):
 
     try:
         from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to pre-download models for tests"
+        ) from exc
 
-        for model_id in model_list:
-            logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
-            )
+    failures = []
+    for model_id in model_list:
+        logging.info(
+            f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+        )
 
-            try:
-                if ignore_weights:
-                    # Weight file patterns to exclude (based on hub.rs implementation)
-                    weight_patterns = [
-                        "*.bin",
-                        "*.safetensors",
-                        "*.h5",
-                        "*.msgpack",
-                        "*.ckpt.index",
-                    ]
+        try:
+            if ignore_weights:
+                # Weight file patterns to exclude (based on hub.rs implementation)
+                weight_patterns = [
+                    "*.bin",
+                    "*.safetensors",
+                    "*.h5",
+                    "*.msgpack",
+                    "*.ckpt.index",
+                ]
 
-                    # Download everything except weight files
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                        ignore_patterns=weight_patterns,
-                    )
-                else:
-                    # Download the full model snapshot (includes all files)
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                    )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
+                # Download everything except weight files
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                    ignore_patterns=weight_patterns,
+                )
+            else:
+                # Download the full model snapshot (includes all files)
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                )
+            logging.info(f"Successfully pre-downloaded: {model_id}")
 
-            except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
-                # Don't fail the fixture - let individual tests handle missing models
+        except Exception as exc:
+            logging.error(f"Failed to pre-download {model_id}: {exc}")
+            failures.append(f"{model_id}: {exc}")
 
-    except ImportError:
-        logging.warning(
-            "huggingface_hub not installed. "
-            "Models will be downloaded during test execution."
+    if failures:
+        raise RuntimeError(
+            "Failed to pre-download required Hugging Face models:\n"
+            + "\n".join(failures)
         )
 
 
@@ -237,30 +243,6 @@ def predownload_tokenizers(pytestconfig):
     os.environ.pop("HF_HUB_OFFLINE", None)
 
 
-@pytest.fixture(scope="session")
-def build_kv_indexer():
-    """Pre-build the standalone KV indexer binary once per session.
-
-    Runs `cargo build` so that `cargo run` in tests starts instantly.
-    No-op if the binary is already cached in target/.
-    """
-    _logger.info("Building dynamo-kv-indexer binary (cached after first build)")
-    subprocess.check_call(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "dynamo-kv-router",
-            "--features",
-            "indexer-bin",
-            "--bin",
-            "dynamo-kv-indexer",
-        ],
-        timeout=600,
-    )
-    _logger.info("dynamo-kv-indexer binary ready")
-
-
 @pytest.fixture(autouse=True)
 def logger(request):
     log_dir = resolve_test_output_path(request.node.name)
@@ -277,11 +259,40 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+def _item_has_marker(item, marker_name):
+    """Check if a test item has a marker, including module-level pytestmark."""
+    if item.get_closest_marker(marker_name):
+        return True
+    module = getattr(item, "module", None)
+    if module is not None:
+        marks = getattr(module, "pytestmark", [])
+        if not isinstance(marks, list):
+            marks = [marks]
+        if any(getattr(m, "name", "") == marker_name for m in marks):
+            return True
+    return False
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Auto-skip tests marked with a framework marker when the framework is not installed
+    framework_markers = {
+        "trtllm": "tensorrt_llm",
+        "vllm": "vllm",
+        "sglang": "sglang",
+        "kvbm": "kvbm",
+        "lmcache": "lmcache",
+    }
+    for marker_name, module_name in framework_markers.items():
+        if importlib.util.find_spec(module_name) is None:
+            skip = pytest.mark.skip(reason=f"{module_name} is not installed")
+            for item in items:
+                if _item_has_marker(item, marker_name):
+                    item.add_marker(skip)
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
@@ -454,14 +465,7 @@ class NatsServer(ManagedProcess):
     def stop(self):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
-        self._terminate_process_group()
-        proc = self.proc  # type: ignore[has-type]
-        if proc is not None:
-            try:
-                proc.wait(timeout=10)
-            except Exception as e:
-                _logger.warning(f"Error waiting for NATS process to stop: {e}")
-            self.proc = None
+        self._stop_started_processes()
 
     def start(self):
         """Restart a stopped NATS server with fresh state."""
