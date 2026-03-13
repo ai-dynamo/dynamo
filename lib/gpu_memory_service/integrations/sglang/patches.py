@@ -5,6 +5,7 @@
 
 - patch_torch_memory_saver: Routes to GMS hybrid implementation
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
+- patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
 
 from __future__ import annotations
@@ -179,15 +180,14 @@ def patch_model_runner() -> None:
 
 
 def patch_static_state_for_gms() -> None:
-    """Wrap SGLang's _import_static_state with CUDA synchronization.
+    """No-op SGLang's _export/_import_static_state when using GMS.
 
-    After CRIU checkpoint/restore the CUDA context on the scheduler process may
-    not be fully initialized when resume_memory_occupation fires.  Synchronizing
-    before the buffer copies ensures restored allocations are visible to the
-    runtime.
-
-    This patch runs inside the scheduler child process (triggered by the
-    GMSModelLoader import in model_loader.py via multiprocessing spawn).
+    SGLang's release_memory_occupation clones every named buffer via
+    buffer.detach().clone() through the default CUDA allocator, then restores
+    them during resume_memory_occupation.
+    This patch must run inside the scheduler child process (which uses
+    multiprocessing spawn).  It is triggered by the GMSModelLoader import
+    in model_loader.py, which executes at module level in the child.
     """
     global _static_state_patched
     if _static_state_patched:
@@ -196,23 +196,19 @@ def patch_static_state_for_gms() -> None:
     try:
         from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
 
-        _original_import_static_state = _mixin._import_static_state
+        def _export_noop(model):
+            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
+            return dict(buffers=[])
 
-        def _synced_import(model, static_params):
-            """Synchronize CUDA before restoring named buffers."""
-            if torch.cuda.is_available():
-                logger.info(
-                    "[GMS] _import_static_state: synchronizing CUDA before "
-                    "buffer restore (pid=%d)",
-                    __import__("os").getpid(),
-                )
-                torch.cuda.synchronize()
-            return _original_import_static_state(model, static_params)
+        def _import_noop(model, static_params):
+            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
+            pass
 
-        _mixin._import_static_state = _synced_import
+        _mixin._export_static_state = _export_noop
+        _mixin._import_static_state = _import_noop
         _static_state_patched = True
         logger.info(
-            "[GMS] Patched _import_static_state with CUDA sync (pid=%d)",
+            "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
             __import__("os").getpid(),
         )
     except ImportError:
