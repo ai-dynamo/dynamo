@@ -54,6 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 use std::any::Any;
+use std::env;
 
 use std::collections::BTreeSet;
 
@@ -69,8 +70,50 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
-pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
-pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+const DEFAULT_MAX_CONCURRENT_TRANSFERS: usize = 4;
+const DEFAULT_MAX_TRANSFER_BATCH_SIZE: usize = 16;
+
+pub fn max_concurrent_transfers() -> usize {
+    read_usize_env(
+        "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+        DEFAULT_MAX_CONCURRENT_TRANSFERS,
+    )
+}
+
+pub fn max_transfer_batch_size() -> usize {
+    read_usize_env(
+        "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+        DEFAULT_MAX_TRANSFER_BATCH_SIZE,
+    )
+}
+
+fn read_usize_env(name: &str, default: usize) -> usize {
+    match env::var(name) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            Ok(_) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %value,
+                    default,
+                    "Environment variable must be > 0; using default"
+                );
+                default
+            }
+            Err(err) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %value,
+                    default,
+                    error = %err,
+                    "Failed to parse environment variable as usize; using default"
+                );
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
 
 /// Configuration for creating an OffloadManager
 pub struct OffloadManagerConfig {
@@ -145,10 +188,19 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let cuda_ctx = Cuda::device_or_create(0)?;
 
+        let max_concurrent_transfers = max_concurrent_transfers();
+        let max_transfer_batch_size = max_transfer_batch_size();
+
+        tracing::info!(
+            max_concurrent_transfers,
+            max_transfer_batch_size,
+            "Configured offload transfer settings"
+        );
+
         let pool_config = PoolConfig {
             enable_pool: true,
-            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_concurrent_transfers,
+            max_transfer_batch_size,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
         };
@@ -179,11 +231,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     device_offload_transfer_ctx,
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -225,11 +277,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -256,11 +308,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -282,11 +334,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -313,11 +365,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 Arc::new(TransferBatcher::new(
                     LocalTransferManager::new(
                         transfer_ctx.clone(),
-                        MAX_CONCURRENT_TRANSFERS,
+                        max_concurrent_transfers,
                         &config.async_rt_handle,
                         config.cancellation_token.clone(),
                     )?,
-                    MAX_TRANSFER_BATCH_SIZE,
+                    max_transfer_batch_size,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )),
