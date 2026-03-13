@@ -4,22 +4,39 @@
 """Tests for AdditionalMetricsCollector and additional metrics integration."""
 
 import ast
-import inspect
-import textwrap
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
-try:
-    from dynamo.trtllm.request_handlers.handler_base import HandlerBase
-except ImportError:
-    # handler_base imports torch which requires CUDA libraries at import time;
-    # gracefully skip on CPU-only CI runners.
-    HandlerBase = None
+# Path to handler_base.py source — read from disk to avoid importing torch/CUDA
+# so the AST-only test class can run on CPU-only CI runners.
+_HANDLER_BASE_PATH = (
+    Path(__file__).resolve().parent.parent / "request_handlers" / "handler_base.py"
+)
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
+
+def _get_method_ast(module_tree: ast.Module, class_name: str, method_name: str):
+    """Extract a method's AST node from a parsed module, without importing the module."""
+    for node in ast.iter_child_nodes(module_tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name == method_name:
+                        return item
+    return None
 
 
 class TestAdditionalMetricsCollector(unittest.TestCase):
@@ -30,9 +47,10 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.registry = CollectorRegistry()
 
         # Patch prometheus_client.Counter and Histogram to use our test registry
-        with patch("dynamo.trtllm.metrics.Counter") as MockCounter, patch(
-            "dynamo.trtllm.metrics.Histogram"
-        ) as MockHistogram:
+        with (
+            patch("dynamo.trtllm.metrics.Counter") as MockCounter,
+            patch("dynamo.trtllm.metrics.Histogram") as MockHistogram,
+        ):
             from prometheus_client import Counter, Histogram
 
             def make_counter(name, documentation, labelnames=None, **_kw):
@@ -175,18 +193,27 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         # (kv_transfer_latency_seconds, kv_transfer_bytes, kv_transfer_speed_gb_s)
 
 
-@unittest.skipIf(HandlerBase is None, "HandlerBase requires CUDA/GPU libraries")
 class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
-    """Test metrics instrumentation in handler_base.py generate_locally()."""
+    """Test metrics instrumentation in handler_base.py generate_locally().
+
+    This test reads the source file from disk and uses AST parsing so it
+    can run on CPU-only CI runners without importing torch/tensorrt_llm.
+    """
 
     def test_structured_output_detection_keys(self):
         """Verify guided decoding detection keys in generate_locally match _override_sampling_params."""
+        source = _HANDLER_BASE_PATH.read_text()
+        module_tree = ast.parse(source)
+
         # Extract detection keys from generate_locally: the tuple in
         #   any(guided.get(k) for k in ("json", ...))
-        gen_source = textwrap.dedent(inspect.getsource(HandlerBase.generate_locally))
-        gen_tree = ast.parse(gen_source)
+        gen_node = _get_method_ast(module_tree, "HandlerBase", "generate_locally")
+        self.assertIsNotNone(
+            gen_node, "Could not find HandlerBase.generate_locally in source"
+        )
+
         detection_keys = set()
-        for node in ast.walk(gen_tree):
+        for node in ast.walk(gen_node):
             # Find: any(guided.get(k) for k in (...))
             if isinstance(node, ast.Tuple) and all(
                 isinstance(e, (ast.Constant, ast.Str)) for e in node.elts
@@ -203,12 +230,16 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
 
         # Extract canonical keys from _override_sampling_params:
         #   GuidedDecodingParams(json=..., regex=..., ...)
-        override_source = textwrap.dedent(
-            inspect.getsource(HandlerBase._override_sampling_params)
+        override_node = _get_method_ast(
+            module_tree, "HandlerBase", "_override_sampling_params"
         )
-        override_tree = ast.parse(override_source)
+        self.assertIsNotNone(
+            override_node,
+            "Could not find HandlerBase._override_sampling_params in source",
+        )
+
         canonical_keys = set()
-        for node in ast.walk(override_tree):
+        for node in ast.walk(override_node):
             if (
                 isinstance(node, ast.Call)
                 and getattr(node.func, "id", None) == "GuidedDecodingParams"
