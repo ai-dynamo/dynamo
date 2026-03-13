@@ -28,10 +28,12 @@ async def wait_for_output(log_name, process, expected_text, timeout=10):
     output = ""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
+    print(f"{log_name}: Start at {loop.time()}, deadline at {deadline}")
 
     while True:
         remaining = deadline - loop.time()
         if remaining <= 0:
+            print(f"{log_name}: Timeout at {loop.time()}")
             raise TimeoutError(
                 f"Timed out waiting for '{expected_text}'. Output so far:\n{output}"
             )
@@ -52,6 +54,7 @@ async def wait_for_output(log_name, process, expected_text, timeout=10):
 
         output += line
         if expected_text in output:
+            print(f"{log_name}: Succeeded at {loop.time()}")
             return output
 
 
