@@ -37,7 +37,7 @@ For all available options: `python -m dynamo.frontend --help`
 
 ### Standalone Router
 
-You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](../../../components/src/dynamo/router/) for more details.
+You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
 
 ### Kubernetes Deployment
 
