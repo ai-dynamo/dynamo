@@ -92,6 +92,7 @@ class DynamoSglangPublisher:
 
         self._running = True
         self.kv_publishers: List[KvEventPublisher] = []
+        self.fpm_relays: list = []
 
         # ZMQ setup for receiving scheduler metrics (leader node only)
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
@@ -179,6 +180,13 @@ class DynamoSglangPublisher:
                 publisher.shutdown()
             except Exception as e:
                 logging.warning(f"Failed to shutdown kv publisher: {e}")
+
+        # Shutdown FPM relays
+        for relay in self.fpm_relays:
+            try:
+                relay.shutdown()
+            except Exception as e:
+                logging.warning(f"Failed to shutdown FPM relay: {e}")
 
         logging.info("DynamoSglangPublisher cleanup complete")
 
@@ -272,6 +280,62 @@ class DynamoSglangPublisher:
         self.kv_publisher = self.kv_publishers[0] if self.kv_publishers else None
 
         return self.kv_publishers
+
+    def init_fpm_relay(self) -> list:
+        """Set up forward pass metrics relays for the event plane.
+
+        Creates one FpmEventRelay per local DP rank. Each relay subscribes
+        to the ZMQ PUB from sglang's _FpmPublisherThread (in the scheduler
+        process) and re-publishes to the Dynamo event plane.
+
+        Returns:
+            List of FpmEventRelay instances, or empty list if not enabled.
+        """
+        import os
+
+        fpm_port_str = os.environ.get("DYN_FORWARDPASS_METRIC_PORT")
+        if not fpm_port_str:
+            return []
+
+        try:
+            from dynamo.llm import FpmEventRelay
+        except ImportError:
+            logging.warning(
+                "FpmEventRelay not available (Rust bindings not built with FPM support). "
+                "Forward pass metrics will not be relayed to the event plane."
+            )
+            return []
+
+        base_port = int(fpm_port_str)
+        dp_size = getattr(self.server_args, "dp_size", 1) or 1
+        enable_dp_attention = getattr(
+            self.server_args, "enable_dp_attention", False
+        )
+        nnodes = getattr(self.server_args, "nnodes", 1) or 1
+        node_rank = getattr(self.server_args, "node_rank", 0) or 0
+
+        if enable_dp_attention and dp_size > 1:
+            local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
+            start_dp_rank = node_rank * local_dp_size
+            end_dp_rank = start_dp_rank + local_dp_size
+        else:
+            start_dp_rank = 0
+            end_dp_rank = 1
+
+        relays = []
+        for dp_rank in range(start_dp_rank, end_dp_rank):
+            zmq_ep = f"tcp://127.0.0.1:{base_port + dp_rank}"
+            relay = FpmEventRelay(
+                endpoint=self.generate_endpoint,
+                zmq_endpoint=zmq_ep,
+            )
+            relays.append(relay)
+            logging.info(
+                f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_ep}"
+            )
+
+        self.fpm_relays = relays
+        return relays
 
 
 def setup_prometheus_registry(
@@ -376,6 +440,7 @@ async def setup_sgl_metrics(
 
     publisher.init_engine_metrics_publish()
     publisher.init_kv_event_publish()
+    publisher.init_fpm_relay()
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")
