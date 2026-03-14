@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use velo_messenger::Messenger;
-use velo_streaming::velo_transport::{VeloFrameTransport, parse_velo_uri};
 use velo_streaming::FrameTransport;
+use velo_streaming::velo_transport::{VeloFrameTransport, parse_velo_uri};
 use velo_transports::tcp::TcpTransportBuilder;
 
 /// Create a TcpTransport bound to an OS-assigned port (no TOCTOU race).
@@ -214,8 +214,8 @@ async fn test_bind_unbind_cleanup() {
         .expect("create messenger");
 
     let worker_id = messenger.instance_id().worker_id();
-    let vft = VeloFrameTransport::new(messenger.clone(), worker_id)
-        .expect("create VeloFrameTransport");
+    let vft =
+        VeloFrameTransport::new(messenger.clone(), worker_id).expect("create VeloFrameTransport");
 
     // bind(42) -- dispatch map has entry for 42.
     let (endpoint1, _rx1) = vft.bind(42).await.expect("bind 42");
