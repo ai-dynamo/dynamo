@@ -167,6 +167,8 @@ async def async_main():
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
     if config.tokenizer_backend == "fasttokens":
         os.environ["DYN_TOKENIZER_BACKEND"] = "fasttokens"
+    else:
+        os.environ.pop("DYN_TOKENIZER_BACKEND", None)
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit})"

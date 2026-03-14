@@ -437,4 +437,5 @@ class FrontendArgGroup(ArgGroup):
                 "or 'fasttokens' (fastokens crate for high-performance BPE encoding). "
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
+            choices=["default", "fasttokens"],
         )
