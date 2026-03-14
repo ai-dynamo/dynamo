@@ -10,30 +10,34 @@ instance (Decode).
 ```text
   Initiator (Prefill)              Responder (Decode)
         │                                │
-        │──── FindMatches ──────────────▶│
-        │                                │  search local blocks
-        │◀─── MatchResult ──────────────│
+        │──── CreateSession ────────────▶│
+        │                                │  search local G2/G3
+        │◀─── G2Results ────────────────│
+        │◀─── G3Results ────────────────│  (if G3 blocks found)
+        │◀─── SearchComplete ───────────│
         │                                │
-        │──── TriggerStaging ───────────▶│
-        │                                │  G3→G2 staging
-        │◀─── BlocksStaged ────────────│
+        │──── HoldBlocks ───────────────▶│
+        │◀─── Acknowledged ─────────────│
         │                                │
-        │──── RDMA Pull ────────────────▶│
-        │     (remote G2 → local G2)     │
-        │◀─── Complete ─────────────────│
+        │──── StageBlocks ──────────────▶│  G3→G2 staging (optional)
+        │◀─── BlocksReady ──────────────│
+        │                                │
+        │     RDMA pull (remote G2→local G2)
+        │                                │
+        │──── CloseSession ─────────────▶│
 ```
 
 ## Session Roles
 
 ### InitiatorSession
 
-The requesting side. Sends `FindMatches` to one or more remote instances,
+The requesting side. Sends `CreateSession` to one or more remote instances,
 collects results, and orchestrates staging and RDMA pulls. Created by
 `InstanceLeader` when `search_remote == true`.
 
 ### ResponderSession
 
-The serving side. Receives `FindMatches`, searches local block managers,
+The serving side. Receives `CreateSession`, searches local block managers,
 holds matched blocks via `BlockHolder`, and responds with match results.
 Handles staging requests and keeps blocks alive until the session ends.
 
@@ -73,7 +77,7 @@ queries, staging triggers, and RDMA block pulls. Used by the controller side
   without network overhead.
 
 Both implement the `MessageTransport` enum which provides `send`,
-`send_remote_session`, and `send_session_message` methods.
+`send_remote_session`, and `send_session` methods.
 
 ## Message Types
 
