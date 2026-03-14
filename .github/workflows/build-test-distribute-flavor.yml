@@ -456,7 +456,7 @@ jobs:
           docker run --rm -w /workspace \
             --network host \
             "${{ steps.calculate-target-tag.outputs.test_image }}" \
-            bash -ec "MYPYPATH=components/src python3 -m mypy ${COMPONENT_TARGETS[*]}"
+            bash -ec "MYPYPATH=components/src python3 -m mypy --explicit-package-bases ${COMPONENT_TARGETS[*]}"
 
           echo "Running mypy for python bindings package: dynamo"
           docker run --rm -w /workspace \
