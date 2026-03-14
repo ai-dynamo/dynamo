@@ -1,5 +1,11 @@
 # Kimi-K2.5 Recipes
 
+> 🚧 **Work-in-Progress — Experimental Recipe**
+>
+> The TensorRT-LLM Python package used for Dynamo's TRT-LLM integration does not yet include
+> native Kimi K2.5 support. This recipe is an **experimental** effort to bring
+> Kimi K2.5 to Dynamo ahead of upstream availability. It needs to patch the container image on top of released dynamo image.
+
 Deployment recipe for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
 
 ## Available Configurations
