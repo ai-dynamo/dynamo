@@ -6,11 +6,12 @@ API from the underlying crates so consumers only need a single dependency.
 ## Crate map
 
 ```text
-velo              ← you are here (facade + re-exports)
-├── velo-messenger   active messaging, handlers, distributed events
-├── velo-events      generational event system
-├── velo-common      shared types (InstanceId, PeerInfo, WorkerId)
-└──      transport abstraction (TCP, gRPC, NATS, UCX)
+velo              <- you are here (facade + re-exports)
++-- velo-messenger   active messaging, handlers, distributed events
++-- velo-streaming   typed exclusive-attachment streaming (anchors, senders, sentinels)
++-- velo-events      generational event system
++-- velo-common      shared types (InstanceId, PeerInfo, WorkerId)
++-- velo-transports  transport abstraction (TCP, gRPC, NATS, UCX)
 ```
 
 Peer discovery backends (e.g. `velo-discovery`) are separate crates that
@@ -49,18 +50,41 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Streaming
+
+The `Velo` struct wraps both a `Messenger` (active messaging) and an
+`AnchorManager` (streaming). Streaming methods delegate to the internal
+`AnchorManager`:
+
+```rust,no_run
+# async fn example(velo: &std::sync::Arc<velo::Velo>) -> anyhow::Result<()> {
+let anchor = velo.create_anchor::<MyPayload>();
+let handle = anchor.handle();
+// ... send handle to producer (same or different worker) ...
+let sender = velo.attach_anchor::<MyPayload>(handle).await?;
+sender.send(payload).await?;
+sender.finalize()?;
+# Ok(())
+# }
+# struct MyPayload;
+# impl serde::Serialize for MyPayload { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_unit() } }
+```
+
+See [`velo-streaming` README](../velo-streaming/README.md) for concepts and full API.
+
 ## What's re-exported
 
 | Source crate | Key types |
 |---|---|
 | `velo-messenger` | `Messenger`, `Handler`, `Context`, `TypedContext`, send/unary/typed-unary builders, `VeloEvents`, `PeerDiscovery` |
+| `velo-streaming` | `AnchorManager`, `StreamAnchor`, `StreamSender`, `StreamFrame`, `StreamController`, `AttachError`, `SendError`, `StreamError`, `StreamAnchorHandle` |
 | `velo-events` | `Event`, `EventManager`, `EventHandle`, `EventAwaiter`, `EventStatus`, `EventPoison` |
-| `` | `*` as `velo::backend` |
+| `velo-transports` | `*` as `velo::backend` |
 | `velo-common` | `InstanceId`, `PeerInfo`, `WorkerId`, `WorkerAddress` |
 
-The `Velo` struct itself is a thin wrapper around `Arc<Messenger>` that
-delegates every method. Use `velo.messenger()` if you need the inner
-`Messenger` directly.
+The `Velo` struct itself is a thin wrapper around `Arc<Messenger>` and
+`Arc<AnchorManager>` that delegates every method. Use `velo.messenger()`
+or `velo.anchor_manager()` if you need direct access.
 
 ## Tests
 
