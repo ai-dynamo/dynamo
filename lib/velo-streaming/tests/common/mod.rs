@@ -64,14 +64,20 @@ pub async fn make_mock_manager() -> Arc<AnchorManager> {
     ))
 }
 
-/// Expand to a test module containing TEST-11 and TEST-13 integration scenarios.
+/// Expand to a test module containing integration scenarios for the streaming protocol.
 ///
 /// # Parameters
 /// - `$mod_name`: identifier for the generated module (e.g. `mock_suite`)
 /// - `$make_manager`: expression that evaluates to `Arc<AnchorManager>`
 ///
 /// # Tests generated
+/// - `test_01_local_round_trip`: round-trip 10 items + finalize
+/// - `test_04_detach_reattach`: detach/reattach with two senders; all 6 items delivered
+/// - `test_05_finalize_closes_stream`: finalize drains stream; registry entry removed
+/// - `test_06_cancel_prevents_attach`: cancel removes anchor; attach returns AnchorNotFound
+/// - `test_08_drop_safety`: sender dropped without detach/finalize sends Dropped sentinel
 /// - `test_11_mock_transport_full_cycle`: create anchor, attach, send 5 items, finalize, collect
+/// - `test_12_sentinel_ordering`: 1000 items + sender drop; ordering guarantees verified
 /// - `test_13_unit_coverage`: handle pack/unpack roundtrip, monotonic IDs, exclusive attach
 #[macro_export]
 macro_rules! run_transport_tests {
@@ -81,10 +87,118 @@ macro_rules! run_transport_tests {
             use futures::StreamExt;
             use std::sync::Arc;
             use velo_common::WorkerId;
-            use velo_streaming::{AnchorManager, AttachError, StreamAnchorHandle, StreamFrame};
+            use velo_streaming::{AnchorManager, AttachError, StreamAnchorHandle, StreamError, StreamFrame};
 
             async fn manager() -> Arc<AnchorManager> {
                 $make_manager
+            }
+
+            /// TEST-01: Local round-trip — send 10 items + finalize; stream yields all 10 then None.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn test_01_local_round_trip() {
+                let mgr = manager().await;
+                let (handle, mut stream) = mgr.create_anchor::<u32>();
+                let sender = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1)
+                    .await
+                    .expect("attach must succeed");
+                for i in 0u32..10 {
+                    sender.send(i).await.expect("send");
+                }
+                sender.finalize().expect("finalize");
+                let mut items = Vec::new();
+                while let Some(frame) = stream.next().await {
+                    match frame {
+                        Ok(StreamFrame::Item(v)) => items.push(v),
+                        Ok(StreamFrame::Finalized) => break,
+                        other => panic!("unexpected frame: {:?}", other),
+                    }
+                }
+                assert_eq!(items, (0u32..10).collect::<Vec<_>>());
+                assert!(stream.next().await.is_none());
+            }
+
+            /// TEST-04: Detach/reattach — first sender sends 3, detaches; second sends 3 more,
+            /// finalizes; stream yields all 6 items in order with a Detached sentinel between batches.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn test_04_detach_reattach() {
+                let mgr = manager().await;
+                let (handle, mut stream) = mgr.create_anchor::<u32>();
+                let sender1 = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1)
+                    .await
+                    .expect("first attach");
+                for i in 0u32..3 {
+                    sender1.send(i).await.expect("send first batch");
+                }
+                // Detach returns the handle for reattachment
+                let returned_handle = sender1.detach().expect("detach must succeed");
+                // After detach, stream should yield Detached frame then stay open
+                // Reattach with the returned handle
+                let sender2 = mgr.attach_stream_anchor::<u32>(returned_handle, "mock://1", 2)
+                    .await
+                    .expect("second attach");
+                for i in 3u32..6 {
+                    sender2.send(i).await.expect("send second batch");
+                }
+                sender2.finalize().expect("finalize");
+                // Collect all frames
+                let mut items = Vec::new();
+                while let Some(frame) = stream.next().await {
+                    match frame {
+                        Ok(StreamFrame::Item(v)) => items.push(v),
+                        Ok(StreamFrame::Detached) => { /* detach sentinel between batches */ }
+                        Ok(StreamFrame::Finalized) => break,
+                        other => panic!("unexpected frame: {:?}", other),
+                    }
+                }
+                assert_eq!(items, vec![0u32, 1, 2, 3, 4, 5]);
+                assert!(stream.next().await.is_none());
+            }
+
+            /// TEST-05: Finalize closes stream — stream drains items then yields None;
+            /// anchor is removed from registry after finalize.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn test_05_finalize_closes_stream() {
+                let mgr = manager().await;
+                let (handle, mut stream) = mgr.create_anchor::<u32>();
+                let sender = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1)
+                    .await
+                    .expect("attach");
+                for i in 0u32..5 {
+                    sender.send(i).await.expect("send");
+                }
+                sender.finalize().expect("finalize");
+                let mut items = Vec::new();
+                while let Some(frame) = stream.next().await {
+                    match frame {
+                        Ok(StreamFrame::Item(v)) => items.push(v),
+                        Ok(StreamFrame::Finalized) => break,
+                        other => panic!("unexpected: {:?}", other),
+                    }
+                }
+                assert_eq!(items.len(), 5);
+                // Stream yields None after Finalized
+                assert!(stream.next().await.is_none());
+                // Registry entry removed after finalize; second attach must fail
+                let second_attach = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 2).await;
+                assert!(
+                    matches!(second_attach, Err(velo_streaming::AttachError::AnchorNotFound { .. })),
+                    "anchor must be absent from registry after finalize"
+                );
+            }
+
+            /// TEST-06: Cancel prevents attach — after stream.cancel(), attach returns AnchorNotFound.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn test_06_cancel_prevents_attach() {
+                let mgr = manager().await;
+                let (handle, stream) = mgr.create_anchor::<u32>();
+                stream.cancel();
+                // Give tokio a chance to process cancel
+                tokio::task::yield_now().await;
+                let result = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1).await;
+                assert!(
+                    matches!(result, Err(velo_streaming::AttachError::AnchorNotFound { .. })),
+                    "attach after cancel must return AnchorNotFound"
+                );
             }
 
             /// TEST-11: Full attach/stream/finalize cycle against MockFrameTransport.

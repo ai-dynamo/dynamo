@@ -207,14 +207,26 @@ impl<T: DeserializeOwned> Stream for AnchorStream<T> {
                         }
                         Ok(StreamFrame::Finalized) => {
                             this.terminated = true;
+                            // Clean up registry entry — anchor is permanently closed.
+                            if let Some((_, entry)) = this.registry.remove(&this.local_id) {
+                                entry.cancel_token.cancel();
+                            }
                             return Poll::Ready(Some(Ok(StreamFrame::Finalized)));
                         }
                         Ok(StreamFrame::Detached) => {
-                            this.terminated = true;
+                            // Detached is NOT terminal — a new sender may reattach.
+                            // Clear the attachment flag so attach_stream_anchor can succeed.
+                            if let Some(mut entry) = this.registry.get_mut(&this.local_id) {
+                                entry.attachment = false;
+                            }
                             return Poll::Ready(Some(Ok(StreamFrame::Detached)));
                         }
                         Ok(StreamFrame::Dropped) => {
                             this.terminated = true;
+                            // Clean up registry entry — sender dropped without explicit close.
+                            if let Some((_, entry)) = this.registry.remove(&this.local_id) {
+                                entry.cancel_token.cancel();
+                            }
                             return Poll::Ready(Some(Err(StreamError::SenderDropped)));
                         }
                         Ok(StreamFrame::TransportError(msg)) => {
@@ -526,7 +538,7 @@ impl AnchorManager {
                         tc.cancel();
                     }
 
-                    Ok(crate::sender::StreamSender::new(frame_tx, handle))
+                    Ok(crate::sender::StreamSender::new(frame_tx, handle, self.registry.clone()))
                 }
             }
         }

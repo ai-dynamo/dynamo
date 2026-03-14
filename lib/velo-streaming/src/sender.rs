@@ -20,11 +20,14 @@
 //! The heartbeat background task is cancelled in all three paths before the
 //! terminal sentinel is sent.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::anchor::AnchorEntry;
 use crate::frame::{SendError, StreamFrame};
 use crate::handle::StreamAnchorHandle;
 
@@ -34,8 +37,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// Typed sender for pushing frames through the streaming channel.
 ///
 /// Holds a [`flume::Sender<Vec<u8>>`] for serialized frame bytes, a
-/// [`StreamAnchorHandle`] identifying the anchor, and a [`CancellationToken`]
-/// to stop the background heartbeat task.
+/// [`StreamAnchorHandle`] identifying the anchor, a [`CancellationToken`]
+/// to stop the background heartbeat task, and a reference to the anchor
+/// registry so that [`detach`](StreamSender::detach) can atomically clear
+/// the attachment flag before returning the handle.
 ///
 /// `T` is the user-defined item payload type. The `Serialize` bound is required
 /// for [`send`](StreamSender::send) to serialize `StreamFrame::Item(T)`.
@@ -46,6 +51,8 @@ pub struct StreamSender<T> {
     handle: StreamAnchorHandle,
     heartbeat_cancel: CancellationToken,
     sent_terminal: bool,
+    /// Registry reference for clearing the attachment flag on detach.
+    registry: Arc<DashMap<u64, AnchorEntry>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -58,13 +65,21 @@ impl<T> std::fmt::Debug for StreamSender<T> {
     }
 }
 
+
 impl<T: Serialize> StreamSender<T> {
     /// Create a new `StreamSender` and spawn the background heartbeat task.
     ///
     /// The heartbeat task emits [`StreamFrame::Heartbeat`] every 5 seconds via
     /// non-blocking `try_send`. It is cancelled when the sender is finalized,
     /// detached, or dropped.
-    pub(crate) fn new(tx: flume::Sender<Vec<u8>>, handle: StreamAnchorHandle) -> Self {
+    ///
+    /// `registry` is a shared reference to the anchor registry so that
+    /// [`detach`](StreamSender::detach) can atomically clear the attachment flag.
+    pub(crate) fn new(
+        tx: flume::Sender<Vec<u8>>,
+        handle: StreamAnchorHandle,
+        registry: Arc<DashMap<u64, AnchorEntry>>,
+    ) -> Self {
         let heartbeat_cancel = CancellationToken::new();
 
         // Spawn heartbeat background task
@@ -97,6 +112,7 @@ impl<T: Serialize> StreamSender<T> {
             handle,
             heartbeat_cancel,
             sent_terminal: false,
+            registry,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -160,7 +176,8 @@ impl<T: Serialize> StreamSender<T> {
     /// Detach the sender from the anchor by sending a `Detached` sentinel.
     ///
     /// Cancels the heartbeat task, sends `StreamFrame::Detached` synchronously,
-    /// and returns the [`StreamAnchorHandle`] for potential re-attachment.
+    /// clears the attachment flag in the registry (so a new sender can attach
+    /// immediately), and returns the [`StreamAnchorHandle`] for re-attachment.
     /// The subsequent `Drop` will see `sent_terminal = true` and skip `Dropped`.
     ///
     /// # Errors
@@ -172,6 +189,12 @@ impl<T: Serialize> StreamSender<T> {
             .expect("Detached serializes infallibly");
         self.sent_terminal = true;
         self.tx.send(bytes).map_err(|_| SendError::ChannelClosed)?;
+        // Atomically clear the attachment flag so a new sender can attach
+        // without waiting for AnchorStream to consume the Detached sentinel.
+        let (_, local_id) = self.handle.unpack();
+        if let Some(mut entry) = self.registry.get_mut(&local_id) {
+            entry.attachment = false;
+        }
         Ok(self.handle)
     }
 }
@@ -199,18 +222,27 @@ impl<T> Drop for StreamSender<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use dashmap::DashMap;
+
+    use crate::anchor::AnchorEntry;
     use crate::frame::{SendError, StreamFrame};
     use crate::handle::StreamAnchorHandle;
 
     use super::StreamSender;
 
+    /// Create an empty registry for use in unit tests (no real anchors needed).
+    fn empty_registry() -> Arc<DashMap<u64, AnchorEntry>> {
+        Arc::new(DashMap::new())
+    }
+
     /// Create a test sender with a bounded(256) channel and a dummy handle.
     fn make_sender() -> (StreamSender<u32>, flume::Receiver<Vec<u8>>) {
         let (tx, rx) = flume::bounded::<Vec<u8>>(256);
         let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
-        let sender = StreamSender::new(tx, handle);
+        let sender = StreamSender::new(tx, handle, empty_registry());
         (sender, rx)
     }
 
@@ -378,7 +410,7 @@ mod tests {
         // Create a channel with capacity 1
         let (tx, rx) = flume::bounded::<Vec<u8>>(1);
         let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
-        let sender = StreamSender::new(tx, handle);
+        let sender = StreamSender::new(tx, handle, empty_registry());
 
         // Put an item in the channel to fill it
         sender.send(99u32).await.expect("send should succeed");
@@ -405,7 +437,7 @@ mod tests {
     async fn test_send_on_closed_channel() {
         let (tx, rx) = flume::bounded::<Vec<u8>>(256);
         let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
-        let sender = StreamSender::new(tx, handle);
+        let sender = StreamSender::new(tx, handle, empty_registry());
 
         // Drop the receiver to close the channel
         drop(rx);
