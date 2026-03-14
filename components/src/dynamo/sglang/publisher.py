@@ -26,6 +26,34 @@ from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
 
 
+def get_local_dp_rank_range(server_args) -> range:
+    """Return the global DP ranks hosted by this local worker."""
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    node_rank = getattr(server_args, "node_rank", 0) or 0
+
+    if enable_dp_attention and dp_size > 1:
+        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
+        start_dp_rank = node_rank * local_dp_size
+        end_dp_rank = start_dp_rank + local_dp_size
+    else:
+        start_dp_rank = 0
+        end_dp_rank = 1
+
+    return range(start_dp_rank, end_dp_rank)
+
+
+def set_forward_pass_metrics_worker_id(server_args, generate_endpoint: Endpoint) -> None:
+    """Inject the endpoint instance identity into SGLang before engine init."""
+    if getattr(server_args, "forward_pass_metrics_port", None) is None:
+        return
+
+    server_args.forward_pass_metrics_worker_id = str(
+        generate_endpoint.connection_id()
+    )
+
+
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
@@ -226,30 +254,15 @@ class DynamoSglangPublisher:
             local_ip = get_local_ip_auto()
 
             # Determine DP attention configuration
-            dp_size = getattr(self.server_args, "dp_size", 1) or 1
-            enable_dp_attention = getattr(
-                self.server_args, "enable_dp_attention", False
-            )
-            nnodes = getattr(self.server_args, "nnodes", 1) or 1
-            node_rank = getattr(self.server_args, "node_rank", 0) or 0
-
-            if enable_dp_attention and dp_size > 1:
-                # Calculate which DP ranks are local to this node
-                # DP ranks are distributed evenly across nodes
-                local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-                start_dp_rank = node_rank * local_dp_size
-                end_dp_rank = start_dp_rank + local_dp_size
-
+            dp_ranks = get_local_dp_rank_range(self.server_args)
+            if len(dp_ranks) > 1:
                 logging.info(
-                    f"DP attention mode: node_rank={node_rank}, dp_size={dp_size}, "
-                    f"nnodes={nnodes}. Subscribing to local DP ranks [{start_dp_rank}, {end_dp_rank})"
+                    "DP attention mode: subscribing to local DP ranks [%d, %d)",
+                    dp_ranks.start,
+                    dp_ranks.stop,
                 )
-            else:
-                # Standard mode: single subscriber for rank 0
-                start_dp_rank = 0
-                end_dp_rank = 1
 
-            for dp_rank in range(start_dp_rank, end_dp_rank):
+            for dp_rank in dp_ranks:
                 # Use SGLang's offset_endpoint_port to ensure alignment with publishers
                 # This is the same function SGLang schedulers use to determine their bind ports
                 zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
@@ -303,23 +316,8 @@ class DynamoSglangPublisher:
                 "Forward pass metrics will not be relayed to the event plane."
             )
             return []
-        dp_size = getattr(self.server_args, "dp_size", 1) or 1
-        enable_dp_attention = getattr(
-            self.server_args, "enable_dp_attention", False
-        )
-        nnodes = getattr(self.server_args, "nnodes", 1) or 1
-        node_rank = getattr(self.server_args, "node_rank", 0) or 0
-
-        if enable_dp_attention and dp_size > 1:
-            local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-            start_dp_rank = node_rank * local_dp_size
-            end_dp_rank = start_dp_rank + local_dp_size
-        else:
-            start_dp_rank = 0
-            end_dp_rank = 1
-
         relays = []
-        for dp_rank in range(start_dp_rank, end_dp_rank):
+        for dp_rank in get_local_dp_rank_range(self.server_args):
             zmq_ep = f"tcp://127.0.0.1:{base_port + dp_rank}"
             relay = FpmEventRelay(
                 endpoint=self.generate_endpoint,

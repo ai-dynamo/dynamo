@@ -19,7 +19,11 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
+from dynamo.sglang.publisher import (
+    handle_non_leader_node,
+    set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
+)
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
@@ -68,18 +72,26 @@ async def init_decode(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
+
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
+        if getattr(server_args, "forward_pass_metrics_port", None) is not None:
+            logging.warning(
+                "Forward pass metrics enabled with snapshot engine: "
+                "worker_id may remain empty because the engine was created before "
+                "the endpoint instance existed."
+            )
     else:
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
-    generate_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
-    )
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -196,18 +208,26 @@ async def init_prefill(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
+
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
+        if getattr(server_args, "forward_pass_metrics_port", None) is not None:
+            logging.warning(
+                "Forward pass metrics enabled with snapshot engine: "
+                "worker_id may remain empty because the engine was created before "
+                "the endpoint instance existed."
+            )
     else:
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
-    generate_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
-    )
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
