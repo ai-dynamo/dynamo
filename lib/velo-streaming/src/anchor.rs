@@ -405,6 +405,17 @@ pub struct AnchorManager {
     /// Set by VeloFrameTransport scenarios; `None` for local/mock transport scenarios.
     #[builder(default)]
     pub messenger: Option<Arc<velo_messenger::Messenger>>,
+
+    /// Monotonically increasing counter for sender_stream_id values.
+    /// Separate from next_local_id to keep anchor-side and sender-side namespaces distinct.
+    #[builder(setter(skip), default = "AtomicU64::new(0)")]
+    next_sender_stream_id: AtomicU64,
+
+    /// Sender-side registry: maps sender_stream_id -> SenderEntry.
+    /// Shared with the _stream_cancel handler registered on this AnchorManager.
+    /// Also accessed by StreamSender::Drop / finalize / detach for cleanup.
+    #[builder(default = "Arc::new(crate::control::SenderRegistry::default())")]
+    pub sender_registry: Arc<crate::control::SenderRegistry>,
 }
 
 impl AnchorManagerBuilder {
@@ -658,7 +669,32 @@ impl AnchorManager {
                         tc.cancel();
                     }
 
-                    Ok(crate::sender::StreamSender::new(frame_tx, handle, self.registry.clone()))
+                    // Allocate sender_stream_id and build SenderEntry
+                    let sender_stream_id = self.next_sender_stream_id.fetch_add(1, Ordering::Relaxed) + 1;
+                    let cancel_token = tokio_util::sync::CancellationToken::new();
+                    let (poison_tx, poison_rx) = flume::bounded::<()>(1);
+
+                    let sender_entry = crate::control::SenderEntry {
+                        cancel_token: cancel_token.clone(),
+                        rx_closer: std::sync::Mutex::new(Some(poison_rx)),
+                    };
+                    self.sender_registry.senders.insert(sender_stream_id, sender_entry);
+
+                    // Store stream_cancel_handle in AnchorEntry (already under DashMap lock)
+                    entry.stream_cancel_handle = Some(crate::control::StreamCancelHandle::pack(
+                        self.worker_id, sender_stream_id
+                    ));
+
+                    // Return sender with all new fields
+                    Ok(crate::sender::StreamSender::new(
+                        frame_tx,
+                        handle,
+                        self.registry.clone(),
+                        cancel_token,
+                        sender_stream_id,
+                        self.sender_registry.clone(),
+                        poison_tx,
+                    ))
                 }
             }
         }
