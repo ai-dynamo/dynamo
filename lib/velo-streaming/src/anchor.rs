@@ -941,6 +941,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_detached_then_none() {
+        // Detached is non-terminal — a new sender may reattach.
+        // After Detached, the stream continues polling. Simulate no reattach
+        // by sending Dropped, which IS terminal.
         let (tx, mut stream) = make_test_stream::<u32>();
 
         let bytes = rmp_serde::to_vec(&StreamFrame::<u32>::Detached).unwrap();
@@ -949,8 +952,15 @@ mod tests {
         let result = stream.next().await;
         assert!(matches!(result, Some(Ok(StreamFrame::Detached))), "expected Detached, got {:?}", result);
 
+        // Send Dropped to signal no reattach — terminal sentinel.
+        let bytes = rmp_serde::to_vec(&StreamFrame::<u32>::Dropped).unwrap();
+        tx.send(bytes).unwrap();
+
         let result2 = stream.next().await;
-        assert!(result2.is_none(), "expected None after Detached, got {:?}", result2);
+        assert!(matches!(result2, Some(Err(StreamError::SenderDropped))), "expected SenderDropped after Detached, got {:?}", result2);
+
+        let result3 = stream.next().await;
+        assert!(result3.is_none(), "expected None after SenderDropped, got {:?}", result3);
     }
 
     #[tokio::test]
