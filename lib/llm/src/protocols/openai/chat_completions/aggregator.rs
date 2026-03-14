@@ -381,6 +381,7 @@ impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompleti
 mod tests {
 
     use super::*;
+    use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
 
     #[allow(deprecated)]
@@ -421,16 +422,19 @@ mod tests {
             refusal: None,
             reasoning_content: None,
         };
-        let logprobs = logprob.map(|lp| dynamo_async_openai::types::ChatChoiceLogprobs {
-            content: Some(vec![
-                dynamo_async_openai::types::ChatCompletionTokenLogprob {
-                    token: text.to_string(),
-                    logprob: lp,
-                    bytes: None,
-                    top_logprobs: vec![],
-                },
-            ]),
-            refusal: None,
+        let logprobs = logprob.map(|lp| {
+            let token = text.to_string();
+            dynamo_async_openai::types::ChatChoiceLogprobs {
+                content: Some(vec![
+                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                        token: token.clone(),
+                        logprob: lp,
+                        bytes: token_to_utf8_bytes(&token),
+                        top_logprobs: vec![],
+                    },
+                ]),
+                refusal: None,
+            }
         });
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
