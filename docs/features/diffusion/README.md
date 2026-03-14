@@ -20,9 +20,6 @@ Dynamo supports serving diffusion models across multiple backends, enabling gene
 
 **Status:** ✅ Supported | ❌ Not supported
 
-> [!NOTE]
-> Image-to-video support for SGLang and TRT-LLM backends is planned and coming soon.
-
 ## Backend Documentation
 
 For deployment guides, configuration, and examples for each backend:
