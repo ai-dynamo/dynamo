@@ -174,6 +174,13 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+
+    /// Session lifecycle control for subagent KV isolation.
+    /// When present, the router opens or closes a streaming session on the
+    /// selected worker, keeping subagent KV in a dedicated SessionSlot.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<SessionControl>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -253,6 +260,33 @@ impl CacheControl {
     }
 }
 
+/// Default session timeout in seconds.
+fn default_session_timeout() -> u64 {
+    120
+}
+
+/// Session lifecycle control for subagent KV isolation.
+/// Sessions hold KV cache in dedicated slots outside the radix tree,
+/// preventing pollution from short-lived subagent conversations.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SessionControl {
+    /// Action to perform: open or close the session.
+    pub action: SessionAction,
+    /// Unique session identifier.
+    pub session_id: String,
+    /// Inactivity timeout in seconds (default 120). Session auto-closes after this.
+    #[serde(default = "default_session_timeout")]
+    pub timeout: u64,
+}
+
+/// Session lifecycle actions.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    Open,
+    Close,
+}
+
 impl Default for NvExt {
     fn default() -> Self {
         NvExt::builder().build().unwrap()
@@ -301,6 +335,7 @@ mod tests {
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.cache_control, None);
+        assert_eq!(nv_ext.session_control, None);
     }
 
     // Test CacheControl serde roundtrip and TTL parsing
@@ -405,6 +440,40 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, Some(100));
         assert_eq!(nv_ext.decode_worker_id, Some(200));
         assert!(nv_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_session_control_serde() {
+        // Open action
+        let sc_json = r#"{"action": "open", "session_id": "sub-1", "timeout": 60}"#;
+        let sc: SessionControl = serde_json::from_str(sc_json).unwrap();
+        assert_eq!(sc.action, SessionAction::Open);
+        assert_eq!(sc.session_id, "sub-1");
+        assert_eq!(sc.timeout, 60);
+
+        // Close action
+        let sc_close = r#"{"action": "close", "session_id": "sub-1"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_close).unwrap();
+        assert_eq!(sc.action, SessionAction::Close);
+        assert_eq!(sc.timeout, 120); // default
+
+        // NvExt with session_control
+        let nvext_json = r#"{"session_control": {"action": "open", "session_id": "sub-2", "timeout": 30}}"#;
+        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
+        assert!(nvext.session_control.is_some());
+        let sc = nvext.session_control.unwrap();
+        assert_eq!(sc.action, SessionAction::Open);
+        assert_eq!(sc.session_id, "sub-2");
+
+        // Roundtrip
+        let original = SessionControl {
+            action: SessionAction::Close,
+            session_id: "test-session".to_string(),
+            timeout: 90,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deser: SessionControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, original);
     }
 
     // Test apply_header_routing_overrides - worker header present, prefill header absent
