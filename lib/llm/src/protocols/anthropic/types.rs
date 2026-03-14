@@ -900,7 +900,22 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                     ..Default::default()
                 })
             },
-            chat_template_args: None,
+            // When the Anthropic request has thinking enabled, pass
+            // enable_thinking=true to the chat template so reasoning models
+            // (e.g., Nemotron-3-Super) emit <think>...</think> tags.
+            // Without this, the model generates plain text and the reasoning
+            // parser cannot detect thinking boundaries.
+            chat_template_args: if req
+                .thinking
+                .as_ref()
+                .is_some_and(|t| t.thinking_type == "enabled")
+            {
+                let mut args = std::collections::HashMap::new();
+                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                Some(args)
+            } else {
+                None
+            },
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })

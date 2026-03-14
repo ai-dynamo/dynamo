@@ -257,6 +257,17 @@ async fn anthropic_messages(
     // `<think>` into the prompt (e.g., Qwen3.5), so the parser must start
     // in reasoning mode — the completion begins mid-reasoning without an
     // explicit `<think>` tag.
+    // When a reasoning parser is configured, the model's chat template likely
+    // injects `<think>` into the prompt (e.g., Nemotron-3-Super, Qwen3.5). Pass
+    // `prompt_injected_reasoning=true` so the parser calls `set_in_reasoning(true)`,
+    // which sets `stripped_think_start=true` — critical for correct `</think>`
+    // detection in the streaming path. Without this, the parser's `<think>`
+    // prefix-check can interfere with `</think>` boundary detection, causing all
+    // content to be classified as reasoning.
+    //
+    // The OpenAI path detects this by inspecting the formatted prompt for a
+    // trailing `<think>`. The Anthropic path bypasses the preprocessor, so we
+    // assume prompt injection when a reasoning parser is configured.
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
