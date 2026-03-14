@@ -137,7 +137,7 @@ impl<T: Serialize> StreamSender<T> {
     }
 
     /// Returns a cloneable `CancellationToken` that fires when the consumer
-    /// cancels the stream (e.g. drops `AnchorStream` or calls `StreamController::cancel()`).
+    /// cancels the stream (e.g. drops `StreamAnchor` or calls `StreamController::cancel()`).
     ///
     /// Use in a `tokio::select!` to stop production proactively:
     /// ```no_run

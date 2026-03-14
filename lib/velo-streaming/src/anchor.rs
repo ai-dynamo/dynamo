@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anchor registry layer: [`AnchorManager`], [`AnchorEntry`], [`AnchorStream`], and [`AttachError`].
+//! Anchor registry layer: [`AnchorManager`], [`AnchorEntry`], [`StreamAnchor`], and [`AttachError`].
 //!
 //! The anchor registry is the core coordination point for the streaming protocol.
 //! Each anchor represents a single exclusive-attachment stream slot:
 //!
 //! - [`AnchorManager::create_anchor`] allocates a registry slot and returns a
-//!   [`crate::handle::StreamAnchorHandle`] (for use by control handlers) and an
-//!   [`AnchorStream<T>`] (for the consumer).
+//!   [`StreamAnchor<T>`] that embeds the [`crate::handle::StreamAnchorHandle`]
+//!   (obtainable via [`.handle()`](StreamAnchor::handle)) for the consumer.
 //! - Exactly one [`flume::Sender`] may be attached at a time;
 //!   the attach check is performed atomically via [`dashmap::DashMap::entry`].
 //! - Each entry holds a [`tokio_util::sync::CancellationToken`] created at anchor
@@ -68,7 +68,7 @@ pub enum AttachError {
 // Fields are consumed by Phase 7+ control handlers and Phase 8 data path.
 #[allow(dead_code)]
 pub(crate) struct AnchorEntry {
-    /// Raw-bytes frame delivery channel to the [`AnchorStream<T>`] consumer.
+    /// Raw-bytes frame delivery channel to the [`StreamAnchor<T>`] consumer.
     ///
     /// Non-generic so `DashMap<u64, AnchorEntry>` requires no type parameters.
     pub frame_tx: flume::Sender<Vec<u8>>,
@@ -101,7 +101,7 @@ pub(crate) struct AnchorEntry {
 // StreamController
 // ---------------------------------------------------------------------------
 
-/// Shared inner state between [`AnchorStream`] and [`StreamController`].
+/// Shared inner state between [`StreamAnchor`] and [`StreamController`].
 ///
 /// Wrapped in `Arc` so `StreamController` can outlive `AnchorStream` being
 /// moved into StreamExt combinators.
@@ -118,10 +118,10 @@ struct StreamControllerInner {
     cancelled: AtomicBool,
 }
 
-/// Cloneable handle to cancel an [`AnchorStream`] from outside the stream.
+/// Cloneable handle to cancel a [`StreamAnchor`] from outside the stream.
 ///
-/// Obtain via [`AnchorStream::controller`]. Required for the StreamExt combinator
-/// use-case where the `AnchorStream` is moved into `.map()` / `.take_while()` etc.
+/// Obtain via [`StreamAnchor::controller`]. Required for the StreamExt combinator
+/// use-case where the `StreamAnchor` is moved into `.map()` / `.take_while()` etc.
 /// and the caller loses direct access to it.
 #[derive(Clone)]
 pub struct StreamController {
@@ -189,7 +189,7 @@ impl StreamController {
 }
 
 // ---------------------------------------------------------------------------
-// AnchorStream<T>
+// StreamAnchor<T>
 // ---------------------------------------------------------------------------
 
 /// Consumer-side receive stream for an anchor.
@@ -200,7 +200,10 @@ impl StreamController {
 /// cause the stream to yield one final item and then `None` on subsequent polls.
 ///
 /// Use [`StreamExt::next()`](futures::StreamExt::next) for async iteration.
-pub struct AnchorStream<T> {
+pub struct StreamAnchor<T> {
+    /// The anchor handle — pass to a sender for attachment via
+    /// [`AnchorManager::attach_stream_anchor`].
+    handle: StreamAnchorHandle,
     /// Async stream obtained from consuming the flume::Receiver via `into_stream()`.
     inner_stream: flume::r#async::RecvStream<'static, Vec<u8>>,
     /// Set to true after a terminal sentinel; prevents further polling.
@@ -214,8 +217,9 @@ pub struct AnchorStream<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T> AnchorStream<T> {
+impl<T> StreamAnchor<T> {
     pub(crate) fn new(
+        handle: StreamAnchorHandle,
         rx: flume::Receiver<Vec<u8>>,
         local_id: u64,
         registry: Arc<DashMap<u64, AnchorEntry>>,
@@ -231,6 +235,7 @@ impl<T> AnchorStream<T> {
         });
         let controller = StreamController { inner };
         Self {
+            handle,
             inner_stream: rx.into_stream(),
             terminated: false,
             local_id,
@@ -238,6 +243,12 @@ impl<T> AnchorStream<T> {
             controller,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Return the anchor handle. Pass to a sender (possibly on another worker)
+    /// for attachment via [`AnchorManager::attach_stream_anchor`].
+    pub fn handle(&self) -> StreamAnchorHandle {
+        self.handle
     }
 
     /// Return a cloneable [`StreamController`] that can cancel this anchor
@@ -299,12 +310,12 @@ impl<T> AnchorStream<T> {
     }
 }
 
-// SAFETY: AnchorStream does not use structural pinning. Its `inner_stream`
+// SAFETY: StreamAnchor does not use structural pinning. Its `inner_stream`
 // (flume::r#async::RecvStream) is Unpin, and all other fields are trivially Unpin.
 // PhantomData<T> should not prevent Unpin, but we assert it explicitly.
-impl<T> Unpin for AnchorStream<T> {}
+impl<T> Unpin for StreamAnchor<T> {}
 
-impl<T> Drop for AnchorStream<T> {
+impl<T> Drop for StreamAnchor<T> {
     fn drop(&mut self) {
         if !self.terminated {
             // Delegate to the shared controller — AtomicBool prevents double-cancel.
@@ -313,7 +324,7 @@ impl<T> Drop for AnchorStream<T> {
     }
 }
 
-impl<T: DeserializeOwned> Stream for AnchorStream<T> {
+impl<T: DeserializeOwned> Stream for StreamAnchor<T> {
     type Item = Result<StreamFrame<T>, StreamError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -459,14 +470,17 @@ impl AnchorManager {
             .expect("required fields provided")
     }
 
-    /// Allocate a new anchor and return the handle (for control path) and stream (for consumer).
+    /// Allocate a new anchor and return a [`StreamAnchor<T>`] for the consumer.
+    ///
+    /// The returned `StreamAnchor` embeds the [`StreamAnchorHandle`]; obtain it via
+    /// [`.handle()`](StreamAnchor::handle) to pass to a sender for attachment.
     ///
     /// Local IDs start at 1 and increment monotonically; ID 0 is reserved.
     /// A flume bounded channel (capacity 256) is created per anchor to deliver raw frame bytes.
     ///
     /// If `default_timeout` is configured, a background task is spawned that will
     /// auto-remove the anchor if no sender attaches within the timeout duration.
-    pub fn create_anchor<T>(&self) -> (StreamAnchorHandle, AnchorStream<T>) {
+    pub fn create_anchor<T>(&self) -> StreamAnchor<T> {
         // fetch_add returns the *old* value (starts at 0), so +1 gives us IDs starting at 1.
         let local_id = self.next_local_id.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -490,14 +504,14 @@ impl AnchorManager {
         self.registry.insert(local_id, entry);
 
         let handle = StreamAnchorHandle::pack(self.worker_id, local_id);
-        let stream = AnchorStream::new(
+        StreamAnchor::new(
+            handle,
             frame_rx,
             local_id,
             self.registry.clone(),
             self.sender_registry.clone(),
             self.messenger.clone(),
-        );
-        (handle, stream)
+        )
     }
 
     /// Spawn a background task that removes the anchor after `timeout` elapses.
@@ -696,7 +710,6 @@ impl AnchorManager {
     async fn attach_remote<T: serde::Serialize>(
         &self,
         handle: StreamAnchorHandle,
-        session_id: u64,
     ) -> Result<crate::sender::StreamSender<T>, AttachError> {
         let (handle_worker_id, _) = handle.unpack();
 
@@ -716,9 +729,10 @@ impl AnchorManager {
             crate::control::StreamCancelHandle::pack(self.worker_id, sender_stream_id);
 
         // Build request payload (serde_json — typed_unary_async handlers use JSON)
+        // Use sender_stream_id as the session_id for the remote attach request.
         let req = crate::control::AnchorAttachRequest {
             handle,
-            session_id,
+            session_id: sender_stream_id,
             stream_cancel_handle,
         };
 
@@ -739,7 +753,7 @@ impl AnchorManager {
                 // Connect transport to Worker A's endpoint — get frame_tx pump channel
                 let frame_tx = self
                     .transport
-                    .connect(&stream_endpoint, local_id, session_id)
+                    .connect(&stream_endpoint, local_id, sender_stream_id)
                     .await?; // maps to AttachError::TransportError via From<anyhow::Error>
 
                 // Register SenderEntry for _stream_cancel routing
@@ -773,31 +787,27 @@ impl AnchorManager {
     /// 1. Detects remote handles (`handle.worker_id != self.worker_id`) and routes through
     ///    [`attach_remote`](Self::attach_remote) for cross-worker AM dispatch.
     /// 2. For local handles: validates the anchor exists and is unattached,
-    ///    calls `transport.connect()` to establish the write channel,
     ///    atomically marks the anchor as attached, and returns a
     ///    [`StreamSender<T>`](crate::sender::StreamSender) for pushing typed frames.
     ///
     /// The StreamSender writes to the entry's `frame_tx` so items flow directly
-    /// to the [`AnchorStream<T>`] consumer. The transport connection validates
-    /// network setup; the reader pump forwards transport-received frames to `frame_tx`
-    /// for cross-worker flows.
+    /// to the [`StreamAnchor<T>`] consumer. The transport connection is used by the
+    /// reader pump for cross-worker flows.
     ///
     /// # Errors
     /// - [`AttachError::AnchorNotFound`] if the handle is not in the registry (local path)
     /// - [`AttachError::AlreadyAttached`] if another sender is already connected (local path)
-    /// - [`AttachError::TransportError`] if `transport.connect()` fails, or for all remote
-    ///   path errors (messenger unavailable, AM send failed, remote error response)
+    /// - [`AttachError::TransportError`] for all remote path errors (messenger unavailable,
+    ///   AM send failed, remote error response)
     pub async fn attach_stream_anchor<T: serde::Serialize>(
         &self,
         handle: StreamAnchorHandle,
-        endpoint: &str,
-        session_id: u64,
     ) -> Result<crate::sender::StreamSender<T>, AttachError> {
         let (handle_worker_id, local_id) = handle.unpack();
 
         // Remote path: handle belongs to a different worker — send _anchor_attach AM
         if handle_worker_id != self.worker_id {
-            return self.attach_remote::<T>(handle, session_id).await;
+            return self.attach_remote::<T>(handle).await;
         }
 
         // Step 1: Quick check anchor exists and is unattached (drop ref before async)
@@ -812,13 +822,7 @@ impl AnchorManager {
             }
         } // DashMap ref dropped here
 
-        // Step 2: Async connect OUTSIDE shard lock -- validates transport setup
-        let _transport_tx = self
-            .transport
-            .connect(endpoint, local_id, session_id)
-            .await?; // maps to AttachError::TransportError via From<anyhow::Error>
-
-        // Step 3: Atomically set attachment under shard lock.
+        // Step 2: Atomically set attachment under shard lock.
         // Re-check under the entry guard to prevent TOCTOU.
         use dashmap::mapref::entry::Entry;
         match self.registry.entry(local_id) {
@@ -979,13 +983,13 @@ mod tests {
     fn test_create_anchor_monotonic_ids() {
         let mgr = make_manager();
 
-        let (h1, _s1) = mgr.create_anchor::<u8>();
-        let (h2, _s2) = mgr.create_anchor::<u8>();
-        let (h3, _s3) = mgr.create_anchor::<u8>();
+        let a1 = mgr.create_anchor::<u8>();
+        let a2 = mgr.create_anchor::<u8>();
+        let a3 = mgr.create_anchor::<u8>();
 
-        let (_, id1) = h1.unpack();
-        let (_, id2) = h2.unpack();
-        let (_, id3) = h3.unpack();
+        let (_, id1) = a1.handle().unpack();
+        let (_, id2) = a2.handle().unpack();
+        let (_, id3) = a3.handle().unpack();
 
         assert_eq!(id1, 1, "first local_id must be 1");
         assert_eq!(id2, 2, "second local_id must be 2");
@@ -1000,8 +1004,8 @@ mod tests {
     fn test_create_anchor_registry_insert() {
         let mgr = make_manager();
 
-        let (handle, _stream) = mgr.create_anchor::<u8>();
-        let (_, local_id) = handle.unpack();
+        let anchor = mgr.create_anchor::<u8>();
+        let (_, local_id) = anchor.handle().unpack();
 
         assert!(
             mgr.registry.contains_key(&local_id),
@@ -1016,7 +1020,8 @@ mod tests {
     #[test]
     fn test_exclusive_attach() {
         let mgr = make_manager();
-        let (handle, _stream) = mgr.create_anchor::<u8>();
+        let anchor = mgr.create_anchor::<u8>();
+        let handle = anchor.handle();
         let (_, local_id) = handle.unpack();
 
         // First attach succeeds.
@@ -1045,8 +1050,8 @@ mod tests {
     #[test]
     fn test_cancel_token_idempotent() {
         let mgr = make_manager();
-        let (handle, _stream) = mgr.create_anchor::<u8>();
-        let (_, local_id) = handle.unpack();
+        let anchor = mgr.create_anchor::<u8>();
+        let (_, local_id) = anchor.handle().unpack();
 
         // Retrieve a clone of the token before removing the entry.
         let token = mgr
@@ -1071,8 +1076,8 @@ mod tests {
     #[test]
     fn test_registry_cleanup() {
         let mgr = make_manager();
-        let (handle, _stream) = mgr.create_anchor::<u8>();
-        let (_, local_id) = handle.unpack();
+        let anchor = mgr.create_anchor::<u8>();
+        let (_, local_id) = anchor.handle().unpack();
 
         assert!(
             mgr.registry.contains_key(&local_id),
@@ -1093,11 +1098,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_attach_stream_anchor_success() {
-        let (mgr, _transport) = make_configurable_manager();
-        let (handle, _stream) = mgr.create_anchor::<u32>();
+        let mgr = make_manager();
+        let anchor = mgr.create_anchor::<u32>();
+        let handle = anchor.handle();
 
         let result = mgr
-            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .attach_stream_anchor::<u32>(handle)
             .await;
 
         assert!(result.is_ok(), "attach_stream_anchor should succeed: {:?}", result.err());
@@ -1109,7 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_attach_stream_anchor_not_found() {
-        let (mgr, _transport) = make_configurable_manager();
+        let mgr = make_manager();
         // Create a handle for a non-existent anchor
         let fake_handle = crate::handle::StreamAnchorHandle::pack(
             velo_common::WorkerId::from_u64(42),
@@ -1117,7 +1123,7 @@ mod tests {
         );
 
         let result = mgr
-            .attach_stream_anchor::<u32>(fake_handle, "mock://endpoint", 1)
+            .attach_stream_anchor::<u32>(fake_handle)
             .await;
 
         match result {
@@ -1128,18 +1134,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_attach_stream_anchor_already_attached() {
-        let (mgr, _transport) = make_configurable_manager();
-        let (handle, _stream) = mgr.create_anchor::<u32>();
+        let mgr = make_manager();
+        let anchor = mgr.create_anchor::<u32>();
+        let handle = anchor.handle();
 
         // First attach should succeed
         let sender1 = mgr
-            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .attach_stream_anchor::<u32>(handle)
             .await
             .expect("first attach should succeed");
 
         // Second attach should fail with AlreadyAttached
         let result = mgr
-            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 2)
+            .attach_stream_anchor::<u32>(handle)
             .await;
 
         match result {
@@ -1152,11 +1159,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_attach_stream_anchor_sender_can_send() {
-        let (mgr, _transport) = make_configurable_manager();
-        let (handle, mut stream) = mgr.create_anchor::<u32>();
+        let mgr = make_manager();
+        let mut anchor = mgr.create_anchor::<u32>();
+        let handle = anchor.handle();
 
         let sender = mgr
-            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .attach_stream_anchor::<u32>(handle)
             .await
             .expect("attach should succeed");
 
@@ -1164,7 +1172,7 @@ mod tests {
         sender.send(42u32).await.expect("send should succeed");
 
         // The item should arrive via the Stream interface
-        let result = stream.next().await;
+        let result = anchor.next().await;
         match result {
             Some(Ok(StreamFrame::Item(val))) => assert_eq!(val, 42),
             other => panic!("expected Item(42), got {:?}", other),
@@ -1173,41 +1181,23 @@ mod tests {
         drop(sender);
     }
 
-    #[tokio::test]
-    async fn test_attach_stream_anchor_transport_error() {
-        let (mgr, transport) = make_configurable_manager();
-        let (handle, _stream) = mgr.create_anchor::<u32>();
-
-        // Configure transport to fail on connect
-        transport.set_connect_fail(true);
-
-        let result = mgr
-            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
-            .await;
-
-        match result {
-            Err(AttachError::TransportError(_)) => {}
-            other => panic!("expected TransportError, got {:?}", other),
-        }
-    }
-
     // -----------------------------------------------------------------------
-    // AnchorStream<T> Stream impl tests (Plan 08-03, Task 1)
+    // StreamAnchor<T> Stream impl tests (Plan 08-03, Task 1)
     // -----------------------------------------------------------------------
 
-    /// Helper: create a raw channel pair + AnchorStream for testing Stream impl.
-    /// Returns (sender for pushing raw bytes, AnchorStream<T>).
-    fn make_test_stream<T>() -> (flume::Sender<Vec<u8>>, AnchorStream<T>) {
+    /// Helper: create a raw channel pair + StreamAnchor for testing Stream impl.
+    /// Returns (sender for pushing raw bytes, StreamAnchor<T>).
+    fn make_test_stream<T>() -> (flume::Sender<Vec<u8>>, StreamAnchor<T>) {
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<T>();
-        let (_, local_id) = handle.unpack();
+        let anchor = mgr.create_anchor::<T>();
+        let (_, local_id) = anchor.handle().unpack();
         // Get the frame_tx from the registry for pushing raw bytes
         let frame_tx = mgr
             .registry
             .get(&local_id)
             .map(|e| e.frame_tx.clone())
             .expect("entry must exist");
-        (frame_tx, stream)
+        (frame_tx, anchor)
     }
 
     #[tokio::test]
@@ -1364,8 +1354,8 @@ mod tests {
     #[tokio::test]
     async fn test_stream_none_when_sender_dropped() {
         let mgr = make_manager();
-        let (handle, mut stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let mut stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         // Remove the anchor from the registry to drop the frame_tx sender,
         // then drop the returned entry so ALL senders are gone.
@@ -1379,8 +1369,8 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_removes_anchor_from_registry() {
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         assert!(mgr.registry.contains_key(&local_id), "anchor must exist before cancel");
 
@@ -1449,7 +1439,8 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        let (handle, _stream) = mgr.create_anchor::<u32>();
+        let anchor = mgr.create_anchor::<u32>();
+        let handle = anchor.handle();
         let (_, local_id) = handle.unpack();
 
         assert!(mgr.registry.contains_key(&local_id), "anchor must exist after create");
@@ -1476,7 +1467,8 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        let (handle, _stream) = mgr.create_anchor::<u32>();
+        let anchor = mgr.create_anchor::<u32>();
+        let handle = anchor.handle();
         let (_, local_id) = handle.unpack();
 
         // Advance past timeout
@@ -1503,7 +1495,8 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        let (handle, _stream) = mgr.create_anchor::<u32>();
+        let anchor = mgr.create_anchor::<u32>();
+        let handle = anchor.handle();
         let (_, local_id) = handle.unpack();
 
         // Advance 1s (less than 2s timeout)
@@ -1532,7 +1525,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AnchorStream::set_timeout tests (Plan 08-04, Task 2)
+    // StreamAnchor::set_timeout tests (Plan 08-04, Task 2)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -1541,8 +1534,8 @@ mod tests {
 
         // Manager with NO default timeout
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         // set_timeout starts a timeout task even though manager had no default
         stream.set_timeout(Some(std::time::Duration::from_secs(1)));
@@ -1571,8 +1564,8 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         // Disable the timeout
         stream.set_timeout(None);
@@ -1599,8 +1592,8 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         // Override with a shorter timeout
         stream.set_timeout(Some(std::time::Duration::from_secs(1)));
@@ -1619,7 +1612,8 @@ mod tests {
         tokio::time::pause();
 
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
+        let stream = mgr.create_anchor::<u32>();
+        let handle = stream.handle();
         let (_, local_id) = handle.unpack();
 
         // Attach the anchor
@@ -1701,8 +1695,8 @@ mod tests {
 
         assert_eq!(shared_registry.len(), 0, "shared registry must be empty before create_anchor");
 
-        let (handle, _stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let anchor = mgr.create_anchor::<u32>();
+        let (_, local_id) = anchor.handle().unpack();
 
         // Verify the entry was inserted into the shared registry (accessible outside mgr)
         assert_eq!(shared_registry.len(), 1, "shared registry must have 1 entry after create_anchor");
@@ -1718,8 +1712,8 @@ mod tests {
     fn test_controller_clone() {
         // controller() returns a Clone-able type; multiple clones all refer to same anchor.
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         let ctrl1 = stream.controller();
         let ctrl2 = ctrl1.clone();
@@ -1734,10 +1728,10 @@ mod tests {
 
     #[test]
     fn test_cancel_self_removes_registry() {
-        // AnchorStream::cancel(self) removes anchor from registry.
+        // StreamAnchor::cancel(self) removes anchor from registry.
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         assert!(mgr.registry.contains_key(&local_id), "anchor must exist before cancel");
 
@@ -1749,10 +1743,10 @@ mod tests {
     #[test]
     fn test_controller_cancel_removes_registry() {
         // StreamController::cancel() removes anchor from registry.
-        // Test the drop path: get controller, drop AnchorStream, verify controller still no-panics.
+        // Test the drop path: get controller, drop StreamAnchor, verify controller still no-panics.
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         let ctrl = stream.controller();
         // Drop the stream — Drop impl fires, removes anchor via controller.cancel()
@@ -1768,8 +1762,8 @@ mod tests {
     fn test_double_cancel_idempotent() {
         // cancel twice does not panic, registry entry absent after first cancel.
         let mgr = make_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
-        let (_, local_id) = handle.unpack();
+        let stream = mgr.create_anchor::<u32>();
+        let (_, local_id) = stream.handle().unpack();
 
         let ctrl = stream.controller();
         ctrl.cancel();

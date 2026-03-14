@@ -39,7 +39,7 @@ pub enum StreamFrame<T> {
 // Error types for the consumer (AnchorStream) and producer (StreamSender) APIs
 // ---------------------------------------------------------------------------
 
-/// Errors surfaced to [`AnchorStream`](crate::anchor::AnchorStream) consumers.
+/// Errors surfaced to [`StreamAnchor`](crate::anchor::StreamAnchor) consumers.
 ///
 /// These represent problems that occurred on the sender side or during
 /// transport/deserialization. The stream may or may not continue producing

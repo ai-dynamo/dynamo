@@ -14,7 +14,7 @@
 //!
 //! Anchor registry:
 //! - [`anchor::AnchorManager`]: creates and tracks streaming anchors
-//! - [`anchor::AnchorStream`]: typed receive stream for anchor consumers
+//! - [`anchor::StreamAnchor`]: typed receive stream for anchor consumers
 //! - [`anchor::AttachError`]: errors for exclusive-attach operations
 //!
 //! Sender:
@@ -28,7 +28,7 @@ pub mod sender;
 pub mod transport;
 pub mod velo_transport;
 
-pub use anchor::{AnchorManager, AnchorManagerBuilder, AnchorStream, AttachError, StreamController};
+pub use anchor::{AnchorManager, AnchorManagerBuilder, StreamAnchor, AttachError, StreamController};
 pub use handle::StreamAnchorHandle;
 pub use control::{
     AnchorAttachRequest, AnchorAttachResponse, AnchorCancelRequest, AnchorDetachRequest,
