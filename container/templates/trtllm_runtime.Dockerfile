@@ -252,7 +252,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt \
-        cupy-cuda13x
+        cupy-cuda13x && \
+    # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
+    # that unconditionally raises NotImplementedError, crashing TRT-LLM on import. cutlass-dsl==4.3.4
+    # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
+    rm -rf ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/experimental/
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
