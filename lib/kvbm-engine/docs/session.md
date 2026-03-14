@@ -87,7 +87,15 @@ Both implement the `MessageTransport` enum which provides `send`,
 
 ### SessionPhase
 
-Lifecycle of block operations: `Searching` → `Holding` → `Staging` → `Ready` → `Complete` (or `Failed`).
+Lifecycle of block operations. Staging is optional — blocks already in the
+target tier (G2) skip it:
+
+```text
+Searching → Holding ──────────────────── Ready → Complete
+                    └── Staging ────────┘
+                    └── Complete  (direct pull, no staging needed)
+                    └── Failed
+```
 
 ### ControlRole
 
