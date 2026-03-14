@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 
 pytestmark = [
@@ -25,7 +26,7 @@ def _make_config(**overrides) -> Mock:
         "multimodal_worker": False,
         "multimodal_decode_worker": False,
         "omni": False,
-        "is_prefill_worker": False,
+        "disaggregation_mode": DisaggregationMode.AGGREGATED,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -34,6 +35,7 @@ def _make_config(**overrides) -> Mock:
 class TestHandles:
     """Test WorkerFactory.handles() config detection."""
 
+    # Legacy worker config
     def test_multimodal_encode_worker(self) -> None:
         config = _make_config(multimodal_encode_worker=True)
         assert WorkerFactory.handles(config)
@@ -46,16 +48,37 @@ class TestHandles:
         config = _make_config(multimodal_decode_worker=True)
         assert WorkerFactory.handles(config)
 
+    # Tests for no standalone encode worker setting
     def test_no_multimodal_flags(self) -> None:
         config = _make_config()
+        assert WorkerFactory.handles(config)
+
+    def test_prefill(self) -> None:
+        config = _make_config(disaggregation_mode=DisaggregationMode.PREFILL)
+        assert WorkerFactory.handles(config)
+
+    def test_decode(self) -> None:
+        config = _make_config(disaggregation_mode=DisaggregationMode.DECODE)
+        assert WorkerFactory.handles(config)
+
+    def test_route_to_encoder_prefill(self) -> None:
+        config = _make_config(
+            route_to_encoder=True, disaggregation_mode=DisaggregationMode.PREFILL
+        )
         assert not WorkerFactory.handles(config)
+
+    def test_route_to_encoder(self) -> None:
+        config = _make_config(route_to_encoder=True)
+        assert WorkerFactory.handles(config)
+
+    def test_route_to_encoder_decode(self) -> None:
+        config = _make_config(
+            route_to_encoder=True, disaggregation_mode=DisaggregationMode.DECODE
+        )
+        assert WorkerFactory.handles(config)
 
     def test_omni_not_handled(self) -> None:
         config = _make_config(omni=True)
-        assert not WorkerFactory.handles(config)
-
-    def test_prefill_only_not_handled(self) -> None:
-        config = _make_config(is_prefill_worker=True)
         assert not WorkerFactory.handles(config)
 
 
@@ -68,10 +91,41 @@ class TestCreate:
             setup_vllm_engine_fn=Mock(),
             setup_kv_event_publisher_fn=Mock(),
             register_vllm_model_fn=AsyncMock(),
+            setup_fpm_relay_fn=Mock(),
+            setup_metrics_collection_fn=Mock(),
         )
         factory._create_multimodal_encode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_multimodal_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         return factory
+
+    @pytest.mark.asyncio
+    async def test_aggregated(self, factory: WorkerFactory) -> None:
+        config = _make_config()
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_decode_worker.assert_called_once()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_prefill(self, factory: WorkerFactory) -> None:
+        config = _make_config(disaggregation_mode=DisaggregationMode.PREFILL)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_prefill_worker.assert_called_once()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_decode(self, factory: WorkerFactory) -> None:
+        config = _make_config(multimodal_decode_worker=True)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_decode_worker.assert_called_once()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
     async def test_routes_to_multimodal_encode(self, factory: WorkerFactory) -> None:
