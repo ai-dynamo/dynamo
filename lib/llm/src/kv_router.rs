@@ -145,13 +145,31 @@ pub enum Indexer {
 }
 
 impl Indexer {
-    pub fn new(
+    pub async fn new(
         component: &dynamo_runtime::component::Component,
         kv_router_config: &KvRouterConfig,
         block_size: u32,
-    ) -> Self {
+        model_name: Option<String>,
+    ) -> Result<Self> {
         if kv_router_config.overlap_score_weight == 0.0 {
-            return Indexer::None;
+            return Ok(Indexer::None);
+        }
+
+        // Remote indexer: forward queries to a standalone KV indexer service.
+        if let Some(ref indexer_component_name) = kv_router_config.remote_indexer_component {
+            let model_name = model_name.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model_name is required when remote_indexer_component is configured"
+                )
+            })?;
+            tracing::info!(
+                remote_indexer_component = %indexer_component_name,
+                model_name,
+                "Using remote KV indexer"
+            );
+            let remote =
+                RemoteIndexer::new(component, indexer_component_name, model_name).await?;
+            return Ok(Indexer::Remote(Arc::new(remote)));
         }
 
         // Approximate mode (--no-kv-events): always use single-threaded KvIndexer
@@ -165,33 +183,33 @@ impl Indexer {
                 max_tree_size: kv_router_config.router_max_tree_size,
                 prune_target_ratio: kv_router_config.router_prune_target_ratio,
             });
-            return Indexer::KvIndexer(KvIndexer::new_with_frequency(
+            return Ok(Indexer::KvIndexer(KvIndexer::new_with_frequency(
                 cancellation_token,
                 None,
                 block_size,
                 kv_indexer_metrics,
                 prune_config,
-            ));
+            )));
         }
 
         if kv_router_config.router_event_threads > 1 {
-            return Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
+            return Ok(Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
                 ConcurrentRadixTree::new(),
                 kv_router_config.router_event_threads as usize,
                 block_size,
-            )));
+            ))));
         }
 
         let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
         let cancellation_token = component.drt().primary_token();
 
-        Indexer::KvIndexer(KvIndexer::new_with_frequency(
+        Ok(Indexer::KvIndexer(KvIndexer::new_with_frequency(
             cancellation_token,
             None, // expiration_duration for frequency tracking
             block_size,
             kv_indexer_metrics,
             None,
-        ))
+        )))
     }
 
     pub(crate) async fn find_matches(
@@ -316,28 +334,8 @@ impl KvRouter {
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
-        // If overlap scoring is disabled, skip indexing entirely.
-        // Otherwise, if a remote indexer component is configured, create a Remote indexer
-        // that queries the standalone KV indexer service via the request plane.
-        // Otherwise, create a local indexer and subscribe to KV events directly.
-        let indexer = if kv_router_config.overlap_score_weight == 0.0 {
-            Indexer::None
-        } else if let Some(ref indexer_component_name) = kv_router_config.remote_indexer_component {
-            let model_name = model_name.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "model_name is required when remote_indexer_component is configured"
-                )
-            })?;
-            tracing::info!(
-                remote_indexer_component = %indexer_component_name,
-                model_name,
-                "Using remote KV indexer"
-            );
-            let remote = RemoteIndexer::new(component, indexer_component_name, model_name).await?;
-            Indexer::Remote(Arc::new(remote))
-        } else {
-            Indexer::new(component, &kv_router_config, block_size)
-        };
+        let indexer =
+            Indexer::new(component, &kv_router_config, block_size, model_name).await?;
 
         // Wait for at least one worker with a known runtime config before starting scheduler
         let _ = workers_with_configs
