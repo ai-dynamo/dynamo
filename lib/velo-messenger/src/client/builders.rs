@@ -184,6 +184,17 @@ where
         })
     }
 
+    /// Create a `TypedUnaryBuilder` without validating the handler name.
+    ///
+    /// Intended for `velo-streaming` to call `_anchor_*` typed-unary handlers
+    /// whose names start with underscore (normally rejected by `new`).
+    pub(crate) fn new_unchecked(client: Arc<ActiveMessageClient>, handler: &str) -> Self {
+        Self {
+            inner: MessageBuilder::new_unchecked(client, handler),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
     pub fn payload<T: Serialize>(mut self, data: T) -> Result<Self> {
         self.inner = self.inner.payload(data)?;
         Ok(self)

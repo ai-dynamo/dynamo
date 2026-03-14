@@ -231,6 +231,18 @@ impl Messenger {
         crate::client::builders::TypedUnaryBuilder::new(self.client.clone(), handler)
     }
 
+    /// Typed unary request-response builder that bypasses handler name validation.
+    ///
+    /// This is the request-response analog of [`Messenger::am_send_streaming`].
+    /// Intended for `velo-streaming` to send `_anchor_attach` and similar internal
+    /// typed-unary AM calls where the handler name starts with an underscore.
+    pub fn typed_unary_streaming<R: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        handler: &str,
+    ) -> crate::client::builders::TypedUnaryBuilder<R> {
+        crate::client::builders::TypedUnaryBuilder::new_unchecked(self.client.clone(), handler)
+    }
+
     pub fn register_handler(&self, handler: Handler) -> Result<()> {
         self.handlers.register_handler(handler)
     }
@@ -390,5 +402,20 @@ mod tests {
             .raw_payload(bytes::Bytes::from_static(b"test"))
             .worker(velo_common::WorkerId::from_u64(1));
         // If this compiles, the builder setters are working
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_typed_unary_streaming_allows_underscore_prefix() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        // Should not panic or return validation error:
+        let _builder = messenger.typed_unary_streaming::<String>("_anchor_attach");
+        // (builder construction succeeds; no network call made)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_typed_unary_still_rejects_underscore_prefix() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        let result = messenger.typed_unary::<String>("_anchor_attach");
+        assert!(result.is_err(), "typed_unary should still reject underscore-prefixed handler names");
     }
 }
