@@ -138,6 +138,8 @@ The disaggrated serving example uses g7e.12xlarge instance that is capable of GP
 
 Using NIXL with LIBFABRIC support for kv transfer in vLLM requires to use the following argument `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
 
+*Note: If running on instance type that doesn't support EFA, NIXL with libfabric support will fallback to TCP, by default the vLLM's `NixlConnector` is set to use `cuda` as the buffer device, you will need to add `"kv_buffer_device":"cpu"` to the `kv-transfer-config` argument for the `NixlConnector` to work for disaggregated serving without EFA support.*
+
 Requesting an EFA device using `vpc.amazonaws.com/efa` extended resource
 ```yaml
       resources:
