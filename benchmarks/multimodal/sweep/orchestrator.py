@@ -33,6 +33,8 @@ def run_sweep(
         repo_root = resolve_repo_root()
 
     output_base = Path(config.output_dir)
+    sweep_mode = config.sweep_mode
+    sweep_values = config.sweep_values
 
     _print_banner("Multimodal Benchmark Sweep")
     print(f"  Model:         {config.model}")
@@ -41,9 +43,11 @@ def run_sweep(
         print(f"                   {f}")
     labels = [c.label for c in config.configs]
     print(f"  Configs:       {labels}")
-    print(f"  Request rates: {config.request_rates}")
+    print(f"  Sweep mode:    {sweep_mode}")
+    print(f"  Sweep values:  {sweep_values}")
     print(f"  OSL:           {config.osl}")
-    print(f"  Requests:      {config.request_count} per request rate")
+    print(f"  Requests:      {config.request_count} per {sweep_mode}")
+    print(f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}")
     print(f"  Output:        {output_base}")
     print(flush=True)
 
@@ -57,44 +61,61 @@ def run_sweep(
 
             _print_banner(f"Input: {Path(input_file).name}  ({file_tag})", char="#")
 
-            for request_rate in sorted(config.request_rates):
-                for bench_cfg in config.configs:
-                    workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
-                    sweep_dir = file_output_dir / bench_cfg.label
-                    artifact_dir = sweep_dir / f"request_rate{request_rate}"
+            for bench_cfg in config.configs:
+                workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
+                sweep_dir = file_output_dir / bench_cfg.label
 
-                    if (artifact_dir / "profile_export_aiperf.json").exists():
-                        print(
-                            f"  SKIP {bench_cfg.label} request_rate={request_rate} "
-                            f"(results exist in {artifact_dir})",
-                            flush=True,
-                        )
-                        continue
-
-                    _print_banner(
-                        f"[{file_tag}] Config: {bench_cfg.label}  "
-                        f"request_rate={request_rate}",
-                        char="-",
-                    )
-
+                if not config.restart_server_every_benchmark:
                     server.start(
                         workflow_script=workflow_abs,
                         model=config.model,
                         extra_args=bench_cfg.extra_args,
                         env_overrides=env_overrides,
                     )
-                    try:
-                        run_aiperf_single(
-                            model=config.model,
-                            port=config.port,
-                            request_rate=request_rate,
-                            request_count=config.request_count,
-                            warmup_count=config.warmup_count,
-                            input_file=input_file,
-                            osl=config.osl,
-                            artifact_dir=artifact_dir,
+
+                try:
+                    for value in sorted(sweep_values):
+                        artifact_dir = sweep_dir / f"{sweep_mode}{value}"
+
+                        if (artifact_dir / "profile_export_aiperf.json").exists():
+                            print(
+                                f"  SKIP {bench_cfg.label} {sweep_mode}={value} "
+                                f"(results exist in {artifact_dir})",
+                                flush=True,
+                            )
+                            continue
+
+                        _print_banner(
+                            f"[{file_tag}] Config: {bench_cfg.label}  "
+                            f"{sweep_mode}={value}",
+                            char="-",
                         )
-                    finally:
+
+                        if config.restart_server_every_benchmark:
+                            server.start(
+                                workflow_script=workflow_abs,
+                                model=config.model,
+                                extra_args=bench_cfg.extra_args,
+                                env_overrides=env_overrides,
+                            )
+
+                        try:
+                            run_aiperf_single(
+                                model=config.model,
+                                port=config.port,
+                                sweep_mode=sweep_mode,
+                                sweep_value=value,
+                                request_count=config.request_count,
+                                warmup_count=config.warmup_count,
+                                input_file=input_file,
+                                osl=config.osl,
+                                artifact_dir=artifact_dir,
+                            )
+                        finally:
+                            if config.restart_server_every_benchmark:
+                                server.stop()
+                finally:
+                    if not config.restart_server_every_benchmark:
                         server.stop()
 
             if not config.skip_plots:

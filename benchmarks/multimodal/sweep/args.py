@@ -7,7 +7,7 @@ import argparse
 from typing import List
 
 
-def _parse_request_rates(value: str) -> List[int]:
+def _parse_int_list(value: str) -> List[int]:
     return [int(x.strip()) for x in value.split(",")]
 
 
@@ -37,12 +37,21 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Override model name from config.",
     )
-    parser.add_argument(
+
+    sweep_group = parser.add_mutually_exclusive_group()
+    sweep_group.add_argument(
         "--request-rates",
-        type=_parse_request_rates,
+        type=_parse_int_list,
         default=None,
         help="Override request rates (comma-separated, e.g. '4,8,16,32').",
     )
+    sweep_group.add_argument(
+        "--concurrencies",
+        type=_parse_int_list,
+        default=None,
+        help="Override concurrency levels (comma-separated, e.g. '16,32,64,128').",
+    )
+
     parser.add_argument(
         "--osl",
         type=int,
@@ -53,7 +62,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--request-count",
         type=int,
         default=None,
-        help="Override request count per request rate.",
+        help="Override request count per sweep value.",
     )
     parser.add_argument(
         "--skip-plots",
