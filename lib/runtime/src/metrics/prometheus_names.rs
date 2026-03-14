@@ -72,9 +72,9 @@ pub mod name_prefix {
     /// Prefix for KV router instance metrics (carries `router_id` label).
     pub const ROUTER: &str = "dynamo_router";
 
-    /// Note: REQUEST_PLANE vs TRANSPORT: REQUEST_PLANE measures *what requests do* (latency,
-    /// concurrency) and is transport-agnostic. TRANSPORT measures *how the wire behaves*
-    /// (bytes transferred, protocol errors) and is protocol-specific (TCP/NATS).
+    // Note: REQUEST_PLANE vs TRANSPORT: REQUEST_PLANE measures *what requests do* (latency,
+    // concurrency) and is transport-agnostic. TRANSPORT measures *how the wire behaves*
+    // (bytes transferred, protocol errors) and is protocol-specific (TCP/NATS).
 
     /// Prefix for standalone KV indexer metrics
     pub const KVINDEXER: &str = "dynamo_kvindexer";
