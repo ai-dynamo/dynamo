@@ -11,10 +11,10 @@
 //!   the remote path): sends `_anchor_attach` AM to Worker A, Worker A's handler binds the transport
 //!   and spawns reader_pump, returns the stream endpoint, Worker B connects and receives StreamSender.
 //! - Worker B sends N items + finalize via StreamSender.
-//! - Worker A's AnchorStream yields all N items then None.
+//! - Worker A's StreamAnchor yields all N items then None.
 //!
 //! This validates the full stack: register_handlers -> remote attach_stream_anchor ->
-//! _anchor_attach AM dispatch -> reader_pump -> AnchorStream receives remote frames.
+//! _anchor_attach AM dispatch -> reader_pump -> StreamAnchor receives remote frames.
 
 mod common;
 
@@ -76,7 +76,7 @@ async fn make_two_messengers() -> (Arc<Messenger>, Arc<Messenger>) {
 //      - Worker A's handler binds transport + spawns reader_pump, returns endpoint
 //      - Worker B connects transport and receives StreamSender
 //   4. Worker B sends 5 items + finalize via StreamSender.
-//   5. Worker A's AnchorStream yields all 5 items then None.
+//   5. Worker A's StreamAnchor yields all 5 items then None.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_02_remote_attach() {
@@ -102,7 +102,8 @@ async fn test_02_remote_attach() {
         .expect("register_handlers on worker A");
 
     // Worker A: create anchor
-    let (handle, mut anchor_stream) = am_a.create_anchor::<u32>();
+    let mut anchor_stream = am_a.create_anchor::<u32>();
+    let handle = anchor_stream.handle();
 
     // Simulate cross-worker handle transfer (u128 round-trip)
     let handle_raw: u128 = handle.as_u128();
@@ -136,7 +137,7 @@ async fn test_02_remote_attach() {
     // Worker A's handler binds transport + spawns reader_pump, returns endpoint,
     // Worker B connects transport and receives StreamSender.
     let sender = am_b
-        .attach_stream_anchor::<u32>(handle_transferred, "", 1)
+        .attach_stream_anchor::<u32>(handle_transferred)
         .await
         .expect("remote attach must succeed");
 
@@ -152,7 +153,7 @@ async fn test_02_remote_attach() {
 
     sender.finalize().expect("finalize");
 
-    // Worker A: collect items from AnchorStream until None
+    // Worker A: collect items from StreamAnchor until None
     use futures::StreamExt;
     let mut items = Vec::new();
     let collect = async {

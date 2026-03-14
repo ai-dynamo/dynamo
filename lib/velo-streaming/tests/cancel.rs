@@ -3,10 +3,10 @@
 
 //! Integration tests for upstream cancellation (Phase 11).
 //!
-//! TEST-CANCEL-01: Drop AnchorStream with attached sender — token fires, send() fails.
+//! TEST-CANCEL-01: Drop StreamAnchor with attached sender — token fires, send() fails.
 //! TEST-CANCEL-02: StreamController::cancel() with attached sender — same effect.
 //! TEST-CANCEL-03: Remote cross-worker cancel via _stream_cancel AM over TCP.
-//! TEST-CANCEL-04: Drop AnchorStream with no sender — registry cleared, attach fails.
+//! TEST-CANCEL-04: Drop StreamAnchor with no sender — registry cleared, attach fails.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,20 +48,21 @@ fn make_local_manager() -> Arc<AnchorManager> {
 }
 
 // ---------------------------------------------------------------------------
-// TEST-CANCEL-01: Drop AnchorStream with attached sender — token fires, send() fails
+// TEST-CANCEL-01: Drop StreamAnchor with attached sender — token fires, send() fails
 // ---------------------------------------------------------------------------
 
-/// Drop AnchorStream (with an attached sender) triggers:
+/// Drop StreamAnchor (with an attached sender) triggers:
 ///   - impl Drop -> controller.cancel() -> SenderRegistry lookup -> cancel_token fires
 ///   - subsequent send() returns Err(SendError::ChannelClosed)
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cancel_01_drop_with_sender() {
     let mgr = make_local_manager();
-    let (handle, anchor_stream) = mgr.create_anchor::<u32>();
+    let anchor = mgr.create_anchor::<u32>();
+    let handle = anchor.handle();
 
     // Attach sender
     let sender = mgr
-        .attach_stream_anchor::<u32>(handle, "mock://1", 1)
+        .attach_stream_anchor::<u32>(handle)
         .await
         .expect("attach must succeed");
 
@@ -69,9 +70,9 @@ async fn test_cancel_01_drop_with_sender() {
     let cancel_token = sender.cancellation_token();
     assert!(!cancel_token.is_cancelled(), "token must not be cancelled initially");
 
-    // Drop the AnchorStream — triggers impl Drop -> controller.cancel()
+    // Drop the StreamAnchor — triggers impl Drop -> controller.cancel()
     // which removes anchor from registry, fires token via SenderRegistry
-    drop(anchor_stream);
+    drop(anchor);
 
     // Give the async cancellation a moment to propagate
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -79,7 +80,7 @@ async fn test_cancel_01_drop_with_sender() {
     // Token must have fired
     assert!(
         cancel_token.is_cancelled(),
-        "cancel_token must fire after AnchorStream is dropped"
+        "cancel_token must fire after StreamAnchor is dropped"
     );
 
     // send() must return Err(ChannelClosed)
@@ -95,18 +96,19 @@ async fn test_cancel_01_drop_with_sender() {
 // TEST-CANCEL-02: StreamController::cancel() with attached sender
 // ---------------------------------------------------------------------------
 
-/// StreamController::cancel() triggers the same effect as dropping AnchorStream.
+/// StreamController::cancel() triggers the same effect as dropping StreamAnchor.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cancel_02_controller_cancel() {
     let mgr = make_local_manager();
-    let (handle, anchor_stream) = mgr.create_anchor::<u32>();
+    let anchor = mgr.create_anchor::<u32>();
+    let handle = anchor.handle();
 
     // Obtain the controller BEFORE moving the stream
-    let ctrl = anchor_stream.controller();
+    let ctrl = anchor.controller();
 
     // Attach sender
     let sender = mgr
-        .attach_stream_anchor::<u32>(handle, "mock://1", 1)
+        .attach_stream_anchor::<u32>(handle)
         .await
         .expect("attach must succeed");
 
@@ -114,8 +116,8 @@ async fn test_cancel_02_controller_cancel() {
     let cancel_token = sender.cancellation_token();
     assert!(!cancel_token.is_cancelled(), "token must not be cancelled initially");
 
-    // Move anchor_stream into _ — drop it without calling cancel on itself
-    let _ = anchor_stream;
+    // Move anchor into _ — drop it without calling cancel on itself
+    let _ = anchor;
 
     // Now explicitly cancel via the controller
     ctrl.cancel();
@@ -139,25 +141,26 @@ async fn test_cancel_02_controller_cancel() {
 }
 
 // ---------------------------------------------------------------------------
-// TEST-CANCEL-04: Drop AnchorStream with no sender — registry cleared, attach fails
+// TEST-CANCEL-04: Drop StreamAnchor with no sender — registry cleared, attach fails
 // ---------------------------------------------------------------------------
 
-/// Dropping AnchorStream without attaching a sender:
+/// Dropping StreamAnchor without attaching a sender:
 ///   - removes anchor from registry (via impl Drop -> controller.cancel())
 ///   - subsequent attach returns AnchorNotFound
 #[tokio::test]
 async fn test_cancel_04_drop_no_sender() {
     let mgr = make_local_manager();
-    let (handle, anchor_stream) = mgr.create_anchor::<u32>();
+    let anchor = mgr.create_anchor::<u32>();
+    let handle = anchor.handle();
 
     // Drop without attaching any sender
-    drop(anchor_stream);
+    drop(anchor);
 
     // Give any async operations a moment to flush
     tokio::task::yield_now().await;
 
     // Subsequent attach must return AnchorNotFound — proves registry was cleared
-    let result = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1).await;
+    let result = mgr.attach_stream_anchor::<u32>(handle).await;
     assert!(
         matches!(result, Err(AttachError::AnchorNotFound { .. })),
         "attach after no-sender drop must return AnchorNotFound, got {:?}",
@@ -226,9 +229,10 @@ async fn test_cancel_03_remote_cancel() {
     ));
 
     // Worker B: create a local anchor + attach local sender (to populate SenderRegistry)
-    let (handle_b, _stream_b) = am_b.create_anchor::<u32>();
+    let anchor_b = am_b.create_anchor::<u32>();
+    let handle_b = anchor_b.handle();
     let sender_b = am_b
-        .attach_stream_anchor::<u32>(handle_b, "mock://", 1)
+        .attach_stream_anchor::<u32>(handle_b)
         .await
         .expect("attach sender B");
     let cancel_token = sender_b.cancellation_token();

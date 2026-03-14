@@ -103,7 +103,7 @@ pub(crate) struct AnchorEntry {
 
 /// Shared inner state between [`StreamAnchor`] and [`StreamController`].
 ///
-/// Wrapped in `Arc` so `StreamController` can outlive `AnchorStream` being
+/// Wrapped in `Arc` so `StreamController` can outlive `StreamAnchor` being
 /// moved into StreamExt combinators.
 struct StreamControllerInner {
     local_id: u64,
@@ -534,7 +534,7 @@ impl AnchorManager {
                     // Timeout expired -- remove anchor
                     if let Some((_, entry)) = registry.remove(&local_id) {
                         entry.cancel_token.cancel();
-                        // Dropping frame_tx closes the channel -> AnchorStream yields None
+                        // Dropping frame_tx closes the channel -> StreamAnchor yields None
                     }
                 }
             }
@@ -833,7 +833,7 @@ impl AnchorManager {
                     Err(AttachError::AlreadyAttached { handle })
                 } else {
                     // Clone the frame_tx so the StreamSender can write items
-                    // directly to the AnchorStream consumer.
+                    // directly to the StreamAnchor consumer.
                     let frame_tx = entry.frame_tx.clone();
 
                     // Mark as attached (reader pump takes ownership of transport
@@ -919,60 +919,6 @@ mod tests {
         let worker_id = velo_common::WorkerId::from_u64(42);
         let transport = Arc::new(MockTransport);
         AnchorManager::new(worker_id, transport)
-    }
-
-    /// A configurable mock transport that can simulate connect failures.
-    struct ConfigurableMockTransport {
-        connect_should_fail: std::sync::atomic::AtomicBool,
-    }
-
-    impl ConfigurableMockTransport {
-        fn new() -> Self {
-            Self {
-                connect_should_fail: std::sync::atomic::AtomicBool::new(false),
-            }
-        }
-
-        fn set_connect_fail(&self, fail: bool) {
-            self.connect_should_fail
-                .store(fail, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    impl crate::transport::FrameTransport for ConfigurableMockTransport {
-        fn bind(
-            &self,
-            _anchor_id: u64,
-        ) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
-            Box::pin(async {
-                Ok(("mock://endpoint".to_string(), flume::bounded::<Vec<u8>>(256).1))
-            })
-        }
-
-        fn connect(
-            &self,
-            _endpoint: &str,
-            _anchor_id: u64,
-            _session_id: u64,
-        ) -> BoxFuture<'_, AnyhowResult<flume::Sender<Vec<u8>>>> {
-            let should_fail = self
-                .connect_should_fail
-                .load(std::sync::atomic::Ordering::Relaxed);
-            Box::pin(async move {
-                if should_fail {
-                    Err(anyhow::anyhow!("mock transport connect failure"))
-                } else {
-                    Ok(flume::bounded::<Vec<u8>>(256).0)
-                }
-            })
-        }
-    }
-
-    fn make_configurable_manager() -> (AnchorManager, Arc<ConfigurableMockTransport>) {
-        let worker_id = velo_common::WorkerId::from_u64(42);
-        let transport = Arc::new(ConfigurableMockTransport::new());
-        let mgr = AnchorManager::new(worker_id, transport.clone());
-        (mgr, transport)
     }
 
     // -----------------------------------------------------------------------

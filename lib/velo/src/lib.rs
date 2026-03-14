@@ -34,7 +34,7 @@ pub use velo_discovery as discovery;
 
 // Re-exports: Streaming (from velo-streaming)
 pub use velo_streaming::{
-    AnchorManager, AnchorStream, AttachError, SendError, StreamAnchorHandle, StreamController,
+    AnchorManager, StreamAnchor, AttachError, SendError, StreamAnchorHandle, StreamController,
     StreamError, StreamFrame, StreamSender,
 };
 
@@ -228,29 +228,23 @@ impl Velo {
 
     /// Create a new streaming anchor.
     ///
-    /// Returns a [`StreamAnchorHandle`](velo_streaming::StreamAnchorHandle) for
-    /// passing to a sender (possibly on another worker) and an
-    /// [`AnchorStream<T>`](velo_streaming::AnchorStream) for consuming typed frames.
-    pub fn create_anchor<T>(
-        &self,
-    ) -> (
-        velo_streaming::StreamAnchorHandle,
-        velo_streaming::AnchorStream<T>,
-    ) {
+    /// Returns a [`StreamAnchor<T>`] that embeds the [`StreamAnchorHandle`];
+    /// obtain it via [`.handle()`](StreamAnchor::handle) to pass to a sender
+    /// (possibly on another worker) for attachment.
+    pub fn create_anchor<T>(&self) -> StreamAnchor<T> {
         self.anchor_manager.create_anchor::<T>()
     }
 
     /// Attach a sender to an existing anchor (local or remote).
     ///
-    /// Delegates to [`AnchorManager::attach_stream_anchor`](velo_streaming::AnchorManager::attach_stream_anchor)
-    /// with default `endpoint` and `session_id` values. For fine-grained control,
-    /// use [`anchor_manager()`](Velo::anchor_manager) directly.
+    /// Delegates to [`AnchorManager::attach_stream_anchor`](velo_streaming::AnchorManager::attach_stream_anchor).
+    /// For fine-grained control, use [`anchor_manager()`](Velo::anchor_manager) directly.
     pub async fn attach_anchor<T: serde::Serialize>(
         &self,
-        handle: velo_streaming::StreamAnchorHandle,
-    ) -> Result<velo_streaming::StreamSender<T>, velo_streaming::AttachError> {
+        handle: StreamAnchorHandle,
+    ) -> Result<StreamSender<T>, AttachError> {
         self.anchor_manager
-            .attach_stream_anchor::<T>(handle, "", 0)
+            .attach_stream_anchor::<T>(handle)
             .await
     }
 
@@ -279,7 +273,7 @@ mod tests {
     fn velo_create_anchor_signature() {
         // Verify the method exists and has the correct type.
         // We can't call it without a Velo instance, but we can verify the signature.
-        let _: fn(&Velo) -> (velo_streaming::StreamAnchorHandle, velo_streaming::AnchorStream<String>) =
+        let _: fn(&Velo) -> velo_streaming::StreamAnchor<String> =
             Velo::create_anchor::<String>;
     }
 
@@ -287,11 +281,6 @@ mod tests {
     /// (verified via integration test that constructs a real Velo)
     #[tokio::test]
     async fn velo_attach_anchor_type_checks() {
-        // Verify attach_anchor exists as an async method with the right types.
-        // We use a type assertion on the function -- async fns are harder to assert,
-        // so we verify via a real construction in the integration test below.
-        // For unit test, we at least ensure the module compiles with the method present.
-
         // Build a real Velo instance to exercise create_anchor + attach_anchor type-checking.
         let transport = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -312,23 +301,16 @@ mod tests {
         // Test 1: anchor_manager() returns &AnchorManager
         let _am: &velo_streaming::AnchorManager = velo.anchor_manager();
 
-        // Test 2: create_anchor::<String>() returns correct tuple type
-        let (handle, _stream): (velo_streaming::StreamAnchorHandle, velo_streaming::AnchorStream<String>) =
-            velo.create_anchor::<String>();
+        // Test 2: create_anchor::<String>() returns StreamAnchor<String>
+        let anchor: velo_streaming::StreamAnchor<String> = velo.create_anchor::<String>();
+        let handle = anchor.handle();
 
         // Test 3: attach_anchor::<String>(handle) returns correct Result type
-        // The delegation passes ("", 0) as default endpoint/session_id. The local
-        // transport path validates the URI and rejects the empty string, which is
-        // expected -- attach_anchor is designed for cross-worker use via the Velo
-        // facade. We verify the return type is correct (Result<StreamSender, AttachError>).
+        // The local attach path no longer calls transport.connect(), so it
+        // should succeed for local handles.
         let result: Result<velo_streaming::StreamSender<String>, velo_streaming::AttachError> =
             velo.attach_anchor::<String>(handle).await;
 
-        // Local attach with empty endpoint returns TransportError (expected).
-        assert!(
-            matches!(result, Err(velo_streaming::AttachError::TransportError(_))),
-            "expected TransportError for empty endpoint, got: {:?}",
-            result,
-        );
+        let _sender = result.expect("local attach should succeed");
     }
 }

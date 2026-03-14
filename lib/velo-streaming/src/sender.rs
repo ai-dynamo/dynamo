@@ -235,7 +235,7 @@ impl<T: Serialize> StreamSender<T> {
         self.sent_terminal = true;
         self.tx.send(bytes).map_err(|_| SendError::ChannelClosed)?;
         // Atomically clear the attachment flag so a new sender can attach
-        // without waiting for AnchorStream to consume the Detached sentinel.
+        // without waiting for StreamAnchor to consume the Detached sentinel.
         let (_, local_id) = self.handle.unpack();
         if let Some(mut entry) = self.registry.get_mut(&local_id) {
             entry.attachment = false;

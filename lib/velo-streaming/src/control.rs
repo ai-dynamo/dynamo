@@ -568,7 +568,8 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_attach_handler() {
         let manager = make_test_manager();
-        let (handle, _stream) = manager.create_anchor::<u8>();
+        let anchor = manager.create_anchor::<u8>();
+        let handle = anchor.handle();
         let (_, local_id) = handle.unpack();
 
         // Simulate bind-then-lock attach handler logic:
@@ -620,7 +621,8 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_attach_already_attached() {
         let manager = make_test_manager();
-        let (handle, _stream) = manager.create_anchor::<u8>();
+        let anchor = manager.create_anchor::<u8>();
+        let handle = anchor.handle();
         let (_, local_id) = handle.unpack();
 
         // First attach: set attachment flag directly
@@ -698,7 +700,8 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_detach_handler() {
         let manager = make_test_manager();
-        let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
+        let mut stream = manager.create_anchor::<Vec<u8>>();
+        let handle = stream.handle();
         let (_, local_id) = handle.unpack();
 
         // Simulate attach: set flag directly
@@ -765,7 +768,8 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_finalize_handler() {
         let manager = make_test_manager();
-        let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
+        let mut stream = manager.create_anchor::<Vec<u8>>();
+        let handle = stream.handle();
         let (_, local_id) = handle.unpack();
 
         // Simulate attach: set flag directly
@@ -811,8 +815,8 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_cancel_handler() {
         let manager = make_test_manager();
-        let (handle, _stream) = manager.create_anchor::<u8>();
-        let (_, local_id) = handle.unpack();
+        let anchor = manager.create_anchor::<u8>();
+        let (_, local_id) = anchor.handle().unpack();
 
         // Simulate cancel handler logic
         if let Some(entry) = manager.remove_anchor(local_id) {
