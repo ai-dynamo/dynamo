@@ -173,6 +173,8 @@ use velo_messenger::Messenger;
 use velo_streaming::{StreamCancelRequest, create_stream_cancel_handler};
 use velo_transports::tcp::TcpTransportBuilder;
 
+// serde_json is needed for AM payload serialization (typed_unary_async handlers use JSON)
+
 /// Create a TcpTransport bound to an OS-assigned port.
 fn new_tcp_transport() -> Arc<velo_transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -239,7 +241,8 @@ async fn test_cancel_03_remote_cancel() {
     );
 
     // Worker A: send _stream_cancel AM to worker B with sender_stream_id
-    let payload = rmp_serde::to_vec(&StreamCancelRequest { sender_stream_id })
+    // NOTE: typed_unary_async handlers deserialize with serde_json, not rmp_serde.
+    let payload = serde_json::to_vec(&StreamCancelRequest { sender_stream_id })
         .expect("serialize StreamCancelRequest");
     messenger_a
         .am_send_streaming("_stream_cancel")

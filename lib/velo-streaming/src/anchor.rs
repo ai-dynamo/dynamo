@@ -169,7 +169,7 @@ impl StreamController {
             // Also send _stream_cancel AM for cross-worker scenarios (messenger present)
             if let Some(messenger) = self.inner.messenger.clone() {
                 let payload =
-                    rmp_serde::to_vec(&crate::control::StreamCancelRequest { sender_stream_id })
+                    serde_json::to_vec(&crate::control::StreamCancelRequest { sender_stream_id })
                         .expect("serialize StreamCancelRequest");
                 // Fire-and-forget: use tokio::spawn guarded by try_current()
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
