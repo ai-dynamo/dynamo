@@ -201,6 +201,79 @@ macro_rules! run_transport_tests {
                 );
             }
 
+            /// TEST-08: Drop safety — sender dropped without detach/finalize sends Dropped sentinel;
+            /// stream yields Err(SenderDropped) then None.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn test_08_drop_safety() {
+                let mgr = manager().await;
+                let (handle, mut stream) = mgr.create_anchor::<u32>();
+                let sender = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1)
+                    .await
+                    .expect("attach");
+                sender.send(42u32).await.expect("send one item");
+                // Drop sender WITHOUT explicit detach or finalize.
+                // impl Drop sends StreamFrame::Dropped synchronously before returning from drop().
+                drop(sender);
+                // Collect frames: expect Item(42) then Err(SenderDropped) then None
+                let frame1 = stream.next().await;
+                assert!(
+                    matches!(frame1, Some(Ok(StreamFrame::Item(42u32)))),
+                    "first frame must be Item(42), got {:?}", frame1
+                );
+                let frame2 = stream.next().await;
+                assert!(
+                    matches!(frame2, Some(Err(velo_streaming::StreamError::SenderDropped))),
+                    "second frame must be Err(SenderDropped) from Dropped sentinel, got {:?}", frame2
+                );
+                assert!(stream.next().await.is_none(), "stream must be exhausted after Dropped");
+            }
+
+            /// TEST-12: Sentinel ordering — 1000 items sent then sender dropped; assert ordering
+            /// guarantees: (a) exactly 1000 Item frames, (b) Dropped is the last frame, (c) no
+            /// Item frames follow the Dropped sentinel.
+            ///
+            /// Sender runs in a spawned task so it can block on the bounded channel (256)
+            /// while the main task concurrently drains the stream.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn test_12_sentinel_ordering() {
+                let mgr = manager().await;
+                let (handle, mut stream) = mgr.create_anchor::<u32>();
+                let sender = mgr.attach_stream_anchor::<u32>(handle, "mock://1", 1)
+                    .await
+                    .expect("attach");
+                // Spawn sender: sends 1000 items then drops (Dropped sent synchronously in drop())
+                let send_task = tokio::spawn(async move {
+                    for i in 0u32..1000 {
+                        sender.send(i).await.expect("send");
+                    }
+                    // sender dropped here -> Dropped sentinel sent synchronously
+                });
+                // Collect ALL frames until None (stream drains concurrently with sender)
+                let mut items: Vec<u32> = Vec::new();
+                let mut saw_dropped = false;
+                let mut saw_item_after_dropped = false;
+                while let Some(frame) = stream.next().await {
+                    match frame {
+                        Ok(StreamFrame::Item(v)) => {
+                            if saw_dropped { saw_item_after_dropped = true; }
+                            items.push(v);
+                        }
+                        Err(velo_streaming::StreamError::SenderDropped) => {
+                            saw_dropped = true;
+                            break; // Dropped is terminal; stream yields None next
+                        }
+                        other => panic!("unexpected frame: {:?}", other),
+                    }
+                }
+                // Wait for sender task to complete
+                send_task.await.expect("send task must not panic");
+                assert_eq!(items.len(), 1000, "must receive exactly 1000 items");
+                assert!(saw_dropped, "Dropped sentinel must be present");
+                assert!(!saw_item_after_dropped, "no Item frame may follow the Dropped sentinel");
+                assert_eq!(items, (0u32..1000).collect::<Vec<_>>(), "items must be in order");
+                assert!(stream.next().await.is_none(), "stream exhausted after Dropped");
+            }
+
             /// TEST-11: Full attach/stream/finalize cycle against MockFrameTransport.
             ///
             /// Validates that the AnchorManager state machine correctly:
