@@ -291,10 +291,8 @@ class DynamoSglangPublisher:
         Returns:
             List of FpmEventRelay instances, or empty list if not enabled.
         """
-        import os
-
-        fpm_port_str = os.environ.get("DYN_FORWARDPASS_METRIC_PORT")
-        if not fpm_port_str:
+        base_port = getattr(self.server_args, "forward_pass_metrics_port", None)
+        if base_port is None:
             return []
 
         try:
@@ -305,8 +303,6 @@ class DynamoSglangPublisher:
                 "Forward pass metrics will not be relayed to the event plane."
             )
             return []
-
-        base_port = int(fpm_port_str)
         dp_size = getattr(self.server_args, "dp_size", 1) or 1
         enable_dp_attention = getattr(
             self.server_args, "enable_dp_attention", False

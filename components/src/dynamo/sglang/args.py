@@ -407,6 +407,15 @@ async def parse_args(args: list[str]) -> Config:
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
+    # Set forward pass metrics port from dynamo env var if configured
+    fpm_port_str = os.environ.get("DYN_FORWARDPASS_METRIC_PORT")
+    if fpm_port_str and not getattr(server_args, "forward_pass_metrics_port", None):
+        server_args.forward_pass_metrics_port = int(fpm_port_str)
+        logging.info(
+            f"Set forward_pass_metrics_port={server_args.forward_pass_metrics_port} "
+            f"from DYN_FORWARDPASS_METRIC_PORT"
+        )
+
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
 
