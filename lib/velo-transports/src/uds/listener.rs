@@ -47,11 +47,10 @@ impl UdsListener {
 
     /// Main server loop that accepts connections
     async fn run_server(self) -> Result<()> {
-        let listener = TokioUnixListener::bind(&self.socket_path)
-            .context(format!(
-                "Failed to bind UDS listener to {:?}",
-                self.socket_path
-            ))?;
+        let listener = TokioUnixListener::bind(&self.socket_path).context(format!(
+            "Failed to bind UDS listener to {:?}",
+            self.socket_path
+        ))?;
 
         info!("UDS listener bound to {:?}", self.socket_path);
 
@@ -200,11 +199,7 @@ impl UdsListener {
         match sender.send_async((header, payload)).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                error_handler.on_error(
-                    e.0 .0,
-                    e.0 .1,
-                    format!("Failed to route {:?}", msg_type),
-                );
+                error_handler.on_error(e.0.0, e.0.1, format!("Failed to route {:?}", msg_type));
                 Err(anyhow::anyhow!("Failed to send to stream"))
             }
         }

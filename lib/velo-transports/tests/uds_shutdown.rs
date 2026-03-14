@@ -67,9 +67,13 @@ async fn test_uds_drain_rejects_messages() {
     sleep(Duration::from_millis(50)).await;
 
     // Connect and send a Message frame
-    let mut stream =
-        connect_and_send_frame(&socket_path, MessageType::Message, b"req-header", b"req-payload")
-            .await;
+    let mut stream = connect_and_send_frame(
+        &socket_path,
+        MessageType::Message,
+        b"req-header",
+        b"req-payload",
+    )
+    .await;
 
     // Should get ShuttingDown back
     let (msg_type, header, payload) = read_one_frame(&mut stream).await;
@@ -91,8 +95,13 @@ async fn test_uds_drain_accepts_responses() {
     sleep(Duration::from_millis(50)).await;
 
     // Connect and send a Response frame
-    connect_and_send_frame(&socket_path, MessageType::Response, b"resp-header", b"resp-payload")
-        .await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Response,
+        b"resp-header",
+        b"resp-payload",
+    )
+    .await;
 
     // Should arrive on the response stream
     let (header, payload) = timeout(
@@ -118,7 +127,13 @@ async fn test_uds_drain_accepts_events() {
     handle.streams.shutdown_state.begin_drain();
     sleep(Duration::from_millis(50)).await;
 
-    connect_and_send_frame(&socket_path, MessageType::Event, b"evt-header", b"evt-payload").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Event,
+        b"evt-header",
+        b"evt-payload",
+    )
+    .await;
 
     let (header, payload) = timeout(
         Duration::from_secs(2),
@@ -145,7 +160,13 @@ async fn test_uds_new_connection_during_drain() {
     sleep(Duration::from_millis(50)).await;
 
     // Establish a NEW connection after drain starts
-    connect_and_send_frame(&socket_path, MessageType::Response, b"new-resp", b"new-payload").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Response,
+        b"new-resp",
+        b"new-payload",
+    )
+    .await;
 
     // Should arrive on the response stream
     let (header, payload) = timeout(
@@ -169,7 +190,13 @@ async fn test_uds_graceful_shutdown_lifecycle() {
     let socket_path = get_socket_path(&handle);
 
     // Verify normal operation: send a message, receive it
-    connect_and_send_frame(&socket_path, MessageType::Message, b"normal-msg", b"normal-pay").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Message,
+        b"normal-msg",
+        b"normal-pay",
+    )
+    .await;
     let (header, _payload) = timeout(
         Duration::from_secs(2),
         handle.streams.message_stream.recv_async(),

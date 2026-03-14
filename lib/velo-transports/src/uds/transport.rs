@@ -20,8 +20,8 @@ use tracing::{debug, error, info, warn};
 use crate::transport::{HealthCheckError, ShutdownState, TransportError, TransportErrorHandler};
 use crate::{MessageType, PeerInfo, Transport, TransportAdapter, TransportKey, WorkerAddress};
 
-use crate::tcp::TcpFrameCodec;
 use super::listener::UdsListener;
+use crate::tcp::TcpFrameCodec;
 
 /// UDS transport with lock-free concurrent access
 ///

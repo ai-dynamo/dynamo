@@ -263,13 +263,13 @@ impl TestTransportHandle<UdsTransport> {
     /// Create a new UDS transport using a temp directory socket path
     pub async fn new_uds() -> anyhow::Result<Self> {
         Self::with_factory(|| {
-            let dir = std::env::temp_dir()
-                .join(format!("velo-uds-test-{}", velo_transports::InstanceId::new_v4()));
+            let dir = std::env::temp_dir().join(format!(
+                "velo-uds-test-{}",
+                velo_transports::InstanceId::new_v4()
+            ));
             std::fs::create_dir_all(&dir)?;
             let socket_path = dir.join("transport.sock");
-            UdsTransportBuilder::new()
-                .socket_path(&socket_path)
-                .build()
+            UdsTransportBuilder::new().socket_path(&socket_path).build()
         })
         .await
     }
@@ -445,13 +445,13 @@ impl TestCluster<UdsTransport> {
     /// Create a new UDS test cluster with the specified number of transports
     pub async fn new_uds(size: usize) -> anyhow::Result<Self> {
         Self::with_factory(size, || {
-            let dir = std::env::temp_dir()
-                .join(format!("velo-uds-test-{}", velo_transports::InstanceId::new_v4()));
+            let dir = std::env::temp_dir().join(format!(
+                "velo-uds-test-{}",
+                velo_transports::InstanceId::new_v4()
+            ));
             std::fs::create_dir_all(&dir)?;
             let socket_path = dir.join("transport.sock");
-            UdsTransportBuilder::new()
-                .socket_path(&socket_path)
-                .build()
+            UdsTransportBuilder::new().socket_path(&socket_path).build()
         })
         .await
     }
