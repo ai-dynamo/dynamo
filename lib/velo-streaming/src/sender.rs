@@ -53,6 +53,17 @@ pub struct StreamSender<T> {
     sent_terminal: bool,
     /// Registry reference for clearing the attachment flag on detach.
     registry: Arc<DashMap<u64, AnchorEntry>>,
+    // --- Phase 11 additions ---
+    /// User-facing cancellation signal: fires when _stream_cancel is received.
+    cancel_token: CancellationToken,
+    /// Key in the sender-side registry for cleanup and for the _stream_cancel handler.
+    sender_stream_id: u64,
+    /// Sender-side registry shared with the _stream_cancel handler.
+    sender_registry: Arc<crate::control::SenderRegistry>,
+    /// Poison channel sender: when rx_closer (the receiver) is dropped by _stream_cancel handler,
+    /// this becomes disconnected and send() returns ChannelClosed.
+    poison_tx: flume::Sender<()>,
+    // --- end Phase 11 ---
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -79,6 +90,10 @@ impl<T: Serialize> StreamSender<T> {
         tx: flume::Sender<Vec<u8>>,
         handle: StreamAnchorHandle,
         registry: Arc<DashMap<u64, AnchorEntry>>,
+        cancel_token: CancellationToken,
+        sender_stream_id: u64,
+        sender_registry: Arc<crate::control::SenderRegistry>,
+        poison_tx: flume::Sender<()>,
     ) -> Self {
         let heartbeat_cancel = CancellationToken::new();
 
@@ -113,8 +128,32 @@ impl<T: Serialize> StreamSender<T> {
             heartbeat_cancel,
             sent_terminal: false,
             registry,
+            cancel_token,
+            sender_stream_id,
+            sender_registry,
+            poison_tx,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Returns a cloneable `CancellationToken` that fires when the consumer
+    /// cancels the stream (e.g. drops `AnchorStream` or calls `StreamController::cancel()`).
+    ///
+    /// Use in a `tokio::select!` to stop production proactively:
+    /// ```no_run
+    /// # async fn example() {
+    /// # let mut sender: velo_streaming::StreamSender<u32> = todo!();
+    /// # async fn produce() -> u32 { 0 }
+    /// loop {
+    ///     tokio::select! {
+    ///         _ = sender.cancellation_token().cancelled() => break,
+    ///         val = produce() => { let _ = sender.send(val).await; }
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 
     /// Send a typed item through the channel.
@@ -127,6 +166,10 @@ impl<T: Serialize> StreamSender<T> {
     /// - [`SendError::SerializationError`] if `rmp_serde::to_vec` fails.
     /// - [`SendError::ChannelClosed`] if the receiver has been dropped.
     pub async fn send(&self, item: T) -> Result<(), SendError> {
+        // Check if the poison channel has been disconnected (rx_closer dropped by _stream_cancel handler).
+        if self.poison_tx.is_disconnected() {
+            return Err(SendError::ChannelClosed);
+        }
         let bytes = rmp_serde::to_vec(&StreamFrame::Item(item))
             .map_err(|e| SendError::SerializationError(e.to_string()))?;
         self.tx
@@ -170,6 +213,8 @@ impl<T: Serialize> StreamSender<T> {
         let bytes = rmp_serde::to_vec(&StreamFrame::<()>::Finalized)
             .expect("Finalized serializes infallibly");
         self.sent_terminal = true;
+        // Clean up sender registry entry before returning
+        self.sender_registry.senders.remove(&self.sender_stream_id);
         self.tx.send(bytes).map_err(|_| SendError::ChannelClosed)
     }
 
@@ -195,6 +240,8 @@ impl<T: Serialize> StreamSender<T> {
         if let Some(mut entry) = self.registry.get_mut(&local_id) {
             entry.attachment = false;
         }
+        // Clean up sender registry entry
+        self.sender_registry.senders.remove(&self.sender_stream_id);
         Ok(self.handle)
     }
 }
@@ -205,6 +252,9 @@ impl<T: Serialize> StreamSender<T> {
 /// uses `StreamFrame::<()>` — Rust forbids trait bounds on `Drop` impls.
 impl<T> Drop for StreamSender<T> {
     fn drop(&mut self) {
+        // Always clean up sender registry entry to prevent memory leak.
+        // This is idempotent: if finalize/detach already removed it, this is a no-op.
+        self.sender_registry.senders.remove(&self.sender_stream_id);
         if !self.sent_terminal {
             self.heartbeat_cancel.cancel();
             let bytes = rmp_serde::to_vec(&StreamFrame::<()>::Dropped)
@@ -239,11 +289,47 @@ mod tests {
     }
 
     /// Create a test sender with a bounded(256) channel and a dummy handle.
-    fn make_sender() -> (StreamSender<u32>, flume::Receiver<Vec<u8>>) {
+    ///
+    /// Returns `(sender, frame_rx, _poison_rx)`.
+    /// The `_poison_rx` must be kept alive for the lifetime of the sender —
+    /// dropping it simulates `_stream_cancel` and causes `send()` to return `ChannelClosed`.
+    fn make_sender() -> (StreamSender<u32>, flume::Receiver<Vec<u8>>, flume::Receiver<()>) {
         let (tx, rx) = flume::bounded::<Vec<u8>>(256);
         let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
-        let sender = StreamSender::new(tx, handle, empty_registry());
-        (sender, rx)
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let sender_registry = std::sync::Arc::new(crate::control::SenderRegistry::default());
+        let (poison_tx, poison_rx) = flume::bounded::<()>(1);
+        let sender = StreamSender::new(tx, handle, empty_registry(), cancel_token, 1, sender_registry, poison_tx);
+        (sender, rx, poison_rx)
+    }
+
+    /// Create a sender entry and insert it into a registry. Returns (registry, sender_stream_id).
+    fn make_sender_with_registry(
+        tx: flume::Sender<Vec<u8>>,
+        handle: StreamAnchorHandle,
+        sender_stream_id: u64,
+    ) -> (StreamSender<u32>, std::sync::Arc<crate::control::SenderRegistry>) {
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let sender_registry = std::sync::Arc::new(crate::control::SenderRegistry::default());
+        let (poison_tx, poison_rx) = flume::bounded::<()>(1);
+
+        // Insert the SenderEntry into the registry (simulating what attach_stream_anchor does)
+        let entry = crate::control::SenderEntry {
+            cancel_token: cancel_token.clone(),
+            rx_closer: std::sync::Mutex::new(Some(poison_rx)),
+        };
+        sender_registry.senders.insert(sender_stream_id, entry);
+
+        let sender = StreamSender::new(
+            tx,
+            handle,
+            empty_registry(),
+            cancel_token,
+            sender_stream_id,
+            sender_registry.clone(),
+            poison_tx,
+        );
+        (sender, sender_registry)
     }
 
     /// Helper: deserialize raw bytes into StreamFrame<T>.
@@ -259,7 +345,7 @@ mod tests {
     async fn test_heartbeat_emits() {
         tokio::time::pause();
 
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
 
         // Advance time past one heartbeat interval (5 seconds).
         // Use sleep rather than advance+yield so the interval task gets polled.
@@ -283,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_item() {
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
 
         sender.send(42u32).await.expect("send should succeed");
 
@@ -303,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_err() {
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
 
         sender
             .send_err("something went wrong")
@@ -326,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_finalize() {
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
 
         sender.finalize().expect("finalize should succeed");
 
@@ -354,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_detach() {
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
         let expected_handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
 
         let returned_handle = sender.detach().expect("detach should succeed");
@@ -384,7 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_sends_dropped() {
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
 
         // Drop without finalize or detach
         drop(sender);
@@ -410,7 +496,10 @@ mod tests {
         // Create a channel with capacity 1
         let (tx, rx) = flume::bounded::<Vec<u8>>(1);
         let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
-        let sender = StreamSender::new(tx, handle, empty_registry());
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let sender_registry = std::sync::Arc::new(crate::control::SenderRegistry::default());
+        let (poison_tx, _poison_rx) = flume::bounded::<()>(1);
+        let sender = StreamSender::new(tx, handle, empty_registry(), cancel_token, 1, sender_registry, poison_tx);
 
         // Put an item in the channel to fill it
         sender.send(99u32).await.expect("send should succeed");
@@ -437,7 +526,10 @@ mod tests {
     async fn test_send_on_closed_channel() {
         let (tx, rx) = flume::bounded::<Vec<u8>>(256);
         let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
-        let sender = StreamSender::new(tx, handle, empty_registry());
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let sender_registry = std::sync::Arc::new(crate::control::SenderRegistry::default());
+        let (poison_tx, _poison_rx) = flume::bounded::<()>(1);
+        let sender = StreamSender::new(tx, handle, empty_registry(), cancel_token, 1, sender_registry, poison_tx);
 
         // Drop the receiver to close the channel
         drop(rx);
@@ -460,7 +552,7 @@ mod tests {
     async fn test_heartbeat_stops_after_cancel() {
         tokio::time::pause();
 
-        let (sender, rx) = make_sender();
+        let (sender, rx, _poison_rx) = make_sender();
 
         // Finalize cancels the heartbeat
         sender.finalize().expect("finalize should succeed");
@@ -477,5 +569,135 @@ mod tests {
             rx.try_recv().is_err(),
             "should NOT receive any frames after heartbeat cancel"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: cancellation_token() returns a cloneable token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cancellation_token() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (sender, _rx, _poison_rx) = make_sender();
+            let token = sender.cancellation_token();
+            // Token should not be cancelled yet
+            assert!(!token.is_cancelled(), "token should not start cancelled");
+            // Cancelling the token externally should be reflected
+            token.cancel();
+            assert!(token.is_cancelled(), "token should be cancelled after cancel()");
+            // A clone should also be cancelled
+            let clone = sender.cancellation_token();
+            assert!(clone.is_cancelled(), "cloned token should reflect cancellation");
+            drop(sender);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: send() returns ChannelClosed after poison_tx disconnected
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_send_after_cancel() {
+        let (frame_tx, _frame_rx) = flume::bounded::<Vec<u8>>(256);
+        let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 2);
+
+        // Create a poison channel and keep track of the receiver
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let sender_registry = std::sync::Arc::new(crate::control::SenderRegistry::default());
+        let (poison_tx, poison_rx) = flume::bounded::<()>(1);
+
+        let sender = StreamSender::<u32>::new(
+            frame_tx,
+            handle,
+            empty_registry(),
+            cancel_token,
+            2,
+            sender_registry,
+            poison_tx,
+        );
+
+        // Drop the receiver (simulating rx_closer drop in _stream_cancel handler)
+        drop(poison_rx);
+
+        // send() should now return ChannelClosed
+        let result = sender.send(42u32).await;
+        assert!(
+            matches!(result, Err(SendError::ChannelClosed)),
+            "expected ChannelClosed after poison_rx drop, got {:?}",
+            result
+        );
+
+        drop(sender);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: SenderRegistry entry removed after finalize()
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_registry_cleanup_on_finalize() {
+        let (tx, _rx) = flume::bounded::<Vec<u8>>(256);
+        let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
+        let (sender, registry) = make_sender_with_registry(tx, handle, 1);
+
+        // Entry should be present before finalize
+        assert!(registry.senders.contains_key(&1), "entry should be present before finalize");
+
+        sender.finalize().expect("finalize should succeed");
+
+        // Entry should be removed after finalize
+        assert!(
+            !registry.senders.contains_key(&1),
+            "entry should be removed after finalize"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: SenderRegistry entry removed after detach()
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_registry_cleanup_on_detach() {
+        let (tx, _rx) = flume::bounded::<Vec<u8>>(256);
+        let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
+        let (sender, registry) = make_sender_with_registry(tx, handle, 1);
+
+        // Entry should be present before detach
+        assert!(registry.senders.contains_key(&1), "entry should be present before detach");
+
+        sender.detach().expect("detach should succeed");
+
+        // Entry should be removed after detach
+        assert!(
+            !registry.senders.contains_key(&1),
+            "entry should be removed after detach"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: SenderRegistry entry removed after drop
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_registry_cleanup_on_drop() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, _rx) = flume::bounded::<Vec<u8>>(256);
+            let handle = StreamAnchorHandle::pack(velo_common::WorkerId::from_u64(1), 1);
+            let (sender, registry) = make_sender_with_registry(tx, handle, 1);
+
+            // Entry should be present before drop
+            assert!(registry.senders.contains_key(&1), "entry should be present before drop");
+
+            // Drop without finalize or detach
+            drop(sender);
+
+            // Entry should be removed after drop
+            assert!(
+                !registry.senders.contains_key(&1),
+                "entry should be removed after drop"
+            );
+        });
     }
 }
