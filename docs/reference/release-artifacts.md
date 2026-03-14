@@ -50,7 +50,8 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 | `dynamo-platform-1.0.0` | Platform services (etcd, NATS) and Dynamo Operator for Dynamo cluster | [link](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.0.tgz) |
 | `snapshot-1.0.0` | Snapshot DaemonSet for fast GPU worker recovery | [link](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.0.0.tgz) |
 
-> **Note:** The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by the Dynamo Operator. The `dynamo-graph` Helm chart is deprecated as of v0.9.0.
+> [!NOTE]
+> The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by the Dynamo Operator. The `dynamo-graph` Helm chart is deprecated as of v0.9.0.
 
 ### Rust Crates
 
@@ -70,7 +71,8 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 
 ### Container Images (NGC)
 
-> For detailed run instructions, see the [Container README](https://github.com/ai-dynamo/dynamo/tree/main/container/README.md) or backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
+> [!TIP]
+> For detailed run instructions, see the backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
 
 ```bash
 # Runtime containers
@@ -94,6 +96,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.0.0
 
 ### Python Wheels (PyPI)
 
+> [!TIP]
 > For detailed installation instructions, see the [Local Quick Start](https://github.com/ai-dynamo/dynamo#local-quick-start) in the README.
 
 ```bash
@@ -112,6 +115,7 @@ uv pip install kvbm==1.0.0
 
 ### Helm Charts (NGC)
 
+> [!TIP]
 > For Kubernetes deployment instructions, see the [Kubernetes Installation Guide](../kubernetes/installation-guide.md).
 
 ```bash
@@ -121,6 +125,7 @@ helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot
 
 ### Rust Crates (crates.io)
 
+> [!TIP]
 > For API documentation, see each crate on [docs.rs](https://docs.rs/). To build Dynamo from source, see [Building from Source](https://github.com/ai-dynamo/dynamo#building-from-source).
 
 ```bash
@@ -341,7 +346,8 @@ For a complete list of known issues, refer to the release notes for each version
 
 #### dynamo-crds (Helm chart) -- Deprecated
 
-> **Note:** The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by the Dynamo Operator.
+> [!NOTE]
+> The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by the Dynamo Operator.
 
 | Chart | Notes |
 |-------|-------|
@@ -377,7 +383,8 @@ For a complete list of known issues, refer to the release notes for each version
 
 #### dynamo-graph (Helm chart) -- Deprecated
 
-> **Note:** The `dynamo-graph` Helm chart is deprecated as of v0.9.0.
+> [!NOTE]
+> The `dynamo-graph` Helm chart is deprecated as of v0.9.0.
 
 | Chart | Notes |
 |-------|-------|
