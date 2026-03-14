@@ -8770,6 +8770,7 @@ dependencies = [
  "velo-discovery",
  "velo-events",
  "velo-messenger",
+ "velo-streaming",
  "velo-transports",
 ]
 
@@ -8855,6 +8856,7 @@ name = "velo-streaming"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap 6.1.0",
  "derive_builder",
  "flume",
@@ -8865,8 +8867,11 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "velo-common",
  "velo-messenger",
+ "velo-transports",
 ]
 
 [[package]]
