@@ -169,10 +169,7 @@ impl MaybeError for IndexerQueryResponse {
 
     fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            IndexerQueryResponse::Error(msg) => Some(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                msg.clone(),
-            ))),
+            IndexerQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
             _ => None,
         }
     }
