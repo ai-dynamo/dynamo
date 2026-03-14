@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: agg-config
+  name: agg-kvbm-config
 data:
   agg-kvbm.yaml: |
     backend: pytorch
@@ -105,14 +105,14 @@ spec:
           image: nvcr.io/nvidian/dynamo-dev/dynamo:cuda-13.1-trtllm-runtime-rc5post1-kimi-k2.5-patched-v3
           workingDir: /workspace/components/backends/trtllm
           volumeMounts:
-            - name: agg-config
+            - name: agg-kvbm-config
               mountPath: /engine_configs
             - name: model-cache
               mountPath: /mnt/model-cache
         volumes:
-          - name: agg-config
+          - name: agg-kvbm-config
             configMap:
-              name: agg-config
+              name: agg-kvbm-config
           - name: model-cache
             persistentVolumeClaim:
               claimName: model-cache
