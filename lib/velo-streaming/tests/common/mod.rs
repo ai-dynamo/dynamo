@@ -77,6 +77,7 @@ pub async fn make_mock_manager() -> Arc<AnchorManager> {
 macro_rules! run_transport_tests {
     ($mod_name:ident, $make_manager:expr) => {
         mod $mod_name {
+            use super::*;
             use futures::StreamExt;
             use std::sync::Arc;
             use velo_common::WorkerId;
