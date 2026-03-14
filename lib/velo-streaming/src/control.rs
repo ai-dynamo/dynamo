@@ -20,6 +20,140 @@ use crate::anchor::AnchorManager;
 use crate::handle::StreamAnchorHandle;
 
 // ---------------------------------------------------------------------------
+// StreamCancelHandle
+// ---------------------------------------------------------------------------
+
+/// Compact wire handle encoding the sender's [`velo_common::WorkerId`] (upper 64 bits)
+/// and the sender's local stream ID (lower 64 bits) into a single `u128`.
+///
+/// Serializes via rmp-serde as a two-field struct `{hi: u64, lo: u64}` — not as raw
+/// binary bytes — to guarantee correct round-tripping across msgpack boundaries.
+/// Identical encoding to [`StreamAnchorHandle`] but scoped to the sender side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamCancelHandle(u128);
+
+/// Private wire representation for rmp-serde serialization.
+///
+/// rmp-serde encodes a raw `u128` as a MessagePack binary blob (`bin8`), which
+/// cannot be decoded back to a struct. By delegating to this two-field struct we
+/// encode as a fixmap with named fields that round-trip correctly.
+#[derive(Serialize, Deserialize)]
+struct StreamCancelHandleWire {
+    hi: u64,
+    lo: u64,
+}
+
+impl StreamCancelHandle {
+    /// Encode a sender [`velo_common::WorkerId`] and stream ID into a [`StreamCancelHandle`].
+    pub fn pack(worker_id: velo_common::WorkerId, stream_id: u64) -> Self {
+        Self(((worker_id.as_u64() as u128) << 64) | (stream_id as u128))
+    }
+
+    /// Decode the sender [`velo_common::WorkerId`] and stream ID from this handle.
+    pub fn unpack(self) -> (velo_common::WorkerId, u64) {
+        let hi = (self.0 >> 64) as u64;
+        let lo = self.0 as u64;
+        (velo_common::WorkerId::from_u64(hi), lo)
+    }
+}
+
+impl Serialize for StreamCancelHandle {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        StreamCancelHandleWire {
+            hi: (self.0 >> 64) as u64,
+            lo: self.0 as u64,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamCancelHandle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = StreamCancelHandleWire::deserialize(deserializer)?;
+        Ok(Self(((wire.hi as u128) << 64) | (wire.lo as u128)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamCancelRequest
+// ---------------------------------------------------------------------------
+
+/// Payload for the `_stream_cancel` active message.
+///
+/// The receiver (sender-side worker) looks up `sender_stream_id` in the
+/// [`SenderRegistry`] to find and cancel the corresponding [`SenderEntry`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StreamCancelRequest {
+    pub sender_stream_id: u64,
+}
+
+// ---------------------------------------------------------------------------
+// SenderEntry + SenderRegistry
+// ---------------------------------------------------------------------------
+
+/// A single slot in the sender-side registry, representing an active [`crate::sender::StreamSender`].
+///
+/// Stored per active stream. The `_stream_cancel` handler retrieves and removes
+/// the entry then triggers both the user-facing cancellation token and the
+/// poison-drop mechanism via `rx_closer`.
+pub struct SenderEntry {
+    /// Fires when `_stream_cancel` is received — user-facing via `cancellation_token()`.
+    pub cancel_token: tokio_util::sync::CancellationToken,
+
+    /// Drop this to signal cancellation to `StreamSender::send()` via
+    /// `poison_tx.is_disconnected()`. Wrapped in `Mutex<Option<...>>` so the
+    /// cancel handler can take it exactly once.
+    pub rx_closer: std::sync::Mutex<Option<flume::Receiver<()>>>,
+}
+
+/// Sender-side registry of active [`SenderEntry`] slots.
+///
+/// Keyed by the sender's local stream ID (`u64`). Mirrored in structure to the
+/// anchor registry (`DashMap<u64, AnchorEntry>`) on the receiver side.
+///
+/// `pub` so that [`create_stream_cancel_handler`] can accept `Arc<SenderRegistry>`
+/// at its public function signature. Callers outside this crate hold it via `Arc`.
+#[derive(Default)]
+pub struct SenderRegistry {
+    pub senders: dashmap::DashMap<u64, SenderEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// create_stream_cancel_handler
+// ---------------------------------------------------------------------------
+
+/// Build the `_stream_cancel` handler.
+///
+/// When the consumer-side anchor receives a cancel request, it sends a
+/// `_stream_cancel` active message to the sender's worker. This handler:
+/// 1. Looks up the [`SenderEntry`] by `sender_stream_id`.
+/// 2. Drops the `rx_closer` to poison the sender channel.
+/// 3. Cancels the user-facing `cancel_token`.
+///
+/// Idempotent: if the entry is absent the handler returns `Ok(())` silently.
+pub fn create_stream_cancel_handler(sender_registry: Arc<SenderRegistry>) -> velo_messenger::Handler {
+    velo_messenger::Handler::typed_unary_async(
+        "_stream_cancel",
+        move |ctx: velo_messenger::TypedContext<StreamCancelRequest>| {
+            let registry = sender_registry.clone();
+            async move {
+                let req = ctx.input;
+                if let Some((_, entry)) = registry.senders.remove(&req.sender_stream_id) {
+                    // Poison the tx channel: drop the receiver end so
+                    // poison_tx.is_disconnected() is true in StreamSender::send()
+                    drop(entry.rx_closer.lock().unwrap().take());
+                    // Signal the token so user code can react proactively
+                    entry.cancel_token.cancel();
+                }
+                Ok(())
+            }
+        },
+    )
+    .spawn()
+    .build()
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
 
@@ -878,6 +1012,45 @@ mod tests {
             cancel_token.is_cancelled(),
             "cancel_token must be cancelled after pump exits due to transport close"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // StreamCancelHandle + SenderRegistry + create_stream_cancel_handler tests (Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stream_cancel_handle_pack_unpack() {
+        let worker_id = velo_common::WorkerId::from_u64(0xDEAD_BEEF_1234_5678);
+        let stream_id: u64 = 0xABCD_EF01_2345_6789;
+
+        let handle = crate::control::StreamCancelHandle::pack(worker_id, stream_id);
+        let (recovered_worker, recovered_stream) = handle.unpack();
+
+        assert_eq!(recovered_worker, worker_id, "worker_id must round-trip through pack/unpack");
+        assert_eq!(recovered_stream, stream_id, "stream_id must round-trip through pack/unpack");
+    }
+
+    #[test]
+    fn test_stream_cancel_handle_serde() {
+        let worker_id = velo_common::WorkerId::from_u64(0xCAFE_BABE_0000_0001);
+        let stream_id: u64 = 42;
+
+        let handle = crate::control::StreamCancelHandle::pack(worker_id, stream_id);
+        let encoded = rmp_serde::to_vec(&handle).expect("rmp_serde serialize must succeed");
+        let decoded: crate::control::StreamCancelHandle =
+            rmp_serde::from_slice(&encoded).expect("rmp_serde deserialize must succeed");
+
+        assert_eq!(handle, decoded, "StreamCancelHandle must survive rmp_serde round-trip");
+        let (w, s) = decoded.unpack();
+        assert_eq!(w, worker_id);
+        assert_eq!(s, stream_id);
+    }
+
+    #[test]
+    fn test_stream_cancel_handler_compiles() {
+        let registry = std::sync::Arc::new(crate::control::SenderRegistry::default());
+        let _handler = crate::control::create_stream_cancel_handler(registry);
+        // Returns without panic — confirms the handler constructor compiles and runs.
     }
 
     #[tokio::test]

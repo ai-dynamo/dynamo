@@ -34,6 +34,7 @@ pub use control::{
     AnchorAttachRequest, AnchorAttachResponse, AnchorCancelRequest, AnchorDetachRequest,
     AnchorFinalizeRequest, create_anchor_attach_handler, create_anchor_cancel_handler,
     create_anchor_detach_handler, create_anchor_finalize_handler,
+    StreamCancelHandle, StreamCancelRequest, SenderEntry, SenderRegistry, create_stream_cancel_handler,
 };
 pub use frame::{SendError, StreamError, StreamFrame};
 pub use sender::StreamSender;
