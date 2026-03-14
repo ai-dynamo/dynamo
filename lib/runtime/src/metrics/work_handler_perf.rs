@@ -42,19 +42,25 @@ pub static WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS: Lazy<Histogram> = Lazy::
     .expect("work_handler_time_to_first_response_seconds histogram")
 });
 
-static REGISTERED: OnceCell<()> = OnceCell::new();
+/// Guards idempotency for the `MetricsRegistry` registration path.
+static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
+
+/// Guards idempotency for the raw `prometheus::Registry` registration path.
+/// Kept separate from `METRICS_REGISTERED` so that calling `ensure_work_handler_perf_metrics_registered`
+/// first does not silently prevent the metrics from being registered in the prometheus registry.
+static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 
 /// Register work handler transport breakdown metrics with the given registry. Idempotent.
 pub fn ensure_work_handler_perf_metrics_registered(registry: &MetricsRegistry) {
-    let _ = REGISTERED.get_or_init(|| {
-        registry
-            .add_metric(Box::new(WORK_HANDLER_NETWORK_TRANSIT_SECONDS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(
-                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS.clone(),
-            ))
-            .ok();
+    let _ = METRICS_REGISTERED.get_or_init(|| {
+        registry.add_metric_or_warn(
+            Box::new(WORK_HANDLER_NETWORK_TRANSIT_SECONDS.clone()),
+            "work_handler_network_transit_seconds",
+        );
+        registry.add_metric_or_warn(
+            Box::new(WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS.clone()),
+            "work_handler_time_to_first_response_seconds",
+        );
     });
 }
 
@@ -62,13 +68,13 @@ pub fn ensure_work_handler_perf_metrics_registered(registry: &MetricsRegistry) {
 pub fn ensure_work_handler_perf_metrics_registered_prometheus(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    if REGISTERED.get().is_some() {
+    if PROMETHEUS_REGISTERED.get().is_some() {
         return Ok(());
     }
     registry.register(Box::new(WORK_HANDLER_NETWORK_TRANSIT_SECONDS.clone()))?;
     registry.register(Box::new(
         WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS.clone(),
     ))?;
-    let _ = REGISTERED.set(());
+    let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }

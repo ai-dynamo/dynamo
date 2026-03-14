@@ -894,6 +894,13 @@ impl MetricsRegistry {
             .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
     }
 
+    /// Add a Prometheus metric collector, logging a warning on failure instead of returning an error.
+    pub fn add_metric_or_warn(&self, collector: Box<dyn prometheus::core::Collector>, name: &str) {
+        if let Err(e) = self.add_metric(collector) {
+            tracing::warn!(error = %e, metric = name, "Failed to register metric");
+        }
+    }
+
     /// Get a read guard to the Prometheus registry for scraping
     pub fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry> {
         self.prometheus_registry.read().unwrap()

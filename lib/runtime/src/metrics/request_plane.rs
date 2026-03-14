@@ -65,23 +65,33 @@ pub static REQUEST_PLANE_INFLIGHT: Lazy<Gauge> = Lazy::new(|| {
     .expect("request_plane_inflight gauge")
 });
 
-static REGISTERED: OnceCell<()> = OnceCell::new();
+/// Guards idempotency for the `MetricsRegistry` registration path.
+static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
+
+/// Guards idempotency for the raw `prometheus::Registry` registration path.
+/// Kept separate from `METRICS_REGISTERED` so that calling `ensure_request_plane_metrics_registered`
+/// first does not silently prevent the metrics from being registered in the prometheus registry.
+static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 
 /// Register request-plane metrics with the given registry. Idempotent; only the first call registers.
 pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
-    let _ = REGISTERED.get_or_init(|| {
-        registry
-            .add_metric(Box::new(REQUEST_PLANE_QUEUE_SECONDS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(REQUEST_PLANE_SEND_SECONDS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(REQUEST_PLANE_INFLIGHT.clone()))
-            .ok();
+    let _ = METRICS_REGISTERED.get_or_init(|| {
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_QUEUE_SECONDS.clone()),
+            "request_plane_queue_seconds",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_SEND_SECONDS.clone()),
+            "request_plane_send_seconds",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()),
+            "request_plane_roundtrip_ttft_seconds",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_INFLIGHT.clone()),
+            "request_plane_inflight",
+        );
     });
 }
 
@@ -90,13 +100,13 @@ pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
 pub fn ensure_request_plane_metrics_registered_prometheus(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    if REGISTERED.get().is_some() {
+    if PROMETHEUS_REGISTERED.get().is_some() {
         return Ok(());
     }
     registry.register(Box::new(REQUEST_PLANE_QUEUE_SECONDS.clone()))?;
     registry.register(Box::new(REQUEST_PLANE_SEND_SECONDS.clone()))?;
     registry.register(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))?;
     registry.register(Box::new(REQUEST_PLANE_INFLIGHT.clone()))?;
-    let _ = REGISTERED.set(());
+    let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }

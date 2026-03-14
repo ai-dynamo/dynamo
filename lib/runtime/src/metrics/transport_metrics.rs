@@ -53,19 +53,20 @@ pub static NATS_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("nats_errors_total counter vec")
 });
 
-static REGISTERED: OnceCell<()> = OnceCell::new();
+/// Guards idempotency for the raw `prometheus::Registry` registration path.
+static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 
 /// Register transport metrics with a raw Prometheus registry. Idempotent.
 pub fn ensure_transport_metrics_registered_prometheus(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    if REGISTERED.get().is_some() {
+    if PROMETHEUS_REGISTERED.get().is_some() {
         return Ok(());
     }
     registry.register(Box::new(TCP_BYTES_SENT_TOTAL.clone()))?;
     registry.register(Box::new(TCP_BYTES_RECEIVED_TOTAL.clone()))?;
     registry.register(Box::new(TCP_ERRORS_TOTAL.clone()))?;
     registry.register(Box::new(NATS_ERRORS_TOTAL.clone()))?;
-    let _ = REGISTERED.set(());
+    let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }
