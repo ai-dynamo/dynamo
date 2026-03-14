@@ -680,30 +680,125 @@ impl AnchorManager {
         Ok(())
     }
 
+    /// Attach a sender to an existing anchor via the remote control-plane path.
+    ///
+    /// Called when `attach_stream_anchor` detects that `handle.worker_id != self.worker_id`.
+    ///
+    /// Sends an `_anchor_attach` AM to the remote worker, receives the stream endpoint,
+    /// calls `transport.connect()` to establish the write channel, and returns a
+    /// [`StreamSender<T>`](crate::sender::StreamSender) that writes directly into the
+    /// transport bridge (which the remote reader_pump forwards to the anchor's frame channel).
+    ///
+    /// # Errors
+    /// - [`AttachError::TransportError`] if `messenger_lock` is not set (register_handlers not called)
+    /// - [`AttachError::TransportError`] if the AM send or transport connect fails
+    /// - [`AttachError::TransportError`] if the remote worker returns `AnchorAttachResponse::Err`
+    async fn attach_remote<T: serde::Serialize>(
+        &self,
+        handle: StreamAnchorHandle,
+        session_id: u64,
+    ) -> Result<crate::sender::StreamSender<T>, AttachError> {
+        let (handle_worker_id, _) = handle.unpack();
+
+        // Require messenger_lock to be set (register_handlers must have been called)
+        let messenger = self.messenger_lock.get().ok_or_else(|| {
+            AttachError::TransportError(anyhow::anyhow!(
+                "register_handlers not called — messenger unavailable for remote attach"
+            ))
+        })?;
+
+        // Allocate sender_stream_id and build cancel infrastructure (same as local path)
+        let sender_stream_id = self.next_sender_stream_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (poison_tx, poison_rx) = flume::bounded::<()>(1);
+
+        let stream_cancel_handle =
+            crate::control::StreamCancelHandle::pack(self.worker_id, sender_stream_id);
+
+        // Build request payload (serde_json — typed_unary_async handlers use JSON)
+        let req = crate::control::AnchorAttachRequest {
+            handle,
+            session_id,
+            stream_cancel_handle,
+        };
+
+        // Send _anchor_attach AM to the remote worker (typed request-response)
+        let response: crate::control::AnchorAttachResponse = messenger
+            .typed_unary_streaming::<crate::control::AnchorAttachResponse>("_anchor_attach")
+            .payload(&req)
+            .map_err(AttachError::TransportError)?
+            .worker(handle_worker_id)
+            .send()
+            .await
+            .map_err(AttachError::TransportError)?;
+
+        match response {
+            crate::control::AnchorAttachResponse::Ok { stream_endpoint } => {
+                let (_, local_id) = handle.unpack();
+
+                // Connect transport to Worker A's endpoint — get frame_tx pump channel
+                let frame_tx = self
+                    .transport
+                    .connect(&stream_endpoint, local_id, session_id)
+                    .await?; // maps to AttachError::TransportError via From<anyhow::Error>
+
+                // Register SenderEntry for _stream_cancel routing
+                let sender_entry = crate::control::SenderEntry {
+                    cancel_token: cancel_token.clone(),
+                    rx_closer: std::sync::Mutex::new(Some(poison_rx)),
+                };
+                self.sender_registry.senders.insert(sender_stream_id, sender_entry);
+
+                // Build StreamSender: frame_tx from transport.connect() (not local registry frame_tx)
+                // No local AnchorEntry is created for Worker A's anchor on Worker B.
+                Ok(crate::sender::StreamSender::new(
+                    frame_tx,
+                    handle,
+                    self.registry.clone(), // Worker B's registry (no entry for this handle — correct)
+                    cancel_token,
+                    sender_stream_id,
+                    self.sender_registry.clone(),
+                    poison_tx,
+                ))
+            }
+            crate::control::AnchorAttachResponse::Err { reason } => {
+                Err(AttachError::TransportError(anyhow::anyhow!("{}", reason)))
+            }
+        }
+    }
+
     /// Attach a sender to an existing anchor, establishing the transport connection.
     ///
     /// This is the primary sender-side entry point (API-05). It:
-    /// 1. Validates the anchor exists and is unattached
-    /// 2. Calls `transport.connect()` to establish the write channel
-    /// 3. Atomically marks the anchor as attached
-    /// 4. Returns a [`StreamSender<T>`](crate::sender::StreamSender) for pushing typed frames
+    /// 1. Detects remote handles (`handle.worker_id != self.worker_id`) and routes through
+    ///    [`attach_remote`](Self::attach_remote) for cross-worker AM dispatch.
+    /// 2. For local handles: validates the anchor exists and is unattached,
+    ///    calls `transport.connect()` to establish the write channel,
+    ///    atomically marks the anchor as attached, and returns a
+    ///    [`StreamSender<T>`](crate::sender::StreamSender) for pushing typed frames.
     ///
     /// The StreamSender writes to the entry's `frame_tx` so items flow directly
     /// to the [`AnchorStream<T>`] consumer. The transport connection validates
-    /// network setup; the reader pump (Plan 03) will forward transport-received
-    /// frames to `frame_tx` for cross-worker flows.
+    /// network setup; the reader pump forwards transport-received frames to `frame_tx`
+    /// for cross-worker flows.
     ///
     /// # Errors
-    /// - [`AttachError::AnchorNotFound`] if the handle is not in the registry
-    /// - [`AttachError::AlreadyAttached`] if another sender is already connected
-    /// - [`AttachError::TransportError`] if `transport.connect()` fails
+    /// - [`AttachError::AnchorNotFound`] if the handle is not in the registry (local path)
+    /// - [`AttachError::AlreadyAttached`] if another sender is already connected (local path)
+    /// - [`AttachError::TransportError`] if `transport.connect()` fails, or for all remote
+    ///   path errors (messenger unavailable, AM send failed, remote error response)
     pub async fn attach_stream_anchor<T: serde::Serialize>(
         &self,
         handle: StreamAnchorHandle,
         endpoint: &str,
         session_id: u64,
     ) -> Result<crate::sender::StreamSender<T>, AttachError> {
-        let (_, local_id) = handle.unpack();
+        let (handle_worker_id, local_id) = handle.unpack();
+
+        // Remote path: handle belongs to a different worker — send _anchor_attach AM
+        if handle_worker_id != self.worker_id {
+            return self.attach_remote::<T>(handle, session_id).await;
+        }
 
         // Step 1: Quick check anchor exists and is unattached (drop ref before async)
         {
