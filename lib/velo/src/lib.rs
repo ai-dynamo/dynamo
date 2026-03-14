@@ -33,7 +33,10 @@ pub use velo_events::{
 pub use velo_discovery as discovery;
 
 // Re-exports: Streaming (from velo-streaming)
-pub use velo_streaming as streaming;
+pub use velo_streaming::{
+    AnchorManager, AnchorStream, AttachError, SendError, StreamAnchorHandle, StreamController,
+    StreamError, StreamFrame, StreamSender,
+};
 
 /// High-level facade for the Velo distributed system.
 ///
