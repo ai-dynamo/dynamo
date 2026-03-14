@@ -67,7 +67,10 @@ class VllmEngineQuiesceController:
 
         level = args[0] if args else None
         await self._engine_client.pause_generation()
-        await self._engine_client.sleep(level)
+        if level is None:
+            await self._engine_client.sleep()
+        else:
+            await self._engine_client.sleep(level)
         self._is_quiesced = True
         return True
 

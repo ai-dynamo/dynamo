@@ -75,6 +75,23 @@ async def test_sleep_and_wake_are_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_quiesce_without_level_uses_vllm_default_sleep():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEngineQuiesceController(engine_client)
+
+    changed = await controller.quiesce(None)
+
+    assert changed is True
+    engine_client.pause_generation.assert_awaited_once()
+    engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_sleep_returns_error_for_unregister_failure():
     handler = _make_handler()
     handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(
