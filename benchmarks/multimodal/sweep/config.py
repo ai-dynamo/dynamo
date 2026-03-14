@@ -148,6 +148,12 @@ def load_config(
             if hasattr(cfg, key):
                 setattr(cfg, key, value)
 
+        # CLI sweep mode override clears the other (mutually exclusive) field.
+        if "request_rates" in cli_overrides and cli_overrides["request_rates"] is not None:
+            cfg.concurrencies = None
+        elif "concurrencies" in cli_overrides and cli_overrides["concurrencies"] is not None:
+            cfg.request_rates = None
+
     return cfg
 
 
