@@ -1270,6 +1270,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					DynamoNamespace: ptr.To("default"),
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+						commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
 						commonconsts.KubeLabelIsRestoreTarget:           commonconsts.KubeLabelValueTrue,
 					},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
@@ -1358,6 +1359,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				commonconsts.KubeLabelDynamoNamespace:           "wrong-namespace",
 				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-dgd",
+				commonconsts.KubeLabelDynamoWorkerHash:          "wrong-hash",
 			},
 		}
 		ckpt := &v1alpha1.DynamoCheckpoint{
@@ -1389,6 +1391,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]; got != "test-dgd" {
 			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoGraphDeploymentName, "test-dgd", got)
+		}
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; got != "workerhash" {
+			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoWorkerHash, "workerhash", got)
 		}
 	})
 

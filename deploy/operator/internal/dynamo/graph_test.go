@@ -6890,12 +6890,14 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 				commonconsts.KubeLabelDynamoNamespace:           "wrong-from-labels",
 				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-labels",
+				commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
 					commonconsts.KubeLabelDynamoNamespace:           "wrong-from-extra-metadata",
 					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 					commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoWorkerHash:          "wrong-from-extra-metadata",
 				},
 			},
 		},
@@ -6909,6 +6911,7 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
 	assert.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
 	assert.Equal(t, "test-dgd", labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "workerhash", labels[commonconsts.KubeLabelDynamoWorkerHash])
 }
 
 func TestIsWorkerComponent(t *testing.T) {

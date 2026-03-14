@@ -1517,6 +1517,9 @@ func generateLabels(
 	if component.DynamoNamespace != nil {
 		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
 	}
+	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
 	// Restore labels are operator-controlled state. Clear any stale or
 	// user-provided values after metadata merge so users cannot force restore
 	// targeting by setting labels directly in the spec.
