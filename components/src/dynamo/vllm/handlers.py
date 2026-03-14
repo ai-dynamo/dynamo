@@ -52,14 +52,6 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class LoRAInfo:
-    """Metadata for a loaded LoRA adapter."""
-
-    id: int
-    path: str
-
-
 class VllmEngineQuiesceController:
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
@@ -85,8 +77,18 @@ class VllmEngineQuiesceController:
 
         await self._engine_client.wake_up()
         await self._engine_client.resume_generation()
-        self._is_quiesced = False
         return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
+
+
+@dataclass(frozen=True)
+class LoRAInfo:
+    """Metadata for a loaded LoRA adapter."""
+
+    id: int
+    path: str
 
 
 def _compute_mm_uuids(
@@ -439,6 +441,7 @@ class BaseWorkerHandler(ABC):
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",

@@ -101,3 +101,4 @@ async def test_wake_up_returns_error_for_register_failure():
     assert result["status"] == "error"
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
+    assert handler._quiesce_controller.is_quiesced is True

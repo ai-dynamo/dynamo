@@ -174,3 +174,18 @@ async def test_resume_returns_error_when_worker_has_no_tokenizer_manager():
         "message": "memory control not supported on this worker",
     }
     handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_quiesced_state_when_register_fails():
+    handler = _make_handler()
+    await handler.release_memory_occupation({})
+    handler.generate_endpoint.register_endpoint_instance = AsyncMock(
+        side_effect=RuntimeError("discovery write timeout")
+    )
+
+    result = await handler.resume_memory_occupation({})
+
+    assert result["status"] == "error"
+    assert handler._quiesce_controller is not None
+    assert handler._quiesce_controller.is_quiesced is True

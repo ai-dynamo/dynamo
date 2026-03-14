@@ -67,8 +67,10 @@ class SGLangEngineQuiesceController:
         await self._engine.tokenizer_manager.continue_generation(
             ContinueGenerationReqInput()
         )
-        self._is_quiesced = False
         return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
 
 
 class BaseGenerativeHandler(ABC):
@@ -275,6 +277,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
