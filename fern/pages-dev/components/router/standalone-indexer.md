@@ -12,7 +12,7 @@ The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight binary that mai
 - **Standalone mode** (default): Subscribes to ZMQ KV event streams directly from workers. No Dynamo runtime dependencies required.
 - **Dynamo runtime mode** (`--dynamo-runtime`): Integrates with the Dynamo runtime for automatic worker discovery via MDC, KV event ingestion via the event plane (NATS or ZMQ), and serves indexer queries over the request plane for remote frontends.
 
-This is distinct from the [Standalone Router](../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
+This is distinct from the [Standalone Router](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
 
 The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
@@ -511,4 +511,4 @@ sequenceDiagram
 - **[Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403)**: Community API standardization for KV cache indexers
 - **[Router Guide](router-guide.md)**: Full KV router configuration and tuning
 - **[Router Design](../../design-docs/router-design.md)**: Architecture and event transport modes
-- **[Standalone Router](../../../components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)
+- **[Standalone Router](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)

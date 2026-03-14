@@ -17,7 +17,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 | **OS** | Ubuntu 22.04, Ubuntu 24.04, CentOS Stream 9 (experimental) |
 | **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
 | **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
-| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.0); experimental for SGLang and vLLM in v0.8.x |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0) |
 
 **On this page:** [Backend Dependencies](#backend-dependencies) | [CUDA and Drivers](#cuda-and-driver-requirements) | [Hardware](#hardware-compatibility) | [Platform](#platform-architecture-compatibility) | [Cloud](#cloud-service-provider-compatibility) | [Build Support](#build-support)
 

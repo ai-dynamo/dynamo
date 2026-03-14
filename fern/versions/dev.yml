@@ -263,7 +263,7 @@ navigation:
             path: ../pages-dev/design-docs/planner-design.md
   # ==================== Blog ====================
   - section: Blog
-    hidden: true
+    collapsed: true
     path: ../blogs/index.mdx
     slug: blog
     contents:
