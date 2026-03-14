@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Parallelization: Hermetic tests (xdist-safe via dynamic ports + per-test namespaces).
-# Tested on: Linux container.
-# Combined pre_merge wall time (this file):
-# - Serialized: 304.01s.
-# - Parallel (-n auto): 34.55s (269.46s saved, 8.80x).
+# NOTE: These tests run reliably in serial but have encountered intermittent failures
+# under pytest-xdist parallel execution (-n auto). Each test spawns its own
+# DistributedRuntime with isolated etcd/NATS and unique namespaces, but the Rust
+# runtime may use process-global state (e.g. lazy_static / OnceLock singletons for
+# endpoint tables) that races under concurrent xdist workers. Do not add
+# @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 # NOTE: TCP request plane is NOT tested here. These tests use --num-workers > 1 which spawns
 # multiple workers in a single process sharing one TCP server. The shared TCP server uses
@@ -637,25 +638,33 @@ class DisaggMockerProcess:
 
 
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events", [False], indirect=True
-)  # Use NATS Core (local indexer)
-def test_mocker_kv_router(
+    "router_mode,durable_kv_events",
+    [
+        pytest.param("kv", False, id="kv-nondurable"),
+        pytest.param("kv", True, id="kv-durable"),
+        pytest.param("round-robin", False, id="roundrobin"),
+        pytest.param("random", False, id="random"),
+    ],
+    indirect=["durable_kv_events"],
+)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+def test_mocker_router(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
+    router_mode,
     request_plane,
     durable_kv_events,
 ):
-    """
-    Test KV router with multiple mocker engine instances.
-    This test doesn't require GPUs and runs quickly for pre-merge validation.
-    Tests both NATS and TCP request planes.
-    """
+    """Test router with multiple mocker engine instances across all router modes.
 
+    Covers kv, round-robin, and random routing. Tests both NATS and TCP request planes.
+    """
     # runtime_services starts etcd and optionally nats based on request_plane
-    logger.info(f"Starting mocker KV router test with request_plane={request_plane}")
+    logger.info(
+        f"Starting mocker router test: router_mode={router_mode}, request_plane={request_plane}"
+    )
 
     # Create mocker args dictionary - use local indexer (NATS Core mode)
     mocker_args = {
@@ -688,12 +697,13 @@ def test_mocker_kv_router(
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             request_plane=request_plane,
+            router_mode=router_mode,
         )
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.parametrize(
-    "durable_kv_events", [False], indirect=True
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
 @pytest.mark.timeout(180)  # bumped for xdist contention (was 60s; ~19.86s serial avg)
 def test_mocker_two_kv_router(
@@ -752,7 +762,7 @@ def test_mocker_two_kv_router(
 
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.parametrize(
-    "durable_kv_events", [False], indirect=True
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
@@ -790,7 +800,7 @@ def test_mocker_kv_router_overload_503(
 @pytest.mark.timeout(90)  # bumped for xdist contention (was 22s; ~7.10s serial avg)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events", [False], indirect=True
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
 def test_kv_router_bindings(
     request,
@@ -922,7 +932,7 @@ def test_indexers_sync(
 
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
 @pytest.mark.parametrize(
-    "durable_kv_events", [False], indirect=True
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
@@ -1155,7 +1165,7 @@ def test_router_decisions_disagg(
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events", [False], indirect=True
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 39s; ~12.84s serial avg)
 def test_busy_threshold_endpoint(

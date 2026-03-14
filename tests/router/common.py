@@ -23,7 +23,7 @@ from tests.router.helper import (
     wait_for_frontend_ready,
     wait_for_workers_ready,
 )
-from tests.router.router_process import KVRouterProcess
+from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -46,6 +46,8 @@ def _test_router_basic(
     frontend_timeout: int = 120,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    router_mode: str = "kv",
+    enforce_disagg: bool = False,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
@@ -53,6 +55,9 @@ def _test_router_basic(
 
     This is a shared test implementation for both mocker and vLLM workers.
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
+
+    Supports any router_mode (defaults to "kv" for existing callers).
+    block_size is only sent to the frontend CLI when router_mode is "kv".
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -64,21 +69,27 @@ def _test_router_basic(
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
+        router_mode: Router mode ("kv", "round-robin", "random", "direct"). Defaults to "kv".
+        enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
 
     Raises:
         AssertionError: If requests fail or frontend doesn't become ready
         TimeoutError: If frontend doesn't become ready within timeout
     """
-    with KVRouterProcess(
+    with FrontendRouterProcess(
         request,
         block_size,
         frontend_port,
         engine_workers.namespace,
         store_backend,
+        enforce_disagg=enforce_disagg,
         request_plane=request_plane,
+        router_mode=router_mode,
     ):
-        # Start KV router frontend
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        # Start router frontend
+        logger.info(
+            f"Starting frontend --router-mode {router_mode} on port {frontend_port}"
+        )
 
         frontend_url = f"http://localhost:{frontend_port}"
 
