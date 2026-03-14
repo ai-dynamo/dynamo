@@ -605,7 +605,7 @@ impl
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
-        let prefill_result = async {
+        let prefill_result: Result<PrefillOutcome, PrefillError> = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .resolve_prefill_worker(&prefill_req, preselected_worker)
                 .await
