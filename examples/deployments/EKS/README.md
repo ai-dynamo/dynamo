@@ -1,10 +1,14 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 # Steps to create an EKS cluster
 
 This guide demonstrates Dynamo platform on Amazon Elastic Kuberentes Service (EKS) platform.
 
 ## Install CLIs
 
-### Install AWS CLI (steps [here](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html))
+### Install AWS CLI ([AWS CLI installation guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html))
 
 ```bash
 sudo apt install unzip
@@ -13,16 +17,16 @@ unzip awscliv2.zip
 sudo ./aws/install
 ```
 
-### Install Kubernetes CLI (steps [here](https://docs.aws.amazon.com/eks/latest/userguide/install-kubectl.html))
+### Install Kubernetes CLI ([kubectl installation guide for EKS](https://docs.aws.amazon.com/eks/latest/userguide/install-kubectl.html))
 
 ```bash
-curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl
+curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.35.2/2026-02-27/bin/darwin/amd64/kubectl
 chmod +x ./kubectl
 mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
 echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
 ```
 
-### Install Eksctl CLI (steps [here](https://eksctl.io/installation/))
+### Install Eksctl CLI ([eksctl installation guide](https://eksctl.io/installation/))
 
 ```bash
 ARCH=amd64
@@ -33,7 +37,7 @@ tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
 sudo mv /tmp/eksctl /usr/local/bin
 ```
 
-### Install Helm CLI (steps [here](https://docs.aws.amazon.com/eks/latest/userguide/helm.html))
+### Install Helm CLI ([Helm setup for EKS](https://docs.aws.amazon.com/eks/latest/userguide/helm.html))
 
 ```bash
 curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > get_helm.sh
@@ -123,7 +127,9 @@ dynamo-platform-nats-0                                            2/2     Runnin
 
 To use EFA, you will need to use Dynamo's EFA container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64` that includes the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) bundled already.
 
-The disaggrated serving uses g7e.12xlarge instance that is capable of GPUDirect RDMA, using Dynamo vLLM container with EFA support.
+The disaggrated serving example uses g7e.12xlarge instance that is capable of GPUDirect RDMA, using Dynamo vLLM container with EFA support.
+
+*Note: For supported instance types with EFA, visit [the AWS EC2 Docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html#efa-instance-types)*
 
 ```yaml
         nodeSelector:
@@ -224,7 +230,6 @@ dynamo-platform-dynamo-operator-controller-manager-ff54b5dstgcq   1/1     Runnin
 dynamo-platform-nats-0                                            2/2     Running   0          12m
 vllm-agg-frontend-ff8457bcf-tq9jh                                 1/1     Running   0          4m46s
 vllm-agg-vllmdecodeworker-d0a70291-759df94478-8lc74               1/1     Running   0          4m46s
-vllm-agg-vllmdecodeworker-d0a70291-759df94478-fcdhb               1/1     Running   0          4m46s
 ```
 
 Watch logs
