@@ -51,6 +51,7 @@ serde_json     = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+insta = { version = "1.41", features = ["json", "redactions"] }
 
 [features]
 testing = [

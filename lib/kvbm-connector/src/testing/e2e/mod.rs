@@ -9,9 +9,8 @@
 #[cfg(test)]
 mod find_blocks;
 
-// // TODO: s3 feature not declared in kvbm-connector. Disabled until s3 is added.
-// #[cfg(TODO)]
-// mod s3_object;
+#[cfg(feature = "s3")]
+mod s3_object;
 
 #[cfg(test)]
 mod tests {

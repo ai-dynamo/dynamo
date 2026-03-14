@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// TODO: Disabled — requires `s3` feature which is not declared in kvbm-connector/Cargo.toml.
-// Re-enable by declaring the feature and uncommenting.
-#[cfg(TODO)]
-mod s3_disabled {
+#[cfg(test)]
+mod s3_tests {
     //! S3 Object Storage Integration Tests
     //!
     //! These tests verify the S3ObjectBlockClient implementation against a real

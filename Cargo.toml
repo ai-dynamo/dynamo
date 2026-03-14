@@ -17,6 +17,7 @@ members = [
     "lib/kvbm-physical",
     "lib/kvbm-common",       # fix pre-existing gap: in workspace.dependencies but missing from members
     "lib/kvbm-connector",    # new
+    "lib/kvbm-scheduler",
     "lib/async-openai",
     "lib/parsers",
     "lib/bench",
@@ -58,6 +59,7 @@ kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 kvbm-connector = { path = "lib/kvbm-connector", version = "0.1.0" }
+kvbm-scheduler = { path = "lib/kvbm-scheduler", version = "0.1.0" }
 
 # velo
 velo = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-messenger" }
