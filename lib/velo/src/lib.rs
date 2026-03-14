@@ -186,3 +186,68 @@ impl Velo {
         self.messenger.tracker()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 1: Velo struct has anchor_manager field of type Arc<AnchorManager>
+    /// (compile-time check via field accessor)
+    #[test]
+    fn velo_has_anchor_manager_accessor() {
+        // This test verifies the anchor_manager() method exists and returns &AnchorManager.
+        // It doesn't construct a Velo (that requires async + transport), so we verify
+        // the method signature exists by type-checking a function pointer.
+        let _: fn(&Velo) -> &velo_streaming::AnchorManager = Velo::anchor_manager;
+    }
+
+    /// Test 2: create_anchor method exists with correct generic signature
+    #[test]
+    fn velo_create_anchor_signature() {
+        // Verify the method exists and has the correct type.
+        // We can't call it without a Velo instance, but we can verify the signature.
+        let _: fn(&Velo) -> (velo_streaming::StreamAnchorHandle, velo_streaming::AnchorStream<String>) =
+            Velo::create_anchor::<String>;
+    }
+
+    /// Test 3: attach_anchor method exists with correct async generic signature
+    /// (verified via integration test that constructs a real Velo)
+    #[tokio::test]
+    async fn velo_attach_anchor_type_checks() {
+        // Verify attach_anchor exists as an async method with the right types.
+        // We use a type assertion on the function -- async fns are harder to assert,
+        // so we verify via a real construction in the integration test below.
+        // For unit test, we at least ensure the module compiles with the method present.
+
+        // Build a real Velo instance to exercise create_anchor + attach_anchor type-checking.
+        let transport = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            Arc::new(
+                velo_transports::tcp::TcpTransportBuilder::new()
+                    .from_listener(listener)
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let velo = Velo::builder()
+            .add_transport(transport)
+            .build()
+            .await
+            .unwrap();
+
+        // Test 1: anchor_manager() returns &AnchorManager
+        let _am: &velo_streaming::AnchorManager = velo.anchor_manager();
+
+        // Test 2: create_anchor::<String>() returns correct tuple type
+        let (handle, _stream): (velo_streaming::StreamAnchorHandle, velo_streaming::AnchorStream<String>) =
+            velo.create_anchor::<String>();
+
+        // Test 3: attach_anchor::<String>(handle) returns correct Result type
+        let result: Result<velo_streaming::StreamSender<String>, velo_streaming::AttachError> =
+            velo.attach_anchor::<String>(handle).await;
+
+        // The attach should succeed for a local anchor
+        assert!(result.is_ok(), "attach_anchor should succeed for local anchor: {:?}", result.err());
+    }
+}
