@@ -117,21 +117,19 @@ pub struct PrefillRouter {
 }
 
 impl PrefillRouter {
-    /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled(
-        model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
-        enforce_disagg: bool,
-    ) -> Arc<Self> {
+    /// Create a disabled prefill router that will never activate (passthrough only).
+    /// enforce_disagg is always false here — a disabled router by definition operates
+    /// in aggregated mode and must not reject requests.
+    pub fn disabled(model_manager: Arc<ModelManager>, router_mode: RouterMode) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
             model_manager,
             endpoint_id: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
-            enforce_disagg,
-            model_name: String::new(), // Not used for disabled router
-            namespace: String::new(),  // Not used for disabled router
+            enforce_disagg: false,
+            model_name: String::new(),
+            namespace: String::new(),
         })
     }
 
@@ -577,9 +575,10 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated (no prefill workers discovered),
-        // this is aggregated mode — route directly to decode.
-        // With --enforce-disagg, fail instead of falling back.
+        // If prefill router is not activated (no prefill workers discovered yet):
+        // - enforce_disagg=true: fail fast — routing to decode without prefill will crash
+        //   with missing disaggregated_params. See #6678.
+        // - enforce_disagg=false: fall through to decode directly (aggregated mode).
         if self.prefill_router.get().is_none() {
             if self.enforce_disagg {
                 return Err(anyhow::anyhow!(PrefillError::NotActivated));
@@ -710,14 +709,184 @@ impl
                 let decode_request = context.map(|_| decode_req);
                 next.generate(decode_request).await
             }
-            Err(PrefillError::NotActivated) => {
-                tracing::error!("Prefill router not activated, failing request");
-                Err(anyhow::anyhow!(PrefillError::NotActivated))
-            }
             Err(e) => {
                 tracing::error!(error = %e, "Remote prefill failed, failing request");
                 Err(anyhow::anyhow!(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use dynamo_runtime::pipeline::{AsyncEngine, DataStream, Error, async_trait};
+
+    /// Mock decode engine that records whether it was called.
+    /// If generate() is invoked, it means the PrefillRouter fell through to
+    /// aggregated routing — the exact bug described in #6678.
+    struct MockDecodeEngine {
+        was_called: Arc<AtomicBool>,
+    }
+
+    impl MockDecodeEngine {
+        fn new() -> (Arc<Self>, Arc<AtomicBool>) {
+            let flag = Arc::new(AtomicBool::new(false));
+            (
+                Arc::new(Self {
+                    was_called: flag.clone(),
+                }),
+                flag,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MockDecodeEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.was_called.store(true, Ordering::SeqCst);
+            // Return an empty stream — the content doesn't matter,
+            // what matters is that this engine was reached at all.
+            let ctx = request.context();
+            let stream: DataStream<Annotated<LLMEngineOutput>> = Box::pin(futures::stream::empty());
+            Ok(dynamo_runtime::engine::ResponseStream::new(stream, ctx))
+        }
+    }
+
+    fn make_test_request() -> SingleIn<PreprocessedRequest> {
+        let req = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .expect("failed to build test request");
+        Context::with_id(req, "test-request".to_string())
+    }
+
+    // ---- Bug reproduction: #6678 race condition ----
+
+    /// Reproduces the race condition from #6678.
+    ///
+    /// A PrefillRouter with enforce_disagg=true has an unset OnceLock before
+    /// the prefill worker is discovered. Without the fix, requests silently
+    /// fall through to the decode engine without prefill — the decode worker
+    /// then crashes because disaggregated_params is missing.
+    ///
+    /// This test proves that with enforce_disagg=true, the router rejects the
+    /// request with PrefillError::NotActivated instead of falling through.
+    #[tokio::test]
+    async fn test_disaggregated_router_rejects_before_activation() {
+        let manager = Arc::new(ModelManager::new());
+        // tx is never sent — simulates prefill worker not yet discovered
+        let (_tx, rx) = oneshot::channel();
+
+        let router = PrefillRouter::new(
+            rx,
+            manager,
+            RouterMode::RoundRobin,
+            16,
+            None,
+            true, // enforce_disagg=true — reject if prefill not ready
+            "test-model".to_string(),
+            "test-ns".to_string(),
+        );
+
+        // OnceLock is not set yet (prefill worker hasn't connected)
+        assert!(!router.is_activated());
+
+        let (mock_engine, was_called) = MockDecodeEngine::new();
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedRequest>,
+                    ManyOut<Annotated<LLMEngineOutput>>,
+                    Error,
+                >,
+        > = mock_engine;
+
+        let result = router.generate(make_test_request(), next).await;
+
+        // The fix: generate() must return an error, NOT fall through to decode
+        assert!(
+            result.is_err(),
+            "Expected error but got Ok — prefill was bypassed"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not yet activated"),
+            "Expected PrefillError::NotActivated"
+        );
+
+        // The mock decode engine must NOT have been called
+        assert!(
+            !was_called.load(Ordering::SeqCst),
+            "Decode engine was called — request bypassed prefill (bug #6678)"
+        );
+    }
+
+    /// Verifies that a disabled (aggregated) router correctly falls through
+    /// to the decode engine. This is the expected behavior for non-disaggregated
+    /// deployments — no prefill step needed.
+    #[tokio::test]
+    async fn test_disabled_router_falls_through_to_decode() {
+        let manager = Arc::new(ModelManager::new());
+        let router = PrefillRouter::disabled(manager, RouterMode::RoundRobin);
+
+        assert!(!router.is_activated());
+
+        let (mock_engine, was_called) = MockDecodeEngine::new();
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedRequest>,
+                    ManyOut<Annotated<LLMEngineOutput>>,
+                    Error,
+                >,
+        > = mock_engine;
+
+        let result = router.generate(make_test_request(), next).await;
+
+        // Aggregated mode: should succeed by falling through to decode
+        assert!(
+            result.is_ok(),
+            "Aggregated router should fall through to decode"
+        );
+        assert!(
+            was_called.load(Ordering::SeqCst),
+            "Decode engine should have been called in aggregated mode"
+        );
+    }
+
+    /// Verifies that `is_activated()` correctly reflects activation state.
+    #[tokio::test]
+    async fn test_is_activated_reflects_state() {
+        let manager = Arc::new(ModelManager::new());
+
+        // disabled() router is never activated
+        let disabled = PrefillRouter::disabled(manager.clone(), RouterMode::RoundRobin);
+        assert!(!disabled.is_activated());
+
+        // new() router starts unactivated
+        let (_tx, rx) = oneshot::channel();
+        let active = PrefillRouter::new(
+            rx,
+            manager,
+            RouterMode::RoundRobin,
+            16,
+            None,
+            true,
+            "m".to_string(),
+            "ns".to_string(),
+        );
+        assert!(!active.is_activated());
     }
 }

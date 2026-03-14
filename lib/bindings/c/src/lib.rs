@@ -736,7 +736,7 @@ pub unsafe extern "C" fn create_routers(
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV)
             }
         };
 
