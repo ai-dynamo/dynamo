@@ -14,11 +14,7 @@ use dynamo_kv_router::standalone_indexer::{
 };
 
 #[cfg(feature = "indexer-runtime")]
-mod discovery;
-#[cfg(feature = "indexer-runtime")]
-mod query_engine;
-#[cfg(feature = "indexer-runtime")]
-mod subscriber;
+mod runtime;
 
 #[derive(Parser)]
 #[command(name = "dynamo-kv-indexer", about = "Standalone KV cache indexer")]
@@ -149,7 +145,7 @@ async fn app_with_runtime(runtime: dynamo_runtime::Runtime, cli: Cli) -> anyhow:
 
     let registry = Arc::new(WorkerRegistry::new(cli.threads));
 
-    let engine = Arc::new(query_engine::IndexerQueryEngine {
+    let engine = Arc::new(runtime::query_engine::IndexerQueryEngine {
         registry: registry.clone(),
     });
     let ingress =
@@ -174,14 +170,14 @@ async fn app_with_runtime(runtime: dynamo_runtime::Runtime, cli: Cli) -> anyhow:
         "Query endpoint registered"
     );
 
-    discovery::spawn_discovery_watcher(
+    runtime::discovery::spawn_discovery_watcher(
         &distributed_runtime,
         registry.clone(),
         cancel_token.clone(),
     )
     .await?;
 
-    subscriber::spawn_event_subscriber(
+    runtime::subscriber::spawn_event_subscriber(
         &distributed_runtime,
         &cli.namespace,
         &cli.worker_component,
