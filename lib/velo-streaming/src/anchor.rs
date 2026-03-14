@@ -430,6 +430,11 @@ pub struct AnchorManager {
     /// Also accessed by StreamSender::Drop / finalize / detach for cleanup.
     #[builder(default = "Arc::new(crate::control::SenderRegistry::default())")]
     pub sender_registry: Arc<crate::control::SenderRegistry>,
+
+    /// Write-once lock storing the live Messenger after `register_handlers` is called.
+    /// `None` until `register_handlers` succeeds; subsequent calls return `Err`.
+    #[builder(setter(skip), default = "std::sync::OnceLock::new()")]
+    pub(crate) messenger_lock: std::sync::OnceLock<Arc<velo_messenger::Messenger>>,
 }
 
 impl AnchorManagerBuilder {
@@ -621,6 +626,58 @@ impl AnchorManager {
         }
 
         was_attached
+    }
+
+    /// Register all five control-plane AM handlers on a live Messenger.
+    ///
+    /// Registers: `_anchor_attach`, `_anchor_detach`, `_anchor_finalize`,
+    /// `_anchor_cancel` (all on `self` as `Arc<AnchorManager>`), and
+    /// `_stream_cancel` (on `self.sender_registry`).
+    ///
+    /// Stores the messenger in `messenger_lock` (write-once) for use by
+    /// `attach_remote` in Phase 12 Plan 02.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if called twice (OnceLock already set) or if any
+    /// handler registration fails (e.g., duplicate handler name).
+    ///
+    /// # Panics
+    ///
+    /// Does not panic. Caller must hold an `Arc<AnchorManager>`.
+    pub fn register_handlers(
+        self: &Arc<Self>,
+        messenger: Arc<velo_messenger::Messenger>,
+    ) -> anyhow::Result<()> {
+        use crate::control::{
+            create_anchor_attach_handler,
+            create_anchor_cancel_handler,
+            create_anchor_detach_handler,
+            create_anchor_finalize_handler,
+            create_stream_cancel_handler,
+        };
+
+        messenger.register_streaming_handler(
+            create_anchor_attach_handler(Arc::clone(self))
+        )?;
+        messenger.register_streaming_handler(
+            create_anchor_detach_handler(Arc::clone(self))
+        )?;
+        messenger.register_streaming_handler(
+            create_anchor_finalize_handler(Arc::clone(self))
+        )?;
+        messenger.register_streaming_handler(
+            create_anchor_cancel_handler(Arc::clone(self))
+        )?;
+        messenger.register_streaming_handler(
+            create_stream_cancel_handler(Arc::clone(&self.sender_registry))
+        )?;
+
+        self.messenger_lock
+            .set(messenger)
+            .map_err(|_| anyhow::anyhow!("register_handlers called twice"))?;
+
+        Ok(())
     }
 
     /// Attach a sender to an existing anchor, establishing the transport connection.
@@ -1625,5 +1682,52 @@ mod tests {
 
         // Second cancel — must not panic.
         ctrl.cancel();
+    }
+
+    // -----------------------------------------------------------------------
+    // register_handlers tests (Plan 12-01, Task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_register_handlers_stores_messenger_in_lock() {
+        // Verify that after register_handlers, messenger_lock.get() is Some
+        // and that a second call returns Err.
+        // Note: We use Messenger::builder().build() which requires tokio runtime.
+        // This is a compile + behavior test using a real Messenger (no-transport).
+        // The test is sync to avoid needing #[tokio::test] but uses a runtime.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let messenger = velo_messenger::Messenger::builder()
+                .build()
+                .await
+                .expect("messenger");
+            let worker_id = velo_common::WorkerId::from_u64(99);
+            let transport = Arc::new(MockTransport);
+            let am = Arc::new(AnchorManager::new(worker_id, transport));
+
+            // First call succeeds
+            am.register_handlers(Arc::clone(&messenger))
+                .expect("first register_handlers must succeed");
+
+            // messenger_lock is set
+            assert!(am.messenger_lock.get().is_some(), "messenger_lock must be Some after register_handlers");
+        });
+    }
+
+    #[test]
+    fn test_register_handlers_second_call_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let m1 = velo_messenger::Messenger::builder().build().await.unwrap();
+            let m2 = velo_messenger::Messenger::builder().build().await.unwrap();
+
+            let worker_id = velo_common::WorkerId::from_u64(100);
+            let transport = Arc::new(MockTransport);
+            let am = Arc::new(AnchorManager::new(worker_id, transport));
+
+            am.register_handlers(Arc::clone(&m1)).expect("first call ok");
+            let result = am.register_handlers(Arc::clone(&m2));
+            assert!(result.is_err(), "second call must return Err");
+        });
     }
 }
