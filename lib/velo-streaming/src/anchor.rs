@@ -108,8 +108,11 @@ pub(crate) struct AnchorEntry {
 struct StreamControllerInner {
     local_id: u64,
     registry: Arc<DashMap<u64, AnchorEntry>>,
+    /// Sender-side registry: used to directly cancel the [`crate::control::SenderEntry`]
+    /// when the anchor is cancelled (same-worker path without AM round-trip).
+    sender_registry: Arc<crate::control::SenderRegistry>,
     /// Optional messenger for sending `_stream_cancel` AM to the sender's worker.
-    /// `None` for local-only (MockFrameTransport) scenarios — cancel is registry-removal-only.
+    /// `None` for local-only (MockFrameTransport) scenarios.
     messenger: Option<Arc<velo_messenger::Messenger>>,
     /// AtomicBool gate: compare_exchange(false, true) to ensure AM is sent at most once.
     cancelled: AtomicBool,
@@ -152,25 +155,34 @@ impl StreamController {
                 entry.stream_cancel_handle
             });
 
-        // Send _stream_cancel AM if we have both a handle and a messenger
-        if let (Some(handle), Some(messenger)) =
-            (stream_cancel_handle, self.inner.messenger.clone())
-        {
+        // Directly cancel the SenderEntry in the local sender_registry.
+        // This fires the user-facing cancel_token and poisons send() immediately
+        // without requiring an AM round-trip. Idempotent: remove returns None if
+        // the entry was already removed (e.g. finalize/detach ran first).
+        if let Some(handle) = stream_cancel_handle {
             let (sender_worker_id, sender_stream_id) = handle.unpack();
-            let payload =
-                rmp_serde::to_vec(&crate::control::StreamCancelRequest { sender_stream_id })
-                    .expect("serialize StreamCancelRequest");
-            // Fire-and-forget: use tokio::spawn guarded by try_current()
-            if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                rt.spawn(async move {
-                    let _ = messenger
-                        .am_send_streaming("_stream_cancel")
-                        .expect("am_send_streaming builder")
-                        .raw_payload(bytes::Bytes::from(payload))
-                        .worker(sender_worker_id)
-                        .send()
-                        .await;
-                });
+            if let Some((_, entry)) = self.inner.sender_registry.senders.remove(&sender_stream_id) {
+                drop(entry.rx_closer.lock().unwrap().take());
+                entry.cancel_token.cancel();
+            }
+
+            // Also send _stream_cancel AM for cross-worker scenarios (messenger present)
+            if let Some(messenger) = self.inner.messenger.clone() {
+                let payload =
+                    rmp_serde::to_vec(&crate::control::StreamCancelRequest { sender_stream_id })
+                        .expect("serialize StreamCancelRequest");
+                // Fire-and-forget: use tokio::spawn guarded by try_current()
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async move {
+                        let _ = messenger
+                            .am_send_streaming("_stream_cancel")
+                            .expect("am_send_streaming builder")
+                            .raw_payload(bytes::Bytes::from(payload))
+                            .worker(sender_worker_id)
+                            .send()
+                            .await;
+                    });
+                }
             }
         }
     }
@@ -207,11 +219,13 @@ impl<T> AnchorStream<T> {
         rx: flume::Receiver<Vec<u8>>,
         local_id: u64,
         registry: Arc<DashMap<u64, AnchorEntry>>,
+        sender_registry: Arc<crate::control::SenderRegistry>,
         messenger: Option<Arc<velo_messenger::Messenger>>,
     ) -> Self {
         let inner = Arc::new(StreamControllerInner {
             local_id,
             registry: registry.clone(),
+            sender_registry,
             messenger,
             cancelled: AtomicBool::new(false),
         });
@@ -471,7 +485,13 @@ impl AnchorManager {
         self.registry.insert(local_id, entry);
 
         let handle = StreamAnchorHandle::pack(self.worker_id, local_id);
-        let stream = AnchorStream::new(frame_rx, local_id, self.registry.clone(), self.messenger.clone());
+        let stream = AnchorStream::new(
+            frame_rx,
+            local_id,
+            self.registry.clone(),
+            self.sender_registry.clone(),
+            self.messenger.clone(),
+        );
         (handle, stream)
     }
 
