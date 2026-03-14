@@ -16,6 +16,7 @@ velo-common = { workspace = true }
 velo-discovery = { workspace = true }
 velo-events = { workspace = true }
 velo-messenger = { workspace = true }
+velo-streaming = { workspace = true }
 velo-transports = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

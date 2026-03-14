@@ -32,6 +32,9 @@ pub use velo_events::{
 // Re-exports: Discovery (from velo-discovery)
 pub use velo_discovery as discovery;
 
+// Re-exports: Streaming (from velo-streaming)
+pub use velo_streaming as streaming;
+
 /// High-level facade for the Velo distributed system.
 ///
 /// Wraps a [`Messenger`] and provides the same public API with a simpler name.

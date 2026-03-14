@@ -28,7 +28,8 @@ pub mod sender;
 pub mod transport;
 pub mod velo_transport;
 
-pub use anchor::{AnchorManager, AnchorStream, AttachError};
+pub use anchor::{AnchorManager, AnchorManagerBuilder, AnchorStream, AttachError};
+pub use handle::StreamAnchorHandle;
 pub use control::{
     AnchorAttachRequest, AnchorAttachResponse, AnchorCancelRequest, AnchorDetachRequest,
     AnchorFinalizeRequest, create_anchor_attach_handler, create_anchor_cancel_handler,
