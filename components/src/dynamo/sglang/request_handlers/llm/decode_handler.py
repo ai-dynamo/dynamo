@@ -113,6 +113,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         priority = (request.get("routing") or {}).get("priority")
 
+        # Extract session_params from extra_args if present
+        extra_args = request.get("extra_args") or {}
+        session_params = extra_args.get("session_params")
+
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
@@ -148,6 +152,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                session_params=session_params,
                 **self._priority_kwargs(priority),
             )
 
@@ -188,6 +193,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                session_params=session_params,
                 **self._priority_kwargs(priority),
             )
             if self.skip_tokenizer_init:

@@ -181,6 +181,14 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
+
+    /// Session parameters for multi-turn streaming sessions.
+    /// Forwarded to SGLang's async_generate as session_params.
+    /// Fields: id (session ID), rid (request ID from previous turn),
+    /// offset, replace, drop_previous_output.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_params: Option<serde_json::Value>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -336,6 +344,7 @@ mod tests {
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.cache_control, None);
         assert_eq!(nv_ext.session_control, None);
+        assert_eq!(nv_ext.session_params, None);
     }
 
     // Test CacheControl serde roundtrip and TTL parsing

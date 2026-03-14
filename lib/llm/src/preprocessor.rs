@@ -248,7 +248,23 @@ impl OpenAIPreprocessor {
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        // Forward session_params into extra_args for backend handler
+        let session_params = request
+            .nvext()
+            .and_then(|ext| ext.session_params.clone());
+
+        let mut preprocessed = builder.build()?;
+
+        if let Some(sp) = session_params {
+            let extra = preprocessed
+                .extra_args
+                .get_or_insert_with(|| serde_json::json!({}));
+            if let serde_json::Value::Object(map) = extra {
+                map.insert("session_params".to_string(), sp);
+            }
+        }
+
+        Ok((preprocessed, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
