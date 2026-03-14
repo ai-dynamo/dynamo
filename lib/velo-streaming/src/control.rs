@@ -161,10 +161,16 @@ pub fn create_stream_cancel_handler(sender_registry: Arc<SenderRegistry>) -> vel
 ///
 /// `session_id` is an opaque caller-assigned identifier that may be forwarded
 /// to the transport layer for logging and routing purposes.
+///
+/// `stream_cancel_handle` encodes the sender's worker ID and local stream ID so that
+/// the anchor can route `_stream_cancel` active messages back to the correct sender.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnchorAttachRequest {
     pub handle: StreamAnchorHandle,
     pub session_id: u64,
+    /// Encodes the sender's WorkerId + sender_stream_id. Stored in [`crate::anchor::AnchorEntry`]
+    /// on successful attach so the anchor knows where to route upstream cancel AMs.
+    pub stream_cancel_handle: StreamCancelHandle,
 }
 
 /// Response from the attach handler.
@@ -326,8 +332,9 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                             let pump_frame_tx = entry.frame_tx.clone();
                             let pump_cancel = entry.cancel_token.clone();
 
-                            // Mark as attached
+                            // Mark as attached and store cancel handle for upstream cancel routing
                             entry.attachment = true;
+                            entry.stream_cancel_handle = Some(req.stream_cancel_handle);
 
                             // Drop shard lock before spawning
                             drop(occ);
@@ -854,6 +861,7 @@ mod tests {
             attachment: true,
             timeout_cancel: None,
             timeout_duration: None,
+            stream_cancel_handle: None,
         });
 
         // Spawn the reader pump

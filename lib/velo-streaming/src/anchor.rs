@@ -89,6 +89,12 @@ pub(crate) struct AnchorEntry {
     /// The configured timeout duration for this anchor. Stored so that
     /// `detach` can respawn the timeout task with the same duration.
     pub timeout_duration: Option<Duration>,
+
+    /// Populated on successful attach from [`crate::control::AnchorAttachRequest::stream_cancel_handle`].
+    /// Encodes the sender's WorkerId + stream ID so the anchor can route `_stream_cancel`
+    /// active messages to the correct sender worker when the consumer cancels upstream.
+    /// `None` until a sender attaches.
+    pub stream_cancel_handle: Option<crate::control::StreamCancelHandle>,
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +341,7 @@ impl AnchorManager {
             attachment: false,
             timeout_cancel,
             timeout_duration: self.default_timeout,
+            stream_cancel_handle: None, // populated on attach
         };
 
         self.registry.insert(local_id, entry);
