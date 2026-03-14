@@ -11,7 +11,10 @@ from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import SglangHealthCheckPayload
-from dynamo.sglang.publisher import setup_sgl_metrics
+from dynamo.sglang.publisher import (
+    set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
+)
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import EmbeddingWorkerHandler
 
@@ -26,11 +29,12 @@ async def init_embedding(
     """Initialize embedding worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    engine = sgl.Engine(server_args=server_args)
-
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
+
+    engine = sgl.Engine(server_args=server_args)
 
     shutdown_endpoints[:] = [generate_endpoint]
 
