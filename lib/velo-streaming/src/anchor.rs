@@ -18,7 +18,7 @@
 use std::pin::Pin;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -98,6 +98,85 @@ pub(crate) struct AnchorEntry {
 }
 
 // ---------------------------------------------------------------------------
+// StreamController
+// ---------------------------------------------------------------------------
+
+/// Shared inner state between [`AnchorStream`] and [`StreamController`].
+///
+/// Wrapped in `Arc` so `StreamController` can outlive `AnchorStream` being
+/// moved into StreamExt combinators.
+struct StreamControllerInner {
+    local_id: u64,
+    registry: Arc<DashMap<u64, AnchorEntry>>,
+    /// Optional messenger for sending `_stream_cancel` AM to the sender's worker.
+    /// `None` for local-only (MockFrameTransport) scenarios — cancel is registry-removal-only.
+    messenger: Option<Arc<velo_messenger::Messenger>>,
+    /// AtomicBool gate: compare_exchange(false, true) to ensure AM is sent at most once.
+    cancelled: AtomicBool,
+}
+
+/// Cloneable handle to cancel an [`AnchorStream`] from outside the stream.
+///
+/// Obtain via [`AnchorStream::controller`]. Required for the StreamExt combinator
+/// use-case where the `AnchorStream` is moved into `.map()` / `.take_while()` etc.
+/// and the caller loses direct access to it.
+#[derive(Clone)]
+pub struct StreamController {
+    inner: Arc<StreamControllerInner>,
+}
+
+impl StreamController {
+    /// Cancel the stream: remove the anchor from the registry and send a
+    /// `_stream_cancel` AM to the sender's worker (fire-and-forget).
+    ///
+    /// Idempotent: the AM is sent at most once regardless of how many clones
+    /// call `cancel()` concurrently.
+    pub fn cancel(&self) {
+        // AtomicBool gate: only the first caller proceeds
+        if self
+            .inner
+            .cancelled
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return; // already cancelled
+        }
+
+        // Remove anchor from registry and extract stream_cancel_handle
+        let stream_cancel_handle = self
+            .inner
+            .registry
+            .remove(&self.inner.local_id)
+            .and_then(|(_, entry)| {
+                entry.cancel_token.cancel();
+                entry.stream_cancel_handle
+            });
+
+        // Send _stream_cancel AM if we have both a handle and a messenger
+        if let (Some(handle), Some(messenger)) =
+            (stream_cancel_handle, self.inner.messenger.clone())
+        {
+            let (sender_worker_id, sender_stream_id) = handle.unpack();
+            let payload =
+                rmp_serde::to_vec(&crate::control::StreamCancelRequest { sender_stream_id })
+                    .expect("serialize StreamCancelRequest");
+            // Fire-and-forget: use tokio::spawn guarded by try_current()
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let _ = messenger
+                        .am_send_streaming("_stream_cancel")
+                        .expect("am_send_streaming builder")
+                        .raw_payload(bytes::Bytes::from(payload))
+                        .worker(sender_worker_id)
+                        .send()
+                        .await;
+                });
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AnchorStream<T>
 // ---------------------------------------------------------------------------
 
@@ -118,6 +197,8 @@ pub struct AnchorStream<T> {
     local_id: u64,
     /// Arc clone of the AnchorManager's registry (for cancel).
     registry: Arc<DashMap<u64, AnchorEntry>>,
+    /// Shared cancel handle — also held by any [`StreamController`] clones.
+    controller: StreamController,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -126,22 +207,40 @@ impl<T> AnchorStream<T> {
         rx: flume::Receiver<Vec<u8>>,
         local_id: u64,
         registry: Arc<DashMap<u64, AnchorEntry>>,
+        messenger: Option<Arc<velo_messenger::Messenger>>,
     ) -> Self {
+        let inner = Arc::new(StreamControllerInner {
+            local_id,
+            registry: registry.clone(),
+            messenger,
+            cancelled: AtomicBool::new(false),
+        });
+        let controller = StreamController { inner };
         Self {
             inner_stream: rx.into_stream(),
             terminated: false,
             local_id,
             registry,
+            controller,
             _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Remove the anchor from the registry. Pending or future attach attempts
-    /// will receive `AttachError::AnchorNotFound`.
-    pub fn cancel(&self) {
-        if let Some((_, entry)) = self.registry.remove(&self.local_id) {
-            entry.cancel_token.cancel();
-        }
+    /// Return a cloneable [`StreamController`] that can cancel this anchor
+    /// even after `self` is moved into a StreamExt combinator.
+    pub fn controller(&self) -> StreamController {
+        self.controller.clone()
+    }
+
+    /// Consume the stream and cancel the anchor.
+    ///
+    /// Removes the anchor from the registry and sends `_stream_cancel` AM to
+    /// the sender's worker if a sender is attached. Same effect as
+    /// [`StreamController::cancel`] but consumes `self` to signal intent.
+    pub fn cancel(mut self) -> StreamController {
+        self.terminated = true; // prevent Drop from re-cancelling
+        self.controller.cancel();
+        self.controller.clone()
     }
 
     /// Configure or override the inactivity timeout for this anchor.
@@ -190,6 +289,15 @@ impl<T> AnchorStream<T> {
 // (flume::r#async::RecvStream) is Unpin, and all other fields are trivially Unpin.
 // PhantomData<T> should not prevent Unpin, but we assert it explicitly.
 impl<T> Unpin for AnchorStream<T> {}
+
+impl<T> Drop for AnchorStream<T> {
+    fn drop(&mut self) {
+        if !self.terminated {
+            // Delegate to the shared controller — AtomicBool prevents double-cancel.
+            self.controller.cancel();
+        }
+    }
+}
 
 impl<T: DeserializeOwned> Stream for AnchorStream<T> {
     type Item = Result<StreamFrame<T>, StreamError>;
@@ -292,6 +400,11 @@ pub struct AnchorManager {
     /// anchor if no sender attaches within this duration.
     #[builder(default, setter(into, strip_option))]
     pub default_timeout: Option<Duration>,
+
+    /// Optional messenger for sending `_stream_cancel` AM from the consumer side.
+    /// Set by VeloFrameTransport scenarios; `None` for local/mock transport scenarios.
+    #[builder(default)]
+    pub messenger: Option<Arc<velo_messenger::Messenger>>,
 }
 
 impl AnchorManagerBuilder {
@@ -347,7 +460,7 @@ impl AnchorManager {
         self.registry.insert(local_id, entry);
 
         let handle = StreamAnchorHandle::pack(self.worker_id, local_id);
-        let stream = AnchorStream::new(frame_rx, local_id, self.registry.clone());
+        let stream = AnchorStream::new(frame_rx, local_id, self.registry.clone(), self.messenger.clone());
         (handle, stream)
     }
 
@@ -1063,9 +1176,10 @@ mod tests {
 
         assert!(mgr.registry.contains_key(&local_id), "anchor must exist before cancel");
 
+        // cancel(self) consumes the stream and removes anchor from registry
         stream.cancel();
 
-        assert!(!mgr.registry.contains_key(&local_id), "anchor must be removed after cancel");
+        assert!(!mgr.registry.contains_key(&local_id), "anchor must be removed after cancel(self)");
     }
 
     // -----------------------------------------------------------------------
@@ -1386,5 +1500,74 @@ mod tests {
         assert_eq!(shared_registry.len(), 1, "shared registry must have 1 entry after create_anchor");
         assert!(shared_registry.contains_key(&local_id),
             "shared registry must contain the created anchor");
+    }
+
+    // -----------------------------------------------------------------------
+    // StreamController tests (Plan 11-02, Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_controller_clone() {
+        // controller() returns a Clone-able type; multiple clones all refer to same anchor.
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        let ctrl1 = stream.controller();
+        let ctrl2 = ctrl1.clone();
+
+        // Both point to the same local_id — cancelling via ctrl2 removes the anchor.
+        ctrl2.cancel();
+        assert!(!mgr.registry.contains_key(&local_id), "ctrl2.cancel() must remove anchor from registry");
+
+        // ctrl1 is now a no-op (AtomicBool already set), double-cancel must not panic.
+        ctrl1.cancel();
+    }
+
+    #[test]
+    fn test_cancel_self_removes_registry() {
+        // AnchorStream::cancel(self) removes anchor from registry.
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        assert!(mgr.registry.contains_key(&local_id), "anchor must exist before cancel");
+
+        stream.cancel();
+
+        assert!(!mgr.registry.contains_key(&local_id), "anchor must be removed after cancel(self)");
+    }
+
+    #[test]
+    fn test_controller_cancel_removes_registry() {
+        // StreamController::cancel() removes anchor from registry.
+        // Test the drop path: get controller, drop AnchorStream, verify controller still no-panics.
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        let ctrl = stream.controller();
+        // Drop the stream — Drop impl fires, removes anchor via controller.cancel()
+        drop(stream);
+
+        assert!(!mgr.registry.contains_key(&local_id), "anchor must be removed by Drop");
+
+        // ctrl.cancel() should be idempotent — anchor already gone, no panic.
+        ctrl.cancel();
+    }
+
+    #[test]
+    fn test_double_cancel_idempotent() {
+        // cancel twice does not panic, registry entry absent after first cancel.
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        let ctrl = stream.controller();
+        ctrl.cancel();
+        assert!(!mgr.registry.contains_key(&local_id), "anchor must be absent after first cancel");
+
+        // Second cancel — must not panic.
+        ctrl.cancel();
     }
 }
