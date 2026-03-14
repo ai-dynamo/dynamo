@@ -1,26 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for VeloFrameTransport end-to-end data flow (TEST-02).
+//! Integration tests for the full control-plane AM dispatch path (TEST-02).
 //!
-//! Tests two-worker simulation using real Messenger + TCP loopback:
-//! - Worker A creates a StreamAnchorHandle and binds the transport anchor.
+//! Tests two-worker simulation using real Messenger + TCP loopback with the complete
+//! AnchorManager control-plane wired up end-to-end:
+//! - Worker A creates an AnchorManager, calls `register_handlers`, and creates an anchor.
 //! - The handle is transferred to Worker B as a raw u128 (simulating cross-worker serialization).
-//! - Worker B connects to the endpoint and sends typed StreamFrame data via the transport channel.
-//! - Worker A receives and decodes the frames from the transport receiver.
+//! - Worker B calls `attach_stream_anchor` with the transferred handle (worker_id mismatch triggers
+//!   the remote path): sends `_anchor_attach` AM to Worker A, Worker A's handler binds the transport
+//!   and spawns reader_pump, returns the stream endpoint, Worker B connects and receives StreamSender.
+//! - Worker B sends N items + finalize via StreamSender.
+//! - Worker A's AnchorStream yields all N items then None.
 //!
-//! # Architecture Note
-//!
-//! The two-AnchorManager pattern (am_a.create_anchor + am_b.attach_stream_anchor) does NOT
-//! support cross-worker data delivery in the current implementation: `attach_stream_anchor`
-//! clones `frame_tx` from the LOCAL registry (am_b's registry), so StreamSender writes to
-//! am_b's internal channel — not to am_a's AnchorStream. The reader_pump that would bridge
-//! transport-received bytes to frame_tx is a planned feature (referenced in comments as
-//! "Plan 03") that is not yet implemented.
-//!
-//! TEST-02 therefore tests the full production data path at the VeloFrameTransport layer:
-//! bind/connect/send/recv with typed StreamFrame<T> encoding via rmp_serde, and handle
-//! transfer as u128. This validates the wire format, AM routing, and TCP delivery end-to-end.
+//! This validates the full stack: register_handlers -> remote attach_stream_anchor ->
+//! _anchor_attach AM dispatch -> reader_pump -> AnchorStream receives remote frames.
 
 mod common;
 
@@ -28,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use velo_messenger::Messenger;
-use velo_streaming::{FrameTransport, StreamAnchorHandle, StreamFrame};
+use velo_streaming::{AnchorManagerBuilder, FrameTransport, StreamAnchorHandle, StreamFrame};
 use velo_streaming::velo_transport::VeloFrameTransport;
 use velo_transports::tcp::TcpTransportBuilder;
 use velo_common::WorkerId;
@@ -71,15 +65,18 @@ async fn make_two_messengers() -> (Arc<Messenger>, Arc<Messenger>) {
 }
 
 // ---------------------------------------------------------------------------
-// TEST-02: Two-worker remote attach via VeloFrameTransport + TCP
+// TEST-02: Two-worker full AM dispatch integration test
 // ---------------------------------------------------------------------------
 //
-// Validates the full production data path:
-//   1. Worker A creates a StreamAnchorHandle and binds the transport anchor.
-//   2. The handle is transferred as u128 to worker B (simulates cross-worker serialization).
-//   3. Worker B reconstructs the handle, connects to worker A's endpoint, and sends data.
-//   4. Worker A receives and decodes the StreamFrame<u32> items from the transport receiver.
-//   5. All 5 items arrive in order; stream terminates after Finalized sentinel.
+// Validates the full control-plane path:
+//   1. Worker A creates AnchorManager, calls register_handlers, creates an anchor.
+//   2. The handle is transferred as u128 to Worker B (simulates cross-worker serialization).
+//   3. Worker B calls attach_stream_anchor (remote path fires):
+//      - sends _anchor_attach AM to Worker A
+//      - Worker A's handler binds transport + spawns reader_pump, returns endpoint
+//      - Worker B connects transport and receives StreamSender
+//   4. Worker B sends 5 items + finalize via StreamSender.
+//   5. Worker A's AnchorStream yields all 5 items then None.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_02_remote_attach() {
@@ -87,98 +84,99 @@ async fn test_02_remote_attach() {
     let worker_id_a = messenger_a.instance_id().worker_id();
     let worker_id_b = messenger_b.instance_id().worker_id();
 
-    // Worker A: create VeloFrameTransport.
-    let vft_a = VeloFrameTransport::new(messenger_a.clone(), worker_id_a)
-        .expect("create VeloFrameTransport for worker A");
-
-    // Worker A: choose a local anchor ID and create a StreamAnchorHandle.
-    // In production, create_anchor() assigns this ID; here we assign it directly
-    // for the transport-layer test.
-    let local_id: u64 = 1;
-    let handle_a = StreamAnchorHandle::pack(worker_id_a, local_id);
-
-    // Worker A: bind the transport anchor to get the endpoint and the transport receiver.
-    let (endpoint, transport_rx): (String, flume::Receiver<Vec<u8>>) = vft_a
-        .bind(local_id)
-        .await
-        .expect("bind anchor on worker A");
-    assert!(
-        endpoint.starts_with("velo://"),
-        "endpoint must start with velo://"
+    // Worker A: create VeloFrameTransport and AnchorManager
+    let vft_a = Arc::new(
+        VeloFrameTransport::new(Arc::clone(&messenger_a), worker_id_a)
+            .expect("VFT worker A"),
+    );
+    let am_a: Arc<velo_streaming::AnchorManager> = Arc::new(
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id_a)
+            .transport(Arc::clone(&vft_a) as Arc<dyn FrameTransport>)
+            .build()
+            .expect("AM worker A"),
     );
 
-    // Transfer the handle as u128 (simulates cross-worker serialization via msgpack or direct copy).
-    let handle_raw: u128 = handle_a.as_u128();
+    // Worker A: register all five control-plane handlers on messenger_a
+    am_a.register_handlers(Arc::clone(&messenger_a))
+        .expect("register_handlers on worker A");
 
-    // Worker B: reconstruct the handle from the raw u128.
-    // StreamAnchorHandle::pack(worker_id, local_id) re-encodes it identically.
-    let handle_b = {
-        let hi = (handle_raw >> 64) as u64; // worker_id_a.as_u64()
-        let lo = handle_raw as u64;         // local_id
-        StreamAnchorHandle::pack(WorkerId::from_u64(hi), lo)
+    // Worker A: create anchor
+    let (handle, mut anchor_stream) = am_a.create_anchor::<u32>();
+
+    // Simulate cross-worker handle transfer (u128 round-trip)
+    let handle_raw: u128 = handle.as_u128();
+    let hi = (handle_raw >> 64) as u64;
+    let lo = handle_raw as u64;
+    let handle_transferred = StreamAnchorHandle::pack(WorkerId::from_u64(hi), lo);
+
+    // Verify transfer
+    let (recovered_worker, _) = handle_transferred.unpack();
+    assert_eq!(recovered_worker, worker_id_a);
+
+    // Worker B: create VeloFrameTransport and AnchorManager
+    let vft_b = Arc::new(
+        VeloFrameTransport::new(Arc::clone(&messenger_b), worker_id_b)
+            .expect("VFT worker B"),
+    );
+    let am_b: Arc<velo_streaming::AnchorManager> = Arc::new(
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id_b)
+            .transport(Arc::clone(&vft_b) as Arc<dyn FrameTransport>)
+            .build()
+            .expect("AM worker B"),
+    );
+
+    // Worker B: register handlers (sets messenger_lock so attach_remote can send _anchor_attach AM)
+    am_b.register_handlers(Arc::clone(&messenger_b))
+        .expect("register_handlers on worker B");
+
+    // Worker B: attach via remote path (handle_transferred.worker_id == worker_id_a != worker_id_b)
+    // This triggers attach_remote: sends _anchor_attach AM to Worker A,
+    // Worker A's handler binds transport + spawns reader_pump, returns endpoint,
+    // Worker B connects transport and receives StreamSender.
+    let sender = am_b
+        .attach_stream_anchor::<u32>(handle_transferred, "", 1)
+        .await
+        .expect("remote attach must succeed");
+
+    // Worker B: send 5 items
+    for i in 0u32..5 {
+        sender.send(i).await.expect("send item");
+    }
+
+    // Wait for all item AMs to be delivered to Worker A's _stream_data handler before
+    // sending Finalized. AM dispatch is concurrent (spawned handlers) so Finalized could
+    // arrive before later items without this barrier. 50ms >> loopback RTT.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    sender.finalize().expect("finalize");
+
+    // Worker A: collect items from AnchorStream until None
+    use futures::StreamExt;
+    let mut items = Vec::new();
+    let collect = async {
+        while let Some(frame) = anchor_stream.next().await {
+            match frame.expect("no stream error") {
+                StreamFrame::Item(v) => items.push(v),
+                StreamFrame::Finalized => break,
+                other => panic!("unexpected frame: {:?}", other),
+            }
+        }
+        items
     };
 
-    // Verify the transferred handle unpacks correctly.
-    let (recovered_worker, recovered_local) = handle_b.unpack();
-    assert_eq!(recovered_worker, worker_id_a, "transferred handle must carry worker A's ID");
-    assert_eq!(recovered_local, local_id, "transferred handle must carry correct local_id");
-
-    // Worker B: create VeloFrameTransport and connect to worker A's endpoint.
-    let vft_b = VeloFrameTransport::new(messenger_b.clone(), worker_id_b)
-        .expect("create VeloFrameTransport for worker B");
-
-    // connect() spawns an AM pump task and returns a Sender<Vec<u8>>.
-    // The pump prepends the 8-byte anchor_id prefix and sends each frame via AM to worker A.
-    let transport_tx: flume::Sender<Vec<u8>> = vft_b
-        .connect(&endpoint, local_id, worker_id_b.as_u64())
+    let items = tokio::time::timeout(Duration::from_secs(10), collect)
         .await
-        .expect("connect from worker B to worker A's endpoint");
+        .expect("timed out waiting for Worker A to receive all items");
 
-    // Worker B: encode StreamFrame<u32> items using rmp_serde and send via the transport sender.
-    // This replicates what the reader_pump will eventually do for the AnchorManager data path.
-    for i in 0u32..5 {
-        let frame: StreamFrame<u32> = StreamFrame::Item(i);
-        let frame_bytes = rmp_serde::to_vec(&frame).expect("serialize StreamFrame::Item");
-        transport_tx
-            .send_async(frame_bytes)
-            .await
-            .expect("send frame bytes from worker B");
-    }
-
-    // Send Finalized sentinel to signal end-of-stream.
-    let finalized: StreamFrame<u32> = StreamFrame::Finalized;
-    let finalized_bytes = rmp_serde::to_vec(&finalized).expect("serialize StreamFrame::Finalized");
-    transport_tx
-        .send_async(finalized_bytes)
-        .await
-        .expect("send Finalized sentinel from worker B");
-
-    // Worker A: receive raw frame bytes from the transport receiver and decode.
-    let mut items = Vec::new();
-    loop {
-        let raw = tokio::time::timeout(Duration::from_secs(5), transport_rx.recv_async())
-            .await
-            .expect("timeout waiting for frame from worker B")
-            .expect("recv frame from transport");
-
-        let frame: StreamFrame<u32> =
-            rmp_serde::from_slice(&raw).expect("decode StreamFrame<u32>");
-
-        match frame {
-            StreamFrame::Item(v) => items.push(v),
-            StreamFrame::Finalized => break,
-            other => panic!("unexpected frame on worker A: {:?}", other),
-        }
-    }
-
-    // AM delivery order is not strictly guaranteed under concurrent sends (see Phase 09-02 decision).
-    // Sort both before comparing to make the assertion content-only (not order-sensitive).
+    // Content check (order may vary under concurrent AM delivery — Phase 09-02 decision)
     let mut items_sorted = items.clone();
     items_sorted.sort_unstable();
     assert_eq!(
         items_sorted,
         vec![0u32, 1, 2, 3, 4],
-        "worker A must receive all 5 items from worker B (content check, order may vary)"
+        "Worker A must receive all 5 items from Worker B"
     );
 }
 
