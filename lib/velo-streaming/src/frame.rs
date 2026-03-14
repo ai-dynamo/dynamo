@@ -60,7 +60,7 @@ pub enum StreamError {
     DeserializationError(String),
 }
 
-/// Errors surfaced to [`StreamSender`] callers when a send operation fails.
+/// Errors surfaced to [`crate::sender::StreamSender`] callers when a send operation fails.
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     /// The underlying channel is closed (receiver dropped or anchor removed).

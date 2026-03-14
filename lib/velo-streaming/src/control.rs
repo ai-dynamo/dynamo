@@ -6,7 +6,7 @@
 //! This module provides four [`velo_messenger::Handler`] constructors:
 //! - [`create_anchor_attach_handler`]: validates anchor existence, calls
 //!   `transport.bind().await` (outside shard lock), then atomically stores
-//!   the [`flume::Receiver`] in [`crate::anchor::AnchorEntry`].
+//!   the [`flume::Receiver`] in the anchor entry.
 //! - [`create_anchor_detach_handler`]: clears attachment, cancels CancellationToken,
 //!   injects [`crate::frame::StreamFrame::Detached`] sentinel; anchor stays in registry.
 //! - [`create_anchor_finalize_handler`]: injects [`crate::frame::StreamFrame::Finalized`]
@@ -168,7 +168,7 @@ pub fn create_stream_cancel_handler(sender_registry: Arc<SenderRegistry>) -> vel
 pub struct AnchorAttachRequest {
     pub handle: StreamAnchorHandle,
     pub session_id: u64,
-    /// Encodes the sender's WorkerId + sender_stream_id. Stored in [`crate::anchor::AnchorEntry`]
+    /// Encodes the sender's WorkerId + sender_stream_id. Stored in the anchor entry
     /// on successful attach so the anchor knows where to route upstream cancel AMs.
     pub stream_cancel_handle: StreamCancelHandle,
 }

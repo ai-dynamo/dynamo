@@ -52,7 +52,7 @@ impl VeloFrameTransport {
     ///
     /// # Arguments
     ///
-    /// * `messenger` - Injected Arc<Messenger>, must already be constructed.
+    /// * `messenger` - Injected `Arc<Messenger>`, must already be constructed.
     /// * `worker_id` - This worker's identity, used for endpoint URI construction.
     ///
     /// # Errors

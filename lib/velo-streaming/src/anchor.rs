@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anchor registry layer: [`AnchorManager`], [`AnchorEntry`], [`StreamAnchor`], and [`AttachError`].
+//! Anchor registry layer: [`AnchorManager`], `AnchorEntry`, [`StreamAnchor`], and [`AttachError`].
 //!
 //! The anchor registry is the core coordination point for the streaming protocol.
 //! Each anchor represents a single exclusive-attachment stream slot:
@@ -200,6 +200,40 @@ impl StreamController {
 /// cause the stream to yield one final item and then `None` on subsequent polls.
 ///
 /// Use [`StreamExt::next()`](futures::StreamExt::next) for async iteration.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use futures::StreamExt;
+/// use velo_streaming::{AnchorManager, StreamFrame};
+///
+/// # async fn example(mgr: &AnchorManager) -> anyhow::Result<()> {
+/// // Consumer creates an anchor
+/// let mut anchor = mgr.create_anchor::<String>();
+/// let handle = anchor.handle();
+///
+/// // Producer attaches (could be on a different worker)
+/// let sender = mgr.attach_stream_anchor::<String>(handle).await?;
+///
+/// // Send items
+/// sender.send("hello".into()).await?;
+/// sender.send("world".into()).await?;
+/// sender.finalize()?;
+///
+/// // Consume the stream
+/// while let Some(frame) = anchor.next().await {
+///     match frame {
+///         Ok(StreamFrame::Item(s)) => println!("{s}"),
+///         Ok(StreamFrame::Finalized) => break,
+///         Err(e) => eprintln!("stream error: {e}"),
+///         _ => {}
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// For upstream cancellation, see [`StreamController`].
 pub struct StreamAnchor<T> {
     /// The anchor handle — pass to a sender for attachment via
     /// [`AnchorManager::attach_stream_anchor`].
@@ -785,7 +819,7 @@ impl AnchorManager {
     ///
     /// This is the primary sender-side entry point (API-05). It:
     /// 1. Detects remote handles (`handle.worker_id != self.worker_id`) and routes through
-    ///    [`attach_remote`](Self::attach_remote) for cross-worker AM dispatch.
+    ///    the remote attach path for cross-worker AM dispatch.
     /// 2. For local handles: validates the anchor exists and is unattached,
     ///    atomically marks the anchor as attached, and returns a
     ///    [`StreamSender<T>`](crate::sender::StreamSender) for pushing typed frames.

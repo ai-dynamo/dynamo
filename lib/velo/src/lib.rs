@@ -40,7 +40,7 @@ pub use velo_streaming::{
 
 /// High-level facade for the Velo distributed system.
 ///
-/// Wraps a [`Messenger`] and [`AnchorManager`](velo_streaming::AnchorManager)
+/// Wraps a [`Messenger`] and [`AnchorManager`]
 /// and provides the same public API with a simpler name.
 #[derive(Clone)]
 pub struct Velo {

@@ -19,9 +19,7 @@ const WORKER_SHIFT: u32 = 64;
 /// Serializes via rmp-serde as a two-field struct `{hi: u64, lo: u64}` — not as raw
 /// binary bytes — to guarantee correct round-tripping across msgpack boundaries.
 ///
-/// `local_id` of `0` is reserved; [`AnchorManager`] assigns IDs starting at `1`.
-///
-/// [`AnchorManager`]: crate — defined in Phase 7
+/// `local_id` of `0` is reserved; [`crate::anchor::AnchorManager`] assigns IDs starting at `1`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StreamAnchorHandle(u128);
 

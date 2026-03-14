@@ -4,8 +4,8 @@
 //! Transport abstraction for frame-level ordered delivery.
 //!
 //! This module defines the [`FrameTransport`] trait boundary consumed by
-//! [`AnchorManager`] (Phase 7) and implemented by [`VeloFrameTransport`]
-//! (Phase 9).
+//! [`crate::anchor::AnchorManager`] and implemented by
+//! [`crate::velo_transport::VeloFrameTransport`].
 //!
 //! Transport endpoints are concrete [`flume::Receiver<Vec<u8>>`] and
 //! [`flume::Sender<Vec<u8>>`] channel halves rather than trait objects.

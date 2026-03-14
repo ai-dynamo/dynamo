@@ -10,7 +10,7 @@
 //!
 //! # Lifecycle
 //!
-//! A `StreamSender<T>` is created by [`AnchorManager::attach_stream_anchor`] and
+//! A `StreamSender<T>` is created by [`crate::anchor::AnchorManager::attach_stream_anchor`] and
 //! must be terminated via one of three paths:
 //!
 //! 1. **[`finalize(self)`](StreamSender::finalize)** — clean close, sends `Finalized` sentinel.
