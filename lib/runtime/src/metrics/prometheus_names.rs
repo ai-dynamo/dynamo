@@ -83,6 +83,9 @@ pub mod name_prefix {
 
     /// Prefix for transport-layer metrics (TCP / NATS)
     pub const TRANSPORT: &str = "dynamo_transport";
+
+    /// Prefix for work-handler transport breakdown metrics (backend side)
+    pub const WORK_HANDLER: &str = "dynamo_work_handler";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -555,7 +558,7 @@ pub mod request_plane {
     /// Time from send_request() to first response item (transport roundtrip TTFT)
     pub const ROUNDTRIP_TTFT_SECONDS: &str = "roundtrip_ttft_seconds";
     /// Currently in-flight requests (gauge)
-    pub const INFLIGHT: &str = "inflight";
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 }
 
 /// Transport-specific metrics (TCP / NATS)

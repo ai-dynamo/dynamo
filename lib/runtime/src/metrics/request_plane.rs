@@ -59,7 +59,7 @@ pub static REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS: Lazy<Histogram> = Lazy::new(|| 
 /// Currently in-flight requests (incremented at generate() entry, decremented on stream complete).
 pub static REQUEST_PLANE_INFLIGHT: Lazy<Gauge> = Lazy::new(|| {
     Gauge::new(
-        request_plane_metric_name(request_plane::INFLIGHT),
+        request_plane_metric_name(request_plane::INFLIGHT_REQUESTS),
         "Currently in-flight requests at AddressedPushRouter",
     )
     .expect("request_plane_inflight gauge")
@@ -71,7 +71,7 @@ static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
 /// Guards idempotency for the raw `prometheus::Registry` registration path.
 /// Kept separate from `METRICS_REGISTERED` so that calling `ensure_request_plane_metrics_registered`
 /// first does not silently prevent the metrics from being registered in the prometheus registry.
-static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
+static PROMETHEUS_REGISTERED: OnceCell<Result<(), String>> = OnceCell::new();
 
 /// Register request-plane metrics with the given registry. Idempotent; only the first call registers.
 pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
@@ -100,13 +100,18 @@ pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
 pub fn ensure_request_plane_metrics_registered_prometheus(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    if PROMETHEUS_REGISTERED.get().is_some() {
-        return Ok(());
-    }
-    registry.register(Box::new(REQUEST_PLANE_QUEUE_SECONDS.clone()))?;
-    registry.register(Box::new(REQUEST_PLANE_SEND_SECONDS.clone()))?;
-    registry.register(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))?;
-    registry.register(Box::new(REQUEST_PLANE_INFLIGHT.clone()))?;
-    let _ = PROMETHEUS_REGISTERED.set(());
-    Ok(())
+    PROMETHEUS_REGISTERED
+        .get_or_init(|| {
+            (|| -> Result<(), prometheus::Error> {
+                registry.register(Box::new(REQUEST_PLANE_QUEUE_SECONDS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_SEND_SECONDS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_INFLIGHT.clone()))?;
+                Ok(())
+            })()
+            .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| prometheus::Error::Msg(e.clone()))
 }

@@ -54,19 +54,24 @@ pub static NATS_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Guards idempotency for the raw `prometheus::Registry` registration path.
-static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
+static PROMETHEUS_REGISTERED: OnceCell<Result<(), String>> = OnceCell::new();
 
 /// Register transport metrics with a raw Prometheus registry. Idempotent.
 pub fn ensure_transport_metrics_registered_prometheus(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    if PROMETHEUS_REGISTERED.get().is_some() {
-        return Ok(());
-    }
-    registry.register(Box::new(TCP_BYTES_SENT_TOTAL.clone()))?;
-    registry.register(Box::new(TCP_BYTES_RECEIVED_TOTAL.clone()))?;
-    registry.register(Box::new(TCP_ERRORS_TOTAL.clone()))?;
-    registry.register(Box::new(NATS_ERRORS_TOTAL.clone()))?;
-    let _ = PROMETHEUS_REGISTERED.set(());
-    Ok(())
+    PROMETHEUS_REGISTERED
+        .get_or_init(|| {
+            (|| -> Result<(), prometheus::Error> {
+                registry.register(Box::new(TCP_BYTES_SENT_TOTAL.clone()))?;
+                registry.register(Box::new(TCP_BYTES_RECEIVED_TOTAL.clone()))?;
+                registry.register(Box::new(TCP_ERRORS_TOTAL.clone()))?;
+                registry.register(Box::new(NATS_ERRORS_TOTAL.clone()))?;
+                Ok(())
+            })()
+            .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| prometheus::Error::Msg(e.clone()))
 }
