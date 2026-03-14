@@ -269,6 +269,19 @@ navigation:
           - page: Planner Design
             path: design-docs/planner-design.md
 
+  # ==================== Blog ====================
+  - section: Blog
+    hidden: true
+    path: blogs/index.mdx
+    slug: blog
+    contents:
+      - page: "Full-Stack Optimizations for Agentic Inference"
+        path: blogs/agentic-inference/agentic-inference.md
+        slug: agentic-inference
+      - page: "Flash Indexer: Inter-Galactic KV Routing"
+        path: blogs/flash-indexer/flash-indexer.md
+        slug: flash-indexer
+
   # ==================== Documentation ====================
   - section: Documentation
     contents:
@@ -282,17 +295,6 @@ navigation:
   - section: Additional Resources
     hidden: true
     contents:
-      # -- Blog --
-      - section: Blog
-        path: blogs/index.mdx
-        slug: blog
-        contents:
-          - page: "Full-Stack Optimizations for Agentic Inference"
-            path: blogs/agentic-inference/agentic-inference.md
-            slug: agentic-inference
-          - page: "Flash Indexer: Inter-Galactic KV Routing"
-            path: blogs/flash-indexer/flash-indexer.md
-            slug: flash-indexer
       # -- Development --
       - page: Runtime Guide
         path: development/runtime-guide.md
