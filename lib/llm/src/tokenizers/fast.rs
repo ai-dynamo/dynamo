@@ -136,9 +136,19 @@ mod tests {
         let cont_ids = wrapper.encode(continuation).unwrap().token_ids().to_vec();
 
         let mut stream = wrapper.decode_stream(&prompt_ids, true);
-        // DecodeStream produces output incrementally; just verify it runs without error.
-        for id in cont_ids {
-            stream.step(id).unwrap();
+        // Accumulate incremental chunks from decode_stream
+        let mut accumulated = String::new();
+        for id in &cont_ids {
+            if let Some(chunk) = stream.step(*id).unwrap() {
+                accumulated.push_str(&chunk);
+            }
         }
+
+        // The accumulated streamed text should match the decoded continuation
+        let expected = wrapper.decode(&cont_ids, true).unwrap();
+        assert_eq!(
+            accumulated, expected,
+            "streamed chunks must equal batch-decoded continuation"
+        );
     }
 }
