@@ -378,12 +378,38 @@ impl ModelDeploymentCard {
 
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
+    ///
+    /// When the `DYN_TOKENIZER_BACKEND=fasttokens` env var is set, uses `fastokens` for encoding
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let use_fast = std::env::var("DYN_TOKENIZER_BACKEND")
+            .map(|v| v == "fasttokens")
+            .unwrap_or(false);
+
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
+
+                // Try fasttokens backend if requested
+                if use_fast {
+                    let path_str = p.to_str().ok_or_else(|| {
+                        anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
+                    })?;
+                    match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                        Ok(fast) => {
+                            tracing::info!("Using fasttokens tokenizer backend");
+                            return Ok(crate::tokenizers::Tokenizer::from(Arc::new(fast)));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                %e,
+                                "Failed to load fasttokens, falling back to HuggingFace"
+                            );
+                        }
+                    }
+                }
+
                 let hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()

@@ -76,6 +76,7 @@ class FrontendConfig(KvRouterConfigBase):
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
     preprocess_workers: int
+    tokenizer_backend: str
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -423,4 +424,17 @@ class FrontendArgGroup(ArgGroup):
                 "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--dyn-tokenizer-backend",
+            env_var="DYN_TOKENIZER_BACKEND",
+            default="default",
+            dest="tokenizer_backend",
+            help=(
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
+                "or 'fasttokens' (fastokens crate for high-performance BPE encoding). "
+                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+            ),
         )
