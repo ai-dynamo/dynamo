@@ -93,6 +93,12 @@ navigation:
       - section: Multimodal
         path: ../pages-v1.0.0/features/multimodal/README.md
         contents:
+          - page: vLLM Multimodal
+            path: ../pages-v1.0.0/features/multimodal/multimodal-vllm.md
+          - page: SGLang Multimodal
+            path: ../pages-v1.0.0/features/multimodal/multimodal-sglang.md
+          - page: TensorRT-LLM Multimodal
+            path: ../pages-v1.0.0/features/multimodal/multimodal-trtllm.md
           - page: Embedding Cache
             path: ../pages-v1.0.0/features/multimodal/embedding-cache.md
           - page: Encoder Disaggregation
@@ -331,6 +337,14 @@ navigation:
       # -- Frontend (hidden sub-pages) --
       - page: NVIDIA Request Extensions (nvext)
         path: ../pages-v1.0.0/components/frontend/nvext.md
+      - page: Frontend Configuration Reference
+        path: ../pages-v1.0.0/components/frontend/configuration.md
+      # -- Router (hidden sub-pages) --
+      - page: Standalone Indexer
+        path: ../pages-v1.0.0/components/router/standalone-indexer.md
+      # -- Planner (hidden sub-pages) --
+      - page: Global Planner Guide
+        path: ../pages-v1.0.0/components/planner/global-planner.md
       # -- Backend detail pages --
       - section: vLLM Details
         contents:
