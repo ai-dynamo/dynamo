@@ -169,6 +169,7 @@ We also need to make sure all workers, both prefill and decode, are on the same 
 ```bash
 kubectl -n ${DYNAMO_NAMESPACE} apply -f vllm/disagg.yaml
 ```
+*Note: the vllm/disagg-tcp.yaml shows an example of using disaggregated serving without EFA, fallback to TCP, on g6e.2xlarge instances*
 
 Your pods should be running like below output, making sure they are in status "Running".
 
