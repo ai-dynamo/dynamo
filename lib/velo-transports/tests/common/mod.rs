@@ -457,18 +457,6 @@ impl TestCluster<UdsTransport> {
     }
 }
 
-// UCX-specific convenience constructor
-#[cfg(feature = "ucx")]
-impl TestCluster<UcxTransport> {
-    /// Create a new UCX test cluster with the specified number of transports
-    ///
-    /// This is a convenience method for creating UCX clusters.
-    /// For other transport types, use `with_factory()`.
-    pub async fn new_ucx(size: usize) -> anyhow::Result<Self> {
-        Self::with_factory(size, || UcxTransportBuilder::new().build()).await
-    }
-}
-
 // // HTTP-specific convenience constructor
 // #[cfg(feature = "http")]
 // impl TestCluster<HttpTransport> {
