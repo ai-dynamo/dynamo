@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from dynamo.vllm.handlers import BaseWorkerHandler
+from dynamo.vllm.handlers import BaseWorkerHandler, VllmEngineQuiesceController
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,8 +34,8 @@ def _make_handler() -> _TestWorkerHandler:
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._sleep_wake_lock = asyncio.Lock()
-    handler._engine_is_sleeping = False
+    handler._quiesce_controller = VllmEngineQuiesceController(handler.engine_client)
+    handler._quiesce_lock = asyncio.Lock()
     return handler
 
 
@@ -91,7 +91,7 @@ async def test_sleep_returns_error_for_unregister_failure():
 @pytest.mark.asyncio
 async def test_wake_up_returns_error_for_register_failure():
     handler = _make_handler()
-    handler._engine_is_sleeping = True
+    await handler._quiesce_controller.quiesce(1)
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
     )

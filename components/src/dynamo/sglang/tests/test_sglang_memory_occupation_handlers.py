@@ -12,6 +12,7 @@ import pytest
 from dynamo.sglang.request_handlers.handler_base import (
     DEFAULT_MEMORY_OCCUPATION_TAGS,
     BaseWorkerHandler,
+    SGLangEngineQuiesceController,
 )
 
 pytestmark = [
@@ -59,8 +60,11 @@ def _make_handler() -> _TestWorkerHandler:
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._memory_occupation_lock = asyncio.Lock()
-    handler._memory_released = False
+    handler._quiesce_controller = SGLangEngineQuiesceController(
+        handler.engine,
+        DEFAULT_MEMORY_OCCUPATION_TAGS,
+    )
+    handler._quiesce_lock = asyncio.Lock()
     return handler
 
 
@@ -146,6 +150,7 @@ async def test_resume_with_no_sleeping_state_is_noop():
 async def test_release_returns_error_when_worker_has_no_tokenizer_manager():
     handler = _make_handler()
     handler.engine = None
+    handler._quiesce_controller = None
 
     result = await handler.release_memory_occupation({})
 
@@ -160,6 +165,7 @@ async def test_release_returns_error_when_worker_has_no_tokenizer_manager():
 async def test_resume_returns_error_when_worker_has_no_tokenizer_manager():
     handler = _make_handler()
     handler.engine = None
+    handler._quiesce_controller = None
 
     result = await handler.resume_memory_occupation({})
 

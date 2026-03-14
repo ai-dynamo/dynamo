@@ -7,19 +7,23 @@ import asyncio
 import logging
 import os
 import signal
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar
 
 from dynamo.common.utils.namespace import get_worker_namespace
 
-_LOG = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 PODINFO_ROOT = "/etc/podinfo"
-PODINFO_FILES = {
+REQUIRED_PODINFO_FILES = {
     "DYN_NAMESPACE": "dyn_namespace",
-    "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
     "DYN_COMPONENT": "dyn_component",
     "DYN_PARENT_DGD_K8S_NAME": "dyn_parent_dgd_k8s_name",
     "DYN_PARENT_DGD_K8S_NAMESPACE": "dyn_parent_dgd_k8s_namespace",
 }
+OPTIONAL_PODINFO_FILES = {
+    "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
+}
+EngineT = TypeVar("EngineT")
 
 
 class CheckpointConfig:
@@ -62,21 +66,25 @@ class CheckpointConfig:
         # The snapshot agent stages PVC checkpoints under <base>/tmp/<hash> and
         # only publishes self.location after a successful finalize/rename.
         if os.path.isdir(self.location):
-            _LOG.info("Existing checkpoint found at %s, skipping", self.location)
+            logger.info("Existing checkpoint found at %s, skipping", self.location)
             return True
 
-        _LOG.info("No checkpoint at %s, creating new one", self.location)
+        logger.info("No checkpoint at %s, creating new one", self.location)
         return False
 
-    async def run_lifecycle(self, engine_client: Any, sleep_level: int) -> bool:
-        _LOG.info("Putting model to sleep (level=%s)", sleep_level)
-        await engine_client.sleep(level=sleep_level)
+    async def run_lifecycle(
+        self,
+        quiesce_controller: Any,
+        *quiesce_args: object,
+    ) -> bool:
+        logger.info("Quiescing model")
+        await quiesce_controller.quiesce(*quiesce_args)
 
         self._install_signal_handlers()
 
         with open(self.ready_file, "w", encoding="utf-8") as ready_file:
             ready_file.write("ready")
-        _LOG.info(
+        logger.info(
             "Ready for checkpoint. Waiting for watcher signal "
             "(SIGUSR1=checkpoint complete, SIGCONT=restore complete)"
         )
@@ -84,12 +92,12 @@ class CheckpointConfig:
         try:
             event = await self._wait_for_watcher_signal()
             if event == "restore":
-                _LOG.info("Restore signal detected (SIGCONT)")
-                _LOG.info("Waking up model after restore")
-                await engine_client.wake_up()
+                logger.info("Restore signal detected (SIGCONT)")
+                logger.info("Resuming model after restore")
+                await quiesce_controller.resume()
                 return True
 
-            _LOG.info("Checkpoint completion signal detected (SIGUSR1)")
+            logger.info("Checkpoint completion signal detected (SIGUSR1)")
             return False
         finally:
             self._remove_signal_handlers()
@@ -142,32 +150,49 @@ def get_checkpoint_config() -> tuple[bool, CheckpointConfig | None]:
     return False, cfg
 
 
-def reload_snapshot_restore_identity() -> tuple[str, str]:
-    namespace = None
+@dataclass
+class EngineSnapshotController(Generic[EngineT]):
+    engine: EngineT
+    quiesce_controller: Any
+    checkpoint_config: CheckpointConfig
+    quiesce_args: tuple[object, ...] = ()
 
-    for env_name, podinfo_file in PODINFO_FILES.items():
+    async def wait_for_restore(self) -> bool:
+        return await self.checkpoint_config.run_lifecycle(
+            self.quiesce_controller,
+            *self.quiesce_args,
+        )
+
+    def reload_restore_identity(self) -> tuple[str, str]:
+        return reload_snapshot_restore_identity()
+
+
+def reload_snapshot_restore_identity() -> tuple[str, str]:
+    for env_name, podinfo_file in REQUIRED_PODINFO_FILES.items():
         podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
         if not os.path.isfile(podinfo_path):
-            if env_name == "DYN_NAMESPACE":
-                raise RuntimeError(
-                    "snapshot restore requires /etc/podinfo/dyn_namespace"
-                )
+            raise RuntimeError(f"snapshot restore requires {podinfo_path}")
+
+        with open(podinfo_path, encoding="utf-8") as podinfo:
+            value = podinfo.read().strip()
+        if not value:
+            raise RuntimeError(f"snapshot restore requires a non-empty {podinfo_path}")
+
+        os.environ[env_name] = value
+
+    for env_name, podinfo_file in OPTIONAL_PODINFO_FILES.items():
+        podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
+        if not os.path.isfile(podinfo_path):
             os.environ.pop(env_name, None)
             continue
 
         with open(podinfo_path, encoding="utf-8") as podinfo:
             value = podinfo.read().strip()
         if not value:
-            if env_name == "DYN_NAMESPACE":
-                raise RuntimeError(
-                    "snapshot restore requires a non-empty /etc/podinfo/dyn_namespace"
-                )
             os.environ.pop(env_name, None)
             continue
 
         os.environ[env_name] = value
-        if env_name == "DYN_NAMESPACE":
-            namespace = value
 
     os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
-    return get_worker_namespace(namespace), "kubernetes"
+    return get_worker_namespace(), "kubernetes"

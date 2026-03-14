@@ -10,7 +10,6 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.snapshot import reload_snapshot_restore_identity
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (
@@ -27,7 +26,7 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_worker,
 )
 from dynamo.sglang.shutdown import install_graceful_shutdown
-from dynamo.sglang.snapshot import handle_checkpoint_mode
+from dynamo.sglang.snapshot import prepare_snapshot_engine
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -43,18 +42,20 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
-    should_exit, snapshot_engine = await handle_checkpoint_mode(
+    should_exit, snapshot_controller = await prepare_snapshot_engine(
         config.server_args, config.dynamo_args
     )
     if should_exit:
         return
 
     dynamo_args = config.dynamo_args
-    if snapshot_engine is not None:
+    snapshot_engine = None
+    if snapshot_controller is not None:
+        snapshot_engine = snapshot_controller.engine
         (
             dynamo_args.namespace,
             dynamo_args.discovery_backend,
-        ) = reload_snapshot_restore_identity()
+        ) = snapshot_controller.reload_restore_identity()
         logger.info(
             "Reloaded snapshot identity after restore (namespace=%s, discovery_backend=%s)",
             dynamo_args.namespace,
