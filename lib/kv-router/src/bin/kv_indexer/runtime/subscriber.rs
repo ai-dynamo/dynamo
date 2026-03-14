@@ -10,12 +10,9 @@ use dynamo_runtime::{
     DistributedRuntime, discovery::EventTransportKind, transports::event_plane::EventSubscriber,
 };
 
-use dynamo_kv_router::protocols::RouterEvent;
+use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 
 use dynamo_kv_router::standalone_indexer::registry::WorkerRegistry;
-
-/// The event subject that workers publish KV events on.
-const KV_EVENT_SUBJECT: &str = "kv-events";
 
 /// Spawn a background task that subscribes to KV events from the worker component
 /// via the event plane and applies them to the appropriate indexer in the registry.

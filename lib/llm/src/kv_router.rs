@@ -75,7 +75,7 @@ use std::collections::HashSet;
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv-events";
+pub use dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
 // for inter-router comms
