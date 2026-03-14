@@ -271,7 +271,6 @@ navigation:
 
   # ==================== Blog ====================
   - section: Blog
-    hidden: true
     path: blogs/index.mdx
     slug: blog
     contents:

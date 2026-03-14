@@ -24,7 +24,7 @@ Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to 
 
 | Deployment                 | Launch Script                                                                           |
 | -------------------------- | --------------------------------------------------------------------------------------- |
-| Aggregated                 | [`agg_kvbm.sh`](../../../examples/backends/vllm/launch/agg_kvbm.sh)                     |
+| Aggregated                 | [`agg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm.sh)                     |
 | Aggregated + KV routing    | [`agg_kvbm_router.sh`](../../../examples/backends/vllm/launch/agg_kvbm_router.sh)       |
 | Disaggregated (1P1D)       | [`disagg_kvbm.sh`](../../../examples/backends/vllm/launch/disagg_kvbm.sh)               |
 | Disaggregated (2P2D)       | [`disagg_kvbm_2p2d.sh`](../../../examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)     |
