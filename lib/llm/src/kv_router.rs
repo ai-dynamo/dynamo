@@ -167,8 +167,7 @@ impl Indexer {
                 model_name,
                 "Using remote KV indexer"
             );
-            let remote =
-                RemoteIndexer::new(component, indexer_component_name, model_name).await?;
+            let remote = RemoteIndexer::new(component, indexer_component_name, model_name).await?;
             return Ok(Indexer::Remote(Arc::new(remote)));
         }
 
@@ -334,8 +333,7 @@ impl KvRouter {
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
-        let indexer =
-            Indexer::new(component, &kv_router_config, block_size, model_name).await?;
+        let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
 
         // Wait for at least one worker with a known runtime config before starting scheduler
         let _ = workers_with_configs
