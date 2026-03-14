@@ -143,7 +143,12 @@ impl ActiveSequence {
             None
         };
 
-        Some(MoveBlock::Use(blocks, hashes, token_ids))
+        let parent = if prev_blocks > 0 {
+            Some(self.unique_blocks[prev_blocks - 1].clone())
+        } else {
+            None
+        };
+        Some(MoveBlock::Use(blocks, hashes, token_ids, parent))
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
@@ -237,7 +242,7 @@ impl ActiveSequence {
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], None));
+        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], None, None));
         Some(signals)
     }
 

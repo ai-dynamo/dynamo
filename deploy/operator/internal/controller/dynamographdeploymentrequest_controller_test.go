@@ -25,6 +25,7 @@ import (
 	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
@@ -1422,6 +1423,18 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
+			mockGPU := &gpu.GPUInfo{
+				GPUsPerNode:   8,
+				VRAMPerGPU:    81920,
+				System:        "H100-SXM5-80GB",
+				NodesWithGPUs: 1,
+			}
+			cache := gpu.NewGPUDiscoveryCache()
+			cache.Set(mockGPU, 10*time.Minute)
+			reconciler.GPUDiscoveryCache = cache
+			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
+			reconciler.APIReader = k8sClient
+
 			// Reconcile - should succeed with GPU discovery
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
@@ -1535,6 +1548,18 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
+			mockGPU := &gpu.GPUInfo{
+				GPUsPerNode:   8,
+				VRAMPerGPU:    81920,
+				System:        "H100-SXM5-80GB",
+				NodesWithGPUs: 1,
+			}
+			cache := gpu.NewGPUDiscoveryCache()
+			cache.Set(mockGPU, 10*time.Minute)
+			reconciler.GPUDiscoveryCache = cache
+			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
+			reconciler.APIReader = k8sClient
+
 			// Reconcile - should succeed with GPU discovery
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
@@ -1647,6 +1672,17 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
+			mockGPU := &gpu.GPUInfo{
+				GPUsPerNode:   8,
+				VRAMPerGPU:    81920,
+				System:        "H100-SXM5-80GB",
+				NodesWithGPUs: 1,
+			}
+			cache := gpu.NewGPUDiscoveryCache()
+			cache.Set(mockGPU, 10*time.Minute)
+			reconciler.GPUDiscoveryCache = cache
+			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
+			reconciler.APIReader = k8sClient
 			// Reconcile - should pick H100 (8 GPUs > 4 GPUs)
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{

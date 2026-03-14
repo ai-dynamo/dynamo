@@ -9,6 +9,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(feature = "metrics")]
+use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
@@ -17,6 +19,8 @@ use super::registry::{IndexerKey, WorkerRegistry};
 
 pub struct AppState {
     pub registry: WorkerRegistry,
+    #[cfg(feature = "metrics")]
+    pub prom_registry: prometheus::Registry,
 }
 
 fn default_tenant() -> String {
@@ -363,6 +367,27 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!(result)))
 }
 
+async fn handle_health() -> StatusCode {
+    StatusCode::OK
+}
+
+#[cfg(feature = "metrics")]
+async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let encoder = prometheus::TextEncoder::new();
+    let mut buf = Vec::new();
+    encoder
+        .encode(&state.prom_registry.gather(), &mut buf)
+        .unwrap();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            prometheus::TEXT_FORMAT.to_string(),
+        )],
+        buf,
+    )
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/register", post(register))
@@ -373,12 +398,27 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/dump", get(dump_events))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
-        .route("/peers", get(list_peers));
+        .route("/peers", get(list_peers))
+        .route("/health", get(handle_health));
 
     #[cfg(feature = "test-endpoints")]
     let router = router
         .route("/test/pause_listener", post(test_pause_listener))
         .route("/test/resume_listener", post(test_resume_listener));
 
-    router.with_state(state)
+    let router = router.with_state(state.clone());
+
+    #[cfg(feature = "metrics")]
+    let router = {
+        let metrics_route = Router::new()
+            .route("/metrics", get(handle_metrics))
+            .with_state(state);
+        router
+            .layer(axum::middleware::from_fn(
+                super::metrics::metrics_middleware,
+            ))
+            .merge(metrics_route)
+    };
+
+    router
 }

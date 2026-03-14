@@ -265,6 +265,7 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
+            context_length=0,
             extra_engine_args=str(worker_engine_args_path),
             runtime_config=runtime_config,
             kv_cache_block_size=kv_cache_block_size,
