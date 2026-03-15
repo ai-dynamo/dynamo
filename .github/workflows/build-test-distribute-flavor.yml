@@ -160,6 +160,7 @@ jobs:
     if: inputs.build_image
     name: Build cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-builder-v3
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.build.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.build.outputs.test_tag_plain }}

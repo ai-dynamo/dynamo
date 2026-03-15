@@ -190,7 +190,6 @@ runs:
             --output-short-filename
     - name: Build and Push Image
       id: build-image
-      timeout-minutes: ${{ fromJSON(inputs.build_timeout_minutes) }}
       uses: ./.github/actions/docker-remote-build
       with:
         image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}

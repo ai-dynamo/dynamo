@@ -80,6 +80,7 @@ jobs:
   build:
     name: Build cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
     runs-on: prod-builder-v3
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
