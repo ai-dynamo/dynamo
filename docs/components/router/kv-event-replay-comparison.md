@@ -105,6 +105,6 @@ For deployments using Dynamo's KV-aware routing, the local indexer is used autom
 
 ## See Also
 
-- **[KV Router Index Data Structures](../../../lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals
+- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals
 - **[Router Guide](router-guide.md)**: Configuration, deployment, and tuning for KV-aware routing
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes

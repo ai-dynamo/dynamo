@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Display,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -17,7 +17,7 @@ use axum::{
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
-        sse::{KeepAlive, Sse},
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
 };
@@ -940,6 +940,104 @@ pub(super) async fn check_for_backend_error(
     }
 }
 
+/// Serialize `payload` and wrap it as an SSE event with the given name.
+fn make_dispatch_event(
+    event_name: &str,
+    payload: &impl serde::Serialize,
+) -> Option<Result<Event, axum::Error>> {
+    match serde_json::to_string(payload) {
+        Ok(json) => Some(Ok(Event::default().event(event_name).data(json))),
+        Err(e) => {
+            tracing::warn!("streaming_{event_name}: failed to serialize: {e}");
+            None
+        }
+    }
+}
+
+/// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
+/// streaming response chunk, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
+///
+/// Dynamo backends emit each tool call as a single complete chunk (id + name + arguments
+/// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
+/// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
+/// for correct disambiguation when `n > 1`.
+fn streaming_tool_dispatch_events(
+    response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    dispatched_ids: &mut HashSet<String>,
+) -> Vec<Result<Event, axum::Error>> {
+    let Some(data) = &response.data else {
+        return vec![];
+    };
+
+    let mut events = vec![];
+    for choice in &data.choices {
+        let Some(tool_calls) = &choice.delta.tool_calls else {
+            continue;
+        };
+        for chunk in tool_calls {
+            // Only dispatch when the tool call is fully formed (id + name + arguments)
+            let has_name_and_args = chunk
+                .function
+                .as_ref()
+                .is_some_and(|f| f.name.is_some() && f.arguments.is_some());
+
+            if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
+                // Skip already-dispatched tool calls (dedup guard, matches
+                // the stopped/done flags in Anthropic/Responses converters).
+                if !dispatched_ids.insert(id.clone()) {
+                    continue;
+                }
+                let payload = serde_json::json!({
+                    "choice_index": choice.index,
+                    "tool_call": chunk,
+                });
+                events.extend(make_dispatch_event("tool_call_dispatch", &payload));
+            }
+        }
+    }
+    events
+}
+
+/// Accumulates reasoning tokens and emits a single `event: reasoning_dispatch` SSE event
+/// when the complete reasoning block has been decoded (i.e. when `reasoning_content`
+/// transitions from `Some(token)` to `None`), matching the UX of `tool_call_dispatch`.
+///
+/// The buffer is maintained across chunks by the caller (captured in the flat_map closure).
+/// Flushing also occurs when `finish_reason` is set, to handle max_tokens during reasoning.
+fn accumulate_reasoning_dispatch(
+    response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    buffers: &mut HashMap<u32, String>,
+) -> Vec<Result<Event, axum::Error>> {
+    let Some(data) = &response.data else {
+        return vec![];
+    };
+
+    let mut events = vec![];
+    for choice in &data.choices {
+        let buffer = buffers.entry(choice.index).or_default();
+        let has_reasoning = choice
+            .delta
+            .reasoning_content
+            .as_ref()
+            .is_some_and(|r| !r.is_empty());
+
+        if has_reasoning {
+            buffer.push_str(choice.delta.reasoning_content.as_ref().unwrap());
+        }
+
+        // Emit when reasoning transitions to None OR when the stream ends (finish_reason).
+        if !buffer.is_empty() && (!has_reasoning || choice.finish_reason.is_some()) {
+            let payload = serde_json::json!({
+                "index": choice.index,
+                "reasoning_content": buffer.as_str(),
+            });
+            events.extend(make_dispatch_event("reasoning_dispatch", &payload));
+            buffer.clear();
+        }
+    }
+    events
+}
+
 /// OpenAI Chat Completions Request Handler
 ///
 /// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
@@ -1073,21 +1171,47 @@ async fn chat_completions(
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream
-            .map(move |response| {
-                // Calls observe_response() on each token
-                // EventConverter will detect `event: "error"` and convert to SSE error events
-                process_response_using_event_converter_and_observe_metrics(
-                    EventConverter::from(response),
-                    &mut response_collector,
-                    &mut http_queue_guard,
-                )
-            })
-            .filter_map(|result| {
-                use futures::future;
-                // Transpose Result<Option<T>> -> Option<Result<T>>
-                future::ready(result.transpose())
-            });
+        let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
+        let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
+        let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
+        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+
+        // flat_map lets us optionally prepend extra SSE events before each regular chunk:
+        //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
+        //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
+        // When both flags are off the flat_map is equivalent to the original map + filter_map.
+        let stream = stream.flat_map(move |response| {
+            // Extract side-channel events before the response is consumed by EventConverter.
+            let mut events: Vec<Result<Event, axum::Error>> = vec![];
+            if tool_dispatch_enabled {
+                events.extend(streaming_tool_dispatch_events(
+                    &response,
+                    &mut dispatched_tool_ids,
+                ));
+            }
+            if reasoning_dispatch_enabled {
+                events.extend(accumulate_reasoning_dispatch(
+                    &response,
+                    &mut reasoning_buffer,
+                ));
+            }
+
+            // Convert to SSE event (this consumes the response).
+            // EventConverter will detect `event: "error"` and convert to SSE error events.
+            let sse_result = process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+
+            // Side-channel events come first, then the regular data event.
+            match sse_result {
+                Ok(Some(ev)) => events.push(Ok(ev)),
+                Ok(None) => {}
+                Err(e) => events.push(Err(e)),
+            }
+            stream::iter(events)
+        });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
@@ -2890,5 +3014,703 @@ mod tests {
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
         );
+    }
+
+    // ── streaming dispatch tests ──────────────────────────────────────
+
+    use std::collections::{HashMap, HashSet};
+
+    use dynamo_async_openai::types::{
+        ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
+        FunctionCallStream,
+    };
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    /// Extract the JSON data payload from an SSE Event's Debug output.
+    ///
+    /// `axum::response::sse::Event` doesn't expose its fields publicly and doesn't
+    /// implement `Display` (the wire format is only produced during response
+    /// serialization). The `Debug` representation includes the event name and data
+    /// string, so we parse it here.
+    ///
+    /// WARNING: Coupled to axum's internal Debug format for `Event`. If an axum
+    /// upgrade changes the Debug output, these tests will break. Preferred over
+    /// spinning up an actual SSE stream for unit test simplicity.
+    fn extract_sse_data_json(event: &axum::response::sse::Event) -> serde_json::Value {
+        // The Event Debug format is:
+        //   Event { buffer: b"event: <name>\ndata: <json>\n", flags: ... }
+        // We extract the JSON after "data: " and unescape the byte-string encoding.
+        let debug = format!("{:?}", event);
+
+        let data_marker = "data: ";
+        let after_data = debug
+            .find(data_marker)
+            .map(|p| p + data_marker.len())
+            .expect("no 'data: ' in Event debug output");
+
+        let rest = &debug[after_data..];
+        let json_start = rest.find('{').expect("no JSON object after data:");
+
+        let mut depth = 0i32;
+        let mut json_end = 0;
+        for (i, b) in rest[json_start..].bytes().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        json_end = json_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let raw = &rest[json_start..json_end];
+
+        // Unescape byte-string Debug format:
+        // \\\\\" -> PLACEHOLDER (nested escaped quotes in JSON string values)
+        // \\\"   -> "           (structural quotes)
+        // Then restore: PLACEHOLDER -> \"
+        let s = raw
+            .replace("\\\\\\\"", "\x00NESTED\x00")
+            .replace("\\\"", "\"")
+            .replace("\x00NESTED\x00", "\\\"");
+
+        // Handle \\xHH byte sequences (non-ASCII in Debug byte-string format)
+        let mut result = Vec::new();
+        let sbytes = s.as_bytes();
+        let mut idx = 0;
+        while idx < sbytes.len() {
+            if idx + 3 < sbytes.len()
+                && sbytes[idx] == b'\\'
+                && sbytes[idx + 1] == b'x'
+                && let Ok(v) = u8::from_str_radix(
+                    std::str::from_utf8(&sbytes[idx + 2..idx + 4]).unwrap_or(""),
+                    16,
+                )
+            {
+                result.push(v);
+                idx += 4;
+                continue;
+            }
+            result.push(sbytes[idx]);
+            idx += 1;
+        }
+
+        let final_str = String::from_utf8_lossy(&result);
+        serde_json::from_str(&final_str).unwrap_or_else(|e| {
+            panic!(
+                "failed to parse JSON from Event: {e}\nraw: {raw}\nunescaped: {s}\nfinal: {final_str}"
+            )
+        })
+    }
+
+    /// Assert that an SSE Event has the expected event type name.
+    /// Uses "event: <name>\n" pattern to avoid substring false-matches.
+    fn assert_event_type(event: &axum::response::sse::Event, expected: &str) {
+        let debug = format!("{:?}", event);
+        let pattern = format!("event: {expected}\\n");
+        assert!(
+            debug.contains(&pattern),
+            "expected event type '{expected}' not found in: {debug}"
+        );
+    }
+
+    /// Build a minimal Annotated<Response> with the given choices.
+    fn make_stream_response(
+        choices: Vec<ChatChoiceStream>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let response = CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+            nvext: None,
+        };
+        Annotated {
+            id: Some("test-id".to_string()),
+            data: Some(response),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    fn make_choice_with_reasoning(
+        index: u32,
+        reasoning: Option<&str>,
+        finish: Option<FinishReason>,
+    ) -> ChatChoiceStream {
+        #[allow(deprecated)]
+        ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: None,
+                role: None,
+                refusal: None,
+                reasoning_content: reasoning.map(|s| s.to_string()),
+            },
+            finish_reason: finish,
+            stop_reason: None,
+            logprobs: None,
+        }
+    }
+
+    fn make_choice_with_tool_call(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ChatChoiceStream {
+        let tool_call = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: id.map(|s| s.to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: name.map(|s| s.to_string()),
+                arguments: arguments.map(|s| s.to_string()),
+            }),
+        };
+        #[allow(deprecated)]
+        ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![tool_call]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        }
+    }
+
+    // ── streaming_tool_dispatch_events tests ──
+
+    #[test]
+    fn test_tool_dispatch_emits_event_for_complete_tool_call() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_123"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 1);
+
+        let event = events[0].as_ref().unwrap();
+        assert_event_type(event, "tool_call_dispatch");
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["choice_index"], 0);
+        assert_eq!(json["tool_call"]["id"], "call_123");
+        assert_eq!(json["tool_call"]["function"]["name"], "get_weather");
+        assert_eq!(
+            json["tool_call"]["function"]["arguments"],
+            r#"{"city":"Paris"}"#
+        );
+    }
+
+    #[test]
+    fn test_tool_dispatch_skips_incomplete_tool_call_no_id() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            None, // no id
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "should not dispatch without id");
+    }
+
+    #[test]
+    fn test_tool_dispatch_skips_incomplete_tool_call_no_name() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_123"),
+            None, // no name
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "should not dispatch without name");
+    }
+
+    #[test]
+    fn test_tool_dispatch_skips_incomplete_tool_call_no_arguments() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_123"),
+            Some("get_weather"),
+            None, // no arguments
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "should not dispatch without arguments");
+    }
+
+    #[test]
+    fn test_tool_dispatch_multiple_tool_calls() {
+        let tc1 = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_1".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+            }),
+        };
+        let tc2 = ChatCompletionMessageToolCallChunk {
+            index: 1,
+            id: Some("call_2".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_time".to_string()),
+                arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
+            }),
+        };
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![tc1, tc2]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 2, "should dispatch both tool calls");
+
+        // Verify each dispatched event has the correct tool call data
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["tool_call"]["id"], "call_1");
+        assert_eq!(json0["tool_call"]["function"]["name"], "get_weather");
+
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["tool_call"]["id"], "call_2");
+        assert_eq!(json1["tool_call"]["function"]["name"], "get_time");
+    }
+
+    #[test]
+    fn test_tool_dispatch_no_data() {
+        let response: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            id: Some("test".to_string()),
+            data: None,
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_tool_dispatch_empty_choices() {
+        let response = make_stream_response(vec![]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_tool_dispatch_mixed_complete_and_incomplete() {
+        // One complete tool call and one incomplete (missing arguments = streaming delta).
+        // Only the complete one should dispatch.
+        let complete = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_complete".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+            }),
+        };
+        let incomplete = ChatCompletionMessageToolCallChunk {
+            index: 1,
+            id: Some("call_partial".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("search".to_string()),
+                arguments: None, // still streaming
+            }),
+        };
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![complete, incomplete]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(
+            events.len(),
+            1,
+            "only the complete tool call should dispatch"
+        );
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["tool_call"]["id"], "call_complete");
+    }
+
+    #[test]
+    fn test_tool_dispatch_function_none() {
+        // Tool call chunk with function: None — should not dispatch and should not panic.
+        let tool_call = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_999".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: None,
+        };
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![tool_call]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "function: None should not dispatch");
+    }
+
+    #[test]
+    fn test_tool_dispatch_empty_arguments_still_dispatches() {
+        // arguments: Some("") is considered complete — intentional.
+        // Some backends emit empty-string arguments for parameterless tools.
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_empty"),
+            Some("no_params_tool"),
+            Some(""),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 1, "empty arguments should still dispatch");
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["tool_call"]["id"], "call_empty");
+        assert_eq!(json["tool_call"]["function"]["name"], "no_params_tool");
+        assert_eq!(json["tool_call"]["function"]["arguments"], "");
+    }
+
+    #[test]
+    fn test_tool_dispatch_n_greater_than_1_includes_choice_index() {
+        // Regression test: with n > 1, each choice should carry its own choice_index
+        // so clients can disambiguate which choice the tool call belongs to.
+        let choice_0 = make_choice_with_tool_call(
+            0,
+            Some("call_a"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        );
+        let choice_1 = make_choice_with_tool_call(
+            1,
+            Some("call_b"),
+            Some("get_time"),
+            Some(r#"{"tz":"UTC"}"#),
+        );
+
+        let response = make_stream_response(vec![choice_0, choice_1]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 2, "should dispatch from both choices");
+
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["choice_index"], 0);
+        assert_eq!(json0["tool_call"]["id"], "call_a");
+
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["choice_index"], 1);
+        assert_eq!(json1["tool_call"]["id"], "call_b");
+    }
+
+    #[test]
+    fn test_tool_dispatch_dedup_skips_already_dispatched_id() {
+        // Simulate a backend that sends the same complete tool call in two consecutive chunks.
+        // The HashSet should prevent the second dispatch.
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_dup"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let mut dispatched = HashSet::new();
+
+        // First call — should dispatch
+        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        assert_eq!(events.len(), 1);
+
+        // Second call with same response — should be deduped
+        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        assert!(events.is_empty(), "duplicate id should not dispatch twice");
+    }
+
+    // ── accumulate_reasoning_dispatch tests ──
+
+    #[test]
+    fn test_reasoning_dispatch_accumulates_and_emits_once() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk 1: reasoning token "Let me"
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(0, Some("Let me"), None)]);
+        let events = accumulate_reasoning_dispatch(&r1, &mut buffers);
+        assert!(
+            events.is_empty(),
+            "should not emit yet — still accumulating"
+        );
+        assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Let me"));
+
+        // Chunk 2: reasoning token " think"
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(0, Some(" think"), None)]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert!(
+            events.is_empty(),
+            "should not emit yet — still accumulating"
+        );
+        assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Let me think"));
+
+        // Chunk 3: reasoning ends (None), meaning normal content follows
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        assert_eq!(events.len(), 1, "should emit single reasoning_dispatch");
+
+        let event = events[0].as_ref().unwrap();
+        assert_event_type(event, "reasoning_dispatch");
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["reasoning_content"], "Let me think");
+        assert_eq!(json["index"], 0);
+
+        // Buffer for choice 0 should be cleared (removed or empty)
+        assert!(
+            buffers.get(&0).is_none_or(|s| s.is_empty()),
+            "buffer should be cleared after emit"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_flushes_on_finish_reason() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk 1: reasoning token
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("Thinking..."),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        // Chunk 2: finish_reason=length while still in reasoning (max_tokens hit)
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some(" more"),
+            Some(FinishReason::Length),
+        )]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1, "should flush on finish_reason");
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Thinking... more");
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_flushes_on_stop() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk 1: reasoning token
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("Analysis complete"),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        // Chunk 2: finish_reason=stop while still in reasoning
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("."),
+            Some(FinishReason::Stop),
+        )]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1, "should flush on FinishReason::Stop");
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Analysis complete.");
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_no_reasoning_no_event() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk with no reasoning content at all
+        let r = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r, &mut buffers);
+        assert!(events.is_empty(), "no reasoning content = no event");
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_empty_string_not_accumulated() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk with empty string reasoning (treated as no-reasoning)
+        let r = make_stream_response(vec![make_choice_with_reasoning(0, Some(""), None)]);
+        let events = accumulate_reasoning_dispatch(&r, &mut buffers);
+        assert!(events.is_empty());
+        assert!(
+            buffers.get(&0).is_none_or(|s| s.is_empty()),
+            "empty string should not accumulate"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_no_data() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+        let response: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            id: Some("test".to_string()),
+            data: None,
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let events = accumulate_reasoning_dispatch(&response, &mut buffers);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_empty_choices() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+        let response = make_stream_response(vec![]);
+        let events = accumulate_reasoning_dispatch(&response, &mut buffers);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_multi_choice_independent_buffers() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Both choices emit reasoning in same chunk
+        let r1 = make_stream_response(vec![
+            make_choice_with_reasoning(0, Some("Thinking A"), None),
+            make_choice_with_reasoning(1, Some("Thinking B"), None),
+        ]);
+        let events = accumulate_reasoning_dispatch(&r1, &mut buffers);
+        assert!(events.is_empty(), "both still accumulating");
+        assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Thinking A"));
+        assert_eq!(buffers.get(&1).map(|s| s.as_str()), Some("Thinking B"));
+
+        // Choice 0 stops reasoning, choice 1 continues
+        let r2 = make_stream_response(vec![
+            make_choice_with_reasoning(0, None, None),
+            make_choice_with_reasoning(1, Some(" more"), None),
+        ]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1, "only choice 0 should emit");
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Thinking A");
+        assert_eq!(json["index"], 0);
+
+        // Choice 1 stops reasoning
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(1, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        assert_eq!(events.len(), 1, "choice 1 should emit");
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Thinking B more");
+        assert_eq!(json["index"], 1);
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_multiple_blocks() {
+        // Reasoning -> emit -> more reasoning -> emit again.
+        // Verifies that after the buffer is cleared, a new reasoning block
+        // accumulates independently.
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // First reasoning block
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(0, Some("First"), None)]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1);
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "First");
+
+        // Second reasoning block — buffer was cleared, should accumulate fresh
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(0, Some("Second"), None)]);
+        accumulate_reasoning_dispatch(&r3, &mut buffers);
+
+        let r4 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r4, &mut buffers);
+        assert_eq!(events.len(), 1);
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(
+            json["reasoning_content"], "Second",
+            "second emit should only contain second block's content"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_unicode() {
+        // Verify that CJK characters and emoji survive the JSON roundtrip.
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("让我想想 🤔"),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some(" 分析完成 ✅"),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r2, &mut buffers);
+
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        assert_eq!(events.len(), 1);
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "让我想想 🤔 分析完成 ✅");
     }
 }

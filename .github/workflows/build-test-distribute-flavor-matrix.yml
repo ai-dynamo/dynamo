@@ -150,7 +150,9 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platforms) }}
         cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-    name: ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
+    # This name weirdly shows in the checks overview, but not once you dive into
+    # a specific workflow. Keeping it as a short placeholder
+    name: matrix
     uses: ./.github/workflows/build-test-distribute-flavor.yml
     with:
       framework: ${{ inputs.framework }}

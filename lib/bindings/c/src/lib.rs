@@ -562,6 +562,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         cfg.router_track_output_blocks = v;
     }
+    if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
+        cfg.router_queue_threshold = Some(v);
+    }
 
     tracing::info!(
         overlap_score_weight = cfg.overlap_score_weight,
@@ -570,6 +573,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_replica_sync = cfg.router_replica_sync,
         router_track_active_blocks = cfg.router_track_active_blocks,
         router_track_output_blocks = cfg.router_track_output_blocks,
+        router_queue_threshold = ?cfg.router_queue_threshold,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 
@@ -683,8 +687,9 @@ pub unsafe extern "C" fn create_routers(
             .kv_chooser_for(
                 &endpoint,
                 block_size,
-                Some(kv_router_config),
+                Some(kv_router_config.clone()),
                 WORKER_TYPE_DECODE,
+                Some(model_name.clone()),
             )
             .await
         {
@@ -713,10 +718,7 @@ pub unsafe extern "C" fn create_routers(
                 "Waiting for decode workers to register ModelRuntimeConfig \
                  (no timeout - controlled by K8s StartupProbe)..."
             );
-            let wait_result = config_watch
-                .wait_for(|m| !m.is_empty())
-                .await
-                .map(|_| ());
+            let wait_result = config_watch.wait_for(|m| !m.is_empty()).await.map(|_| ());
             match wait_result {
                 Ok(()) => {
                     let count = config_watch.borrow().len();
@@ -1393,7 +1395,12 @@ async fn fetch_preprocessor_from_discovery(
 
     // Create preprocessor
     let preprocessor = OpenAIPreprocessor::new(card)?;
-    Ok((preprocessor, kv_cache_block_size, model_name, actual_namespace))
+    Ok((
+        preprocessor,
+        kv_cache_block_size,
+        model_name,
+        actual_namespace,
+    ))
 }
 
 /// Find a prefill endpoint from already-discovered instances (one-time filter).

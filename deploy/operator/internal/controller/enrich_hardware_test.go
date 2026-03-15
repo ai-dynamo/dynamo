@@ -74,8 +74,8 @@ func intStr(n int) string {
 func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
 	tests := []struct {
 		name           string
-		gfdProduct     string // raw GFD label value
-		expectedGPUSKU string // what the profiler needs
+		gfdProduct     string                      // raw GFD label value
+		expectedGPUSKU nvidiacomv1beta1.GPUSKUType // what the profiler needs
 	}{
 		{
 			name:           "B200 GFD label maps to AIC system identifier",
@@ -92,12 +92,23 @@ func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newFakeReconciler(gpuNode("gpu-node-1", tt.gfdProduct, 8, 141312))
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			vram := float64(141312)
+			gpus := int32(8)
 
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:         tt.expectedGPUSKU,
+						VRAMMB:         &vram,
+						NumGPUsPerNode: &gpus,
+					},
+				},
+			}
 			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+
 			require.NoError(t, err)
 			require.NotNil(t, dgdr.Spec.Hardware)
-			assert.Equal(t, tt.expectedGPUSKU, string(dgdr.Spec.Hardware.GPUSKU),
+			assert.Equal(t, string(tt.expectedGPUSKU), string(dgdr.Spec.Hardware.GPUSKU),
 				"GPUSKU should be the AIC system identifier, not the raw GFD product name %q", tt.gfdProduct)
 		})
 	}
@@ -107,7 +118,18 @@ func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
 // not in the AIC support matrix, the raw GFD product name is used as a fallback.
 func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T) {
 	r := newFakeReconciler(gpuNode("gpu-node-1", "Tesla-V100-SXM2-16GB", 8, 16384))
-	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+	vram := float64(16384)
+	gpus := int32(8)
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         "Tesla-V100-SXM2-16GB",
+				VRAMMB:         &vram,
+				NumGPUsPerNode: &gpus,
+			},
+		},
+	}
 
 	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 	require.NoError(t, err)

@@ -7,6 +7,8 @@ import logging
 
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
+from dynamo._core import FpmEventRelay as FpmEventRelay
+from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
@@ -32,6 +34,7 @@ from dynamo._core import lora_name_to_id as lora_name_to_id
 from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
 from dynamo._core import run_input
+from dynamo._core import run_kv_indexer as run_kv_indexer
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError

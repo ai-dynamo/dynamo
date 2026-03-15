@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tested with dynamo 1.0 (vLLM 0.16.0).
+#
+# Dynamo 0.9.1 compatibility notes:
+#   - Change image tags from :1.0.0 to :0.9.1
+#   - Add `--connector none` to args (required in 0.9.1, rejected in 1.0)
+#   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
+#     (nemotron_nano reasoning parser is broken in 0.9.1)
+#   - With deepseek_r1 parser, enable_thinking: false will not work correctly
+#
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-super-fp8-vllm-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          # Approximate KV-aware routing: uses prefix hashing to route
+          # requests to workers likely to have relevant KV cache, without
+          # requiring KV events from the backend.
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 120
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          env:
+            - name: HF_HOME
+              value: "/opt/models"
+            # Workaround for vllm/vllm#35772: FlashInfer allreduce can hang during
+            # CUDA graph capture with TP>1. Fixed in vllm/vllm#35793 (default changed
+            # to trtllm). The 1.0 container ships vLLM 0.16.0, so set explicitly.
+            - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+              value: "trtllm"
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+            - --served-model-name
+            - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+            - --tensor-parallel-size
+            - "4"
+            - --trust-remote-code
+            # On Blackwell, vLLM defaults to FlashInfer, which has a stale NaN bug
+            # with hybrid Mamba models (vllm/vllm#35138). FlashInfer's multiply-by-zero
+            # masking doesn't clear NaN from stale Mamba fp32 blocks reused by attention
+            # layers, causing progressive accuracy degradation.
+            # On Hopper, the default (FLASH_ATTN) is safe and this can be omitted.
+            # On Blackwell, use FLASH_ATTN or TRITON_ATTN to avoid the bug:
+            #   --attention-backend FLASH_ATTN
+            # or:
+            #   --attention-backend TRITON_ATTN
+            # Workaround for vllm/vllm#34865: prefix caching with mamba_cache_mode="all"
+            # (the default for Nemotron-H) produces NaN logprobs and garbage tokens.
+            # Fixed in vLLM 0.17.0 (vllm/vllm#34874). Use "align" until then.
+            - --mamba-cache-mode
+            - align
+            # --connector none is no longer needed in 1.0 (default is no connector).
+            # In 0.9.1, you must add: --connector none
+            #
+            # --is-decode-worker also automatically disables KV event publishing,
+            # which pairs with --no-kv-events on the frontend for approximate routing.
+            - --is-decode-worker
+            - --dyn-tool-call-parser
+            - nemotron_nano
+            # nemotron_nano reasoning parser handles both enable_thinking: true and false.
+            # In 0.9.1, use deepseek_r1 instead (nemotron_nano reasoning parser is broken),
+            # but note that enable_thinking: false will not work with deepseek_r1.
+            - --dyn-reasoning-parser
+            - nemotron_nano

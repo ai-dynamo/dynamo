@@ -83,6 +83,7 @@ core:
   - 'container/templates/wheel_builder.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
+  - 'container/compliance/**'
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
@@ -102,6 +103,11 @@ operator:
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
   - 'docs/kubernetes/api-reference.md'
+  - 'deploy/helm/charts/platform/components/operator/crds/**'
+  - 'deploy/helm/charts/platform/values.yaml'
+  - 'deploy/helm/charts/platform/README.md'
+  - 'deploy/helm/charts/platform/README.md.gotmpl'
+  - 'deploy/helm/charts/platform/components/operator/values.yaml'
 
 deploy:
   - '!**/*.md'
@@ -154,6 +160,7 @@ frontend:
   - '*.toml'
   - '*.lock'
   - 'container/deps/*'
+  - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'

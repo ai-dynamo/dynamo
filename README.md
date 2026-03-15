@@ -50,7 +50,6 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 
 | | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) | [vLLM](docs/backends/vllm/README.md) |
 |---|:----:|:----------:|:--:|
-| **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
 | [**Disaggregated Serving**](docs/design-docs/disagg-serving.md) | ✅ | ✅ | ✅ |
 | [**KV-Aware Routing**](docs/components/router/README.md) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](docs/components/planner/planner-guide.md) | ✅ | ✅ | ✅ |
@@ -82,7 +81,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 | [**Kubernetes Deployment**](#kubernetes-deployment) | Production multi-node clusters | ~30 min | K8s cluster with GPUs |
 | [**Building from Source**](#building-from-source) | Contributors and development | ~15 min | Ubuntu, Rust, Python |
 
-Want to help shape the future of distributed LLM inference? See the **[Contributing Guide](CONTRIBUTING.md)**.
+Want to help shape the future of distributed LLM inference? See the **[Contribution Guide](docs/contribution-guide.md)**.
 
 # Local Quick Start
 
@@ -97,13 +96,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
 ```
 
 > **Tip:** To run frontend and worker in the same container, either run processes in background with `&` (see below), or open a second terminal and use `docker exec -it <container_id> bash`.

@@ -264,6 +264,16 @@ async def async_main():
     else:
         os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
 
+    if config.enable_streaming_tool_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_TOOL_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_TOOL_DISPATCH", None)
+
+    if config.enable_streaming_reasoning_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_REASONING_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
+
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None

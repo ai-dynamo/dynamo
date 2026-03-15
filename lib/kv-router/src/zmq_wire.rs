@@ -366,9 +366,14 @@ pub fn convert_event(
                         event_id,
                         "Self-referencing block detected: duplicate hash in store event; dropping"
                     );
+                    // Return an empty Removed instead of Cleared to avoid nuking
+                    // the worker's entire index state. An empty Removed is a no-op
+                    // in the radix tree (zero iterations, returns Ok(())).
                     return KvCacheEvent {
                         event_id,
-                        data: KvCacheEventData::Cleared,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: vec![],
+                        }),
                         dp_rank,
                     };
                 }

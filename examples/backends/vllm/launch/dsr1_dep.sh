@@ -4,6 +4,9 @@
 
 set -ex
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 NUM_NODES=""
 NODE_RANK=""
@@ -71,31 +74,26 @@ fi
 DATA_PARALLEL_SIZE=$((NUM_NODES * GPUS_PER_NODE))
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching DeepSeek-R1 Data Parallel (Multi-Node)"
-echo "=========================================="
-echo "Model:       $MODEL"
-if [ "$NODE_RANK" -eq 0 ]; then
-echo "Frontend:    http://localhost:$HTTP_PORT"
-fi
-echo "Number of nodes: $NUM_NODES"
-echo "Node rank:       $NODE_RANK"
-echo "GPUs per node:   $GPUS_PER_NODE"
-echo "Data parallel:   $DATA_PARALLEL_SIZE"
-echo "Master address:  $MASTER_ADDR"
-echo "Log directory:   $LOG_DIR"
-echo "=========================================="
+print_launch_banner --no-curl "Launching DeepSeek-R1 Data Parallel (Multi-Node)" "$MODEL" "$HTTP_PORT" \
+    "Number of nodes: $NUM_NODES" \
+    "Node rank:       $NODE_RANK" \
+    "GPUs per node:   $GPUS_PER_NODE" \
+    "Data parallel:   $DATA_PARALLEL_SIZE" \
+    "Master address:  $MASTER_ADDR" \
+    "Log directory:   $LOG_DIR"
 if [ "$NODE_RANK" -eq 0 ]; then
 echo ""
 echo "Example test command:"
 echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
+cat <<CURL_EOF
+  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "model": "${MODEL}",
+      "messages": [{"role": "user", "content": "${EXAMPLE_PROMPT}"}],
+      "max_tokens": 32
+    }'
+CURL_EOF
 echo ""
 echo "=========================================="
 fi
@@ -136,4 +134,5 @@ python3 -m dynamo.vllm \
 --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20080\",\"enable_kv_cache_events\":true}" 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_start_rank}.log &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

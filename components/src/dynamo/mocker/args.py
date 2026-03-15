@@ -109,6 +109,7 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
         "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
         "preemption_mode": getattr(args, "preemption_mode", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
+        "decode_speedup_ratio": getattr(args, "decode_speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
         "planner_profile_data": (
@@ -302,6 +303,14 @@ def parse_args() -> argparse.Namespace:
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
+        "--decode-speedup-ratio",
+        type=float,
+        default=None,
+        help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
+        "Models speculative decoding (e.g. Eagle) where decode throughput improves "
+        "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
+    )
+    parser.add_argument(
         "--data-parallel-size",
         type=int,
         dest="dp_size",
@@ -386,6 +395,15 @@ def parse_args() -> argparse.Namespace:
         "subscribes and forwards events to NATS. (default: None, disabled)",
     )
     parser.add_argument(
+        "--zmq-replay-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ ROUTER base ports for KV event replay. "
+        "One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. "
+        "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -453,6 +471,13 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
+    )
 
     args = parser.parse_args()
     validate_worker_type_args(args)
@@ -477,6 +502,17 @@ def parse_args() -> argparse.Namespace:
             raise ValueError(
                 f"--zmq-kv-events-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_kv_events_ports_list)}: {args.zmq_kv_events_ports_list}"
+            )
+
+    # Parse and validate zmq_replay_ports
+    args.zmq_replay_ports_list = parse_bootstrap_ports(args.zmq_replay_ports)
+    if args.zmq_replay_ports_list:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--zmq-replay-ports requires --zmq-kv-events-ports")
+        if len(args.zmq_replay_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
 
     # Set endpoint default based on worker type if not explicitly provided
