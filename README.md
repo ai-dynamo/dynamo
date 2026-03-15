@@ -50,7 +50,6 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 
 | | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) | [vLLM](docs/backends/vllm/README.md) |
 |---|:----:|:----------:|:--:|
-| **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
 | [**Disaggregated Serving**](docs/design-docs/disagg-serving.md) | ✅ | ✅ | ✅ |
 | [**KV-Aware Routing**](docs/components/router/README.md) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](docs/components/planner/planner-guide.md) | ✅ | ✅ | ✅ |

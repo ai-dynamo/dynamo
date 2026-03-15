@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for TCP graceful shutdown
+//! Integration tests for UDS graceful shutdown
 //!
 //! These tests verify the 3-phase shutdown behavior:
 //! 1. Gate: new Message frames are rejected with ShuttingDown
 //! 2. Drain: in-flight work completes, responses/events still flow
 //! 3. Teardown: listener and writer tasks exit
+
+#![cfg(unix)]
 
 mod common;
 
@@ -14,26 +16,37 @@ use bytes::Bytes;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use velo_transports::tcp::TcpFrameCodec;
+use velo_transports::uds::UdsTransport;
 use velo_transports::{MessageType, Transport};
 
 use common::TestTransportHandle;
 
-/// Helper: connect a raw TCP client to the transport's bind address and send a frame.
+/// Get the socket path from a UDS transport by parsing its WorkerAddress.
+fn get_socket_path(handle: &TestTransportHandle<UdsTransport>) -> std::path::PathBuf {
+    let addr = handle.transport.address();
+    let key = handle.transport.key();
+    let endpoint = addr.get_entry(&key).unwrap().unwrap();
+    let s = std::str::from_utf8(&endpoint).unwrap();
+    let s = s.strip_prefix("uds://").unwrap_or(s);
+    std::path::PathBuf::from(s)
+}
+
+/// Helper: connect a raw UDS client to the transport's socket and send a frame.
 async fn connect_and_send_frame(
-    addr: std::net::SocketAddr,
+    socket_path: &std::path::Path,
     msg_type: MessageType,
     header: &[u8],
     payload: &[u8],
-) -> tokio::net::TcpStream {
-    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+) -> tokio::net::UnixStream {
+    let mut stream = tokio::net::UnixStream::connect(socket_path).await.unwrap();
     TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
         .await
         .unwrap();
     stream
 }
 
-/// Helper: read one frame from a raw TCP stream.
-async fn read_one_frame(stream: &mut tokio::net::TcpStream) -> (MessageType, Bytes, Bytes) {
+/// Helper: read one frame from a raw UDS stream.
+async fn read_one_frame(stream: &mut tokio::net::UnixStream) -> (MessageType, Bytes, Bytes) {
     use futures::StreamExt;
     use tokio_util::codec::Framed;
 
@@ -41,23 +54,11 @@ async fn read_one_frame(stream: &mut tokio::net::TcpStream) -> (MessageType, Byt
     framed.next().await.unwrap().unwrap()
 }
 
-/// Get the bind address from a TcpTransport by parsing its WorkerAddress.
-fn get_bind_addr(
-    handle: &TestTransportHandle<velo_transports::tcp::TcpTransport>,
-) -> std::net::SocketAddr {
-    let addr = handle.transport.address();
-    let key = handle.transport.key();
-    let endpoint = addr.get_entry(&key).unwrap().unwrap();
-    let s = std::str::from_utf8(&endpoint).unwrap();
-    let s = s.strip_prefix("tcp://").unwrap_or(s);
-    s.parse().unwrap()
-}
-
-// --- Test 18: Drain rejects Message frames ---
+// --- Test: Drain rejects Message frames ---
 #[tokio::test]
-async fn test_tcp_drain_rejects_messages() {
-    let handle = TestTransportHandle::new_tcp().await.unwrap();
-    let addr = get_bind_addr(&handle);
+async fn test_uds_drain_rejects_messages() {
+    let handle = TestTransportHandle::new_uds().await.unwrap();
+    let socket_path = get_socket_path(&handle);
 
     // Begin drain
     handle.streams.shutdown_state.begin_drain();
@@ -66,8 +67,13 @@ async fn test_tcp_drain_rejects_messages() {
     sleep(Duration::from_millis(50)).await;
 
     // Connect and send a Message frame
-    let mut stream =
-        connect_and_send_frame(addr, MessageType::Message, b"req-header", b"req-payload").await;
+    let mut stream = connect_and_send_frame(
+        &socket_path,
+        MessageType::Message,
+        b"req-header",
+        b"req-payload",
+    )
+    .await;
 
     // Should get ShuttingDown back
     let (msg_type, header, payload) = read_one_frame(&mut stream).await;
@@ -78,18 +84,24 @@ async fn test_tcp_drain_rejects_messages() {
     handle.streams.shutdown_state.teardown_token().cancel();
 }
 
-// --- Test 19: Drain accepts Response frames ---
+// --- Test: Drain accepts Response frames ---
 #[tokio::test]
-async fn test_tcp_drain_accepts_responses() {
-    let handle = TestTransportHandle::new_tcp().await.unwrap();
-    let addr = get_bind_addr(&handle);
+async fn test_uds_drain_accepts_responses() {
+    let handle = TestTransportHandle::new_uds().await.unwrap();
+    let socket_path = get_socket_path(&handle);
 
     // Begin drain
     handle.streams.shutdown_state.begin_drain();
     sleep(Duration::from_millis(50)).await;
 
     // Connect and send a Response frame
-    connect_and_send_frame(addr, MessageType::Response, b"resp-header", b"resp-payload").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Response,
+        b"resp-header",
+        b"resp-payload",
+    )
+    .await;
 
     // Should arrive on the response stream
     let (header, payload) = timeout(
@@ -106,16 +118,22 @@ async fn test_tcp_drain_accepts_responses() {
     handle.streams.shutdown_state.teardown_token().cancel();
 }
 
-// --- Test 20: Drain accepts Event frames ---
+// --- Test: Drain accepts Event frames ---
 #[tokio::test]
-async fn test_tcp_drain_accepts_events() {
-    let handle = TestTransportHandle::new_tcp().await.unwrap();
-    let addr = get_bind_addr(&handle);
+async fn test_uds_drain_accepts_events() {
+    let handle = TestTransportHandle::new_uds().await.unwrap();
+    let socket_path = get_socket_path(&handle);
 
     handle.streams.shutdown_state.begin_drain();
     sleep(Duration::from_millis(50)).await;
 
-    connect_and_send_frame(addr, MessageType::Event, b"evt-header", b"evt-payload").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Event,
+        b"evt-header",
+        b"evt-payload",
+    )
+    .await;
 
     let (header, payload) = timeout(
         Duration::from_secs(2),
@@ -131,18 +149,24 @@ async fn test_tcp_drain_accepts_events() {
     handle.streams.shutdown_state.teardown_token().cancel();
 }
 
-// --- Test 21: New connection during drain still accepts responses ---
+// --- Test: New connection during drain still accepts responses ---
 #[tokio::test]
-async fn test_tcp_new_connection_during_drain() {
-    let handle = TestTransportHandle::new_tcp().await.unwrap();
-    let addr = get_bind_addr(&handle);
+async fn test_uds_new_connection_during_drain() {
+    let handle = TestTransportHandle::new_uds().await.unwrap();
+    let socket_path = get_socket_path(&handle);
 
     // Begin drain BEFORE connecting
     handle.streams.shutdown_state.begin_drain();
     sleep(Duration::from_millis(50)).await;
 
     // Establish a NEW connection after drain starts
-    connect_and_send_frame(addr, MessageType::Response, b"new-resp", b"new-payload").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Response,
+        b"new-resp",
+        b"new-payload",
+    )
+    .await;
 
     // Should arrive on the response stream
     let (header, payload) = timeout(
@@ -159,37 +183,20 @@ async fn test_tcp_new_connection_during_drain() {
     handle.streams.shutdown_state.teardown_token().cancel();
 }
 
-// --- Test 22: ShuttingDown frame roundtrip ---
-#[test]
-fn test_shutting_down_frame_roundtrip() {
-    use bytes::BytesMut;
-    use tokio_util::codec::Decoder;
-
-    let header = b"correlation-header";
-    let payload = b"";
-
-    // Encode ShuttingDown frame
-    let mut buf = Vec::new();
-    TcpFrameCodec::encode_frame_sync(&mut buf, MessageType::ShuttingDown, header, payload).unwrap();
-
-    // Decode it
-    let mut codec = TcpFrameCodec::new();
-    let mut bytes = BytesMut::from(&buf[..]);
-    let (msg_type, decoded_header, decoded_payload) = codec.decode(&mut bytes).unwrap().unwrap();
-
-    assert_eq!(msg_type, MessageType::ShuttingDown);
-    assert_eq!(&decoded_header[..], header);
-    assert_eq!(decoded_payload.len(), 0);
-}
-
-// --- Test 23: Full graceful shutdown lifecycle ---
+// --- Test: Full graceful shutdown lifecycle ---
 #[tokio::test]
-async fn test_tcp_graceful_shutdown_lifecycle() {
-    let handle = TestTransportHandle::new_tcp().await.unwrap();
-    let addr = get_bind_addr(&handle);
+async fn test_uds_graceful_shutdown_lifecycle() {
+    let handle = TestTransportHandle::new_uds().await.unwrap();
+    let socket_path = get_socket_path(&handle);
 
     // Verify normal operation: send a message, receive it
-    connect_and_send_frame(addr, MessageType::Message, b"normal-msg", b"normal-pay").await;
+    connect_and_send_frame(
+        &socket_path,
+        MessageType::Message,
+        b"normal-msg",
+        b"normal-pay",
+    )
+    .await;
     let (header, _payload) = timeout(
         Duration::from_secs(2),
         handle.streams.message_stream.recv_async(),
@@ -208,12 +215,13 @@ async fn test_tcp_graceful_shutdown_lifecycle() {
     sleep(Duration::from_millis(50)).await;
 
     // Verify new messages are rejected
-    let mut stream = connect_and_send_frame(addr, MessageType::Message, b"reject-me", b"").await;
+    let mut stream =
+        connect_and_send_frame(&socket_path, MessageType::Message, b"reject-me", b"").await;
     let (msg_type, _, _) = read_one_frame(&mut stream).await;
     assert_eq!(msg_type, MessageType::ShuttingDown);
 
     // Verify responses still flow
-    connect_and_send_frame(addr, MessageType::Response, b"still-ok", b"data").await;
+    connect_and_send_frame(&socket_path, MessageType::Response, b"still-ok", b"data").await;
     let (header, _) = timeout(
         Duration::from_secs(2),
         handle.streams.response_stream.recv_async(),
@@ -236,7 +244,7 @@ async fn test_tcp_graceful_shutdown_lifecycle() {
     sleep(Duration::from_millis(100)).await;
     assert!(!shutdown_handle.is_finished());
 
-    // Drop guard → drain completes → teardown fires
+    // Drop guard -> drain completes -> teardown fires
     drop(guard);
 
     timeout(Duration::from_secs(2), shutdown_handle)
@@ -253,10 +261,10 @@ async fn test_tcp_graceful_shutdown_lifecycle() {
     );
 }
 
-// --- Test 24: Shutdown timeout forces teardown ---
+// --- Test: Shutdown timeout forces teardown ---
 #[tokio::test]
-async fn test_tcp_shutdown_timeout_forces_teardown() {
-    let handle = TestTransportHandle::new_tcp().await.unwrap();
+async fn test_uds_shutdown_timeout_forces_teardown() {
+    let handle = TestTransportHandle::new_uds().await.unwrap();
 
     // Acquire guard and hold it
     let _guard = handle.streams.shutdown_state.acquire();
@@ -290,12 +298,12 @@ async fn test_tcp_shutdown_timeout_forces_teardown() {
     assert_eq!(handle.streams.shutdown_state.in_flight_count(), 1);
 }
 
-// --- Test 25: Outbound sends during drain ---
+// --- Test: Outbound sends during drain ---
 #[tokio::test]
-async fn test_outbound_sends_during_drain() {
+async fn test_uds_outbound_sends_during_drain() {
     // Create two transports and register them as peers
-    let handle_a = TestTransportHandle::new_tcp().await.unwrap();
-    let handle_b = TestTransportHandle::new_tcp().await.unwrap();
+    let handle_a = TestTransportHandle::new_uds().await.unwrap();
+    let handle_b = TestTransportHandle::new_uds().await.unwrap();
 
     handle_a.register_peer(&handle_b).unwrap();
     handle_b.register_peer(&handle_a).unwrap();
@@ -328,11 +336,11 @@ async fn test_outbound_sends_during_drain() {
     handle_b.streams.shutdown_state.teardown_token().cancel();
 }
 
-// --- Test 26: Connection writer exits on teardown ---
+// --- Test: Connection writer exits on teardown ---
 #[tokio::test]
-async fn test_connection_writer_exits_on_teardown() {
-    let handle_a = TestTransportHandle::new_tcp().await.unwrap();
-    let handle_b = TestTransportHandle::new_tcp().await.unwrap();
+async fn test_uds_connection_writer_exits_on_teardown() {
+    let handle_a = TestTransportHandle::new_uds().await.unwrap();
+    let handle_b = TestTransportHandle::new_uds().await.unwrap();
 
     handle_a.register_peer(&handle_b).unwrap();
 
