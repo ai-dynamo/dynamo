@@ -428,8 +428,8 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--dyn-tokenizer-backend",
-            env_var="DYN_TOKENIZER_BACKEND",
+            flag_name="--tokenizer",
+            env_var="DYN_TOKENIZER",
             default="default",
             dest="tokenizer_backend",
             help=(
