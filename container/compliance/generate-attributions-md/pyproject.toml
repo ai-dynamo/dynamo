@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [project]
@@ -7,7 +7,7 @@ version = "1.0.0"
 description = "Generate third-party attribution files for Dynamo"
 readme = "README.md"
 authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+    { name = "Dan Gil", email = "dagil@nvidia.com" },
 ]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
