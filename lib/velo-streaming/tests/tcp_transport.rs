@@ -11,7 +11,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use velo_streaming::{FrameTransport, StreamFrame, TcpFrameTransport};
+use futures::StreamExt;
+use velo_common::WorkerId;
+use velo_messenger::Messenger;
+use velo_streaming::{
+    AnchorManagerBuilder, FrameTransport, StreamAnchorHandle, StreamFrame, TcpFrameTransport,
+};
+use velo_transports::tcp::TcpTransportBuilder;
 
 // ---------------------------------------------------------------------------
 // Sentinel helpers (cached_* are pub(crate), so we serialize directly)
@@ -326,4 +332,169 @@ async fn test_velo_builder_tcp_transport() {
 
     // Create an anchor to verify the setup works end-to-end
     let _anchor = velo.create_anchor::<String>();
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for two-worker AM dispatch test
+// ---------------------------------------------------------------------------
+
+/// Create a TcpTransport bound to an OS-assigned port (for AM transport, not streaming).
+fn new_am_tcp_transport() -> Arc<velo_transports::tcp::TcpTransport> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    Arc::new(
+        TcpTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap(),
+    )
+}
+
+/// Set up two Messenger instances connected to each other over TCP loopback.
+async fn make_two_messengers() -> (Arc<Messenger>, Arc<Messenger>) {
+    let t1 = new_am_tcp_transport();
+    let t2 = new_am_tcp_transport();
+
+    let m1 = Messenger::new(vec![t1], None)
+        .await
+        .expect("create messenger 1");
+    let m2 = Messenger::new(vec![t2], None)
+        .await
+        .expect("create messenger 2");
+
+    let p1 = m1.peer_info();
+    let p2 = m2.peer_info();
+
+    // Register bidirectionally so each can reach the other.
+    m2.register_peer(p1).expect("register m1 on m2");
+    m1.register_peer(p2).expect("register m2 on m1");
+
+    // Wait for TCP connections to establish.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    (m1, m2)
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Full AM-dispatch TCP integration test (TCP-08 gap closure)
+// ---------------------------------------------------------------------------
+
+/// TCP-08 gap closure: Two-worker remote attach via full AM control-plane + TCP data transport.
+///
+/// This test validates the COMPLETE path that was missing from test_remote_attach:
+///   1. Worker A creates AnchorManager with TcpFrameTransport + "tcp" in transport_registry
+///   2. Worker A calls register_handlers to wire _anchor_attach/_anchor_finalize handlers
+///   3. Worker A creates an anchor, handle transferred as u128 to Worker B
+///   4. Worker B creates AnchorManager with TcpFrameTransport + "tcp" in transport_registry
+///   5. Worker B calls register_handlers (sets messenger_lock for attach_remote)
+///   6. Worker B calls attach_stream_anchor (remote path triggers):
+///      - sends _anchor_attach AM to Worker A
+///      - Worker A's handler calls manager.transport.bind() (TcpFrameTransport) -> tcp:// endpoint
+///      - Worker A's handler spawns reader_pump, returns tcp:// endpoint in AnchorAttachResponse
+///      - Worker B's attach_remote receives tcp:// endpoint
+///      - Worker B calls resolve_transport("tcp") -> TcpFrameTransport
+///      - Worker B calls TcpFrameTransport.connect(tcp://...) -> flume::Sender
+///   7. Worker B sends items + finalize via StreamSender
+///   8. Worker A's StreamAnchor yields all items then Finalized
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remote_attach_am_dispatch() {
+    let (messenger_a, messenger_b) = make_two_messengers().await;
+    let worker_id_a = messenger_a.instance_id().worker_id();
+    let worker_id_b = messenger_b.instance_id().worker_id();
+
+    // --- Worker A setup ---
+    // TcpFrameTransport is the DEFAULT transport (used by _anchor_attach handler's bind())
+    let tcp_a = Arc::new(TcpFrameTransport::new(std::net::Ipv4Addr::LOCALHOST.into()));
+    let mut registry_a = HashMap::new();
+    registry_a.insert("tcp".to_string(), tcp_a.clone() as Arc<dyn FrameTransport>);
+
+    let am_a: Arc<velo_streaming::AnchorManager> = Arc::new(
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id_a)
+            .transport(tcp_a as Arc<dyn FrameTransport>)
+            .transport_registry(Arc::new(registry_a))
+            .build()
+            .expect("AM worker A"),
+    );
+
+    // Register all 5 control-plane handlers on messenger_a
+    am_a.register_handlers(Arc::clone(&messenger_a))
+        .expect("register_handlers on worker A");
+
+    // Worker A: create anchor
+    let mut anchor_stream = am_a.create_anchor::<u32>();
+    let handle = anchor_stream.handle();
+
+    // Simulate cross-worker handle transfer (u128 round-trip)
+    let handle_raw: u128 = handle.as_u128();
+    let hi = (handle_raw >> 64) as u64;
+    let lo = handle_raw as u64;
+    let handle_transferred = StreamAnchorHandle::pack(WorkerId::from_u64(hi), lo);
+
+    // Verify transfer preserves worker_id
+    let (recovered_worker, _) = handle_transferred.unpack();
+    assert_eq!(recovered_worker, worker_id_a);
+
+    // --- Worker B setup ---
+    let tcp_b = Arc::new(TcpFrameTransport::new(std::net::Ipv4Addr::LOCALHOST.into()));
+    let mut registry_b = HashMap::new();
+    registry_b.insert("tcp".to_string(), tcp_b.clone() as Arc<dyn FrameTransport>);
+
+    let am_b: Arc<velo_streaming::AnchorManager> = Arc::new(
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id_b)
+            .transport(tcp_b as Arc<dyn FrameTransport>)
+            .transport_registry(Arc::new(registry_b))
+            .build()
+            .expect("AM worker B"),
+    );
+
+    // Register handlers on Worker B (sets messenger_lock so attach_remote can send _anchor_attach AM)
+    am_b.register_handlers(Arc::clone(&messenger_b))
+        .expect("register_handlers on worker B");
+
+    // --- Worker B: remote attach ---
+    // handle_transferred.worker_id == worker_id_a != worker_id_b -> triggers attach_remote
+    // attach_remote sends _anchor_attach AM to Worker A -> Worker A binds TcpFrameTransport
+    // -> returns tcp:// endpoint -> Worker B resolves "tcp" from registry -> connects
+    let sender = am_b
+        .attach_stream_anchor::<u32>(handle_transferred)
+        .await
+        .expect("remote attach via TCP must succeed");
+
+    // --- Worker B: send data ---
+    for i in 0u32..10 {
+        sender.send(i).await.expect("send item");
+    }
+
+    // TCP transport delivers items in order (dedicated connection, not AM dispatch),
+    // so no sleep barrier needed before finalize (unlike VeloFrameTransport which uses
+    // concurrent AM sends). However, add a small yield to let the pump task flush.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    sender.finalize().expect("finalize");
+
+    // --- Worker A: collect items ---
+    let mut items = Vec::new();
+    let collect = async {
+        while let Some(frame) = anchor_stream.next().await {
+            match frame.expect("no stream error") {
+                StreamFrame::Item(v) => items.push(v),
+                StreamFrame::Finalized => break,
+                other => panic!("unexpected frame: {:?}", other),
+            }
+        }
+        items
+    };
+
+    let items = tokio::time::timeout(Duration::from_secs(10), collect)
+        .await
+        .expect("timed out waiting for Worker A to receive all items");
+
+    // TCP transport preserves ordering (single connection, no concurrent dispatch)
+    assert_eq!(
+        items,
+        (0u32..10).collect::<Vec<_>>(),
+        "Worker A must receive all 10 items from Worker B in order via TCP"
+    );
 }
