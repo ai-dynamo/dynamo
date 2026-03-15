@@ -411,6 +411,23 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
+
+      # Copy CI-cached models into the shared work volume so the dind
+      # container (where dockerd runs) can serve them as bind mounts.
+      # The models PVC is only mounted in the runner container; the dind
+      # sidecar cannot see Kubernetes volume mounts directly.
+      - name: Stage CI models for dind
+        shell: bash
+        run: |
+          if [[ -d "/models/ci/models" ]]; then
+            echo "📦 Copying CI models to shared work volume for dind access"
+            cp -a /models/ci/models /home/runner/_work/.ci-models
+            echo "📂 Staged models:"
+            ls -la /home/runner/_work/.ci-models/
+          else
+            echo "ℹ️  No CI model cache found at /models/ci/models, skipping"
+          fi
+
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
@@ -493,6 +510,18 @@ jobs:
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
+      - name: Stage CI models for dind
+        shell: bash
+        run: |
+          if [[ -d "/models/ci/models" ]]; then
+            echo "📦 Copying CI models to shared work volume for dind access"
+            cp -a /models/ci/models /home/runner/_work/.ci-models
+            echo "📂 Staged models:"
+            ls -la /home/runner/_work/.ci-models/
+          else
+            echo "ℹ️  No CI model cache found at /models/ci/models, skipping"
+          fi
+
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
       - name: Run GPU tests (sequential)

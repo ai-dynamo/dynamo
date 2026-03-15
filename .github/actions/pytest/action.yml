@@ -152,16 +152,14 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models into the test container (read-only).
-        # The dind sidecar must also have the models PVC mounted for this
-        # bind mount to resolve correctly.
+        # Mount CI-cached models if staged into the shared work volume.
+        # The workflow copies models from the K8s PVC to /home/runner/_work/.ci-models
+        # which is visible to dind (shared emptyDir volume).
         CI_MODELS_FLAGS=()
-        if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected, mounting into container"
-          echo "📂 Runner /models/ci/models contents:"
-          ls -la /models/ci/models/ || true
-          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+        CI_MODELS_STAGED="/home/runner/_work/.ci-models"
+        if [[ -d "$CI_MODELS_STAGED" ]]; then
+          echo "📦 CI model cache detected at $CI_MODELS_STAGED, mounting into container"
+          CI_MODELS_FLAGS+=(-v "$CI_MODELS_STAGED:/models/ci/models:ro")
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
@@ -261,16 +259,14 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models into the test container (read-only).
-        # The dind sidecar must also have the models PVC mounted for this
-        # bind mount to resolve correctly.
+        # Mount CI-cached models if staged into the shared work volume.
+        # The workflow copies models from the K8s PVC to /home/runner/_work/.ci-models
+        # which is visible to dind (shared emptyDir volume).
         CI_MODELS_FLAGS=()
-        if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected, mounting into container"
-          echo "📂 Runner /models/ci/models contents:"
-          ls -la /models/ci/models/ || true
-          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+        CI_MODELS_STAGED="/home/runner/_work/.ci-models"
+        if [[ -d "$CI_MODELS_STAGED" ]]; then
+          echo "📦 CI model cache detected at $CI_MODELS_STAGED, mounting into container"
+          CI_MODELS_FLAGS+=(-v "$CI_MODELS_STAGED:/models/ci/models:ro")
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
