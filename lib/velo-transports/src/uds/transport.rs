@@ -848,8 +848,7 @@ mod tests {
     async fn test_double_bind_returns_err() {
         use crate::transport::make_channels;
 
-        let dir =
-            std::env::temp_dir().join(format!("uds-test-{}", crate::InstanceId::new_v4()));
+        let dir = std::env::temp_dir().join(format!("uds-test-{}", crate::InstanceId::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket_path = dir.join("double-bind.sock");
 
@@ -889,8 +888,7 @@ mod tests {
     async fn test_begin_drain_activates_draining_flag() {
         use crate::transport::make_channels;
 
-        let dir =
-            std::env::temp_dir().join(format!("uds-test-{}", crate::InstanceId::new_v4()));
+        let dir = std::env::temp_dir().join(format!("uds-test-{}", crate::InstanceId::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket_path = dir.join("drain-test.sock");
 
