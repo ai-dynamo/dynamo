@@ -45,7 +45,7 @@ make docker-push-placeholder \
   PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
 ```
 
-This flow is defined in [deploy/snapshot/Makefile](../../deploy/snapshot/Makefile) and [deploy/snapshot/Dockerfile](../../deploy/snapshot/Dockerfile). The placeholder image preserves the base runtime entrypoint and command contract, and adds the CRIU, `cuda-checkpoint`, and `nsrestore` tooling needed for restore.
+This flow is defined in [deploy/snapshot/Makefile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/Makefile) and [deploy/snapshot/Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/Dockerfile). The placeholder image preserves the base runtime entrypoint and command contract, and adds the CRIU, `cuda-checkpoint`, and `nsrestore` tooling needed for restore.
 
 ### 2. Enable checkpointing in the platform and verify it
 
@@ -75,7 +75,7 @@ kubectl get configmap "${OPERATOR_CONFIG}" -n "${PLATFORM_NAMESPACE}" \
 
 Verify that the rendered config includes `enabled: true` and the same PVC name and base path you plan to use for the snapshot chart.
 
-For the full platform/operator configuration surface, see [deploy/helm/charts/platform/README.md](../../deploy/helm/charts/platform/README.md) and [deploy/helm/charts/platform/components/operator/values.yaml](../../deploy/helm/charts/platform/components/operator/values.yaml).
+For the full platform/operator configuration surface, see [deploy/helm/charts/platform/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md) and [deploy/helm/charts/platform/components/operator/values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/components/operator/values.yaml).
 
 ### 3. Install the snapshot chart
 
@@ -97,11 +97,11 @@ kubectl get pvc snapshot-pvc -n ${NAMESPACE}
 kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
 ```
 
-For the full snapshot chart configuration surface, see [deploy/helm/charts/snapshot/README.md](../../deploy/helm/charts/snapshot/README.md) and [deploy/helm/charts/snapshot/values.yaml](../../deploy/helm/charts/snapshot/values.yaml).
+For the full snapshot chart configuration surface, see [deploy/helm/charts/snapshot/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/README.md) and [deploy/helm/charts/snapshot/values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/values.yaml).
 
 ### 4. Apply a snapshot-compatible `DynamoGraphDeployment`
 
-This example is adapted from [examples/backends/vllm/deploy/agg.yaml](../../examples/backends/vllm/deploy/agg.yaml). The worker must use the placeholder image from step 1, and the checkpoint identity must describe the runtime state you want to reuse.
+This example is adapted from [examples/backends/vllm/deploy/agg.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml). The worker must use the placeholder image from step 1, and the checkpoint identity must describe the runtime state you want to reuse.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -490,6 +490,6 @@ Or use `mode: Auto` with the same identity and snapshot-hash label, and the oper
 
 ## Related Documentation
 
-- [Dynamo Snapshot Helm Chart README](../../deploy/helm/charts/snapshot/README.md) - Chart configuration
+- [Dynamo Snapshot Helm Chart README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/README.md) - Chart configuration
 - [Installation Guide](installation-guide.md) - Platform installation
 - [API Reference](api-reference.md) - Complete CRD specifications
