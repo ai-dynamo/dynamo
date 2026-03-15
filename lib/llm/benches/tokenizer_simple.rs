@@ -144,15 +144,15 @@ pub fn tiktoken_decode(c: &mut Criterion) {
 //
 // By default these use the in-tree TinyLlama tokenizer. Override with a
 // production-size tokenizer for more realistic numbers:
-//   TOKENIZER_PATH=/path/to/tokenizer.json cargo bench -- fasttokens
-//   TOKENIZER_PATH=Qwen/Qwen3-0.6B        cargo bench -- fasttokens
+//   TOKENIZER_PATH=/path/to/tokenizer.json cargo bench -- fastokens
+//   TOKENIZER_PATH=Qwen/Qwen3-0.6B        cargo bench -- fastokens
 // ---------------------------------------------------------------------------
 
 /// Default HuggingFace model to download when TOKENIZER_PATH is not set.
 const DEFAULT_HF_MODEL: &str = "Qwen/Qwen3-0.6B";
 
 /// Resolve a tokenizer.json path from TOKENIZER_PATH env var or download from HF Hub.
-fn resolve_fasttokens_path() -> String {
+fn resolve_tokenizer_path() -> String {
     let input = std::env::var("TOKENIZER_PATH").ok();
 
     if let Some(ref p) = input
@@ -175,10 +175,10 @@ fn resolve_fasttokens_path() -> String {
         .to_string()
 }
 
-const FASTTOKENS_BATCH_SIZE: usize = 64;
+const FASTOKENS_BATCH_SIZE: usize = 64;
 
-pub fn fasttokens_encode(c: &mut Criterion) {
-    let tokenizer_path = resolve_fasttokens_path();
+pub fn fastokens_encode(c: &mut Criterion) {
+    let tokenizer_path = resolve_tokenizer_path();
     let test_str: &str = &INPUT_STR.repeat(TARGET_ISL / INPUT_STR.len());
 
     let hf_encoder = HuggingFaceTokenizer::from_file(&tokenizer_path).unwrap();
@@ -190,10 +190,10 @@ pub fn fasttokens_encode(c: &mut Criterion) {
     assert_eq!(
         hf_ids.token_ids(),
         fast_ids.token_ids(),
-        "fasttokens and HuggingFace must produce identical token IDs"
+        "fastokens and HuggingFace must produce identical token IDs"
     );
 
-    let mut group = c.benchmark_group("fasttokens-encode");
+    let mut group = c.benchmark_group("fastokens-encode");
     group.throughput(Throughput::Bytes(test_str.len() as u64));
 
     group.bench_function("hf_encode", |b| {
@@ -202,7 +202,7 @@ pub fn fasttokens_encode(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("fasttokens_encode", |b| {
+    group.bench_function("fastokens_encode", |b| {
         b.iter(|| {
             let _ = fast_encoder.encode(black_box(test_str)).unwrap();
         })
@@ -211,15 +211,15 @@ pub fn fasttokens_encode(c: &mut Criterion) {
     group.finish();
 }
 
-pub fn fasttokens_batch_encode(c: &mut Criterion) {
-    let tokenizer_path = resolve_fasttokens_path();
-    let batch: Vec<&str> = (0..FASTTOKENS_BATCH_SIZE).map(|_| INPUT_STR).collect();
+pub fn fastokens_batch_encode(c: &mut Criterion) {
+    let tokenizer_path = resolve_tokenizer_path();
+    let batch: Vec<&str> = (0..FASTOKENS_BATCH_SIZE).map(|_| INPUT_STR).collect();
     let total_bytes: u64 = batch.iter().map(|s| s.len() as u64).sum();
 
     let hf_encoder = HuggingFaceTokenizer::from_file(&tokenizer_path).unwrap();
     let fast_encoder = FastTokenizer::from_file(&tokenizer_path).unwrap();
 
-    let mut group = c.benchmark_group("fasttokens-batch-encode");
+    let mut group = c.benchmark_group("fastokens-batch-encode");
     group.throughput(Throughput::Bytes(total_bytes));
 
     group.bench_function("hf_batch_encode", |b| {
@@ -228,7 +228,7 @@ pub fn fasttokens_batch_encode(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("fasttokens_batch_encode", |b| {
+    group.bench_function("fastokens_batch_encode", |b| {
         b.iter(|| {
             let _ = fast_encoder.encode_batch(black_box(&batch)).unwrap();
         })
@@ -244,7 +244,7 @@ criterion_group!(
     decode_big,
     tiktoken_encode,
     tiktoken_decode,
-    fasttokens_encode,
-    fasttokens_batch_encode
+    fastokens_encode,
+    fastokens_batch_encode
 );
 criterion_main!(benches);

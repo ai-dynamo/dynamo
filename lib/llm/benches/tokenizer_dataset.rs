@@ -144,7 +144,7 @@ fn print_summary(
     println!("  Total tokens:       {total_tokens}");
     println!("  ---");
     println!("  HF total:           {hf_ms:>10.2} ms");
-    println!("  fasttokens total:   {ft_ms:>10.2} ms");
+    println!("  fastokens total:   {ft_ms:>10.2} ms");
     println!("  Speedup:            {speedup:>10.2}x");
     println!("  ---");
     println!("  HF avg/sample:      {:>10.3} ms", hf_ms / nf);
@@ -170,7 +170,7 @@ fn bench_sequential(samples: &[String], hf: &HuggingFaceTokenizer, fast: &FastTo
         let t0 = Instant::now();
         let hf_enc = hf.encode(text).expect("HF encode failed");
         let t1 = Instant::now();
-        let ft_enc = fast.encode(text).expect("fasttokens encode failed");
+        let ft_enc = fast.encode(text).expect("fastokens encode failed");
         let t2 = Instant::now();
 
         let dt_hf = t1 - t0;
@@ -238,7 +238,7 @@ fn bench_batched(
         let t1 = Instant::now();
         let ft_results = fast
             .encode_batch(&batch_refs)
-            .expect("fasttokens encode_batch failed");
+            .expect("fastokens encode_batch failed");
         let t2 = Instant::now();
 
         // Verify correctness per sample within the batch
@@ -303,7 +303,7 @@ fn main() {
     let hf = HuggingFaceTokenizer::from_file(&tokenizer_path)
         .expect("Failed to load HuggingFace tokenizer");
     let fast =
-        FastTokenizer::from_file(&tokenizer_path).expect("Failed to load fasttokens tokenizer");
+        FastTokenizer::from_file(&tokenizer_path).expect("Failed to load fastokens tokenizer");
 
     // Warmup
     if let Some(s) = samples.first() {
