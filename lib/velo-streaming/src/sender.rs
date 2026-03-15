@@ -20,7 +20,7 @@
 //! The heartbeat background task is cancelled in all three paths before the
 //! terminal sentinel is sent.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -33,6 +33,48 @@ use crate::handle::StreamAnchorHandle;
 
 /// Heartbeat interval: emits a [`StreamFrame::Heartbeat`] every 5 seconds.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------------
+// Cached sentinel bytes (OnceLock)
+// ---------------------------------------------------------------------------
+
+/// Cached serialized bytes for `StreamFrame::<()>::Heartbeat`.
+/// Avoids re-serializing on every 5-second heartbeat tick.
+pub(crate) fn cached_heartbeat() -> &'static Vec<u8> {
+    static HEARTBEAT: OnceLock<Vec<u8>> = OnceLock::new();
+    HEARTBEAT.get_or_init(|| {
+        rmp_serde::to_vec(&StreamFrame::<()>::Heartbeat)
+            .expect("Heartbeat serializes infallibly")
+    })
+}
+
+/// Cached serialized bytes for `StreamFrame::<()>::Dropped`.
+/// Used in Drop impl and reader_pump timeout path.
+pub(crate) fn cached_dropped() -> &'static Vec<u8> {
+    static DROPPED: OnceLock<Vec<u8>> = OnceLock::new();
+    DROPPED.get_or_init(|| {
+        rmp_serde::to_vec(&StreamFrame::<()>::Dropped)
+            .expect("Dropped serializes infallibly")
+    })
+}
+
+/// Cached serialized bytes for `StreamFrame::<()>::Finalized`.
+pub(crate) fn cached_finalized() -> &'static Vec<u8> {
+    static FINALIZED: OnceLock<Vec<u8>> = OnceLock::new();
+    FINALIZED.get_or_init(|| {
+        rmp_serde::to_vec(&StreamFrame::<()>::Finalized)
+            .expect("Finalized serializes infallibly")
+    })
+}
+
+/// Cached serialized bytes for `StreamFrame::<()>::Detached`.
+pub(crate) fn cached_detached() -> &'static Vec<u8> {
+    static DETACHED: OnceLock<Vec<u8>> = OnceLock::new();
+    DETACHED.get_or_init(|| {
+        rmp_serde::to_vec(&StreamFrame::<()>::Detached)
+            .expect("Detached serializes infallibly")
+    })
+}
 
 /// Typed sender for pushing frames through the streaming channel.
 ///
@@ -109,11 +151,8 @@ impl<T: Serialize> StreamSender<T> {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        // Serialize Heartbeat using StreamFrame::<()> — the phantom
-                        // type doesn't matter for sentinel-only variants since the
-                        // msgpack encoding is identical regardless of T.
-                        let bytes = rmp_serde::to_vec(&StreamFrame::<()>::Heartbeat)
-                            .expect("Heartbeat serializes infallibly");
+                        // Use cached heartbeat bytes — avoids rmp_serde::to_vec per tick.
+                        let bytes = cached_heartbeat().clone();
                         // Non-blocking try_send: if the channel is full we silently
                         // drop the heartbeat rather than stalling the sender.
                         let _ = tx_clone.try_send(bytes);
@@ -210,8 +249,7 @@ impl<T: Serialize> StreamSender<T> {
     /// - [`SendError::ChannelClosed`] if the receiver has already been dropped.
     pub fn finalize(mut self) -> Result<(), SendError> {
         self.heartbeat_cancel.cancel();
-        let bytes = rmp_serde::to_vec(&StreamFrame::<()>::Finalized)
-            .expect("Finalized serializes infallibly");
+        let bytes = cached_finalized().clone();
         self.sent_terminal = true;
         // Clean up sender registry entry before returning
         self.sender_registry.senders.remove(&self.sender_stream_id);
@@ -230,8 +268,7 @@ impl<T: Serialize> StreamSender<T> {
     /// - [`SendError::ChannelClosed`] if the receiver has already been dropped.
     pub fn detach(mut self) -> Result<StreamAnchorHandle, SendError> {
         self.heartbeat_cancel.cancel();
-        let bytes = rmp_serde::to_vec(&StreamFrame::<()>::Detached)
-            .expect("Detached serializes infallibly");
+        let bytes = cached_detached().clone();
         self.sent_terminal = true;
         self.tx.send(bytes).map_err(|_| SendError::ChannelClosed)?;
         // Atomically clear the attachment flag so a new sender can attach
@@ -257,8 +294,7 @@ impl<T> Drop for StreamSender<T> {
         self.sender_registry.senders.remove(&self.sender_stream_id);
         if !self.sent_terminal {
             self.heartbeat_cancel.cancel();
-            let bytes = rmp_serde::to_vec(&StreamFrame::<()>::Dropped)
-                .expect("Dropped serializes infallibly");
+            let bytes = cached_dropped().clone();
             // Synchronous send — no spawn, no block_on. Ignore errors (channel
             // may already be closed if the receiver was dropped first).
             let _ = self.tx.send(bytes);
