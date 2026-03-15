@@ -75,8 +75,8 @@ runs:
           --progress=plain \
           ${PUSH_ARGS} \
           ${NO_CACHE_ARG} \
-          --platform linux/${{ inputs.platform }} \
+          --platform "linux/${{ inputs.platform }}" \
           -f container/Dockerfile.test \
-          --build-arg BASE_IMAGE=${{ inputs.base_image }} \
+          --build-arg "BASE_IMAGE=${{ inputs.base_image }}" \
           ${CACHE_ARGS} \
-          -t ${{ inputs.image_tag }} .
+          -t "${{ inputs.image_tag }}" .

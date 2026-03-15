@@ -29,6 +29,10 @@ inputs:
     description: 'CUDA version used on re-init (e.g. 12.9, 13.0). Leave empty for general flavor.'
     required: false
     default: ''
+  all_arch:
+    description: 'If true, re-initialize builder for both amd64 and arm64 architectures'
+    required: false
+    default: 'false'
 
   # Kubernetes fallback passthrough inputs (forwarded to init-dynamo-builder)
   ephemeral_storage:
@@ -69,7 +73,7 @@ runs:
       shell: bash
       run: |
         echo "Checking BuildKit builder '${{ inputs.builder_name }}'..."
-        docker buildx inspect ${{ inputs.builder_name }} --bootstrap
+        docker buildx inspect "${{ inputs.builder_name }}" --bootstrap
         echo "Builder is healthy."
 
     - name: Remove stale builder (if unhealthy)
@@ -77,7 +81,7 @@ runs:
       shell: bash
       run: |
         echo "::warning::Builder '${{ inputs.builder_name }}' is unhealthy. Removing and re-initializing..."
-        docker buildx rm ${{ inputs.builder_name }} || true
+        docker buildx rm "${{ inputs.builder_name }}" || true
 
     - name: Re-initialize builder (if unhealthy)
       if: steps.check-health.outcome == 'failure'
@@ -86,6 +90,7 @@ runs:
         builder_name: ${{ inputs.builder_name }}
         flavor: ${{ inputs.flavor }}
         arch: ${{ inputs.arch }}
+        all_arch: ${{ inputs.all_arch }}
         cuda_version: ${{ inputs.cuda_version }}
         ephemeral_storage: ${{ inputs.ephemeral_storage }}
         namespace: ${{ inputs.namespace }}

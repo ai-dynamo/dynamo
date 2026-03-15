@@ -294,6 +294,7 @@ jobs:
           cuda_version: ${{ inputs.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
+        timeout-minutes: 15
         uses: ./.github/actions/docker-test-image-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
