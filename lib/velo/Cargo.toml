@@ -11,6 +11,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[features]
+grpc = ["velo-streaming/grpc"]
+
 [dependencies]
 velo-common = { workspace = true }
 velo-discovery = { workspace = true }

@@ -62,6 +62,25 @@ impl TcpConfig {
     }
 }
 
+/// Configuration for gRPC streaming transport.
+///
+/// Only available when the `grpc` feature is enabled.
+#[cfg(feature = "grpc")]
+#[derive(Debug, Clone)]
+pub struct GrpcConfig {
+    /// Socket address to bind the gRPC streaming server. Defaults to 0.0.0.0:0 (OS-assigned port).
+    pub bind_addr: std::net::SocketAddr,
+}
+
+#[cfg(feature = "grpc")]
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: "0.0.0.0:0".parse().unwrap(),
+        }
+    }
+}
+
 /// Streaming transport configuration for a [`Velo`] instance.
 ///
 /// Only one `StreamConfig` may be set per [`VeloBuilder`] instance —
@@ -73,10 +92,10 @@ impl TcpConfig {
 ///   Pass `None` to bind to `0.0.0.0` (OS-assigned port), or provide a
 ///   [`TcpConfig`] for an explicit bind address.
 ///
-/// # Note
-///
-/// A `Grpc` variant will be added in a future plan (Plan 03) when
-/// `GrpcFrameTransport` is wired into `VeloBuilder`.
+/// - [`StreamConfig::Grpc`]: gRPC-based streaming via [`GrpcFrameTransport`](velo_streaming::GrpcFrameTransport).
+///   Only available when the `grpc` feature is enabled.
+///   Pass `None` to bind to `0.0.0.0:0` (OS-assigned port), or provide a
+///   [`GrpcConfig`] for an explicit bind address.
 #[derive(Debug, Clone)]
 pub enum StreamConfig {
     /// TCP-based streaming transport (TcpFrameTransport).
@@ -84,6 +103,13 @@ pub enum StreamConfig {
     /// Pass `None` to use the default bind address (`0.0.0.0`),
     /// or `Some(TcpConfig)` for an explicit bind address.
     Tcp(Option<TcpConfig>),
+    /// gRPC-based streaming transport (GrpcFrameTransport).
+    ///
+    /// Only available with the `grpc` feature.
+    /// Pass `None` to bind to `0.0.0.0:0` (OS-assigned port),
+    /// or `Some(GrpcConfig)` for an explicit bind address.
+    #[cfg(feature = "grpc")]
+    Grpc(Option<GrpcConfig>),
 }
 
 /// High-level facade for the Velo distributed system.
@@ -125,6 +151,10 @@ impl VeloBuilder {
     /// Use [`StreamConfig::Tcp(None)`](StreamConfig::Tcp) for TCP with default
     /// bind address (`0.0.0.0`), or `StreamConfig::Tcp(Some(TcpConfig::new(addr)))`
     /// for an explicit bind address.
+    ///
+    /// Use [`StreamConfig::Grpc(None)`](StreamConfig::Grpc) for gRPC streaming
+    /// (requires the `grpc` feature), or `StreamConfig::Grpc(Some(GrpcConfig { bind_addr }))`
+    /// for an explicit bind address.
     pub fn stream_config(mut self, config: StreamConfig) -> Result<Self> {
         if self.stream_config.is_some() {
             return Err(anyhow::anyhow!(
@@ -162,7 +192,7 @@ impl VeloBuilder {
     /// 1. Build Messenger (async)
     /// 2. Extract WorkerId
     /// 3. Create VeloFrameTransport
-    /// 4. Optionally create TcpFrameTransport and transport registry (from stream_config)
+    /// 4. Optionally create TcpFrameTransport or GrpcFrameTransport and transport registry (from stream_config)
     /// 5. Create AnchorManager via builder
     /// 6. Register streaming control-plane handlers on Messenger
     /// 7. Assemble Velo struct
@@ -197,6 +227,30 @@ impl VeloBuilder {
                 // Default transport is TCP when stream_config is set
                 (
                     tcp_transport as Arc<dyn velo_streaming::FrameTransport>,
+                    Arc::new(registry),
+                )
+            }
+            #[cfg(feature = "grpc")]
+            Some(StreamConfig::Grpc(grpc_cfg)) => {
+                let bind_addr = grpc_cfg
+                    .map(|c| c.bind_addr)
+                    .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+                let grpc_transport = Arc::new(
+                    velo_streaming::GrpcFrameTransport::new(bind_addr)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to start gRPC transport: {}", e))?,
+                );
+                let mut registry = std::collections::HashMap::new();
+                registry.insert(
+                    "grpc".to_string(),
+                    Arc::clone(&grpc_transport) as Arc<dyn velo_streaming::FrameTransport>,
+                );
+                registry.insert(
+                    "velo".to_string(),
+                    velo_transport.clone() as Arc<dyn velo_streaming::FrameTransport>,
+                );
+                (
+                    grpc_transport as Arc<dyn velo_streaming::FrameTransport>,
                     Arc::new(registry),
                 )
             }
