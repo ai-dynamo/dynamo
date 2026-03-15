@@ -14,9 +14,6 @@ license = "Apache-2.0"
 homepage = "https://github.com/ai-dynamo/dynamo"
 repository = "https://github.com/ai-dynamo/dynamo.git"
 
-[package.metadata.cargo-machete]
-ignored = ["clap", "dynamo-kv-router", "tracing-subscriber"]
-
 [lib]
 path = "rust/lib.rs"
 name = "_core"
