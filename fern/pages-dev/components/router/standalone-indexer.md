@@ -7,12 +7,12 @@ subtitle: Run the KV cache indexer as an independent HTTP service for querying b
 
 ## Overview
 
-The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight binary that maintains a radix tree of cached blocks and exposes HTTP endpoints for querying and managing workers. It supports two operational modes:
+The standalone KV indexer (`python -m dynamo.indexer`) is a lightweight service that maintains a radix tree of cached blocks and exposes HTTP endpoints for querying and managing workers. It supports two operational modes:
 
-- **Standalone mode** (default): Subscribes to ZMQ KV event streams directly from workers. No Dynamo runtime dependencies required.
-- **Dynamo runtime mode** (`--dynamo-runtime`): Integrates with the Dynamo runtime for automatic worker discovery via MDC, KV event ingestion via the event plane (NATS or ZMQ), and serves indexer queries over the request plane for remote frontends.
+- **Standalone mode** (default): subscribes to ZMQ KV event streams directly from workers. No Dynamo runtime dependencies required.
+- **Dynamo runtime mode** (`--dynamo-runtime`): integrates with the Dynamo runtime for automatic worker discovery via MDC, KV event ingestion via the event plane (NATS or ZMQ), and overlap queries over the request plane for remote frontends.
 
-This is distinct from the [Standalone Router](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
+This is distinct from the [Standalone Router](../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
 
 The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
@@ -56,11 +56,11 @@ If no peers are reachable, the indexer starts with an empty state.
 
 ```bash
 # Replica A (first instance, no peers)
-dynamo-kv-indexer --port 8090 --block-size 16 \
+python -m dynamo.indexer --port 8090 --block-size 16 \
   --workers "1=tcp://worker1:5557,2=tcp://worker2:5558"
 
 # Replica B (recovers from A on startup)
-dynamo-kv-indexer --port 8091 --block-size 16 \
+python -m dynamo.indexer --port 8091 --block-size 16 \
   --workers "1=tcp://worker1:5557,2=tcp://worker2:5558" \
   --peers "http://localhost:8090"
 ```
@@ -81,52 +81,50 @@ Peers can be registered at startup via `--peers` or dynamically via the HTTP API
 
 ## Building
 
-The binary is a feature-gated target in the `dynamo-kv-router` crate. The available cargo features control which capabilities are compiled in:
+The service is exposed through the Python package after building the bindings with maturin. Feature flags control which capabilities are compiled in:
 
 | Feature | Description |
 |---------|-------------|
-| `standalone-indexer` | Core standalone indexer library (HTTP server, ZMQ listeners, P2P recovery) |
-| `metrics` | Prometheus metrics (`/metrics` endpoint, request/worker gauges) |
-| `indexer-bin` | CLI binary target |
-| `indexer-runtime` | Dynamo runtime integration (discovery, event plane, request plane) |
-| `test-endpoints` | Test-only endpoints (`/test/pause_listener`, `/test/resume_listener`) |
+| `kv-indexer` | Core standalone indexer binary (HTTP API, ZMQ listeners, P2P recovery) |
+| `kv-indexer-metrics` | Optional `/metrics` endpoint |
+| `kv-indexer-runtime` | Dynamo runtime integration (`--dynamo-runtime`, discovery, event plane, request plane) |
 
-### Standalone build (no runtime dependency)
+### Standalone build
 
 ```bash
-cargo build -p dynamo-kv-router --features indexer-bin --bin dynamo-kv-indexer
+cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer
 ```
 
-This produces a binary with no `dynamo-runtime` dependency. It supports ZMQ event listeners, HTTP API, and P2P recovery.
+After installation, launch the service with `python -m dynamo.indexer`.
 
 ### Standalone build with metrics
 
 ```bash
-cargo build -p dynamo-kv-router --features indexer-bin,metrics --bin dynamo-kv-indexer
+cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer,kv-indexer-metrics
 ```
 
-Adds Prometheus metrics support (`/metrics` endpoint). Pulls in `dynamo-runtime` for the metrics implementation.
+This keeps the default `kv-indexer` build lean while still allowing Prometheus metrics when needed.
 
 ### Runtime-enabled build
 
 ```bash
-cargo build -p dynamo-kv-router --features indexer-bin,indexer-runtime --bin dynamo-kv-indexer
+cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer,kv-indexer-runtime
 ```
 
-Enables the `--dynamo-runtime` CLI flag for MDC discovery, event plane subscription, and request plane query endpoint. Includes metrics.
+This enables the `--dynamo-runtime` CLI flag for MDC discovery, event-plane subscription, and request-plane queries. It also includes the metrics endpoint.
 
 ## CLI
 
 ### Standalone mode (default)
 
 ```bash
-dynamo-kv-indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
+python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
 ```
 
-### Dynamo runtime mode (requires `indexer-runtime` feature)
+### Dynamo runtime mode
 
 ```bash
-dynamo-kv-indexer --dynamo-runtime --namespace default --component-name kv-indexer --worker-component backend --port 8090 [--threads 4]
+python -m dynamo.indexer --dynamo-runtime --namespace default --component-name kv-indexer --worker-component backend --port 8090 [--threads 4]
 ```
 
 In runtime mode, workers are discovered automatically via MDC. The `--workers` flag can still be used to register additional static workers alongside discovered ones.
@@ -140,10 +138,10 @@ In runtime mode, workers are discovered automatically via MDC. The `--workers` f
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--tenant-id` | `default` | Tenant ID for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
-| `--dynamo-runtime` | `false` | Enable Dynamo runtime integration (requires `indexer-runtime` feature) |
-| `--namespace` | `default` | Dynamo namespace to register the indexer component under (runtime mode) |
-| `--component-name` | `kv-indexer` | Component name for this indexer in the Dynamo runtime (runtime mode) |
-| `--worker-component` | `backend` | Component name that workers register under, for event plane subscription (runtime mode) |
+| `--dynamo-runtime` | `false` | Enable Dynamo runtime integration (requires `kv-indexer-runtime`) |
+| `--namespace` | `default` | Dynamo namespace to register the indexer component under |
+| `--component-name` | `kv-indexer` | Component name for this indexer in the Dynamo runtime |
+| `--worker-component` | `backend` | Component name that workers register under for event-plane subscription |
 
 ## HTTP API
 
@@ -157,7 +155,7 @@ curl http://localhost:8090/health
 
 ### `GET /metrics` — Prometheus metrics
 
-Returns metrics in Prometheus text exposition format. Available when the binary is built with the `metrics` or `indexer-runtime` feature.
+Returns metrics in Prometheus text exposition format. Available when the binary is built with the `kv-indexer-metrics` or `kv-indexer-runtime` feature.
 
 ```bash
 curl http://localhost:8090/metrics
@@ -170,10 +168,12 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_errors_total` | Counter | `endpoint`, `status_class` | HTTP error responses (4xx/5xx) |
 | `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
+| `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
 
 ### `POST /register` — Register an endpoint
 
 Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, tenant_id)` pair.
+Registration is non-blocking: if the worker is not up yet, the listener is accepted in `pending` state and transitions to `active` once the initial ZMQ connection succeeds.
 
 ```bash
 # Single model, default tenant
@@ -245,8 +245,37 @@ curl http://localhost:8090/workers
 
 Returns:
 ```json
-[{"instance_id": 1, "endpoints": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}]
+[
+  {
+    "instance_id": 1,
+    "source": "zmq",
+    "status": "active",
+    "endpoints": {
+      "0": "tcp://127.0.0.1:5557",
+      "1": "tcp://127.0.0.1:5558"
+    },
+    "listeners": {
+      "0": {
+        "endpoint": "tcp://127.0.0.1:5557",
+        "status": "active"
+      },
+      "1": {
+        "endpoint": "tcp://127.0.0.1:5558",
+        "status": "active"
+      }
+    }
+  },
+  {
+    "instance_id": 2,
+    "source": "discovery",
+    "status": "active",
+    "endpoints": {},
+    "listeners": {}
+  }
+]
 ```
+
+For ZMQ-managed workers, `status` is aggregated across listeners with priority `failed > pending > active > paused`. Each listener entry may also expose a `last_error` field when the most recent startup or recv-loop attempt failed.
 
 ### `POST /query` — Query overlap for token IDs
 
@@ -367,7 +396,7 @@ When started with `--dynamo-runtime`, the indexer integrates with the Dynamo dis
 
 ### Worker Discovery
 
-The indexer watches MDC (Model Discovery Catalog) for worker additions and removals. When a worker registers with MDC, the indexer automatically creates an indexer for its model and block size. Workers discovered via MDC are tracked separately from those registered via `--workers` or the `/register` HTTP API — a worker cannot be registered through both paths simultaneously.
+The indexer watches MDC (Model Discovery Catalog) for worker additions and removals. When a worker registers with MDC, the indexer automatically creates an indexer for its model and block size. Workers discovered via MDC are tracked separately from those registered via `--workers` or the `/register` HTTP API; a worker cannot be registered through both paths simultaneously.
 
 ### Event Plane Subscription
 
@@ -381,7 +410,7 @@ The indexer registers a query endpoint on the Dynamo request plane, allowing fro
 
 ```bash
 # Start the indexer with runtime integration
-dynamo-kv-indexer --dynamo-runtime \
+python -m dynamo.indexer --dynamo-runtime \
   --namespace my-namespace \
   --component-name kv-indexer \
   --worker-component backend \
@@ -392,7 +421,7 @@ The HTTP API remains fully available in runtime mode. Static workers can be adde
 
 ## Limitations
 
-- **Standalone mode is ZMQ only**: In standalone mode, workers must publish KV events via ZMQ PUB sockets. Build with `indexer-runtime` and use `--dynamo-runtime` to receive events via the event plane (NATS or ZMQ).
+- **Standalone mode is ZMQ only**: In standalone mode, workers must publish KV events via ZMQ PUB sockets. Build with `kv-indexer-runtime` and use `--dynamo-runtime` to receive events via the event plane (NATS or ZMQ).
 - **No routing logic**: The indexer only maintains the radix tree and answers queries. It does not track active blocks, manage request lifecycle, or perform worker selection.
 
 ## Architecture
@@ -410,7 +439,7 @@ graph TD
         REG[Worker Registry]
         ZMQ[ZMQ SUB Listeners]
         IDX["Indexer Map<br/>(model, tenant) → Radix Tree"]
-        HTTP[HTTP API<br/>/query /dump /register /metrics /health]
+        HTTP[HTTP API<br/>/query /dump /register /health]
     end
 
     CLIENT[External Client]
@@ -453,7 +482,7 @@ graph TD
         REG[Worker Registry]
         IDX["Indexer Map<br/>(model, tenant) → Radix Tree"]
         QE[Query Endpoint]
-        HTTP[HTTP API<br/>/query /dump /register]
+        HTTP[HTTP API<br/>/query /dump /register /metrics]
     end
 
     FRONTEND[Frontend / Router]
@@ -511,4 +540,4 @@ sequenceDiagram
 - **[Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403)**: Community API standardization for KV cache indexers
 - **[Router Guide](router-guide.md)**: Full KV router configuration and tuning
 - **[Router Design](../../design-docs/router-design.md)**: Architecture and event transport modes
-- **[Standalone Router](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)
+- **[Standalone Router](../../../components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)
