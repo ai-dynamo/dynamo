@@ -291,7 +291,7 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           CUDA_MAJOR=${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
-          CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-amd64-cache"
+          CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
           CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -316,7 +316,7 @@ jobs:
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
-            --platform linux/amd64 \
+            --platform ${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
             ${CACHE_ARGS} \
@@ -352,10 +352,19 @@ jobs:
     if: |
         !inputs.build_only &&
         ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
-        inputs.build_image
+        inputs.build_image &&
+        ( matrix.arch == 'amd64' || contains(inputs.platform, 'arm64') )
     needs: [build]
-    name: Test cuda${{ inputs.cuda_version }}
-    runs-on: prod-tester-amd-gpu-v1
+    name: Test cuda${{ inputs.cuda_version }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: prod-tester-amd-gpu-v1
+          - arch: arm64
+            runner: prod-tester-arm-v1
+    runs-on: ${{ matrix.runner }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
@@ -422,7 +431,7 @@ jobs:
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
-          platform_arch: amd64
+          platform_arch: ${{ matrix.arch }}
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
@@ -432,14 +441,14 @@ jobs:
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
-        if: ( inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
+        if: inputs.run_single_gpu_tests && matrix.arch == 'amd64'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
-          platform_arch: amd64
+          platform_arch: ${{ matrix.arch }}
           enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
