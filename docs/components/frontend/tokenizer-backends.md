@@ -10,7 +10,7 @@ The Dynamo Frontend supports multiple tokenizer backends for BPE-based models. T
 
 #### `default` HuggingFace Tokenizers
 
-The default backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust). 
+The default backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust).
 It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback).
 
 #### `fastokens` High-Performance BPE Encoding
