@@ -51,6 +51,7 @@ pub struct Velo {
 /// Builder for configuring and creating a [`Velo`] instance.
 pub struct VeloBuilder {
     inner: MessengerBuilder,
+    stream_bind_addr: Option<std::net::IpAddr>,
 }
 
 impl VeloBuilder {
@@ -58,12 +59,24 @@ impl VeloBuilder {
     pub fn new() -> Self {
         Self {
             inner: MessengerBuilder::new(),
+            stream_bind_addr: None,
         }
     }
 
     /// Add a transport to the system.
     pub fn add_transport(mut self, transport: Arc<dyn Transport>) -> Self {
         self.inner = self.inner.add_transport(transport);
+        self
+    }
+
+    /// Set the bind address for TCP streaming transport.
+    ///
+    /// When set, `build()` creates a [`TcpFrameTransport`](velo_streaming::TcpFrameTransport)
+    /// bound to this address and registers both `tcp` and `velo` schemes in the
+    /// transport registry. When `None` (default), only `VeloFrameTransport` is
+    /// created (backward compatible).
+    pub fn stream_bind_addr(mut self, addr: std::net::IpAddr) -> Self {
+        self.stream_bind_addr = Some(addr);
         self
     }
 
@@ -90,15 +103,30 @@ impl VeloBuilder {
         let worker_id = messenger.instance_id().worker_id();
 
         // Step 3: Create VeloFrameTransport
-        let transport = Arc::new(
+        let velo_transport = Arc::new(
             velo_streaming::VeloFrameTransport::new(Arc::clone(&messenger), worker_id)?,
         );
+
+        // Step 3b: Optionally create TcpFrameTransport and transport registry
+        let (default_transport, transport_registry) = if let Some(bind_addr) = self.stream_bind_addr {
+            let tcp_transport = Arc::new(
+                velo_streaming::TcpFrameTransport::new(bind_addr),
+            );
+            let mut registry = std::collections::HashMap::new();
+            registry.insert("tcp".to_string(), Arc::clone(&tcp_transport) as Arc<dyn velo_streaming::FrameTransport>);
+            registry.insert("velo".to_string(), velo_transport.clone() as Arc<dyn velo_streaming::FrameTransport>);
+            // Default transport is TCP when stream_bind_addr is set
+            (tcp_transport as Arc<dyn velo_streaming::FrameTransport>, Arc::new(registry))
+        } else {
+            (velo_transport as Arc<dyn velo_streaming::FrameTransport>, Arc::new(std::collections::HashMap::new()))
+        };
 
         // Step 4: Create AnchorManager (pass messenger for cross-worker cancel AMs)
         let anchor_manager = Arc::new(
             velo_streaming::AnchorManagerBuilder::default()
                 .worker_id(worker_id)
-                .transport(transport as Arc<dyn velo_streaming::FrameTransport>)
+                .transport(default_transport)
+                .transport_registry(transport_registry)
                 .messenger(Some(Arc::clone(&messenger)))
                 .build()
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
