@@ -187,7 +187,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -214,7 +214,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -237,7 +237,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -260,7 +260,7 @@ jobs:
     with:
       framework: vllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -279,7 +279,7 @@ jobs:
     with:
       framework: sglang
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -298,7 +298,7 @@ jobs:
     with:
       framework: trtllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -404,7 +404,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
           platform_arch: amd64
 
   deploy-test-sglang:
@@ -441,7 +441,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12
           platform_arch: amd64
 
   deploy-test-trtllm:
@@ -482,7 +482,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13
           platform_arch: amd64
 
   # ============================================================================
