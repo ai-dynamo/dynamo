@@ -319,8 +319,8 @@ impl DispatcherHub {
 
         backend.send_message_to_worker(
             WorkerId::from_u64(response_id.worker_id()),
-            header.to_vec(),
-            payload.to_vec(),
+            header,
+            payload,
             MessageType::Ack,
             error_handler,
         )?;

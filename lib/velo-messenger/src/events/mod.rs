@@ -818,8 +818,8 @@ impl VeloEvents {
 
         self.backend.send_message_to_worker(
             WorkerId::from_u64(response_id.worker_id()),
-            header.to_vec(),
-            vec![],
+            header,
+            Bytes::new(),
             velo_transports::MessageType::Ack,
             get_event_ack_error_handler(),
         )?;
@@ -829,11 +829,11 @@ impl VeloEvents {
 
     async fn send_nack(&self, response_id: ResponseId, error_message: String) -> Result<()> {
         let header = encode_event_header(EventType::Ack(response_id, Outcome::Error));
-        let payload = error_message.into_bytes();
+        let payload = Bytes::from(error_message.into_bytes());
 
         self.backend.send_message_to_worker(
             WorkerId::from_u64(response_id.worker_id()),
-            header.to_vec(),
+            header,
             payload,
             velo_transports::MessageType::Ack,
             get_event_nack_error_handler(),

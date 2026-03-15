@@ -51,8 +51,8 @@ impl ActiveMessageClient {
         let (header, payload, message_type) = message.encode()?;
         self.backend.send_message(
             target,
-            header.to_vec(),
-            payload.to_vec(),
+            header,
+            payload,
             message_type,
             self.error_handler.clone(),
         )
