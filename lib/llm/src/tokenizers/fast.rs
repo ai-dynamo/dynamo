@@ -144,11 +144,17 @@ mod tests {
             }
         }
 
-        // The accumulated streamed text should match the decoded continuation
-        let expected = wrapper.decode(&cont_ids, true).unwrap();
+        // DecodeStream uses prompt tokens as context, so the expected text is
+        // decode(prompt + continuation) minus decode(prompt) -- not a bare
+        // decode(continuation) which lacks the surrounding context.
+        let mut all_ids = prompt_ids.clone();
+        all_ids.extend_from_slice(&cont_ids);
+        let full_text = wrapper.decode(&all_ids, true).unwrap();
+        let prompt_text = wrapper.decode(&prompt_ids, true).unwrap();
+        let expected = &full_text[prompt_text.len()..];
         assert_eq!(
             accumulated, expected,
-            "streamed chunks must equal batch-decoded continuation"
+            "streamed chunks must equal context-aware decoded continuation"
         );
     }
 }
