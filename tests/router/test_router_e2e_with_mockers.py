@@ -586,20 +586,6 @@ def test_kv_router_bindings(
         )
 
 
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", True, "nats"),  # JetStream mode - uses JetStream
-        ("etcd", False, "tcp"),  # NATS core mode (with gap detection) - no JetStream
-        ("file", True, "nats"),  # File backend - uses JetStream
-    ],
-    ids=[
-        "jetstream",
-        "nats_core",
-        "file",
-    ],
-    indirect=["request_plane", "durable_kv_events"],
-)
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
