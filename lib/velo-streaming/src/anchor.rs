@@ -15,6 +15,7 @@
 //!   creation so that whichever cleanup path fires first cancels the token; subsequent
 //!   cancellations are no-ops.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{
     Arc,
@@ -454,6 +455,13 @@ pub struct AnchorManager {
 
     pub transport: Arc<dyn crate::transport::FrameTransport>,
 
+    /// Transport registry: maps scheme (e.g., "tcp", "velo") to the FrameTransport
+    /// that handles endpoints with that scheme. Populated at build time via
+    /// `AnchorManagerBuilder::transport_registry()`. Read-only after construction.
+    /// Used by `attach_remote` to resolve the correct transport for `connect()`.
+    #[builder(default = "Arc::new(HashMap::new())")]
+    pub transport_registry: Arc<HashMap<String, Arc<dyn crate::transport::FrameTransport>>>,
+
     /// Optional inactivity timeout for newly created anchors.
     /// When set, `create_anchor` spawns a timeout task that auto-removes the
     /// anchor if no sender attaches within this duration.
@@ -608,6 +616,45 @@ impl AnchorManager {
             // Non-blocking best-effort -- control sentinels must never stall.
             let _ = sender.try_send(frame_bytes);
         }
+    }
+
+    /// Resolve a FrameTransport from an endpoint's scheme.
+    ///
+    /// Parses the scheme from `endpoint` (everything before `://`), looks it up
+    /// in the transport registry. Falls back to `self.transport` if the registry
+    /// is empty (backward compatibility for callers that don't populate the registry).
+    ///
+    /// Returns `Err(AttachError::TransportError)` if the scheme is not found
+    /// in a non-empty registry.
+    fn resolve_transport(
+        &self,
+        endpoint: &str,
+    ) -> Result<Arc<dyn crate::transport::FrameTransport>, AttachError> {
+        let scheme = endpoint
+            .split("://")
+            .next()
+            .ok_or_else(|| {
+                AttachError::TransportError(anyhow::anyhow!(
+                    "no scheme in endpoint: {}",
+                    endpoint
+                ))
+            })?;
+
+        // Check registry first
+        if let Some(transport) = self.transport_registry.get(scheme) {
+            return Ok(Arc::clone(transport));
+        }
+
+        // Fallback: if registry is empty, use default transport (backward compat)
+        if self.transport_registry.is_empty() {
+            return Ok(Arc::clone(&self.transport));
+        }
+
+        Err(AttachError::TransportError(anyhow::anyhow!(
+            "unsupported transport scheme: {} (endpoint: {})",
+            scheme,
+            endpoint
+        )))
     }
 
     /// Atomically attempt to mark an anchor as attached.
@@ -784,9 +831,9 @@ impl AnchorManager {
             crate::control::AnchorAttachResponse::Ok { stream_endpoint } => {
                 let (_, local_id) = handle.unpack();
 
-                // Connect transport to Worker A's endpoint — get frame_tx pump channel
-                let frame_tx = self
-                    .transport
+                // Resolve transport from endpoint scheme, then connect
+                let transport = self.resolve_transport(&stream_endpoint)?;
+                let frame_tx = transport
                     .connect(&stream_endpoint, local_id, sender_stream_id)
                     .await?; // maps to AttachError::TransportError via From<anyhow::Error>
 
@@ -1798,5 +1845,126 @@ mod tests {
             let result = am.register_handlers(Arc::clone(&m2));
             assert!(result.is_err(), "second call must return Err");
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Transport registry tests (Plan 16-02, Task 1)
+    // -----------------------------------------------------------------------
+
+    /// Minimal no-op transport used for registry resolution tests.
+    /// Different from MockTransport so we can distinguish registered
+    /// transports by type via pointer identity.
+    struct NoopTransport;
+
+    impl crate::transport::FrameTransport for NoopTransport {
+        fn bind(
+            &self,
+            _anchor_id: u64,
+        ) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
+            Box::pin(async { Ok(("noop://".to_string(), flume::bounded(1).1)) })
+        }
+
+        fn connect(
+            &self,
+            _endpoint: &str,
+            _anchor_id: u64,
+            _session_id: u64,
+        ) -> BoxFuture<'_, AnyhowResult<flume::Sender<Vec<u8>>>> {
+            Box::pin(async { Ok(flume::bounded(1).0) })
+        }
+    }
+
+    #[test]
+    fn test_transport_registry_resolution() {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let default_transport: Arc<dyn crate::transport::FrameTransport> =
+            Arc::new(MockTransport);
+        let tcp_transport: Arc<dyn crate::transport::FrameTransport> =
+            Arc::new(NoopTransport);
+
+        let mut registry = HashMap::new();
+        registry.insert("tcp".to_string(), Arc::clone(&tcp_transport));
+
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(default_transport)
+            .transport_registry(Arc::new(registry))
+            .build()
+            .expect("builder should succeed");
+
+        // "tcp" scheme should resolve to the registered NoopTransport
+        let resolved = mgr
+            .resolve_transport("tcp://127.0.0.1:1234/token")
+            .expect("tcp scheme must resolve");
+        assert!(
+            Arc::ptr_eq(&resolved, &tcp_transport),
+            "resolved transport must be the registered tcp transport"
+        );
+
+        // "velo" scheme is NOT registered; registry is non-empty, so fallback is NOT used
+        let err = match mgr.resolve_transport("velo://123/stream/456") {
+            Err(e) => e,
+            Ok(_) => panic!("unregistered scheme in non-empty registry must error"),
+        };
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unsupported transport scheme"),
+            "error message must mention unsupported scheme, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_unsupported_scheme() {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let default_transport: Arc<dyn crate::transport::FrameTransport> =
+            Arc::new(MockTransport);
+
+        let mut registry = HashMap::new();
+        registry.insert(
+            "tcp".to_string(),
+            Arc::new(NoopTransport) as Arc<dyn crate::transport::FrameTransport>,
+        );
+
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(default_transport)
+            .transport_registry(Arc::new(registry))
+            .build()
+            .expect("builder should succeed");
+
+        let err = match mgr.resolve_transport("unknown://some-host:1234/path") {
+            Err(e) => e,
+            Ok(_) => panic!("unknown scheme must return error"),
+        };
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unsupported transport scheme: unknown"),
+            "error must name the unsupported scheme, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_empty_registry_fallback() {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let default_transport: Arc<dyn crate::transport::FrameTransport> =
+            Arc::new(MockTransport);
+        let default_clone = Arc::clone(&default_transport);
+
+        // Empty registry -- backward compat: resolve_transport falls back to self.transport
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(default_transport)
+            .build()
+            .expect("builder should succeed");
+
+        let resolved = mgr
+            .resolve_transport("anything://host:1234/path")
+            .expect("empty registry must fall back to default transport");
+        assert!(
+            Arc::ptr_eq(&resolved, &default_clone),
+            "resolved transport must be the default transport when registry is empty"
+        );
     }
 }
