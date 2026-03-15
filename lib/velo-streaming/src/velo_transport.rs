@@ -5,13 +5,16 @@
 //! active message (AM) fire-and-forget system.
 //!
 //! [`VeloFrameTransport`] uses a single shared `_stream_data` AM handler
-//! registered at construction time. Each incoming AM payload is prefixed with
-//! an 8-byte little-endian `anchor_id` for receiver-side demultiplexing.
+//! registered at construction time. Each incoming AM carries the target
+//! `anchor_id` as a string value in the AM headers map (key
+//! [`ANCHOR_ID_HEADER`]). The payload contains only the raw frame bytes --
+//! no binary prefix.
 //!
-//! # Wire Format
+//! # Routing
 //!
 //! ```text
-//! [ anchor_id: u64 LE (8 bytes) ][ frame_bytes: ... ]
+//! AM headers: { "anchor_id": "<u64>" }
+//! AM payload: [ frame_bytes: ... ]
 //! ```
 //!
 //! # Construction
@@ -24,6 +27,7 @@
 //!     .build()?;
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -34,13 +38,17 @@ use velo_messenger::{Context, Handler, Messenger};
 
 use crate::transport::FrameTransport;
 
+/// AM header key used to route frames to the correct anchor's dispatch channel.
+const ANCHOR_ID_HEADER: &str = "anchor_id";
+
 /// Production [`FrameTransport`] backed by velo-messenger active messages.
 ///
 /// Holds its own internal `DashMap<u64, flume::Sender<Vec<u8>>>` dispatch map
-/// for transport-level routing. The `_stream_data` AM handler writes to this
-/// map, which feeds the transport-side flume channel. The existing `reader_pump`
-/// (spawned by `_anchor_attach`) reads from the transport receiver and bridges
-/// to `frame_tx` with heartbeat monitoring intact.
+/// for transport-level routing. The `_stream_data` AM handler extracts the
+/// target `anchor_id` from the AM headers ([`ANCHOR_ID_HEADER`]) and writes
+/// the payload directly into the matching dispatch channel. The existing
+/// `reader_pump` (spawned by `_anchor_attach`) reads from the transport
+/// receiver and bridges to `frame_tx` with heartbeat monitoring intact.
 pub struct VeloFrameTransport {
     messenger: Arc<Messenger>,
     dispatch: Arc<DashMap<u64, flume::Sender<Vec<u8>>>>,
@@ -63,19 +71,25 @@ impl VeloFrameTransport {
 
         // Register the shared _stream_data handler.
         // The handler captures dispatch and routes incoming AM payloads to the
-        // correct per-anchor transport channel based on the 8-byte LE anchor_id prefix.
+        // correct per-anchor transport channel based on the anchor_id AM header.
         let handler_dispatch = dispatch.clone();
         let handler = Handler::am_handler("_stream_data", move |ctx: Context| {
-            let payload = ctx.payload;
-            if payload.len() < 8 {
-                tracing::warn!(
-                    "_stream_data: payload too short ({} bytes), dropping",
-                    payload.len()
-                );
-                return Ok(());
-            }
-            let anchor_id = u64::from_le_bytes(payload[..8].try_into().unwrap());
-            let frame_bytes = payload[8..].to_vec();
+            let anchor_id = match ctx
+                .headers
+                .as_ref()
+                .and_then(|h| h.get(ANCHOR_ID_HEADER))
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                Some(id) => id,
+                None => {
+                    tracing::warn!(
+                        "_stream_data: missing or invalid {} header, dropping frame",
+                        ANCHOR_ID_HEADER
+                    );
+                    return Ok(());
+                }
+            };
+            let frame_bytes = ctx.payload.to_vec();
             if let Some(tx) = handler_dispatch.get(&anchor_id) {
                 // try_send: non-blocking, drops frame if channel full
                 // (back-pressure handled by TCP flow control at lower level)
@@ -127,17 +141,21 @@ impl FrameTransport for VeloFrameTransport {
             let (target_worker_id, target_anchor_id) = parse_velo_uri(&endpoint)?;
             let (tx, rx) = flume::bounded::<Vec<u8>>(256);
 
-            // Spawn pump task: reads from rx, sends AM per frame with anchor_id prefix.
+            // Spawn pump task: reads from rx, sends AM per frame with
+            // anchor_id routed via AM headers (no payload prefix).
             tokio::spawn(async move {
                 while let Ok(frame_bytes) = rx.recv_async().await {
-                    let mut payload = Vec::with_capacity(8 + frame_bytes.len());
-                    payload.extend_from_slice(&target_anchor_id.to_le_bytes());
-                    payload.extend_from_slice(&frame_bytes);
+                    let mut headers = HashMap::with_capacity(1);
+                    headers.insert(
+                        ANCHOR_ID_HEADER.to_string(),
+                        target_anchor_id.to_string(),
+                    );
 
                     if let Err(e) = messenger
                         .am_send_streaming("_stream_data")
                         .expect("am_send_streaming builder")
-                        .raw_payload(bytes::Bytes::from(payload))
+                        .headers(headers)
+                        .raw_payload(bytes::Bytes::from(frame_bytes))
                         .worker(WorkerId::from_u64(target_worker_id))
                         .send()
                         .await
