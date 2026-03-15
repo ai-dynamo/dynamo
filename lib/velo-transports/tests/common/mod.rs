@@ -153,8 +153,8 @@ impl<T: Transport> TestTransportHandle<T> {
     ) {
         self.transport.send_message(
             target,
-            header,
-            payload,
+            Bytes::from(header),
+            Bytes::from(payload),
             msg_type,
             self.error_handler.clone(),
         );
