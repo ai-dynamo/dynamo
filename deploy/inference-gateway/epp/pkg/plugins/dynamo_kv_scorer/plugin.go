@@ -24,7 +24,7 @@ package dynamo_kv_scorer
 /*
 #cgo CPPFLAGS: -I${SRCDIR}/include
 #cgo CXXFLAGS: -std=c++17
-#cgo LDFLAGS: ${SRCDIR}/lib/libdynamo_llm_capi.a -lstdc++ -ldl -lpthread -lm
+#cgo LDFLAGS: ${SRCDIR}/lib/libdynamo_llm_capi.a -lstdc++ -ldl -lpthread -lm -lpcre2-8
 
 #include <stdint.h>
 #include <stddef.h>
