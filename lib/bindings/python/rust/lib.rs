@@ -7,7 +7,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyStopAsyncIteration, PySystemExit};
+use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -206,7 +206,7 @@ fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
     #[cfg(feature = "kv-indexer")]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
-        return PySystemExit::new_err(clap_error.exit_code());
+        return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
     }
 
     to_pyerr(err)
