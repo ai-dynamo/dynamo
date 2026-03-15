@@ -344,32 +344,16 @@ impl FrameTransport for GrpcFrameTransport {
 
             let mut client = VeloStreamingClient::new(channel);
 
-            // Create frame channel: caller writes to tx, pump task reads from rx
-            let (tx, rx) = flume::bounded::<Vec<u8>>(256);
+            // Create frame channels:
+            //   - mpsc: bridges flume frames into the gRPC request stream
+            //   - flume: returned to caller for sending frames
+            let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel::<FramedData>(256);
+            let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
 
-            // Map rx to FramedData stream for gRPC
-            let request_stream = {
-                tokio_stream::wrappers::ReceiverStream::new({
-                    // Bridge flume::Receiver to tokio mpsc for tokio-stream compatibility
-                    let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel::<FramedData>(256);
-                    let rx_clone = rx.clone();
-                    tokio::spawn(async move {
-                        while let Ok(payload) = rx_clone.recv_async().await {
-                            let framed = FramedData {
-                                preamble: vec![],
-                                header: vec![],
-                                payload,
-                            };
-                            if mpsc_tx.send(framed).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-                    mpsc_rx
-                })
-            };
+            // Build the gRPC request stream from the mpsc receiver
+            let request_stream = tokio_stream::wrappers::ReceiverStream::new(mpsc_rx);
 
-            // Attach x-anchor-id metadata and send request
+            // Attach x-anchor-id metadata header
             let mut request = Request::new(request_stream);
             request.metadata_mut().insert(
                 "x-anchor-id",
@@ -378,12 +362,32 @@ impl FrameTransport for GrpcFrameTransport {
                 })?,
             );
 
-            // Spawn task that drives the gRPC stream
+            // Call client.stream() and await the server's initial response.
+            // This is where the server performs its exclusive-attach check:
+            // - Ok(_) means the server accepted the stream
+            // - Err(status) means the server rejected it (e.g., ALREADY_EXISTS)
+            let _response = client
+                .stream(request)
+                .await
+                .map_err(|status| anyhow::anyhow!("gRPC stream rejected: {}", status))?;
+
+            // Server accepted. Spawn a pump task that forwards frames from the
+            // flume channel to the mpsc channel (which feeds the gRPC request stream).
             tokio::spawn(async move {
-                let _ = client.stream(request).await;
+                while let Ok(payload) = frame_rx.recv_async().await {
+                    let framed = FramedData {
+                        preamble: vec![],
+                        header: vec![],
+                        payload,
+                    };
+                    if mpsc_tx.send(framed).await.is_err() {
+                        break;
+                    }
+                }
+                // mpsc_tx dropped here -> gRPC stream body ends -> server pump sees EOF
             });
 
-            Ok(tx)
+            Ok(frame_tx)
         })
     }
 }

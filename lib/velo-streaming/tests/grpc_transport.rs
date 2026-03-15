@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use velo_streaming::grpc_transport::parse_grpc_endpoint;
-use velo_streaming::{GrpcFrameTransport, StreamFrame};
+use velo_streaming::{FrameTransport, GrpcFrameTransport, StreamFrame};
 
 // ---------------------------------------------------------------------------
 // Sentinel helpers
@@ -21,6 +21,7 @@ fn dropped_bytes() -> Vec<u8> {
     rmp_serde::to_vec(&StreamFrame::<()>::Dropped).unwrap()
 }
 
+#[allow(dead_code)]
 fn finalized_bytes() -> Vec<u8> {
     rmp_serde::to_vec(&StreamFrame::<()>::Finalized).unwrap()
 }
