@@ -3,7 +3,7 @@
 
 [package]
 name = "velo-common"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 description = "Common types for Velo distributed systems (identity, address, transport)"
 authors.workspace = true

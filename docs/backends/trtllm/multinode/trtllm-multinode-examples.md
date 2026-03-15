@@ -80,7 +80,7 @@ following environment variables based:
 ```bash
 # NOTE: IMAGE must be set manually for now
 # Use the prebuilt container from NGC (see ../README.md#quick-start):
-#   export IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0"
+#   export IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0"
 # Or build a custom one (see ../trtllm-building-custom-container.md)
 # Or you can also download the image to shared storage and point
 # IMAGE to the local path.

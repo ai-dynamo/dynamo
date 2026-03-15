@@ -14,8 +14,6 @@
 // use velo_transports::http::{HttpTransport, HttpTransportBuilder};
 // #[cfg(feature = "nats")]
 // use velo_transports::nats::{NatsTransport, NatsTransportBuilder};
-// #[cfg(feature = "ucx")]
-// use velo_transports::ucx::{UcxTransport, UcxTransportBuilder};
 
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};

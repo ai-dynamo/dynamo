@@ -28,6 +28,7 @@ from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -309,6 +310,7 @@ class BaseWorkerHandler(ABC):
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[KvEventPublisher] | None = None
+        self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
@@ -1105,7 +1107,7 @@ class BaseWorkerHandler(ABC):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int
+        output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from vLLM CompletionOutput for new tokens.
@@ -1113,6 +1115,8 @@ class BaseWorkerHandler(ABC):
         Args:
             output: vLLM CompletionOutput object
             num_output_tokens_so_far: Number of tokens already processed
+            tokenizer: Optional tokenizer for decoding token IDs when
+                       decoded_token is not populated by the engine
 
         Returns:
             Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
@@ -1145,18 +1149,23 @@ class BaseWorkerHandler(ABC):
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
+                token_str = getattr(logprob_info, "decoded_token", None)
+                if not token_str and tokenizer:
+                    try:
+                        token_str = tokenizer.decode([tok_id])
+                    except Exception:
+                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": (
                             logprob_info.rank if hasattr(logprob_info, "rank") else 0
                         ),
                         "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
+                        "token": token_str,
                         "logprob": float(logprob_info.logprob),
+                        "bytes": (
+                            list(token_str.encode("utf-8")) if token_str else None
+                        ),
                     }
                 )
             top_logprobs.append(token_top_logprobs)
@@ -1248,8 +1257,9 @@ class BaseWorkerHandler(ABC):
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 # Extract logprobs for new tokens if available
+                tokenizer = getattr(self.engine_client, "tokenizer", None)
                 log_probs, top_logprobs = self._extract_logprobs(
-                    output, num_output_tokens_so_far
+                    output, num_output_tokens_so_far, tokenizer=tokenizer
                 )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
@@ -1314,14 +1324,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        first_token = True
+        with time_and_log_code_section(
+            f"[DECODE] request: {request_id} generate"
+        ) as decode_timer:
+            if self.use_vllm_tokenizer:
+                # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+                generator = self._generate_text_mode(request, context, request_id)
+            else:
+                # Token-in-token-out mode: internal protocol format
+                generator = self._generate_token_mode(request, context, request_id)
 
-        if self.use_vllm_tokenizer:
-            # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
-            async for chunk in self._generate_text_mode(request, context, request_id):
-                yield chunk
-        else:
-            # Token-in-token-out mode: internal protocol format
-            async for chunk in self._generate_token_mode(request, context, request_id):
+            async for chunk in generator:
+                if first_token:
+                    decode_timer.stop_interval()
+                    first_token = False
                 yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
@@ -1524,8 +1541,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prefill Request ID: {request_id}")
 
         # Token-in-token-out mode: internal protocol format
-        async for chunk in self._generate_token_mode(request, context, request_id):
-            yield chunk
+        with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""

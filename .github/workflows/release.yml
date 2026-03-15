@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             echo "Error: workflow_dispatch must be triggered from a release/* branch"
             echo "Current branch: $BRANCH_NAME"
             exit 1

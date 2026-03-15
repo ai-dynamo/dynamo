@@ -154,6 +154,26 @@ impl State {
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
     }
+
+    /// Returns true if streaming tool call dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
+    /// SSE events for each complete tool call, letting clients start processing tool calls
+    /// before `finish_reason="tool_calls"` arrives.
+    pub fn streaming_tool_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+    }
+
+    /// Returns true if streaming reasoning dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path accumulates reasoning tokens and
+    /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
+    /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
+    pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
+    }
 }
 
 #[derive(Clone)]

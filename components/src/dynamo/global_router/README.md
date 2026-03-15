@@ -163,7 +163,7 @@ If not provided, the middle of the configured range is used as default.
 
 ## Example
 
-See `examples/hierarchical_planner/` for a complete example with:
+See `examples/global_planner/` for a complete example with:
 - Global router configuration
 - Local router setup for each pool
 - Mocker workers for testing

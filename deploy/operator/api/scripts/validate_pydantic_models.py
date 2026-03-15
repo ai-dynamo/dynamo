@@ -103,7 +103,6 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     FeaturesSpec,
     MockerSpec,
     ModelCacheSpec,
-    OptimizationType,
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
     ProfilingPhase,
@@ -175,7 +174,6 @@ def test_sla_defaults_and_validation():
     assert sla.ttft == 2000.0
     assert sla.itl == 30.0
     assert sla.e2eLatency is None
-    assert sla.optimizationType is None
     print("✓ SLASpec defaults correct")
 
     # explicit ttft+itl mode: OK
@@ -183,13 +181,6 @@ def test_sla_defaults_and_validation():
 
     # e2eLatency mode: OK (null out ttft/itl)
     SLASpec(ttft=None, itl=None, e2eLatency=500.0)
-
-    # optimizationType mode: OK (null out ttft/itl)
-    SLASpec(ttft=None, itl=None, optimizationType=OptimizationType.Throughput)
-
-    # optimizationType mode: OK without explicitly nulling defaults (TC-2.5 / TC-2.6)
-    SLASpec(optimizationType=OptimizationType.Throughput)
-    SLASpec(optimizationType=OptimizationType.Latency)
 
     # e2eLatency mode: OK without explicitly nulling defaults
     SLASpec(e2eLatency=500.0)
@@ -229,10 +220,6 @@ def test_enums():
     # ProfilingPhase — TitleCase suffix from Go const names
     assert ProfilingPhase.Initializing == "Initializing"
     assert ProfilingPhase.SweepingPrefill == "SweepingPrefill"
-
-    # OptimizationType — TitleCase from Go const names
-    assert OptimizationType.Latency == "latency"
-    assert OptimizationType.Throughput == "throughput"
 
     # SearchStrategy — TitleCase from Go const names
     assert SearchStrategy.Rapid == "rapid"

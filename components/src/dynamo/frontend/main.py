@@ -259,6 +259,21 @@ async def async_main():
     if config.enable_anthropic_api:
         os.environ["DYN_ENABLE_ANTHROPIC_API"] = "1"
 
+    if config.strip_anthropic_preamble:
+        os.environ["DYN_STRIP_ANTHROPIC_PREAMBLE"] = "1"
+    else:
+        os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
+
+    if config.enable_streaming_tool_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_TOOL_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_TOOL_DISPATCH", None)
+
+    if config.enable_streaming_reasoning_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_REASONING_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
+
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None

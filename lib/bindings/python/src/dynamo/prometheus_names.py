@@ -132,6 +132,13 @@ class frontend_service:
     OPERATION_LABEL = "operation"
 
 
+class kv_publisher:
+    """KV Publisher metrics"""
+
+    # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
+    ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+
+
 class kvbm:
     """KVBM"""
 
@@ -165,6 +172,21 @@ class kvbm:
     OBJECT_READ_FAILURES = "object_read_failures"
     # Number of failed object storage write operations (blocks)
     OBJECT_WRITE_FAILURES = "object_write_failures"
+
+
+class kvindexer:
+    """Standalone KV indexer HTTP service metrics"""
+
+    # HTTP request latency
+    REQUEST_DURATION_SECONDS = "request_duration_seconds"
+    # Total HTTP requests
+    REQUESTS_TOTAL = "requests_total"
+    # HTTP error responses (4xx/5xx)
+    ERRORS_TOTAL = "errors_total"
+    # Number of active model+tenant indexers
+    MODELS = "models"
+    # Number of registered worker instances
+    WORKERS = "workers"
 
 
 class kvrouter:
@@ -225,6 +247,27 @@ class name_prefix:
     ROUTER = "dynamo_router"
     # Prefix for tokio runtime metrics
     TOKIO = "dynamo_tokio"
+    # Prefix for standalone KV indexer metrics
+    KVINDEXER = "dynamo_kvindexer"
+    # Prefix for request-plane metrics at AddressedPushRouter
+    REQUEST_PLANE = "dynamo_request_plane"
+    # Prefix for transport-layer metrics (TCP / NATS)
+    TRANSPORT = "dynamo_transport"
+    # Prefix for work-handler transport breakdown metrics (backend side)
+    WORK_HANDLER = "dynamo_work_handler"
+
+
+class request_plane:
+    """Request plane metrics at AddressedPushRouter"""
+
+    # Time from generate() entry to send_request() (serialization + encoding)
+    QUEUE_SECONDS = "queue_seconds"
+    # Time for send_request() to complete (frontend view: network + queue + ack)
+    SEND_SECONDS = "send_seconds"
+    # Time from send_request() to first response item (transport roundtrip TTFT)
+    ROUNDTRIP_TTFT_SECONDS = "roundtrip_ttft_seconds"
+    # Currently in-flight requests (gauge)
+    INFLIGHT_REQUESTS = "inflight_requests"
 
 
 class router:
@@ -265,25 +308,6 @@ class routing_overhead:
     TOTAL_MS = "overhead_total_ms"
 
 
-class trtllm_additional:
-    """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
-
-    # Total number of aborted/cancelled requests
-    NUM_ABORTED_REQUESTS_TOTAL = "trtllm_num_aborted_requests_total"
-    # Total number of requests containing image content
-    REQUEST_TYPE_IMAGE_TOTAL = "trtllm_request_type_image_total"
-    # Total number of requests using guided/structured decoding
-    REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL = "trtllm_request_type_structured_output_total"
-    # Total number of successful KV cache transfers
-    KV_TRANSFER_SUCCESS_TOTAL = "trtllm_kv_transfer_success_total"
-    # KV cache transfer latency per request in seconds
-    KV_TRANSFER_LATENCY_SECONDS = "trtllm_kv_transfer_latency_seconds"
-    # KV cache transfer size per request in bytes
-    KV_TRANSFER_BYTES = "trtllm_kv_transfer_bytes"
-    # KV cache transfer speed per request in GB/s
-    KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
-
-
 class task_tracker:
     """Task tracker Prometheus metric name suffixes"""
 
@@ -316,6 +340,45 @@ class tokio_perf:
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
     ALIVE_TASKS = "alive_tasks"
+
+
+class transport:
+    """Transport-specific metrics (TCP / NATS)"""
+
+    # NOTE: Nested classes added manually because the codegen does not yet
+    # handle Rust submodules (see TODO in prometheus_parser.rs).
+    # Re-running gen-python-prometheus-names will overwrite this file and
+    # lose these classes until the codegen is updated.
+
+    class tcp:
+        POOL_ACTIVE = "tcp_pool_active"
+        POOL_IDLE = "tcp_pool_idle"
+        BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
+        BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
+        ERRORS_TOTAL = "tcp_errors_total"
+        SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
+
+    class nats:
+        ERRORS_TOTAL = "nats_errors_total"
+
+
+class trtllm_additional:
+    """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
+
+    # Total number of aborted/cancelled requests
+    NUM_ABORTED_REQUESTS_TOTAL = "trtllm_num_aborted_requests_total"
+    # Total number of requests containing image content
+    REQUEST_TYPE_IMAGE_TOTAL = "trtllm_request_type_image_total"
+    # Total number of requests using guided/structured decoding
+    REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL = "trtllm_request_type_structured_output_total"
+    # Total number of successful KV cache transfers
+    KV_TRANSFER_SUCCESS_TOTAL = "trtllm_kv_transfer_success_total"
+    # KV cache transfer latency per request in seconds
+    KV_TRANSFER_LATENCY_SECONDS = "trtllm_kv_transfer_latency_seconds"
+    # KV cache transfer size per request in bytes
+    KV_TRANSFER_BYTES = "trtllm_kv_transfer_bytes"
+    # KV cache transfer speed per request in GB/s
+    KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
 
 
 class work_handler:

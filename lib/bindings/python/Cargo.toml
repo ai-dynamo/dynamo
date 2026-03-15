@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
+kv-indexer = ["dep:dynamo-kv-router", "dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
@@ -41,7 +42,12 @@ thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
-tracing = { version = "0"  }
+tracing = { version = "0" }
+
+# kv-indexer (optional)
+dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"], optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10, which is the minimum version in pyproject.toml
@@ -69,5 +75,10 @@ dynamo-llm = { path = "../../llm" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
+
+[[bin]]
+name = "dynamo-kv-indexer"
+path = "rust/bin/kv_indexer.rs"
+required-features = ["kv-indexer"]
 
 [dev-dependencies]

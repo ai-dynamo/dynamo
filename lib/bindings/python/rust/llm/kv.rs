@@ -124,12 +124,14 @@ impl KvEventPublisher {
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
     ///     zmq_topic: ZMQ topic filter (default "").
-    ///     batching_timeout_us: Maximum time (in **microseconds**) to accumulate
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
     ///         events into a single batch before flushing.
-    ///         ``None`` uses the default window of 10000 µs (10 ms).
-    ///         ``0`` disables batching: every event is published immediately.
+    ///         ``None`` disables batching: every event is published immediately.
+    ///         ``50`` to enable batching with a 50 ms window.
+    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_us=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -139,7 +141,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
-        batching_timeout_us: Option<u64>,
+        batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
         let _ = worker_id;
 
@@ -161,7 +163,7 @@ impl KvEventPublisher {
             source_config,
             enable_local_indexer,
             dp_rank,
-            batching_timeout_us,
+            batching_timeout_ms,
         )
         .map_err(to_pyerr)?;
 
@@ -589,12 +591,51 @@ async fn create_kv_router_from_endpoint(
     } else {
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
+
+    // Only query discovery for model_name when a remote indexer is configured,
+    // since model_name is only needed for the RemoteIndexer path.
+    let needs_model_name = kv_router_config
+        .as_ref()
+        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .unwrap_or(false);
+
+    let model_name = if needs_model_name {
+        let discovery = endpoint.inner.component().drt().discovery();
+        let instances = discovery
+            .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+            })
+            .await
+            .map_err(to_pyerr)?;
+
+        Some(
+            instances
+                .into_iter()
+                .find_map(|inst| {
+                    inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                        .ok()
+                        .map(|card| card.display_name)
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "no model card found in discovery for endpoint {}/{}/{}",
+                        endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+
     let kv_router = model_manager
         .kv_chooser_for(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
             worker_type,
+            model_name,
         )
         .await
         .map_err(to_pyerr)?;
