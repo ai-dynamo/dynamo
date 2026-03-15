@@ -324,8 +324,13 @@ async def wait_for_indexer_workers_active(
 
     async with aiohttp.ClientSession() as session:
         while loop.time() < deadline:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+
             try:
-                async with session.get(workers_url) as resp:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(workers_url, timeout=request_timeout) as resp:
                     if resp.status != 200:
                         await asyncio.sleep(0.5)
                         continue

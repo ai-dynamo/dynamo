@@ -7,7 +7,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::{PyStopAsyncIteration, PySystemExit};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -202,12 +202,22 @@ where
     PyException::new_err(format!("{}", err))
 }
 
+fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
+    #[cfg(feature = "kv-indexer")]
+    if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
+        let _ = clap_error.print();
+        return PySystemExit::new_err(clap_error.exit_code());
+    }
+
+    to_pyerr(err)
+}
+
 #[pyfunction(name = "run_kv_indexer")]
 #[pyo3(signature = (argv=None))]
 fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_kv_indexer_cli(argv))
-        .map_err(to_pyerr)
+        .map_err(kv_indexer_to_pyerr)
 }
 
 /// Log a message from Python with file and line info
