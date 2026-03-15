@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This script runs INSIDE the container (legacy mode) or against a mounted
+# This script runs INSIDE the container (local mode) or against a mounted
 # filesystem root (--root /target mode for BuildKit extraction).
 # It must be fully self-contained with zero external dependencies (only Python stdlib).
 
@@ -149,7 +149,7 @@ def main():
             license_id = get_license_for_package(pkg, root)
             print(f"{pkg}\t{version}\t{license_id}")
     else:
-        # Legacy mode: run dpkg-query inside the container
+        # Local mode: run dpkg-query inside the container
         result = subprocess.run(
             ["dpkg-query", "-W", "-f=${Package}\t${Version}\n"],
             capture_output=True,

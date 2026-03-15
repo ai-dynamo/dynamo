@@ -200,6 +200,7 @@ def extract_all_buildx(
             f"TARGET_IMAGE={image}",
             "--output",
             f"type=local,dest={tmpdir}",
+            "--pull",  # always re-resolve target image digest from registry
             "-f",
             str(_EXTRACT_DOCKERFILE),
             str(_SCRIPT_DIR),
@@ -295,7 +296,8 @@ Examples:
         default="",
         help=(
             "docker buildx builder name. When set, uses BuildKit filesystem extraction "
-            "(no docker run) instead of docker run. Requires --platform."
+            "(no docker run) instead of docker run. Use --platform to target a specific "
+            "architecture (defaults to linux/amd64)."
         ),
     )
     parser.add_argument(

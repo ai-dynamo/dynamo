@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This script runs INSIDE the container (legacy mode) or against a mounted
+# This script runs INSIDE the container (local mode) or against a mounted
 # filesystem root (--root /target mode for BuildKit extraction).
 # It must be fully self-contained with zero external dependencies (only Python stdlib).
 
@@ -117,9 +117,12 @@ def main():
         search_paths += glob.glob(f"{root}/usr/lib/python*/site-packages")
         search_paths += glob.glob(f"{root}/usr/local/lib/python*/dist-packages")
         search_paths += glob.glob(f"{root}/usr/local/lib/python*/site-packages")
+        # conda / virtualenv layouts common in ML containers (e.g. /opt/conda)
+        search_paths += glob.glob(f"{root}/opt/*/lib/python*/site-packages")
+        search_paths += glob.glob(f"{root}/opt/*/lib/python*/dist-packages")
         dists = importlib.metadata.distributions(path=search_paths)
     else:
-        # Legacy mode: enumerate distributions in the running Python environment
+        # Local mode: enumerate distributions in the running Python environment
         dists = importlib.metadata.distributions()
 
     seen = set()
