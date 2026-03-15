@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""License fetcher for transitive dependencies.
+"""License fetcher for Rust and Go transitive dependencies.
 
-Queries registry APIs (crates.io, PyPI, GitHub) to retrieve license metadata
-for resolved packages, with persistent JSON caching and rate limiting.
+Queries registry APIs (crates.io for Rust, GitHub for Go) to retrieve license
+metadata for resolved packages, with persistent JSON caching and rate limiting.
+Python packages are handled via --image (container inspection), not this module.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ DEFAULT_CACHE_PATH = Path.home() / ".dynamo_license_cache.json"
 
 _RATE_LIMITS: dict[Ecosystem, float] = {
     Ecosystem.RUST: 1.0,
-    Ecosystem.PYTHON: 0.2,
+    Ecosystem.PYTHON: 0.0,  # Python uses --image, not API calls
     Ecosystem.GO: 0.0,
 }
 
@@ -179,66 +180,6 @@ def fetch_rust_license(
     )
 
 
-def fetch_python_license(
-    name: str,
-    version: str,
-    session: requests.Session,
-) -> PackageLicense:
-    """Fetch license info for a Python package from PyPI."""
-    # Strip PEP 440 local version suffix (+cu129, +cu12, etc.) — PyPI doesn't index these
-    pypi_version = version.split("+")[0]
-    url = f"https://pypi.org/pypi/{quote(name, safe='')}/{quote(pypi_version, safe='')}/json"
-    try:
-        resp = session.get(url, timeout=15)
-        if resp.status_code == 404:
-            return PackageLicense(
-                name=name,
-                version=version,
-                ecosystem="pypi",
-                error="Not found on PyPI",
-            )
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as exc:
-        return PackageLicense(
-            name=name,
-            version=version,
-            ecosystem="pypi",
-            error=str(exc),
-        )
-
-    info = data.get("info", {})
-    license_expr = info.get("license") or ""
-
-    if not license_expr or license_expr.lower() in (
-        "unknown",
-        "other/proprietary license",
-    ):
-        classifiers = info.get("classifiers", [])
-        for clf in classifiers:
-            if clf.startswith("License :: OSI Approved ::"):
-                license_expr = clf.split("::")[-1].strip()
-                break
-
-    project_urls = info.get("project_urls") or {}
-    homepage = info.get("home_page") or project_urls.get("Homepage", "")
-    repository = (
-        project_urls.get("Repository", "")
-        or project_urls.get("Source", "")
-        or project_urls.get("Source Code", "")
-    )
-
-    return PackageLicense(
-        name=name,
-        version=version,
-        ecosystem="pypi",
-        license_expression=license_expr,
-        repository=repository,
-        homepage=homepage,
-        project_urls={k: v for k, v in project_urls.items() if v},
-    )
-
-
 _GO_VANITY_TO_GITHUB: list[tuple[str, str, str]] = [
     ("golang.org/x/", "golang", "{name}"),
     ("google.golang.org/grpc", "grpc", "grpc-go"),
@@ -368,8 +309,6 @@ def _fetch_one(
     """Dispatch a single license lookup to the appropriate ecosystem fetcher."""
     if pkg.ecosystem == Ecosystem.RUST:
         return fetch_rust_license(pkg.name, pkg.version, session)
-    if pkg.ecosystem == Ecosystem.PYTHON:
-        return fetch_python_license(pkg.name, pkg.version, session)
     return fetch_go_license(pkg.name, pkg.version, session, github_token)
 
 

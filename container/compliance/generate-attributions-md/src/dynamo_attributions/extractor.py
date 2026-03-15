@@ -8,7 +8,7 @@ import logging
 import re
 import subprocess
 
-from .lockfile import parse_cargo_lock, parse_go_mod, parse_pip_freeze
+from .lockfile import parse_cargo_lock, parse_go_mod
 from .tree import DependencyTree
 from .types import Ecosystem, ResolvedPackage
 
@@ -59,40 +59,14 @@ def _get_cargo_workspace_members(dynamo_path: str, branch: str) -> list[str]:
     return members
 
 
-def _get_direct_python_packages(dynamo_path: str, branch: str) -> list[str]:
-    """Extract declared Python package names from requirements files."""
-    req_files = [
-        "container/deps/requirements.common.txt",
-        "container/deps/requirements.frontend.txt",
-        "container/deps/requirements.planner.txt",
-        "container/deps/requirements.benchmark.txt",
-        "container/deps/requirements.vllm.txt",
-    ]
-    names: set[str] = set()
-    for req_file in req_files:
-        content = _git_read(dynamo_path, branch, req_file)
-        if not content:
-            continue
-        for line in content.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("-"):
-                continue
-            m = re.match(r"^([a-zA-Z0-9][a-zA-Z0-9._-]*)", line)
-            if m:
-                names.add(m.group(1))
-    return sorted(names)
-
-
 def extract_transitive(
     dynamo_path: str,
     branch: str = "HEAD",
     ecosystem: Ecosystem | None = None,
-    pip_freeze_content: str | None = None,
-    direct_python_packages: list[str] | None = None,
 ) -> DependencyTree:
-    """Extract transitive dependencies and build a dependency tree.
+    """Extract Rust and Go transitive dependencies via git-show.
 
-    Reads lock files via git-show (no checkout needed).
+    Python packages are extracted separately via --image (container inspection).
     """
     all_packages: list[ResolvedPackage] = []
 
@@ -108,18 +82,5 @@ def extract_transitive(
         if go_mod:
             go_pkgs = parse_go_mod(go_mod)
             all_packages.extend(go_pkgs)
-
-    if ecosystem is None or ecosystem == Ecosystem.PYTHON:
-        if pip_freeze_content:
-            py_pkgs = parse_pip_freeze(pip_freeze_content)
-            if direct_python_packages:
-                direct_set = {
-                    re.sub(r"[-_.]+", "-", n).lower() for n in direct_python_packages
-                }
-                for pkg in py_pkgs:
-                    norm = re.sub(r"[-_.]+", "-", pkg.name).lower()
-                    if norm in direct_set:
-                        pkg.is_direct = True
-            all_packages.extend(py_pkgs)
 
     return DependencyTree(all_packages)

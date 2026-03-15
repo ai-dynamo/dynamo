@@ -11,7 +11,7 @@ import sys
 from enum import IntEnum
 from pathlib import Path
 
-from .extractor import _get_direct_python_packages, extract_transitive
+from .extractor import extract_transitive
 from .licenses import fetch_all_licenses
 from .types import Ecosystem
 
@@ -88,11 +88,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--image",
-        help="Container image to extract Python packages from (preferred over --pip-freeze-file)",
-    )
-    parser.add_argument(
-        "--pip-freeze-file",
-        help="Path to pip freeze output file (fallback for Python; use --image instead)",
+        help="Container image to extract Python packages from (required for Python)",
     )
     parser.add_argument(
         "--output-dir",
@@ -121,44 +117,27 @@ def main() -> int:
         print(f"Error: {prereq_err}", file=sys.stderr)
         return _ExitCodes.FAILURE
 
-    # --- Python: --image (preferred) or --pip-freeze-file (fallback) ---
+    # --- Python: requires --image ---
     python_from_image: list[dict[str, str]] | None = None
-    pip_freeze = None
     wants_python = eco is None or eco == Ecosystem.PYTHON
 
     if args.image and wants_python:
         python_from_image = _extract_python_from_image(args.image, args.dynamo_path)
-    elif args.pip_freeze_file:
-        freeze_path = Path(args.pip_freeze_file)
-        if not freeze_path.is_file():
-            print(f"Error: pip freeze file not found: {freeze_path}", file=sys.stderr)
-            return _ExitCodes.BAD_INPUT
-        pip_freeze = freeze_path.read_text()
     elif eco == Ecosystem.PYTHON:
         print(
-            "Error: Python ecosystem requires --image or --pip-freeze-file.\n"
-            "  --image IMAGE          Extract from container (preferred)\n"
-            "  --pip-freeze-file FILE Fallback using pip freeze output",
+            "Error: --image is required for the Python ecosystem.\n"
+            "  dynamo-attributions --ecosystem python --image IMAGE",
             file=sys.stderr,
         )
         return _ExitCodes.BAD_INPUT
 
-    # --- Build transitive dep tree (Rust + Go, and Python via pip-freeze) ---
-    direct_py: list[str] | None = None
-    if pip_freeze:
-        direct_py = _get_direct_python_packages(args.dynamo_path, args.branch)
-
+    # --- Build transitive dep tree (Rust + Go only) ---
     tree = extract_transitive(
         dynamo_path=args.dynamo_path,
         branch=args.branch,
         ecosystem=eco,
-        pip_freeze_content=pip_freeze,
-        direct_python_packages=direct_py,
     )
     packages = tree.all_packages()
-
-    if python_from_image:
-        packages = [p for p in packages if p.ecosystem != Ecosystem.PYTHON]
 
     if not packages and not python_from_image:
         print("No packages found. Diagnostics:", file=sys.stderr)
@@ -172,12 +151,8 @@ def main() -> int:
                 f"  Go: could not read deploy/operator/go.mod from branch '{args.branch}'",
                 file=sys.stderr,
             )
-        if eco in (None, Ecosystem.PYTHON) and not pip_freeze and not python_from_image:
-            print(
-                "  Python: --image or --pip-freeze-file not provided", file=sys.stderr
-            )
-        elif eco in (None, Ecosystem.PYTHON):
-            print("  Python: extraction returned 0 packages", file=sys.stderr)
+        if eco in (None, Ecosystem.PYTHON) and not python_from_image:
+            print("  Python: --image not provided", file=sys.stderr)
         print(
             f"\nVerify branch '{args.branch}' exists and --dynamo-path "
             f"'{args.dynamo_path}' is correct.",
@@ -185,7 +160,7 @@ def main() -> int:
         )
         return _ExitCodes.BAD_INPUT
 
-    # --- Fetch licenses for Rust/Go (Python via --image already has licenses) ---
+    # --- Fetch licenses for Rust/Go ---
     eco_packages: dict[str, list[dict]] = {"cargo": [], "pypi": [], "golang": []}
 
     if packages:
