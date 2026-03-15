@@ -197,7 +197,10 @@ jobs:
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      run_multi_gpu_tests: false  # TODO: select multi-GPU tests based for pre_merge from post_merge and anable below lines.
+      # run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
+      # multi_gpu_test_markers: 'pre_merge and vllm and gpu_2'
+      # multi_gpu_test_timeout_minutes: 30
     secrets: inherit
 
   # ============================================================================

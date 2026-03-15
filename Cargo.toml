@@ -80,6 +80,7 @@ derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
 futures = { version = "0.3" }
+futures-util = { version = "0.3.32" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
     "tokio",
     "rustls-tls",

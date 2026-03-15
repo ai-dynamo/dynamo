@@ -591,12 +591,51 @@ async fn create_kv_router_from_endpoint(
     } else {
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
+
+    // Only query discovery for model_name when a remote indexer is configured,
+    // since model_name is only needed for the RemoteIndexer path.
+    let needs_model_name = kv_router_config
+        .as_ref()
+        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .unwrap_or(false);
+
+    let model_name = if needs_model_name {
+        let discovery = endpoint.inner.component().drt().discovery();
+        let instances = discovery
+            .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+            })
+            .await
+            .map_err(to_pyerr)?;
+
+        Some(
+            instances
+                .into_iter()
+                .find_map(|inst| {
+                    inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                        .ok()
+                        .map(|card| card.display_name)
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "no model card found in discovery for endpoint {}/{}/{}",
+                        endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+
     let kv_router = model_manager
         .kv_chooser_for(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
             worker_type,
+            model_name,
         )
         .await
         .map_err(to_pyerr)?;

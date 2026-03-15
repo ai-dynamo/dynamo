@@ -3,6 +3,8 @@
 
 use clap::Parser;
 
+#[cfg(feature = "kv-indexer-runtime")]
+use dynamo_kv_router::standalone_indexer::RuntimeConfig;
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
 
 #[derive(Parser)]
@@ -35,10 +37,56 @@ struct Cli {
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
     peers: Option<String>,
+
+    /// Enable Dynamo runtime integration (discovery, event plane, request plane).
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long)]
+    dynamo_runtime: bool,
+
+    /// Dynamo namespace to register the indexer component under.
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long, default_value = "default")]
+    namespace: String,
+
+    /// Component name for this indexer in the Dynamo runtime.
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long, default_value = "kv-indexer")]
+    component_name: String,
+
+    /// Component name that workers register under.
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long, default_value = "backend")]
+    worker_component: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    #[cfg(feature = "kv-indexer-runtime")]
+    if cli.dynamo_runtime {
+        dynamo_runtime::logging::init();
+        let worker = dynamo_runtime::Worker::from_settings()?;
+        return worker.execute(move |runtime| {
+            standalone_indexer::run_with_runtime(
+                runtime,
+                IndexerConfig {
+                    block_size: cli.block_size,
+                    port: cli.port,
+                    threads: cli.threads,
+                    workers: cli.workers,
+                    model_name: cli.model_name,
+                    tenant_id: cli.tenant_id,
+                    peers: cli.peers,
+                },
+                RuntimeConfig {
+                    namespace: cli.namespace,
+                    component_name: cli.component_name,
+                    worker_component: cli.worker_component,
+                },
+            )
+        });
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -46,9 +94,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
-
-    standalone_indexer::run_server(IndexerConfig {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(standalone_indexer::run_server(IndexerConfig {
         block_size: cli.block_size,
         port: cli.port,
         threads: cli.threads,
@@ -56,6 +103,5 @@ async fn main() -> anyhow::Result<()> {
         model_name: cli.model_name,
         tenant_id: cli.tenant_id,
         peers: cli.peers,
-    })
-    .await
+    }))
 }

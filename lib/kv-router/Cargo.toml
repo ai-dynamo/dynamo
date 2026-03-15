@@ -14,7 +14,8 @@ repository.workspace = true
 default = []
 metrics = ["dep:dynamo-runtime"]
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
-standalone-indexer = ["metrics", "dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
+standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
+indexer-runtime = ["metrics", "standalone-indexer"]
 
 [dependencies]
 # repo
@@ -64,6 +65,5 @@ ignored = ["clap", "indicatif", "plotters"]
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
-

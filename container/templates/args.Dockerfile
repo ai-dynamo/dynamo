@@ -37,7 +37,7 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
 {% elif platform == "multi" %}
 {# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}

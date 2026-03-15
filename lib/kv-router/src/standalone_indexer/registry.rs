@@ -50,6 +50,9 @@ pub struct WorkerRegistry {
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     /// Saved listener state for pause/resume. Populated on register, kept on pause.
     listener_states: DashMap<(WorkerId, u32), ListenerState>,
+    /// Workers added via MDC discovery (no ZMQ listener). Maps worker_id → indexer key.
+    #[cfg(feature = "indexer-runtime")]
+    discovered_workers: DashMap<WorkerId, IndexerKey>,
     num_threads: usize,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
@@ -64,6 +67,8 @@ impl WorkerRegistry {
             peers: DashMap::new(),
             watermarks: DashMap::new(),
             listener_states: DashMap::new(),
+            #[cfg(feature = "indexer-runtime")]
+            discovered_workers: DashMap::new(),
             num_threads,
             ready_tx,
             ready_rx,
@@ -101,6 +106,15 @@ impl WorkerRegistry {
         block_size: u32,
         replay_endpoint: Option<String>,
     ) -> Result<()> {
+        // Reject if this worker was already added via discovery
+        #[cfg(feature = "indexer-runtime")]
+        if self.discovered_workers.contains_key(&instance_id) {
+            bail!(
+                "instance {instance_id} is already registered via discovery; \
+                 use the Dynamo runtime to manage it"
+            );
+        }
+
         let key = IndexerKey {
             model_name,
             tenant_id,
@@ -207,21 +221,24 @@ impl WorkerRegistry {
         model_name: &str,
         tenant_id: &str,
     ) -> Result<()> {
-        let (_, entry) = self
-            .workers
-            .remove(&instance_id)
-            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
-
-        super::metrics::dec_workers();
-
-        for cancel in entry.cancels.values() {
-            cancel.cancel();
-        }
-
         let key = IndexerKey {
             model_name: model_name.to_string(),
             tenant_id: tenant_id.to_string(),
         };
+
+        // Check ZMQ-registered workers first, then discovery workers (if runtime mode)
+        if let Some((_, entry)) = self.workers.remove(&instance_id) {
+            super::metrics::dec_workers();
+            for cancel in entry.cancels.values() {
+                cancel.cancel();
+            }
+        } else if self.remove_discovered_worker(instance_id) {
+            super::metrics::dec_workers();
+            tracing::info!(instance_id, "Deregistering discovered worker via HTTP");
+        } else {
+            bail!("instance {instance_id} not found");
+        }
+
         if let Some(ie) = self.indexers.get(&key) {
             ie.indexer.remove_worker(instance_id).await;
         } else {
@@ -286,15 +303,20 @@ impl WorkerRegistry {
         instance_id: WorkerId,
         model_name: &str,
     ) -> Result<()> {
-        let (_, entry) = self
-            .workers
-            .remove(&instance_id)
-            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
-
-        super::metrics::dec_workers();
-
-        for cancel in entry.cancels.values() {
-            cancel.cancel();
+        // Check ZMQ-registered workers first, then discovery workers (if runtime mode)
+        if let Some((_, entry)) = self.workers.remove(&instance_id) {
+            super::metrics::dec_workers();
+            for cancel in entry.cancels.values() {
+                cancel.cancel();
+            }
+        } else if self.remove_discovered_worker(instance_id) {
+            super::metrics::dec_workers();
+            tracing::info!(
+                instance_id,
+                "Deregistering discovered worker (all tenants) via HTTP"
+            );
+        } else {
+            bail!("instance {instance_id} not found");
         }
 
         let mut found = false;
@@ -379,10 +401,25 @@ impl WorkerRegistry {
     }
 
     pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
-        self.workers
+        #[allow(unused_mut)]
+        let mut result: Vec<(WorkerId, HashMap<u32, String>)> = self
+            .workers
             .iter()
             .map(|entry| (*entry.key(), entry.value().endpoints.clone()))
-            .collect()
+            .collect();
+
+        // Include discovered workers (no ZMQ endpoints)
+        #[cfg(feature = "indexer-runtime")]
+        for entry in self.discovered_workers.iter() {
+            let worker_id = *entry.key();
+            // Skip if already in the workers map (shouldn't happen, but be safe)
+            if self.workers.contains_key(&worker_id) {
+                continue;
+            }
+            result.push((worker_id, HashMap::new()));
+        }
+
+        result
     }
 
     pub fn get_indexer(&self, key: &IndexerKey) -> Option<Ref<'_, IndexerKey, IndexerEntry>> {
@@ -425,5 +462,106 @@ impl WorkerRegistry {
                 )
             })
             .collect()
+    }
+
+    /// Helper: try to remove a worker from the discovered_workers map.
+    /// Returns false when the feature is disabled (no discovered workers exist).
+    fn remove_discovered_worker(&self, _instance_id: WorkerId) -> bool {
+        #[cfg(feature = "indexer-runtime")]
+        {
+            self.discovered_workers.remove(&_instance_id).is_some()
+        }
+        #[cfg(not(feature = "indexer-runtime"))]
+        {
+            false
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Discovery-based worker management (no ZMQ listener)
+    // ---------------------------------------------------------------
+
+    /// Register a worker discovered via MDC. Creates the indexer if needed but
+    /// does NOT start a ZMQ listener — events arrive via the event plane.
+    #[cfg(feature = "indexer-runtime")]
+    pub fn add_worker_from_discovery(
+        &self,
+        instance_id: WorkerId,
+        model_name: String,
+        tenant_id: String,
+        block_size: u32,
+    ) -> Result<()> {
+        // Reject if this worker is already registered via ZMQ (--workers or /register)
+        if self.workers.contains_key(&instance_id) {
+            bail!(
+                "instance {instance_id} is already registered via ZMQ; \
+                 cannot add via discovery"
+            );
+        }
+
+        let key = IndexerKey {
+            model_name,
+            tenant_id,
+        };
+
+        let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
+            tracing::info!(
+                model_name = %key.model_name,
+                tenant_id = %key.tenant_id,
+                block_size,
+                "Creating new indexer (discovery)"
+            );
+            IndexerEntry {
+                indexer: create_indexer(block_size, self.num_threads),
+                block_size,
+            }
+        });
+
+        if indexer_entry.block_size != block_size {
+            bail!(
+                "block_size mismatch for model={} tenant={}: existing={}, requested={}",
+                key.model_name,
+                key.tenant_id,
+                indexer_entry.block_size,
+                block_size
+            );
+        }
+        drop(indexer_entry);
+
+        self.discovered_workers.insert(instance_id, key);
+        Ok(())
+    }
+
+    /// Remove a worker that was discovered via MDC.
+    #[cfg(feature = "indexer-runtime")]
+    pub async fn remove_worker_from_discovery(&self, instance_id: WorkerId) {
+        if let Some((_, key)) = self.discovered_workers.remove(&instance_id) {
+            if let Some(ie) = self.indexers.get(&key) {
+                ie.indexer.remove_worker(instance_id).await;
+            }
+        } else {
+            tracing::debug!(
+                instance_id,
+                "remove_worker_from_discovery: worker not in discovered_workers map"
+            );
+        }
+    }
+
+    /// Look up the indexer responsible for a given worker_id.
+    /// Checks both discovery-registered and CLI-registered workers.
+    #[cfg(feature = "indexer-runtime")]
+    pub fn get_indexer_for_worker(&self, worker_id: WorkerId) -> Option<Indexer> {
+        // Check discovery workers first (more common in runtime mode)
+        if let Some(key) = self.discovered_workers.get(&worker_id)
+            && let Some(ie) = self.indexers.get(key.value())
+        {
+            return Some(ie.indexer.clone());
+        }
+        // Fall back for legacy --workers mode: only if this worker is actually
+        // in the ZMQ-registered workers map, route to the first indexer.
+        if self.workers.contains_key(&worker_id) {
+            return self.indexers.iter().next().map(|ie| ie.indexer.clone());
+        }
+        None
     }
 }
