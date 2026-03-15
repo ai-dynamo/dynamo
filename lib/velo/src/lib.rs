@@ -38,6 +38,54 @@ pub use velo_streaming::{
     StreamError, StreamFrame, StreamSender,
 };
 
+/// Configuration for TCP streaming transport.
+///
+/// Controls the bind address for the TCP streaming listener.
+#[derive(Debug, Clone)]
+pub struct TcpConfig {
+    /// IP address to bind the TCP streaming listener on. Defaults to 0.0.0.0.
+    pub bind_addr: std::net::IpAddr,
+}
+
+impl Default for TcpConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
+
+impl TcpConfig {
+    /// Create a new `TcpConfig` with an explicit bind address.
+    pub fn new(bind_addr: std::net::IpAddr) -> Self {
+        Self { bind_addr }
+    }
+}
+
+/// Streaming transport configuration for a [`Velo`] instance.
+///
+/// Only one `StreamConfig` may be set per [`VeloBuilder`] instance —
+/// one streaming server per Velo instance is enforced.
+///
+/// # Variants
+///
+/// - [`StreamConfig::Tcp`]: TCP-based streaming via [`TcpFrameTransport`](velo_streaming::TcpFrameTransport).
+///   Pass `None` to bind to `0.0.0.0` (OS-assigned port), or provide a
+///   [`TcpConfig`] for an explicit bind address.
+///
+/// # Note
+///
+/// A `Grpc` variant will be added in a future plan (Plan 03) when
+/// `GrpcFrameTransport` is wired into `VeloBuilder`.
+#[derive(Debug, Clone)]
+pub enum StreamConfig {
+    /// TCP-based streaming transport (TcpFrameTransport).
+    ///
+    /// Pass `None` to use the default bind address (`0.0.0.0`),
+    /// or `Some(TcpConfig)` for an explicit bind address.
+    Tcp(Option<TcpConfig>),
+}
+
 /// High-level facade for the Velo distributed system.
 ///
 /// Wraps a [`Messenger`] and [`AnchorManager`]
@@ -51,7 +99,7 @@ pub struct Velo {
 /// Builder for configuring and creating a [`Velo`] instance.
 pub struct VeloBuilder {
     inner: MessengerBuilder,
-    stream_bind_addr: Option<std::net::IpAddr>,
+    stream_config: Option<StreamConfig>,
 }
 
 impl VeloBuilder {
@@ -59,7 +107,7 @@ impl VeloBuilder {
     pub fn new() -> Self {
         Self {
             inner: MessengerBuilder::new(),
-            stream_bind_addr: None,
+            stream_config: None,
         }
     }
 
@@ -69,15 +117,37 @@ impl VeloBuilder {
         self
     }
 
+    /// Set the streaming transport configuration.
+    ///
+    /// Only one transport server is allowed per Velo instance. Returns [`Err`]
+    /// if called more than once on the same builder.
+    ///
+    /// Use [`StreamConfig::Tcp(None)`](StreamConfig::Tcp) for TCP with default
+    /// bind address (`0.0.0.0`), or `StreamConfig::Tcp(Some(TcpConfig::new(addr)))`
+    /// for an explicit bind address.
+    pub fn stream_config(mut self, config: StreamConfig) -> Result<Self> {
+        if self.stream_config.is_some() {
+            return Err(anyhow::anyhow!(
+                "stream_config called more than once: only one streaming server allowed per Velo instance"
+            ));
+        }
+        self.stream_config = Some(config);
+        Ok(self)
+    }
+
     /// Set the bind address for TCP streaming transport.
+    ///
+    /// Convenience wrapper around [`stream_config`](VeloBuilder::stream_config)
+    /// with `StreamConfig::Tcp(Some(TcpConfig::new(addr)))`.
     ///
     /// When set, `build()` creates a [`TcpFrameTransport`](velo_streaming::TcpFrameTransport)
     /// bound to this address and registers both `tcp` and `velo` schemes in the
-    /// transport registry. When `None` (default), only `VeloFrameTransport` is
+    /// transport registry. When not set (default), only `VeloFrameTransport` is
     /// created (backward compatible).
-    pub fn stream_bind_addr(mut self, addr: std::net::IpAddr) -> Self {
-        self.stream_bind_addr = Some(addr);
-        self
+    pub fn stream_bind_addr(self, addr: std::net::IpAddr) -> Self {
+        // Convenience: wraps StreamConfig::Tcp with explicit bind address.
+        // stream_config() cannot fail here (only one call from this path).
+        self.stream_config(StreamConfig::Tcp(Some(TcpConfig::new(addr)))).unwrap()
     }
 
     /// Set the peer discovery backend.
@@ -92,9 +162,10 @@ impl VeloBuilder {
     /// 1. Build Messenger (async)
     /// 2. Extract WorkerId
     /// 3. Create VeloFrameTransport
-    /// 4. Create AnchorManager via builder
-    /// 5. Register streaming control-plane handlers on Messenger
-    /// 6. Assemble Velo struct
+    /// 4. Optionally create TcpFrameTransport and transport registry (from stream_config)
+    /// 5. Create AnchorManager via builder
+    /// 6. Register streaming control-plane handlers on Messenger
+    /// 7. Assemble Velo struct
     pub async fn build(self) -> Result<Arc<Velo>> {
         // Step 1: Build Messenger
         let messenger = self.inner.build().await?;
@@ -107,21 +178,35 @@ impl VeloBuilder {
             velo_streaming::VeloFrameTransport::new(Arc::clone(&messenger), worker_id)?,
         );
 
-        // Step 3b: Optionally create TcpFrameTransport and transport registry
-        let (default_transport, transport_registry) = if let Some(bind_addr) = self.stream_bind_addr {
-            let tcp_transport = Arc::new(
-                velo_streaming::TcpFrameTransport::new(bind_addr),
-            );
-            let mut registry = std::collections::HashMap::new();
-            registry.insert("tcp".to_string(), Arc::clone(&tcp_transport) as Arc<dyn velo_streaming::FrameTransport>);
-            registry.insert("velo".to_string(), velo_transport.clone() as Arc<dyn velo_streaming::FrameTransport>);
-            // Default transport is TCP when stream_bind_addr is set
-            (tcp_transport as Arc<dyn velo_streaming::FrameTransport>, Arc::new(registry))
-        } else {
-            (velo_transport as Arc<dyn velo_streaming::FrameTransport>, Arc::new(std::collections::HashMap::new()))
+        // Step 4: Resolve transport and registry from stream_config
+        let (default_transport, transport_registry) = match self.stream_config {
+            Some(StreamConfig::Tcp(tcp_cfg)) => {
+                let bind_addr = tcp_cfg
+                    .map(|c| c.bind_addr)
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                let tcp_transport = Arc::new(velo_streaming::TcpFrameTransport::new(bind_addr));
+                let mut registry = std::collections::HashMap::new();
+                registry.insert(
+                    "tcp".to_string(),
+                    Arc::clone(&tcp_transport) as Arc<dyn velo_streaming::FrameTransport>,
+                );
+                registry.insert(
+                    "velo".to_string(),
+                    velo_transport.clone() as Arc<dyn velo_streaming::FrameTransport>,
+                );
+                // Default transport is TCP when stream_config is set
+                (
+                    tcp_transport as Arc<dyn velo_streaming::FrameTransport>,
+                    Arc::new(registry),
+                )
+            }
+            None => (
+                velo_transport as Arc<dyn velo_streaming::FrameTransport>,
+                Arc::new(std::collections::HashMap::new()),
+            ),
         };
 
-        // Step 4: Create AnchorManager (pass messenger for cross-worker cancel AMs)
+        // Step 5: Create AnchorManager (pass messenger for cross-worker cancel AMs)
         let anchor_manager = Arc::new(
             velo_streaming::AnchorManagerBuilder::default()
                 .worker_id(worker_id)
@@ -132,10 +217,10 @@ impl VeloBuilder {
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
         );
 
-        // Step 5: Register streaming control-plane handlers
+        // Step 6: Register streaming control-plane handlers
         anchor_manager.register_handlers(Arc::clone(&messenger))?;
 
-        // Step 6: Assemble Velo
+        // Step 7: Assemble Velo
         Ok(Arc::new(Velo {
             messenger,
             anchor_manager,
@@ -297,7 +382,8 @@ mod tests {
             .expect("first stream_config should succeed");
         let result = builder.stream_config(StreamConfig::Tcp(None));
         assert!(result.is_err(), "second stream_config call should return Err");
-        let err = result.unwrap_err();
+        // Extract error without unwrap_err() to avoid T: Debug bound on VeloBuilder
+        let err = result.err().unwrap();
         assert!(
             err.to_string().contains("more than once") || err.to_string().contains("one streaming"),
             "error message should indicate double-call: {}",
