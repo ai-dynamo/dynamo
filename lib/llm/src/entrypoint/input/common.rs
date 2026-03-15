@@ -189,7 +189,6 @@ pub async fn build_routed_pipeline<Req, Resp>(
     chooser: Option<Arc<KvRouter>>,
     tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
-    enforce_disagg: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -218,7 +217,6 @@ where
         preprocessor,
         tokenizer,
         prefill_chooser,
-        enforce_disagg,
         migration_limit,
         metrics,
     )
@@ -236,7 +234,6 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     preprocessor: Arc<OpenAIPreprocessor>,
     tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
-    enforce_disagg: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
