@@ -3,15 +3,24 @@
 
 //! Integration tests for GrpcFrameTransport.
 //!
-//! Validates GRPC-01..04: endpoint format, round-trip data flow,
-//! Dropped sentinel injection on abrupt close, and exclusive-attach enforcement.
+//! Validates GRPC-01..04, GRPC-09: endpoint format, round-trip data flow,
+//! Dropped sentinel injection on abrupt close, exclusive-attach enforcement,
+//! and full two-worker AM dispatch integration.
 //!
 //! This file requires `--features grpc` to compile (enforced via Cargo.toml [[test]]).
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
+use velo_common::WorkerId;
+use velo_messenger::Messenger;
 use velo_streaming::grpc_transport::parse_grpc_endpoint;
-use velo_streaming::{FrameTransport, GrpcFrameTransport, StreamFrame};
+use velo_streaming::{
+    AnchorManagerBuilder, FrameTransport, GrpcFrameTransport, StreamAnchorHandle, StreamFrame,
+};
+use velo_transports::tcp::TcpTransportBuilder;
 
 // ---------------------------------------------------------------------------
 // Sentinel helpers
@@ -160,4 +169,146 @@ async fn test_exclusive_attach_enforcement() {
 
     // Keep tx1 alive through test
     let _ = tx1;
+}
+
+// ---------------------------------------------------------------------------
+// Test GRPC-09: Full two-worker remote attach via gRPC AM dispatch
+// ---------------------------------------------------------------------------
+
+/// GRPC-09: Two-worker remote attach via full AM control-plane + gRPC data transport.
+///
+/// Path:
+///   1. Worker A creates AnchorManager with GrpcFrameTransport + "grpc" in registry
+///   2. Worker A calls register_handlers to wire _anchor_attach/_anchor_finalize
+///   3. Worker A creates anchor
+///   4. Worker B creates AnchorManager with GrpcFrameTransport + "grpc" in registry
+///   5. Worker B calls register_handlers
+///   6. Worker B calls attach_stream_anchor (remote path):
+///      - sends _anchor_attach AM to Worker A
+///      - Worker A's handler calls transport.bind() -> grpc:// endpoint
+///      - Worker B receives grpc:// endpoint, resolves "grpc" transport, calls connect()
+///   7. Worker B sends items + finalize
+///   8. Worker A's StreamAnchor yields all items then Finalized
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remote_attach_am_dispatch() {
+    // Helper: create TcpTransport bound to OS-assigned port (for AM messaging)
+    fn new_am_transport() -> Arc<velo_transports::tcp::TcpTransport> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        Arc::new(
+            TcpTransportBuilder::new()
+                .from_listener(listener)
+                .unwrap()
+                .build()
+                .unwrap(),
+        )
+    }
+
+    async fn make_two_messengers() -> (Arc<Messenger>, Arc<Messenger>) {
+        let t1 = new_am_transport();
+        let t2 = new_am_transport();
+        let m1 = Messenger::new(vec![t1], None).await.expect("m1");
+        let m2 = Messenger::new(vec![t2], None).await.expect("m2");
+        let p1 = m1.peer_info();
+        let p2 = m2.peer_info();
+        m2.register_peer(p1).expect("register m1 on m2");
+        m1.register_peer(p2).expect("register m2 on m1");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (m1, m2)
+    }
+
+    let (messenger_a, messenger_b) = make_two_messengers().await;
+    let worker_id_a = messenger_a.instance_id().worker_id();
+    let worker_id_b = messenger_b.instance_id().worker_id();
+
+    // Worker A: GrpcFrameTransport (server — binds on Worker A's machine)
+    let grpc_a = Arc::new(
+        GrpcFrameTransport::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("GrpcFrameTransport worker A"),
+    );
+    let mut registry_a = HashMap::new();
+    registry_a.insert("grpc".to_string(), grpc_a.clone() as Arc<dyn FrameTransport>);
+
+    let am_a: Arc<velo_streaming::AnchorManager> = Arc::new(
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id_a)
+            .transport(grpc_a as Arc<dyn FrameTransport>)
+            .transport_registry(Arc::new(registry_a))
+            .build()
+            .expect("AM worker A"),
+    );
+    am_a.register_handlers(Arc::clone(&messenger_a))
+        .expect("register_handlers A");
+
+    let mut anchor_stream = am_a.create_anchor::<u32>();
+    let handle = anchor_stream.handle();
+
+    // Simulate cross-worker handle transfer (u128 round-trip)
+    let handle_raw: u128 = handle.as_u128();
+    let hi = (handle_raw >> 64) as u64;
+    let lo = handle_raw as u64;
+    let handle_transferred = StreamAnchorHandle::pack(WorkerId::from_u64(hi), lo);
+    let (recovered_worker, _) = handle_transferred.unpack();
+    assert_eq!(recovered_worker, worker_id_a);
+
+    // Worker B: GrpcFrameTransport (client — connects to Worker A's gRPC server)
+    let grpc_b = Arc::new(
+        GrpcFrameTransport::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("GrpcFrameTransport worker B"),
+    );
+    let mut registry_b = HashMap::new();
+    registry_b.insert("grpc".to_string(), grpc_b.clone() as Arc<dyn FrameTransport>);
+
+    let am_b: Arc<velo_streaming::AnchorManager> = Arc::new(
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id_b)
+            .transport(grpc_b as Arc<dyn FrameTransport>)
+            .transport_registry(Arc::new(registry_b))
+            .build()
+            .expect("AM worker B"),
+    );
+    am_b.register_handlers(Arc::clone(&messenger_b))
+        .expect("register_handlers B");
+
+    // Worker B: remote attach (triggers _anchor_attach AM to Worker A -> gRPC bind -> connect)
+    let sender = am_b
+        .attach_stream_anchor::<u32>(handle_transferred)
+        .await
+        .expect("remote attach via gRPC must succeed");
+
+    // Worker B: send 10 items
+    for i in 0u32..10 {
+        sender.send(i).await.expect("send item");
+    }
+
+    // gRPC uses async pump tasks -- add small barrier before finalize
+    // (same pattern as VeloFrameTransport concurrent dispatch tests)
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    sender.finalize().expect("finalize");
+
+    // Worker A: collect items
+    let mut items = Vec::new();
+    let collect = async {
+        while let Some(frame) = anchor_stream.next().await {
+            match frame.expect("no stream error") {
+                StreamFrame::Item(v) => items.push(v),
+                StreamFrame::Finalized => break,
+                other => panic!("unexpected frame: {:?}", other),
+            }
+        }
+        items
+    };
+
+    let items = tokio::time::timeout(Duration::from_secs(10), collect)
+        .await
+        .expect("timed out waiting for Worker A to receive items from Worker B via gRPC");
+
+    // gRPC stream preserves ordering (single bidirectional stream per anchor)
+    assert_eq!(
+        items,
+        (0u32..10).collect::<Vec<_>>(),
+        "Worker A must receive all 10 items from Worker B in order via gRPC"
+    );
 }

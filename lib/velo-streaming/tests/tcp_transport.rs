@@ -341,6 +341,93 @@ async fn test_velo_builder_tcp_transport() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8: AnchorManager with gRPC transport registry (GRPC-05)
+// ---------------------------------------------------------------------------
+
+/// Validates that an AnchorManager constructed with GrpcFrameTransport as
+/// default and a populated transport_registry correctly has "grpc" in the registry.
+#[cfg(feature = "grpc")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_anchor_manager_grpc_registry() {
+    use velo_streaming::GrpcFrameTransport;
+
+    let grpc_transport = Arc::new(
+        GrpcFrameTransport::new("0.0.0.0:0".parse().unwrap())
+            .await
+            .expect("GrpcFrameTransport::new"),
+    );
+    let mut registry = HashMap::new();
+    registry.insert(
+        "grpc".to_string(),
+        grpc_transport.clone() as Arc<dyn FrameTransport>,
+    );
+
+    let manager = Arc::new(
+        velo_streaming::AnchorManagerBuilder::default()
+            .worker_id(velo_common::WorkerId::from_u64(1))
+            .transport(grpc_transport as Arc<dyn FrameTransport>)
+            .transport_registry(Arc::new(registry))
+            .build()
+            .unwrap(),
+    );
+
+    assert!(
+        manager.transport_registry.contains_key("grpc"),
+        "transport_registry should contain 'grpc' scheme"
+    );
+    assert_eq!(manager.transport_registry.len(), 1);
+
+    // Verify anchor creation works
+    let _anchor = manager.create_anchor::<String>();
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: VeloBuilder with gRPC transport (GRPC-06)
+// ---------------------------------------------------------------------------
+
+/// Validates that VeloBuilder.stream_config(StreamConfig::Grpc(None)) creates a
+/// GrpcFrameTransport and populates the transport_registry with both "grpc" and
+/// "velo" schemes.
+#[cfg(feature = "grpc")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_velo_builder_grpc_transport() {
+    use velo::StreamConfig;
+
+    let transport = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        Arc::new(
+            velo_transports::tcp::TcpTransportBuilder::new()
+                .from_listener(listener)
+                .unwrap()
+                .build()
+                .unwrap(),
+        )
+    };
+
+    let velo = velo::Velo::builder()
+        .add_transport(transport)
+        .stream_config(StreamConfig::Grpc(None))
+        .expect("stream_config should succeed on first call")
+        .build()
+        .await
+        .expect("VeloBuilder with Grpc config should build successfully");
+
+    // Verify transport_registry contains "grpc" and "velo"
+    let registry = &velo.anchor_manager().transport_registry;
+    assert!(
+        registry.contains_key("grpc"),
+        "transport_registry should contain 'grpc' scheme"
+    );
+    assert!(
+        registry.contains_key("velo"),
+        "transport_registry should contain 'velo' scheme"
+    );
+    assert_eq!(registry.len(), 2, "transport_registry should have exactly 2 entries");
+
+    let _anchor = velo.create_anchor::<String>();
+}
+
+// ---------------------------------------------------------------------------
 // Helpers for two-worker AM dispatch test
 // ---------------------------------------------------------------------------
 
