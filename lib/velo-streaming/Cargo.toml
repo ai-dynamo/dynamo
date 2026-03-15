@@ -33,6 +33,8 @@ socket2 = "0.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+velo = { workspace = true }
+velo-common = { workspace = true }
 velo-messenger = { workspace = true }
 velo-transports = { workspace = true }
 bytes = { workspace = true }
