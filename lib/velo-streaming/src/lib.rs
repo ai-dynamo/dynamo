@@ -25,6 +25,7 @@ pub mod control;
 pub mod frame;
 pub mod handle;
 pub mod sender;
+pub mod tcp_transport;
 pub mod transport;
 pub mod velo_transport;
 
@@ -38,5 +39,6 @@ pub use control::{
 };
 pub use frame::{SendError, StreamError, StreamFrame};
 pub use sender::StreamSender;
+pub use tcp_transport::TcpFrameTransport;
 pub use transport::FrameTransport;
 pub use velo_transport::VeloFrameTransport;

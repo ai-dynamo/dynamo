@@ -14,6 +14,7 @@ repository.workspace = true
 [dependencies]
 velo-common = { workspace = true }
 velo-messenger = { workspace = true }
+velo-transports = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
@@ -27,6 +28,8 @@ futures = { workspace = true }
 derive_builder = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+socket2 = "0.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
