@@ -87,7 +87,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -184,7 +184,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Build Frontend Container
         id: build-image
         timeout-minutes: 30

@@ -115,7 +115,7 @@ jobs:
         with:
           builder_name: ${{ needs.init.outputs.builder_name }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:

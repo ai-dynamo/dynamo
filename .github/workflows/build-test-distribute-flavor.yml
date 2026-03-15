@@ -202,7 +202,7 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ inputs.framework }}
-          all_arch: 'true'
+          arch: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
       - name: Calculate extra tags
         id: extra-tags

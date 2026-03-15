@@ -74,7 +74,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          arch: amd64
+          arch: linux/amd64
       - name: Docker Login
         if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
         uses: ./.github/actions/docker-login

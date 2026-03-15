@@ -211,7 +211,7 @@ jobs:
         with:
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
