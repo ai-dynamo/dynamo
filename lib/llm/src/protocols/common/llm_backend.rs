@@ -59,6 +59,8 @@ pub struct TopLogprob {
     pub token_id: TokenIdType,
     pub token: TokenType,
     pub logprob: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
 }
 pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 

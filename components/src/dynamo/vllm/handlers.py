@@ -1107,7 +1107,7 @@ class BaseWorkerHandler(ABC):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int
+        output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from vLLM CompletionOutput for new tokens.
@@ -1115,6 +1115,8 @@ class BaseWorkerHandler(ABC):
         Args:
             output: vLLM CompletionOutput object
             num_output_tokens_so_far: Number of tokens already processed
+            tokenizer: Optional tokenizer for decoding token IDs when
+                       decoded_token is not populated by the engine
 
         Returns:
             Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
@@ -1147,18 +1149,23 @@ class BaseWorkerHandler(ABC):
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
+                token_str = getattr(logprob_info, "decoded_token", None)
+                if not token_str and tokenizer:
+                    try:
+                        token_str = tokenizer.decode([tok_id])
+                    except Exception:
+                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": (
                             logprob_info.rank if hasattr(logprob_info, "rank") else 0
                         ),
                         "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
+                        "token": token_str,
                         "logprob": float(logprob_info.logprob),
+                        "bytes": (
+                            list(token_str.encode("utf-8")) if token_str else None
+                        ),
                     }
                 )
             top_logprobs.append(token_top_logprobs)
@@ -1250,8 +1257,9 @@ class BaseWorkerHandler(ABC):
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 # Extract logprobs for new tokens if available
+                tokenizer = getattr(self.engine_client, "tokenizer", None)
                 log_probs, top_logprobs = self._extract_logprobs(
-                    output, num_output_tokens_so_far
+                    output, num_output_tokens_so_far, tokenizer=tokenizer
                 )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
