@@ -409,9 +409,9 @@ async fn connection_writer_task(
     instance_id: crate::InstanceId,
     rx: flume::Receiver<SendTask>,
     connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
-    _cancel_token: CancellationToken,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
-    let result = connection_writer_inner(&path, instance_id, &rx).await;
+    let result = connection_writer_inner(&path, instance_id, &rx, &cancel_token).await;
 
     // Always drain queued messages and notify their error handlers.
     while let Ok(msg) = rx.try_recv() {
@@ -434,17 +434,26 @@ async fn connection_writer_inner(
     path: &Path,
     instance_id: crate::InstanceId,
     rx: &flume::Receiver<SendTask>,
+    cancel_token: &CancellationToken,
 ) -> Result<()> {
     debug!("Connecting to UDS {:?}", path);
 
-    let mut stream = UnixStream::connect(path)
-        .await
-        .context("UDS connect failed")?;
+    let mut stream = tokio::select! {
+        _ = cancel_token.cancelled() => return Ok(()),
+        res = UnixStream::connect(path) => res.context("UDS connect failed")?,
+    };
 
     debug!("Connected to UDS {:?}", path);
 
     // Main send loop
-    while let Ok(msg) = rx.recv_async().await {
+    loop {
+        let msg = tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            res = rx.recv_async() => match res {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
         if let Err(e) =
             TcpFrameCodec::encode_frame(&mut stream, msg.msg_type, &msg.header, &msg.payload).await
         {
@@ -837,6 +846,84 @@ mod tests {
 
         // Cleanup
         std::fs::remove_file(&peer_socket).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_double_bind_returns_err() {
+        use crate::transport::make_channels;
+
+        let dir =
+            std::env::temp_dir().join(format!("uds-test-{}", crate::InstanceId::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("double-bind.sock");
+
+        let transport1 = UdsTransportBuilder::new()
+            .socket_path(&socket_path)
+            .build()
+            .unwrap();
+
+        let instance_id = crate::InstanceId::new_v4();
+        let (adapter1, _streams1) = make_channels();
+        let rt = tokio::runtime::Handle::current();
+
+        // First bind must succeed.
+        transport1
+            .start(instance_id, adapter1, rt.clone())
+            .await
+            .unwrap();
+
+        // Second transport on the same path must fail.
+        let transport2 = UdsTransportBuilder::new()
+            .socket_path(&socket_path)
+            .build()
+            .unwrap();
+        let (adapter2, _streams2) = make_channels();
+        let result = transport2.start(instance_id, adapter2, rt).await;
+        assert!(
+            result.is_err(),
+            "start() should return Err when a live listener already owns the socket"
+        );
+
+        // Cleanup
+        transport1.shutdown();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_begin_drain_activates_draining_flag() {
+        use crate::transport::make_channels;
+
+        let dir =
+            std::env::temp_dir().join(format!("uds-test-{}", crate::InstanceId::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("drain-test.sock");
+
+        let transport = UdsTransportBuilder::new()
+            .socket_path(&socket_path)
+            .build()
+            .unwrap();
+
+        let instance_id = crate::InstanceId::new_v4();
+        let (adapter, _streams) = make_channels();
+        let rt = tokio::runtime::Handle::current();
+
+        transport.start(instance_id, adapter, rt).await.unwrap();
+
+        assert!(
+            !transport.shutdown_state.get().unwrap().is_draining(),
+            "should not be draining before begin_drain()"
+        );
+
+        transport.begin_drain();
+
+        assert!(
+            transport.shutdown_state.get().unwrap().is_draining(),
+            "should be draining after begin_drain()"
+        );
+
+        // Cleanup
+        transport.shutdown();
         std::fs::remove_dir_all(&dir).ok();
     }
 
