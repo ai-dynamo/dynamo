@@ -2410,13 +2410,14 @@ dependencies = [
 [[package]]
 name = "fastokens"
 version = "0.1.0"
-source = "git+https://github.com/biswapanda/fastokens?rev=e79e7bd2a4b2e1bc3f372aa29a268954c95f43c7#e79e7bd2a4b2e1bc3f372aa29a268954c95f43c7"
+source = "git+https://github.com/Atero-ai/fastokens?rev=2bd154304e3243a00abec25c35f34d8fed5b2350#2bd154304e3243a00abec25c35f34d8fed5b2350"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
  "hf-hub",
  "icu_normalizer",
  "memchr",
+ "pcre2",
  "rayon",
  "serde",
  "serde_json",
@@ -5382,6 +5383,28 @@ name = "pathdiff"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
+name = "pcre2"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e970b0fcce0c7ee6ef662744ff711f21ccd6f11b7cf03cd187a80e89797fc67"
+dependencies = [
+ "libc",
+ "log",
+ "pcre2-sys",
+]
+
+[[package]]
+name = "pcre2-sys"
+version = "0.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18b9073c1a2549bd409bf4a32c94d903bb1a09bf845bc306ae148897fa0760a4"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+]
 
 [[package]]
 name = "pear"

@@ -46,7 +46,7 @@ dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
-fastokens = { git = "https://github.com/biswapanda/fastokens", rev = "e79e7bd2a4b2e1bc3f372aa29a268954c95f43c7", version = "0.1.0", default-features = false }
+fastokens = { git = "https://github.com/Atero-ai/fastokens", rev = "2bd154304e3243a00abec25c35f34d8fed5b2350", version = "0.1.0", default-features = false }
 
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "0.1.0" }
