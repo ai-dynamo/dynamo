@@ -32,12 +32,7 @@ from tests.router.common import (
     _test_router_query_instance_id,
     _test_router_two_routers,
 )
-from tests.router.helper import (
-    generate_random_suffix,
-    get_kv_indexer_command,
-    get_runtime,
-    wait_for_indexer_workers_active,
-)
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -310,7 +305,15 @@ class MockerProcess:
             # Launch the standalone indexer binary
             block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
             indexer_cmd = [
-                *get_kv_indexer_command(),
+                "cargo",
+                "run",
+                "-p",
+                "dynamo-kv-router",
+                "--features",
+                "indexer-bin,test-endpoints",
+                "--bin",
+                "dynamo-kv-indexer",
+                "--",
                 "--block-size",
                 str(block_size),
                 "--port",
@@ -342,7 +345,7 @@ class MockerProcess:
         For each mocker:
         1. Launch a mocker process with --num-workers 1
         2. Poll endpoint.client().instance_ids() until a new worker_id appears
-        3. POST /register to the indexer with the worker_id and its ZMQ addresses
+        3. POST /workers to the indexer with the worker_id and its ZMQ addresses
 
         Args:
             endpoint: The dynamo endpoint object to discover worker IDs.
@@ -408,7 +411,7 @@ class MockerProcess:
                 for dp_rank in range(dp_size):
                     port = self._zmq_kv_events_ports[i * dp_size + dp_rank]
                     endpoint = f"tcp://127.0.0.1:{port}"
-                    zmq_addresses[dp_rank] = endpoint
+                    zmq_addresses[str(dp_rank)] = endpoint
 
                     payload = {
                         "instance_id": new_worker_id,
@@ -437,9 +440,6 @@ class MockerProcess:
                 f"zmq_addresses={zmq_addresses}"
             )
 
-        await wait_for_indexer_workers_active(
-            self.standalone_indexer_url, self.worker_id_to_zmq_ports
-        )
         logger.info(
             f"All {self.num_workers} mockers launched and registered with indexer"
         )
@@ -461,12 +461,20 @@ class MockerProcess:
         # Build --workers arg: "worker_id:dp_rank=zmq_addr,..."
         worker_entries = []
         for worker_id, zmq_addresses in self.worker_id_to_zmq_ports.items():
-            for dp_rank, zmq_endpoint in zmq_addresses.items():
-                worker_entries.append(f"{worker_id}:{dp_rank}={zmq_endpoint}")
+            for dp_rank_str, zmq_endpoint in zmq_addresses.items():
+                worker_entries.append(f"{worker_id}:{dp_rank_str}={zmq_endpoint}")
         workers_arg = ",".join(worker_entries)
 
         indexer_b_cmd = [
-            *get_kv_indexer_command(),
+            "cargo",
+            "run",
+            "-p",
+            "dynamo-kv-router",
+            "--features",
+            "indexer-bin,test-endpoints",
+            "--bin",
+            "dynamo-kv-indexer",
+            "--",
             "--block-size",
             str(block_size),
             "--port",
