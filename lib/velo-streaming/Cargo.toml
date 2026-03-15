@@ -11,6 +11,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[features]
+grpc = ["dep:tonic", "dep:prost", "dep:tokio-stream"]
+
 [dependencies]
 velo-common = { workspace = true }
 velo-messenger = { workspace = true }
@@ -31,6 +34,11 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 socket2 = "0.6"
 
+# Optional dependencies for grpc feature
+tonic = { version = "0.13.1", optional = true }
+prost = { version = "0.13", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 velo = { workspace = true }
@@ -40,3 +48,10 @@ velo-transports = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.13.1"
+
+[[test]]
+name = "grpc_transport"
+required-features = ["grpc"]

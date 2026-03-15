@@ -28,6 +28,8 @@ pub mod sender;
 pub mod tcp_transport;
 pub mod transport;
 pub mod velo_transport;
+#[cfg(feature = "grpc")]
+pub mod grpc_transport;
 
 pub use anchor::{AnchorManager, AnchorManagerBuilder, StreamAnchor, AttachError, StreamController};
 pub use handle::StreamAnchorHandle;
@@ -42,3 +44,5 @@ pub use sender::StreamSender;
 pub use tcp_transport::TcpFrameTransport;
 pub use transport::FrameTransport;
 pub use velo_transport::VeloFrameTransport;
+#[cfg(feature = "grpc")]
+pub use grpc_transport::GrpcFrameTransport;
