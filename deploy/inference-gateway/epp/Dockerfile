@@ -87,10 +87,12 @@ ARG BUILD_REF
 WORKDIR /workspace
 
 # Install build dependencies for CGO
+# libpcre2-dev: required by the pcre2 crate (transitive dep of fastokens)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libc-dev \
+    libpcre2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy go mod files first for better caching (from default context = epp/)
