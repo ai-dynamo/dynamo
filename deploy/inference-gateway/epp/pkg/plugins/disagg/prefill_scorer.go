@@ -119,6 +119,16 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		"prefillWorkerID", prefillWorkerID,
 		"tokenCount", len(result.TokenData))
 
+	// Set the prefill worker ID header directly on the request.
+	// The request object is shared across all profile runs in the scheduling
+	// cycle, so the decode scorer (which runs in the next profile) will see it.
+	// This is more reliable than CycleState which may be scoped per profile.
+	if req.Headers == nil {
+		req.Headers = map[string]string{}
+	}
+	req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
+
+	// Also write to CycleState for any plugin that needs it via the standard API.
 	cycleState.Write(PrefillWorkerIDStateKey, &PrefillWorkerIDState{WorkerID: prefillWorkerID})
 
 	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,

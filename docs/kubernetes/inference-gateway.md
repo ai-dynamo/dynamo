@@ -224,11 +224,31 @@ Key configurations include:
 You can configure the plugin by setting environment variables in the EPP component of your DGD in case of the operator-managed installation or in your [values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/values.yaml).
 
 Common Vars for Routing Configuration:
+
+**Enabling KV-Aware Routing (most precise)**
+
+KV-aware routing uses live KV cache block events from workers so the EPP can route requests to the worker with the best prefix cache overlap. To enable it (default):
+
+1. **Workers — enable prefix caching and KV event publishing.** Each worker must publish KV cache events to NATS so the EPP's router can track per-worker cache state.
+   - **vLLM:** Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`.
+   - **SGLang:** Pass `--kv-events-config` with the appropriate endpoint.
+   - **TRT-LLM:** Pass `--publish-events-and-metrics`.
+   - **Disaggregated vLLM (prefill/decode separation):** Do **not** pass `--disaggregation-mode decode` on decode workers — this flag hardcodes KV event publishing to off. Instead, omit the flag (defaults to aggregated mode) so decode workers also publish their cache state.
+2. **EPP — leave `DYN_USE_KV_EVENTS` at its default (`true`).** The EPP subscribes to worker KV events via NATS and uses them for prefix-overlap scoring.
+3. **Block size — must be consistent.** The `--block-size` on all workers must match `DYN_KV_CACHE_BLOCK_SIZE` on the EPP (default: 128). Mismatched block sizes cause incorrect block hash computation.
+
+**Disabling KV-Aware Routing**
+
+To disable the EPP from listening for KV events (e.g., when prefix caching is off on workers, or for simpler load-balanced routing):
+
+1. **EPP:** Set `DYN_USE_KV_EVENTS=false`. The router falls back to approximate mode (routing decisions are tracked locally with TTL decay instead of live KV events from workers).
+2. **Workers:** Pass `--no-enable-prefix-caching` to disable prefix caching entirely. Without prefix caching, no KV events are generated regardless of other flags.
+3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
+
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
 - Set `DYN_ENFORCE_DISAGG=true` to strictly enforce disaggregated mode. When enabled, requests fail if prefill workers have not registered yet. Without this, requests arriving before prefill workers are discovered fall through to decode-only routing. Prefill errors always fail requests regardless of this setting.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- Set `DYN_USE_KV_EVENTS=false` if you want to disable the router listening for KV events while using kv-routing (default: true). SGLang workers require `--kv-events-config` and TRT-LLM workers require `--publish-events-and-metrics` to publish KV events. For vLLM, KV events are auto-configured when prefix caching is active (deprecated — use `--kv-events-config` explicitly)
 - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
@@ -285,7 +305,7 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
+kubectl port-forward svc/inference-gateway 8000:0 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model8
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
