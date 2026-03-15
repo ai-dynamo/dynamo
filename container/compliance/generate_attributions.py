@@ -4,19 +4,25 @@
 
 """Generate attribution CSV files for container images.
 
-Extracts dpkg and Python package information from a container image by
-running helper scripts inside the container via `docker run`. Optionally
-computes a diff against a base image to show only added/changed packages.
+Extracts dpkg and Python package information from a container image either by:
+- (default) running helper scripts inside the container via `docker run`, or
+- (with --builder) using `docker buildx build` to mount the image filesystem
+  without running the container (no Docker-in-Docker required).
+
+Optionally computes a diff against a base image to show only added/changed packages.
 
 Usage:
     python generate_attributions.py <image:tag> [--output out.csv] [--base-image base:tag]
     python generate_attributions.py <image:tag> --framework vllm --cuda-version 12.9
+    python generate_attributions.py <image:tag> --builder my-builder --platform linux/amd64
 """
 
 import argparse
 import csv
 import logging
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Allow running as a script from any directory
@@ -145,6 +151,90 @@ def extract_all(
     return packages
 
 
+_EXTRACT_DOCKERFILE = _SCRIPT_DIR / "Dockerfile.extract"
+
+
+def _parse_tsv(tsv_path: Path, pkg_type: str) -> list[dict[str, str]]:
+    """Parse a tab-separated extraction output file into package dicts."""
+    packages = []
+    if not tsv_path.is_file():
+        return packages
+    for line in tsv_path.read_text(errors="replace").strip().splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        pkg_name, version, spdx_license = parts
+        packages.append(
+            {
+                "package_name": pkg_name,
+                "version": version,
+                "type": pkg_type,
+                "spdx_license": spdx_license,
+            }
+        )
+    return packages
+
+
+def extract_all_buildx(
+    image: str,
+    types: set[str],
+    builder: str,
+    platform: str,
+    verbose: bool,
+) -> list[dict[str, str]]:
+    """Extract packages using docker buildx build — no docker run of target image.
+
+    Mounts the target image filesystem via BuildKit's bind-from-stage mechanism,
+    runs helper scripts against it, and exports TSV output to a local temp directory.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cmd = [
+            "docker",
+            "buildx",
+            "build",
+            "--builder",
+            builder,
+            "--platform",
+            platform,
+            "--build-arg",
+            f"TARGET_IMAGE={image}",
+            "--output",
+            f"type=local,dest={tmpdir}",
+            "-f",
+            str(_EXTRACT_DOCKERFILE),
+            str(_SCRIPT_DIR),
+        ]
+        if verbose:
+            cmd.append("--progress=plain")
+            log.info("Running: %s", " ".join(cmd))
+
+        result = subprocess.run(
+            cmd,
+            capture_output=not verbose,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr if not verbose else ""
+            raise RuntimeError(
+                f"buildx extraction failed for {image} (exit {result.returncode}): {stderr}"
+            )
+
+        packages = []
+        if "dpkg" in types:
+            pkgs = _parse_tsv(Path(tmpdir) / "dpkg.tsv", "dpkg")
+            if verbose:
+                log.info("Extracted %d dpkg packages via buildx", len(pkgs))
+            packages.extend(pkgs)
+        if "python" in types:
+            pkgs = _parse_tsv(Path(tmpdir) / "python.tsv", "python")
+            if verbose:
+                log.info("Extracted %d Python packages via buildx", len(pkgs))
+            packages.extend(pkgs)
+
+    return packages
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate attribution CSV files for container images",
@@ -201,6 +291,19 @@ Examples:
         help="Docker command to use (default: docker)",
     )
     parser.add_argument(
+        "--builder",
+        default="",
+        help=(
+            "docker buildx builder name. When set, uses BuildKit filesystem extraction "
+            "(no docker run) instead of docker run. Requires --platform."
+        ),
+    )
+    parser.add_argument(
+        "--platform",
+        default="linux/amd64",
+        help="Target platform for buildx extraction, e.g. linux/amd64 or linux/arm64 (default: linux/amd64)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -241,7 +344,17 @@ def main() -> None:
         log.info("Auto-resolved base image: %s", base_image)
 
     # Extract from target image
-    target_packages = extract_all(args.image, types, args.docker_cmd, args.verbose)
+    if args.builder:
+        log.info(
+            "Using BuildKit extraction (builder=%s, platform=%s)",
+            args.builder,
+            args.platform,
+        )
+        target_packages = extract_all_buildx(
+            args.image, types, args.builder, args.platform, args.verbose
+        )
+    else:
+        target_packages = extract_all(args.image, types, args.docker_cmd, args.verbose)
     log.info("Total packages extracted from target: %d", len(target_packages))
 
     # Write full CSV
@@ -250,7 +363,14 @@ def main() -> None:
     # Compute and write diff if base image is available
     if base_image:
         log.info("Extracting packages from base image for diff: %s", base_image)
-        base_packages = extract_all(base_image, types, args.docker_cmd, args.verbose)
+        if args.builder:
+            base_packages = extract_all_buildx(
+                base_image, types, args.builder, args.platform, args.verbose
+            )
+        else:
+            base_packages = extract_all(
+                base_image, types, args.docker_cmd, args.verbose
+            )
         log.info("Total packages extracted from base: %d", len(base_packages))
 
         diff_packages = compute_diff(target_packages, base_packages)

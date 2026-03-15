@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This script runs INSIDE the container. It must be fully self-contained
-# with zero external dependencies (only Python stdlib).
+# This script runs INSIDE the container (legacy mode) or against a mounted
+# filesystem root (--root /target mode for BuildKit extraction).
+# It must be fully self-contained with zero external dependencies (only Python stdlib).
 
+import argparse
 import os
 import subprocess
 import sys
@@ -76,9 +78,10 @@ def extract_dep5_license(content):
     return "UNKNOWN"
 
 
-def get_license_for_package(pkg_name):
-    """Read /usr/share/doc/<pkg>/copyright and extract license info."""
-    copyright_path = f"/usr/share/doc/{pkg_name}/copyright"
+def get_license_for_package(pkg_name, root="/"):
+    """Read <root>/usr/share/doc/<pkg>/copyright and extract license info."""
+    root = root.rstrip("/")
+    copyright_path = f"{root}/usr/share/doc/{pkg_name}/copyright"
     if not os.path.isfile(copyright_path):
         return "UNKNOWN"
     try:
@@ -96,23 +99,73 @@ def get_license_for_package(pkg_name):
     return "UNKNOWN"
 
 
-def main():
-    result = subprocess.run(
-        ["dpkg-query", "-W", "-f=${Package}\t${Version}\n"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"ERROR: dpkg-query failed: {result.stderr}", file=sys.stderr)
+def parse_dpkg_status(status_path):
+    """Parse a dpkg status file and return {pkg: version} for installed packages."""
+    packages = {}
+    current = {}
+    try:
+        with open(status_path, "r", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line:
+                    # End of stanza — record if installed
+                    if current.get("Package") and "installed" in current.get(
+                        "Status", ""
+                    ):
+                        packages[current["Package"]] = current.get("Version", "UNKNOWN")
+                    current = {}
+                elif line.startswith((" ", "\t")):
+                    # Continuation line — ignore
+                    pass
+                elif ":" in line:
+                    key, _, val = line.partition(":")
+                    current[key.strip()] = val.strip()
+    except (OSError, IOError):
+        print(f"ERROR: Cannot read dpkg status file: {status_path}", file=sys.stderr)
         sys.exit(1)
+    # Handle last stanza if file has no trailing blank line
+    if current.get("Package") and "installed" in current.get("Status", ""):
+        packages[current["Package"]] = current.get("Version", "UNKNOWN")
+    return packages
 
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        pkg, version = parts
-        license_id = get_license_for_package(pkg)
-        print(f"{pkg}\t{version}\t{license_id}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract dpkg package info (stdlib only)"
+    )
+    parser.add_argument(
+        "--root",
+        default="/",
+        help="Filesystem root to inspect (default: /, i.e. running system)",
+    )
+    args = parser.parse_args()
+    root = args.root.rstrip("/") or "/"
+
+    if root != "/":
+        # BuildKit mode: parse dpkg status file from mounted target filesystem
+        status_path = f"{root}/var/lib/dpkg/status"
+        pkgs = parse_dpkg_status(status_path)
+        for pkg, version in pkgs.items():
+            license_id = get_license_for_package(pkg, root)
+            print(f"{pkg}\t{version}\t{license_id}")
+    else:
+        # Legacy mode: run dpkg-query inside the container
+        result = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Package}\t${Version}\n"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"ERROR: dpkg-query failed: {result.stderr}", file=sys.stderr)
+            sys.exit(1)
+
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            pkg, version = parts
+            license_id = get_license_for_package(pkg)
+            print(f"{pkg}\t{version}\t{license_id}")
 
 
 if __name__ == "__main__":

@@ -228,13 +228,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: prod-builder-amd-v1
-          - arch: arm64
-            runner: prod-tester-arm-v1
+        arch: [amd64, arm64]
     name: Compliance frontend-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -251,6 +247,7 @@ jobs:
         with:
           image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build-frontend-image.outputs.target_tag }}
           artifact_name: compliance-frontend-${{ matrix.arch }}
+          arch: ${{ matrix.arch }}
           framework: dynamo
           target: frontend
 
