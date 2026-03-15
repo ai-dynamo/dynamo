@@ -4,6 +4,7 @@
 import asyncio
 import inspect
 import logging
+import os
 import random
 import socket
 from abc import ABC, abstractmethod
@@ -22,6 +23,20 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 # Keep default tags minimal and safe for general use.
 # "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
 DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
+DEFAULT_CANCEL_GRACE_MS = 300
+
+
+def _cancel_grace_seconds() -> float:
+    """Return the cancellation grace window in seconds."""
+    raw_value = os.getenv("CANCEL_GRACE_MS")
+    try:
+        grace_ms = int(raw_value) if raw_value is not None else DEFAULT_CANCEL_GRACE_MS
+    except ValueError:
+        grace_ms = DEFAULT_CANCEL_GRACE_MS
+    if grace_ms <= 0:
+        grace_ms = DEFAULT_CANCEL_GRACE_MS
+    grace_ms = min(grace_ms, 10_000)
+    return grace_ms / 1000.0
 
 
 class BaseGenerativeHandler(ABC):
@@ -522,65 +537,105 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         Raises:
             GeneratorExit: If shutdown event was triggered.
         """
+        shutdown_task: Optional[asyncio.Task[Any]] = None
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
 
-            # Always wait for the request ID to ensure we can abort the request
-            sglang_request_id = await request_id_future
-            logging.debug(
-                f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
-            )
-            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
-
-            # Get the cancellation future
             cancellation_future = context.async_killed_or_stopped()
-
-            # Build list of futures/tasks to wait for
-            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
-            shutdown_task = None
+            cancellation_triggers: list[asyncio.Future[Any]] = [cancellation_future]
 
             if self.shutdown_event:
                 # Create task for shutdown monitoring and add to wait list
                 shutdown_task = asyncio.create_task(self.shutdown_event.wait())
-                wait_for.append(shutdown_task)
+                cancellation_triggers.append(shutdown_task)
 
-            # Wait for whichever happens first
-            done, pending = await asyncio.wait(
-                wait_for,
+            # Wait until either the request ID is available or cancellation starts.
+            done, _ = await asyncio.wait(
+                [request_id_future, *cancellation_triggers],
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            trigger_done = {
+                future for future in cancellation_triggers if future in done
+            }
+            sglang_request_id = None
 
-            # Cancel the pending task/future
-            for task in pending:
-                task.cancel()
+            if request_id_future in done:
+                sglang_request_id = request_id_future.result()
+                logging.debug(
+                    "Cancellation monitor received SGLang Request ID %s for Context: %s",
+                    sglang_request_id,
+                    context.id(),
+                )
+                if not trigger_done:
+                    trigger_done, _ = await asyncio.wait(
+                        cancellation_triggers,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+            else:
                 try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                    sglang_request_id = await asyncio.wait_for(
+                        asyncio.shield(request_id_future),
+                        timeout=_cancel_grace_seconds(),
+                    )
+                    logging.info(
+                        (
+                            "Recovered late SGLang Request ID %s after cancellation "
+                            "for Context: %s"
+                        ),
+                        sglang_request_id,
+                        context.id(),
+                    )
+                except asyncio.TimeoutError:
+                    logging.warning(
+                        (
+                            "Cancellation arrived before SGLang request ID was "
+                            "available for Context: %s"
+                        ),
+                        context.id(),
+                    )
 
+            request_id_log = sglang_request_id if sglang_request_id else "unavailable"
             logging.info(
-                f"Cancellation or shutdown signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
+                (
+                    "Cancellation or shutdown signal received for SGLang Request ID "
+                    "%s, Context: %s"
+                ),
+                request_id_log,
+                context.id(),
             )
 
-            # Call abort_request on the tokenizer_manager through the engine
-            if (
+            if sglang_request_id is not None and (
                 hasattr(self.engine, "tokenizer_manager")
                 and self.engine.tokenizer_manager
             ):
                 logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
+                    "Calling SGLang abort_request for Request ID %s",
+                    sglang_request_id,
                 )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
-                )
-                logging.info(f"Aborted Request ID: {context.id()}")
-            else:
+                try:
+                    self.engine.tokenizer_manager.abort_request(
+                        rid=sglang_request_id, abort_all=False
+                    )
+                    logging.info(
+                        "Aborted Request ID: %s (SGLang: %s)",
+                        context.id(),
+                        sglang_request_id,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "abort_request failed for SGLang Request ID %s (Context: %s): %s",
+                        sglang_request_id,
+                        context.id(),
+                        e,
+                    )
+            elif sglang_request_id is not None:
                 logging.error(
-                    f"SGLang tokenizer_manager not found for abort request: {context.id()}"
+                    "SGLang tokenizer_manager not found for abort request: %s",
+                    context.id(),
                 )
 
             # Check which event triggered and raise GeneratorExit if shutdown
-            if shutdown_task and shutdown_task in done:
+            if shutdown_task and shutdown_task in trigger_done:
                 raise GeneratorExit("Engine was shut down during token generation")
 
         except asyncio.CancelledError:
@@ -595,6 +650,13 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
             )
             raise
+        finally:
+            if shutdown_task and not shutdown_task.done():
+                shutdown_task.cancel()
+                try:
+                    await shutdown_task
+                except asyncio.CancelledError:
+                    pass
 
     @asynccontextmanager
     async def _cancellation_monitor(

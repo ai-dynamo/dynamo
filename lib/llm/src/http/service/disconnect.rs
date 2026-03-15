@@ -31,7 +31,7 @@
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::http::service::metrics::{ErrorType, InflightGuard, Metrics};
 
@@ -122,6 +122,49 @@ pub async fn create_connection_monitor(
     )
 }
 
+async fn handle_client_cancellation(
+    cancel_handled: &mut bool,
+    engine_context: &Arc<dyn AsyncEngineContext>,
+    metrics: Option<&Arc<Metrics>>,
+    cancel_reason: &str,
+    cancel_grace: Duration,
+) {
+    if *cancel_handled {
+        return;
+    }
+    *cancel_handled = true;
+
+    tracing::trace!(
+        request_id = %engine_context.id(),
+        cancel_reason,
+        "client disconnected; requesting graceful cancellation"
+    );
+    if let Some(metrics) = metrics {
+        metrics.inc_client_disconnect();
+    }
+
+    engine_context.stop_generating();
+
+    tokio::select! {
+        _ = engine_context.stopped() => {
+            tracing::debug!(
+                request_id = %engine_context.id(),
+                cancel_reason,
+                "request stopped before disconnect grace deadline"
+            );
+        }
+        _ = tokio::time::sleep(cancel_grace) => {
+            tracing::warn!(
+                request_id = %engine_context.id(),
+                cancel_reason,
+                timeout_ms = cancel_grace.as_millis(),
+                "request did not stop before disconnect grace deadline; forcing kill"
+            );
+            engine_context.kill();
+        }
+    }
+}
+
 #[tracing::instrument(level = "trace", skip_all, fields(request_id = %engine_context.id()))]
 async fn connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
@@ -129,14 +172,18 @@ async fn connection_monitor(
     stream_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
     metrics: Option<Arc<Metrics>>,
 ) {
+    let mut cancel_handled = false;
+
     match connection_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            // the client has disconnected, no need to gracefully cancel, just kill the context
-            tracing::trace!("Connection closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-            }
-            engine_context.kill();
+            handle_client_cancellation(
+                &mut cancel_handled,
+                &engine_context,
+                metrics.as_ref(),
+                "connection",
+                cancel_grace_duration(),
+            )
+            .await;
         }
         Ok(ConnectionStatus::ClosedGracefully) => {
             tracing::trace!("Connection closed gracefully");
@@ -146,11 +193,14 @@ async fn connection_monitor(
 
     match stream_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            tracing::trace!("Stream closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-            }
-            engine_context.kill();
+            handle_client_cancellation(
+                &mut cancel_handled,
+                &engine_context,
+                metrics.as_ref(),
+                "stream",
+                cancel_grace_duration(),
+            )
+            .await;
         }
         Ok(ConnectionStatus::ClosedGracefully) => {
             tracing::trace!("Stream closed gracefully");
@@ -213,5 +263,182 @@ pub fn monitor_for_disconnects(
                 }
             }
         }
+    }
+}
+
+fn cancel_grace_ms() -> u64 {
+    std::env::var("CANCEL_GRACE_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .map(|value: u64| value.min(10_000))
+        .unwrap_or(300)
+}
+
+fn cancel_grace_duration() -> Duration {
+    Duration::from_millis(cancel_grace_ms())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct TestContext {
+        id: &'static str,
+        auto_stop_on_cancel: bool,
+        stop_calls: AtomicUsize,
+        kill_calls: AtomicUsize,
+        stopped: AtomicBool,
+        killed: AtomicBool,
+        stopped_notify: Notify,
+        killed_notify: Notify,
+    }
+
+    impl TestContext {
+        fn new(auto_stop_on_cancel: bool) -> Self {
+            Self {
+                id: "test-request",
+                auto_stop_on_cancel,
+                stop_calls: AtomicUsize::new(0),
+                kill_calls: AtomicUsize::new(0),
+                stopped: AtomicBool::new(false),
+                killed: AtomicBool::new(false),
+                stopped_notify: Notify::new(),
+                killed_notify: Notify::new(),
+            }
+        }
+
+        fn stop_calls(&self) -> usize {
+            self.stop_calls.load(Ordering::SeqCst)
+        }
+
+        fn kill_calls(&self) -> usize {
+            self.kill_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngineContext for TestContext {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn is_stopped(&self) -> bool {
+            self.stopped.load(Ordering::SeqCst)
+        }
+
+        fn is_killed(&self) -> bool {
+            self.killed.load(Ordering::SeqCst)
+        }
+
+        async fn stopped(&self) {
+            while !self.is_stopped() {
+                self.stopped_notify.notified().await;
+            }
+        }
+
+        async fn killed(&self) {
+            while !self.is_killed() {
+                self.killed_notify.notified().await;
+            }
+        }
+
+        fn stop_generating(&self) {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            if self.auto_stop_on_cancel {
+                self.stopped.store(true, Ordering::SeqCst);
+                self.stopped_notify.notify_waiters();
+            }
+        }
+
+        fn stop(&self) {
+            self.stop_generating();
+        }
+
+        fn kill(&self) {
+            self.kill_calls.fetch_add(1, Ordering::SeqCst);
+            self.killed.store(true, Ordering::SeqCst);
+            self.stopped.store(true, Ordering::SeqCst);
+            self.killed_notify.notify_waiters();
+            self.stopped_notify.notify_waiters();
+        }
+
+        fn link_child(&self, _child: Arc<dyn AsyncEngineContext>) {}
+    }
+
+    #[tokio::test]
+    async fn disconnect_uses_graceful_stop_before_kill() {
+        let raw_context = Arc::new(TestContext::new(true));
+        let context: Arc<dyn AsyncEngineContext> = raw_context.clone();
+        let mut cancel_handled = false;
+
+        handle_client_cancellation(
+            &mut cancel_handled,
+            &context,
+            None,
+            "connection",
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(raw_context.stop_calls(), 1);
+        assert_eq!(raw_context.kill_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn disconnect_forces_kill_after_grace_timeout() {
+        let raw_context = Arc::new(TestContext::new(false));
+        let context: Arc<dyn AsyncEngineContext> = raw_context.clone();
+
+        let task = tokio::spawn(async move {
+            let mut cancel_handled = false;
+            handle_client_cancellation(
+                &mut cancel_handled,
+                &context,
+                None,
+                "stream",
+                Duration::from_millis(10),
+            )
+            .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("disconnect task should finish")
+            .unwrap();
+
+        assert_eq!(raw_context.stop_calls(), 1);
+        assert_eq!(raw_context.kill_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_disconnect_only_handles_cancellation_once() {
+        let raw_context = Arc::new(TestContext::new(true));
+        let context: Arc<dyn AsyncEngineContext> = raw_context.clone();
+        let mut cancel_handled = false;
+
+        handle_client_cancellation(
+            &mut cancel_handled,
+            &context,
+            None,
+            "connection",
+            Duration::from_millis(10),
+        )
+        .await;
+        handle_client_cancellation(
+            &mut cancel_handled,
+            &context,
+            None,
+            "stream",
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(raw_context.stop_calls(), 1);
+        assert_eq!(raw_context.kill_calls(), 0);
     }
 }

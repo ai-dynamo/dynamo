@@ -28,6 +28,19 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
+
+def _cancel_grace_ms() -> int:
+    try:
+        value = int(os.getenv("CANCEL_GRACE_MS", "300"))
+    except ValueError:
+        return 300
+    return min(value, 10_000) if value > 0 else 300
+
+
+def _abort_wait_ms() -> int:
+    return max(5000, _cancel_grace_ms() + 2000)
+
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.sglang,
@@ -186,7 +199,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="DYN-2265")
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -207,8 +219,8 @@ def test_request_cancellation_sglang_aggregated(
     - Testing 3 scenarios: ~30s (~10s each)
     - Teardown: ~2s
 
-    TODO: Test is currently flaky/failing due to SGLang limitations with prefill cancellation.
-    See: https://github.com/sgl-project/sglang/issues/11139
+    Uses large prompts to reliably exercise the prefill cancellation path before
+    the request is aborted.
     """
     logger.info("Sanity check if latest test is getting executed")
 
@@ -245,9 +257,11 @@ def test_request_cancellation_sglang_aggregated(
             for request_type, description in test_scenarios:
                 logger.info(f"Testing {description.lower()}...")
 
-                # Send the request (non-blocking)
+                # Use a long prompt so SGLang spends time in prefill before cancellation.
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, request_type
+                    frontend.frontend_port,
+                    request_type,
+                    use_long_prompt=True,
                 )
 
                 # Poll for "New Request ID" pattern (Dynamo context ID)
@@ -274,12 +288,12 @@ def test_request_cancellation_sglang_aggregated(
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" with matching ID
+                # Allow enough time for the disconnect grace period plus log propagation.
                 _, worker_log_offset = poll_for_pattern(
                     process=worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=worker_log_offset,
-                    max_wait_ms=2000,
+                    max_wait_ms=_abort_wait_ms(),
                 )
 
                 # Verify frontend log has kill message
