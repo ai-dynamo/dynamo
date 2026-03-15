@@ -47,7 +47,7 @@ required-features = ["kv-router-stress"]
 # repo
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
-dynamo-kv-router = { workspace = true, features = ["metrics"] }
+dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 
@@ -201,4 +201,3 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
-

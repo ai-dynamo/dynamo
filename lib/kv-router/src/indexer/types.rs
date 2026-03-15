@@ -4,10 +4,6 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-#[cfg(feature = "metrics")]
-use dynamo_runtime::error::DynamoError;
-#[cfg(feature = "metrics")]
-pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -16,7 +12,6 @@ use dynamo_tokens::SequenceHash;
 
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
-#[cfg(not(feature = "metrics"))]
 pub trait MaybeError {
     /// Construct an instance from an error.
     fn from_err(err: impl std::error::Error + 'static) -> Self;
@@ -75,15 +70,30 @@ pub enum WorkerKvQueryResponse {
     Error(String),
 }
 
-#[cfg(feature = "metrics")]
 impl MaybeError for WorkerKvQueryResponse {
     fn from_err(err: impl std::error::Error + 'static) -> Self {
         WorkerKvQueryResponse::Error(err.to_string())
     }
 
-    fn err(&self) -> Option<DynamoError> {
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            WorkerKvQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
+            WorkerKvQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::protocols::maybe_error::MaybeError for WorkerKvQueryResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        WorkerKvQueryResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            WorkerKvQueryResponse::Error(msg) => {
+                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
+            }
             _ => None,
         }
     }
@@ -147,21 +157,6 @@ pub enum IndexerQueryResponse {
     Error(String),
 }
 
-#[cfg(feature = "metrics")]
-impl MaybeError for IndexerQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        IndexerQueryResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<DynamoError> {
-        match self {
-            IndexerQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(not(feature = "metrics"))]
 impl MaybeError for IndexerQueryResponse {
     fn from_err(err: impl std::error::Error + 'static) -> Self {
         IndexerQueryResponse::Error(err.to_string())
@@ -170,6 +165,22 @@ impl MaybeError for IndexerQueryResponse {
     fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
         match self {
             IndexerQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerQueryResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerQueryResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            IndexerQueryResponse::Error(msg) => {
+                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
+            }
             _ => None,
         }
     }

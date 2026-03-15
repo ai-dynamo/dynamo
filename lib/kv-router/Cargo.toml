@@ -12,10 +12,11 @@ repository.workspace = true
 
 [features]
 default = []
-metrics = ["dep:dynamo-runtime"]
-bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
+metrics = ["dep:prometheus"]
+runtime-protocols = ["dep:dynamo-runtime"]
+bench = []
 standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
-indexer-runtime = ["metrics", "standalone-indexer"]
+indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
 
 [dependencies]
 # repo
@@ -29,7 +30,7 @@ dashmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
-prometheus = { workspace = true }
+prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
@@ -46,10 +47,6 @@ flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 
-# bench (optional)
-clap = { version = "4.5", features = ["derive"], optional = true }
-indicatif = { version = "0.18.0", optional = true }
-plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
 rustc-hash = "2.1.1"
 
 # standalone-indexer (optional)
@@ -57,9 +54,6 @@ axum = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
-
-[package.metadata.cargo-machete]
-ignored = ["clap", "indicatif", "plotters"]
 
 [dev-dependencies]
 rstest = "0.18.2"
