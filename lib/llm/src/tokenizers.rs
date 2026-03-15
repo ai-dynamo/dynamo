@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod fast;
+pub mod fastokens;
 pub mod hf;
 pub mod tiktoken;
 
@@ -16,7 +16,7 @@ use std::{ops::Deref, path::Path};
 use crate::protocols::TokenIdType;
 pub use anyhow::{Error, Result};
 
-pub use fast::FastTokenizer;
+pub use fastokens::FastTokenizer;
 pub use hf::HuggingFaceTokenizer;
 pub use tiktoken::TikTokenTokenizer;
 
