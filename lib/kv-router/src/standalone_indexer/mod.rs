@@ -35,20 +35,58 @@ pub struct RuntimeConfig {
     pub worker_component: String,
 }
 
-pub fn parse_workers(s: &str) -> Vec<(u64, u32, String)> {
-    s.split(',')
-        .filter(|entry| !entry.is_empty())
-        .filter_map(|entry| {
-            let (id_part, addr) = entry.split_once('=')?;
-            let id_part = id_part.trim();
-            let (id, dp_rank) = if let Some((id_str, rank_str)) = id_part.split_once(':') {
-                (id_str.parse::<u64>().ok()?, rank_str.parse::<u32>().ok()?)
-            } else {
-                (id_part.parse::<u64>().ok()?, 0)
-            };
-            Some((id, dp_rank, addr.trim().to_string()))
-        })
-        .collect()
+pub(super) fn validate_zmq_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    endpoint
+        .parse::<zeromq::Endpoint>()
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: {error}"))
+}
+
+pub(super) fn validate_listener_endpoints(
+    endpoint: &str,
+    replay_endpoint: Option<&str>,
+) -> anyhow::Result<()> {
+    validate_zmq_endpoint(endpoint)?;
+    if let Some(replay_endpoint) = replay_endpoint {
+        validate_zmq_endpoint(replay_endpoint).map_err(|error| {
+            anyhow::anyhow!("invalid replay endpoint `{replay_endpoint}`: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+pub fn parse_workers(s: &str) -> anyhow::Result<Vec<(u64, u32, String)>> {
+    let mut workers = Vec::new();
+
+    for entry in s.split(',').filter(|entry| !entry.trim().is_empty()) {
+        let (id_part, addr) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid worker entry `{entry}`; expected worker_id[:dp_rank]=endpoint")
+        })?;
+        let id_part = id_part.trim();
+        let (instance_id, dp_rank) = if let Some((id_str, rank_str)) = id_part.split_once(':') {
+            (
+                id_str
+                    .parse::<u64>()
+                    .map_err(|error| anyhow::anyhow!("invalid worker id in `{entry}`: {error}"))?,
+                rank_str
+                    .parse::<u32>()
+                    .map_err(|error| anyhow::anyhow!("invalid dp_rank in `{entry}`: {error}"))?,
+            )
+        } else {
+            (
+                id_part
+                    .parse::<u64>()
+                    .map_err(|error| anyhow::anyhow!("invalid worker id in `{entry}`: {error}"))?,
+                0,
+            )
+        };
+
+        let endpoint = addr.trim().to_string();
+        validate_zmq_endpoint(&endpoint)?;
+        workers.push((instance_id, dp_rank, endpoint));
+    }
+
+    Ok(workers)
 }
 
 pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
@@ -169,7 +207,7 @@ async fn run_common(
         let block_size = config.block_size.ok_or_else(|| {
             anyhow::anyhow!("--block-size is required when --workers is specified")
         })?;
-        for (instance_id, dp_rank, endpoint) in parse_workers(workers_str) {
+        for (instance_id, dp_rank, endpoint) in parse_workers(workers_str)? {
             tracing::info!(instance_id, dp_rank, endpoint, "Registering initial worker");
             registry
                 .register(
@@ -242,7 +280,7 @@ mod tests {
     #[test]
     fn test_parse_workers() {
         let input = "1=tcp://host:5557,2:1=tcp://host:5558";
-        let result = parse_workers(input);
+        let result = parse_workers(input).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], (1, 0, "tcp://host:5557".to_string()));
         assert_eq!(result[1], (2, 1, "tcp://host:5558".to_string()));
@@ -250,6 +288,12 @@ mod tests {
 
     #[test]
     fn test_parse_workers_empty() {
-        assert!(parse_workers("").is_empty());
+        assert!(parse_workers("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_workers_invalid_entry() {
+        let error = parse_workers("1").unwrap_err().to_string();
+        assert!(error.contains("invalid worker entry"));
     }
 }

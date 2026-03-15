@@ -7,7 +7,7 @@ subtitle: Run the KV cache indexer as an independent HTTP service for querying b
 
 ## Overview
 
-The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight binary that maintains a radix tree of cached blocks and exposes HTTP endpoints for querying and managing workers. It supports two operational modes:
+The standalone KV indexer (`python -m dynamo.indexer`) is a lightweight service that maintains a radix tree of cached blocks and exposes HTTP endpoints for querying and managing workers. It supports two operational modes:
 
 - **Standalone mode** (default): subscribes to ZMQ KV event streams directly from workers. No Dynamo runtime dependencies required.
 - **Dynamo runtime mode** (`--dynamo-runtime`): integrates with the Dynamo runtime for automatic worker discovery via MDC, KV event ingestion via the event plane (NATS or ZMQ), and overlap queries over the request plane for remote frontends.
@@ -56,11 +56,11 @@ If no peers are reachable, the indexer starts with an empty state.
 
 ```bash
 # Replica A (first instance, no peers)
-dynamo-kv-indexer --port 8090 --block-size 16 \
+python -m dynamo.indexer --port 8090 --block-size 16 \
   --workers "1=tcp://worker1:5557,2=tcp://worker2:5558"
 
 # Replica B (recovers from A on startup)
-dynamo-kv-indexer --port 8091 --block-size 16 \
+python -m dynamo.indexer --port 8091 --block-size 16 \
   --workers "1=tcp://worker1:5557,2=tcp://worker2:5558" \
   --peers "http://localhost:8090"
 ```
@@ -81,7 +81,7 @@ Peers can be registered at startup via `--peers` or dynamically via the HTTP API
 
 ## Building
 
-The binary is built via maturin as part of the Python bindings. Feature flags control which capabilities are compiled in:
+The service is exposed through the Python package after building the bindings with maturin. Feature flags control which capabilities are compiled in:
 
 | Feature | Description |
 |---------|-------------|
@@ -95,7 +95,7 @@ The binary is built via maturin as part of the Python bindings. Feature flags co
 cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer
 ```
 
-This installs `dynamo-kv-indexer` into the virtualenv.
+After installation, launch the service with `python -m dynamo.indexer`.
 
 ### Standalone build with metrics
 
@@ -118,13 +118,13 @@ This enables the `--dynamo-runtime` CLI flag for MDC discovery, event-plane subs
 ### Standalone mode (default)
 
 ```bash
-dynamo-kv-indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
+python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
 ```
 
 ### Dynamo runtime mode
 
 ```bash
-dynamo-kv-indexer --dynamo-runtime --namespace default --component-name kv-indexer --worker-component backend --port 8090 [--threads 4]
+python -m dynamo.indexer --dynamo-runtime --namespace default --component-name kv-indexer --worker-component backend --port 8090 [--threads 4]
 ```
 
 In runtime mode, workers are discovered automatically via MDC. The `--workers` flag can still be used to register additional static workers alongside discovered ones.
@@ -168,10 +168,12 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_errors_total` | Counter | `endpoint`, `status_class` | HTTP error responses (4xx/5xx) |
 | `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
+| `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
 
 ### `POST /register` — Register an endpoint
 
 Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, tenant_id)` pair.
+Registration is non-blocking: if the worker is not up yet, the listener is accepted in `pending` state and transitions to `active` once the initial ZMQ connection succeeds.
 
 ```bash
 # Single model, default tenant
@@ -243,8 +245,37 @@ curl http://localhost:8090/workers
 
 Returns:
 ```json
-[{"instance_id": 1, "endpoints": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}]
+[
+  {
+    "instance_id": 1,
+    "source": "zmq",
+    "status": "active",
+    "endpoints": {
+      "0": "tcp://127.0.0.1:5557",
+      "1": "tcp://127.0.0.1:5558"
+    },
+    "listeners": {
+      "0": {
+        "endpoint": "tcp://127.0.0.1:5557",
+        "status": "active"
+      },
+      "1": {
+        "endpoint": "tcp://127.0.0.1:5558",
+        "status": "active"
+      }
+    }
+  },
+  {
+    "instance_id": 2,
+    "source": "discovery",
+    "status": "active",
+    "endpoints": {},
+    "listeners": {}
+  }
+]
 ```
+
+For ZMQ-managed workers, `status` is aggregated across listeners with priority `failed > pending > active > paused`. Each listener entry may also expose a `last_error` field when the most recent startup or recv-loop attempt failed.
 
 ### `POST /query` — Query overlap for token IDs
 
@@ -379,7 +410,7 @@ The indexer registers a query endpoint on the Dynamo request plane, allowing fro
 
 ```bash
 # Start the indexer with runtime integration
-dynamo-kv-indexer --dynamo-runtime \
+python -m dynamo.indexer --dynamo-runtime \
   --namespace my-namespace \
   --component-name kv-indexer \
   --worker-component backend \

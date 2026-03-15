@@ -17,17 +17,11 @@ use crate::protocols::{KvCacheEventData, KvCacheEventError};
 
 /// Metrics for the KV Indexer.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "metrics"), derive(Default))]
 pub struct KvIndexerMetrics {
     /// Counter of events applied.
     #[cfg(feature = "metrics")]
     pub kv_cache_events_applied: IntCounterVec,
-}
-
-#[cfg(not(feature = "metrics"))]
-impl Default for KvIndexerMetrics {
-    fn default() -> Self {
-        Self {}
-    }
 }
 
 /// Metric status labels.
@@ -42,7 +36,9 @@ pub const METRIC_EVENT_REMOVED: &str = "removed";
 pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
 /// Metric name for KV cache events applied counter.
+#[cfg(feature = "metrics")]
 const KV_CACHE_EVENTS_APPLIED_SUFFIX: &str = "kv_cache_events_applied";
+#[cfg(feature = "metrics")]
 const KV_CACHE_EVENTS_APPLIED_NAME: &str = "dynamo_kvrouter_kv_cache_events_applied";
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]

@@ -78,9 +78,4 @@ dynamo-llm = { path = "../../llm" }
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
 
-[[bin]]
-name = "dynamo-kv-indexer"
-path = "rust/bin/kv_indexer.rs"
-required-features = ["kv-indexer"]
-
 [dev-dependencies]

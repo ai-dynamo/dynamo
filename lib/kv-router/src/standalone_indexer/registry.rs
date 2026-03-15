@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
+use parking_lot::Mutex;
+use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerId;
 
 use super::indexer::{Indexer, create_indexer};
-use super::listener::run_zmq_listener;
+use super::listener::spawn_zmq_listener;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct IndexerKey {
@@ -27,30 +30,289 @@ pub struct IndexerEntry {
     pub block_size: u32,
 }
 
-pub struct WorkerEntry {
-    pub endpoints: HashMap<u32, String>,
-    pub replay_endpoints: HashMap<u32, String>,
-    cancels: HashMap<u32, CancellationToken>,
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenerStatus {
+    Pending,
+    Active,
+    Paused,
+    Failed,
 }
 
-/// State needed to restart a paused ZMQ listener.
-struct ListenerState {
+impl ListenerStatus {
+    pub const ALL: [Self; 4] = [Self::Pending, Self::Active, Self::Paused, Self::Failed];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn metric_index(self) -> usize {
+        match self {
+            Self::Pending => 0,
+            Self::Active => 1,
+            Self::Paused => 2,
+            Self::Failed => 3,
+        }
+    }
+
+    pub fn aggregate(statuses: impl IntoIterator<Item = Self>) -> Self {
+        let mut saw_pending = false;
+        let mut saw_active = false;
+
+        for status in statuses {
+            match status {
+                Self::Failed => return Self::Failed,
+                Self::Pending => saw_pending = true,
+                Self::Active => saw_active = true,
+                Self::Paused => {}
+            }
+        }
+
+        if saw_pending {
+            Self::Pending
+        } else if saw_active {
+            Self::Active
+        } else {
+            Self::Paused
+        }
+    }
+}
+
+impl fmt::Display for ListenerStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerSource {
+    Zmq,
+    Discovery,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListenerInfo {
+    endpoint: String,
+    status: ListenerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerInfo {
+    instance_id: WorkerId,
+    source: WorkerSource,
+    status: ListenerStatus,
+    endpoints: HashMap<u32, String>,
+    listeners: HashMap<u32, ListenerInfo>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ListenerControlError {
+    #[error("instance {instance_id} not found")]
+    WorkerNotFound { instance_id: WorkerId },
+
+    #[error("instance {instance_id} dp_rank {dp_rank} not found")]
+    ListenerNotFound { instance_id: WorkerId, dp_rank: u32 },
+
+    #[error("instance {instance_id} is discovery-managed; no ZMQ listener to control")]
+    DiscoveryManaged { instance_id: WorkerId },
+
+    #[error("instance {instance_id} dp_rank {dp_rank} cannot be paused from status {status}")]
+    InvalidPauseState {
+        instance_id: WorkerId,
+        dp_rank: u32,
+        status: ListenerStatus,
+    },
+
+    #[error("instance {instance_id} dp_rank {dp_rank} cannot be resumed from status {status}")]
+    InvalidResumeState {
+        instance_id: WorkerId,
+        dp_rank: u32,
+        status: ListenerStatus,
+    },
+}
+
+struct ListenerRuntime {
+    status: ListenerStatus,
+    last_error: Option<String>,
+    cancel_token: Option<CancellationToken>,
+    generation: u64,
+}
+
+pub struct ListenerRecord {
     endpoint: String,
     replay_endpoint: Option<String>,
     block_size: u32,
     indexer: Indexer,
     watermark: Arc<AtomicU64>,
+    runtime: Mutex<ListenerRuntime>,
+}
+
+impl ListenerRecord {
+    fn new(
+        endpoint: String,
+        replay_endpoint: Option<String>,
+        block_size: u32,
+        indexer: Indexer,
+        watermark: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            endpoint,
+            replay_endpoint,
+            block_size,
+            indexer,
+            watermark,
+            runtime: Mutex::new(ListenerRuntime {
+                status: ListenerStatus::Pending,
+                last_error: None,
+                cancel_token: None,
+                generation: 0,
+            }),
+        }
+    }
+
+    pub(super) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub(super) fn replay_endpoint(&self) -> Option<&str> {
+        self.replay_endpoint.as_deref()
+    }
+
+    pub(super) fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    pub(super) fn indexer(&self) -> Indexer {
+        self.indexer.clone()
+    }
+
+    pub(super) fn watermark(&self) -> Arc<AtomicU64> {
+        self.watermark.clone()
+    }
+
+    pub(super) fn start_pending(&self) -> (u64, CancellationToken) {
+        let mut runtime = self.runtime.lock();
+        runtime.generation += 1;
+        let cancel_token = CancellationToken::new();
+        runtime.status = ListenerStatus::Pending;
+        runtime.last_error = None;
+        runtime.cancel_token = Some(cancel_token.clone());
+        (runtime.generation, cancel_token)
+    }
+
+    pub(super) fn pause(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<CancellationToken, ListenerControlError> {
+        let mut runtime = self.runtime.lock();
+        match runtime.status {
+            ListenerStatus::Pending | ListenerStatus::Active => {
+                let cancel_token =
+                    runtime
+                        .cancel_token
+                        .take()
+                        .ok_or(ListenerControlError::InvalidPauseState {
+                            instance_id,
+                            dp_rank,
+                            status: runtime.status,
+                        })?;
+                runtime.status = ListenerStatus::Paused;
+                runtime.last_error = None;
+                Ok(cancel_token)
+            }
+            status => Err(ListenerControlError::InvalidPauseState {
+                instance_id,
+                dp_rank,
+                status,
+            }),
+        }
+    }
+
+    pub(super) fn resume(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<(u64, CancellationToken), ListenerControlError> {
+        let mut runtime = self.runtime.lock();
+        match runtime.status {
+            ListenerStatus::Paused | ListenerStatus::Failed => {
+                runtime.generation += 1;
+                let cancel_token = CancellationToken::new();
+                runtime.status = ListenerStatus::Pending;
+                runtime.last_error = None;
+                runtime.cancel_token = Some(cancel_token.clone());
+                Ok((runtime.generation, cancel_token))
+            }
+            status => Err(ListenerControlError::InvalidResumeState {
+                instance_id,
+                dp_rank,
+                status,
+            }),
+        }
+    }
+
+    pub(super) fn is_current_attempt(&self, generation: u64) -> bool {
+        let runtime = self.runtime.lock();
+        runtime.generation == generation && runtime.cancel_token.is_some()
+    }
+
+    pub(super) fn try_mark_active(&self, generation: u64) -> bool {
+        let mut runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return false;
+        }
+        runtime.status = ListenerStatus::Active;
+        runtime.last_error = None;
+        true
+    }
+
+    pub(super) fn try_mark_failed(&self, generation: u64, error: impl Into<String>) {
+        let mut runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return;
+        }
+        runtime.status = ListenerStatus::Failed;
+        runtime.last_error = Some(error.into());
+        runtime.cancel_token = None;
+    }
+
+    fn take_cancel(&self) -> Option<CancellationToken> {
+        self.runtime.lock().cancel_token.take()
+    }
+
+    fn snapshot(&self) -> ListenerInfo {
+        let runtime = self.runtime.lock();
+        ListenerInfo {
+            endpoint: self.endpoint.clone(),
+            status: runtime.status,
+            last_error: runtime.last_error.clone(),
+        }
+    }
+
+    fn status(&self) -> ListenerStatus {
+        self.runtime.lock().status
+    }
+}
+
+pub struct WorkerEntry {
+    key: IndexerKey,
+    listeners: HashMap<u32, Arc<ListenerRecord>>,
 }
 
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
     indexers: DashMap<IndexerKey, IndexerEntry>,
     peers: DashMap<String, ()>,
-    /// Persists across unregister/register cycles so gap detection works after re-registration.
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
-    /// Saved listener state for pause/resume. Populated on register, kept on pause.
-    listener_states: DashMap<(WorkerId, u32), ListenerState>,
-    /// Workers added via MDC discovery (no ZMQ listener). Maps worker_id → indexer key.
     #[cfg(feature = "indexer-runtime")]
     discovered_workers: DashMap<WorkerId, IndexerKey>,
     num_threads: usize,
@@ -66,7 +328,6 @@ impl WorkerRegistry {
             indexers: DashMap::new(),
             peers: DashMap::new(),
             watermarks: DashMap::new(),
-            listener_states: DashMap::new(),
             #[cfg(feature = "indexer-runtime")]
             discovered_workers: DashMap::new(),
             num_threads,
@@ -95,6 +356,25 @@ impl WorkerRegistry {
         self.peers.iter().map(|entry| entry.key().clone()).collect()
     }
 
+    #[cfg(feature = "metrics")]
+    pub fn refresh_metrics(&self) {
+        let models = self.indexers.len();
+        let mut workers = self.workers.len();
+        #[cfg(feature = "indexer-runtime")]
+        {
+            workers += self.discovered_workers.len();
+        }
+
+        let mut listener_counts = [0_i64; 4];
+        for entry in self.workers.iter() {
+            for record in entry.value().listeners.values() {
+                listener_counts[record.status().metric_index()] += 1;
+            }
+        }
+
+        super::metrics::set_worker_state(models, workers, listener_counts);
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn register(
         &self,
@@ -106,7 +386,6 @@ impl WorkerRegistry {
         block_size: u32,
         replay_endpoint: Option<String>,
     ) -> Result<()> {
-        // Reject if this worker was already added via discovery
         #[cfg(feature = "indexer-runtime")]
         if self.discovered_workers.contains_key(&instance_id) {
             bail!(
@@ -120,6 +399,20 @@ impl WorkerRegistry {
             tenant_id,
         };
 
+        if let Some(entry) = self.workers.get(&instance_id) {
+            if entry.key != key {
+                bail!(
+                    "instance {instance_id} is already registered for model={} tenant={}",
+                    entry.key.model_name,
+                    entry.key.tenant_id
+                );
+            }
+
+            if entry.listeners.contains_key(&dp_rank) {
+                bail!("instance {instance_id} dp_rank {dp_rank} already registered");
+            }
+        }
+
         let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
@@ -127,7 +420,6 @@ impl WorkerRegistry {
                 block_size,
                 "Creating new indexer"
             );
-            super::metrics::inc_models();
             IndexerEntry {
                 indexer: create_indexer(block_size, self.num_threads),
                 block_size,
@@ -148,70 +440,33 @@ impl WorkerRegistry {
         let bs = indexer_entry.block_size;
         drop(indexer_entry);
 
-        // Check for duplicate and insert replay endpoint while holding the lock briefly.
-        {
-            let mut entry = self.workers.entry(instance_id).or_insert_with(|| {
-                super::metrics::inc_workers();
-                WorkerEntry {
-                    endpoints: HashMap::new(),
-                    replay_endpoints: HashMap::new(),
-                    cancels: HashMap::new(),
-                }
-            });
-
-            if entry.endpoints.contains_key(&dp_rank) {
-                bail!("instance {instance_id} dp_rank {dp_rank} already registered");
-            }
-
-            if let Some(rep) = &replay_endpoint {
-                entry.replay_endpoints.insert(dp_rank, rep.clone());
-            }
-        }
-
-        // Reuse watermark if it survived a previous unregister (preserves gap detection).
         let watermark = self
             .watermarks
             .entry((instance_id, dp_rank))
             .or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX)))
             .clone();
 
-        self.listener_states.insert(
-            (instance_id, dp_rank),
-            ListenerState {
-                endpoint: endpoint.clone(),
-                replay_endpoint: replay_endpoint.clone(),
-                block_size: bs,
-                indexer: indexer.clone(),
-                watermark: watermark.clone(),
-            },
-        );
-
-        let cancel = CancellationToken::new();
-        let child_cancel = cancel.child_token();
-        let addr = endpoint.clone();
-        let ready = self.ready_rx();
-
-        // Connect the ZMQ socket and spawn the listener task (non-blocking).
-        run_zmq_listener(
-            instance_id,
-            dp_rank,
-            addr,
+        let record = Arc::new(ListenerRecord::new(
+            endpoint,
+            replay_endpoint,
             bs,
             indexer,
-            child_cancel,
-            ready,
-            replay_endpoint,
             watermark,
-        )
-        .await;
+        ));
+        let attempt = record.start_pending();
 
-        // Re-acquire to store the endpoint and cancel token.
-        let mut entry = self
-            .workers
-            .get_mut(&instance_id)
-            .expect("worker entry disappeared during listener setup");
-        entry.endpoints.insert(dp_rank, endpoint);
-        entry.cancels.insert(dp_rank, cancel);
+        {
+            let mut entry = self
+                .workers
+                .entry(instance_id)
+                .or_insert_with(|| WorkerEntry {
+                    key: key.clone(),
+                    listeners: HashMap::new(),
+                });
+            entry.listeners.insert(dp_rank, record.clone());
+        }
+
+        self.spawn_listener(instance_id, dp_rank, attempt, record);
         Ok(())
     }
 
@@ -226,30 +481,49 @@ impl WorkerRegistry {
             tenant_id: tenant_id.to_string(),
         };
 
-        // Check ZMQ-registered workers first, then discovery workers (if runtime mode)
-        if let Some((_, entry)) = self.workers.remove(&instance_id) {
-            super::metrics::dec_workers();
-            for cancel in entry.cancels.values() {
-                cancel.cancel();
+        if let Some(entry) = self.workers.get(&instance_id) {
+            if entry.key != key {
+                bail!(
+                    "instance {instance_id} is registered for model={} tenant={}",
+                    entry.key.model_name,
+                    entry.key.tenant_id
+                );
             }
-        } else if self.remove_discovered_worker(instance_id) {
-            super::metrics::dec_workers();
-            tracing::info!(instance_id, "Deregistering discovered worker via HTTP");
         } else {
+            #[cfg(feature = "indexer-runtime")]
+            if let Some(discovered_key) = self.discovered_workers.get(&instance_id) {
+                if discovered_key.value() != &key {
+                    bail!(
+                        "instance {instance_id} is registered for model={} tenant={}",
+                        discovered_key.value().model_name,
+                        discovered_key.value().tenant_id
+                    );
+                }
+            } else {
+                bail!("instance {instance_id} not found");
+            }
+
+            #[cfg(not(feature = "indexer-runtime"))]
             bail!("instance {instance_id} not found");
+        }
+
+        if let Some((_, entry)) = self.workers.remove(&instance_id) {
+            for record in entry.listeners.values() {
+                if let Some(cancel_token) = record.take_cancel() {
+                    cancel_token.cancel();
+                }
+            }
+        } else {
+            #[cfg(feature = "indexer-runtime")]
+            {
+                self.discovered_workers.remove(&instance_id);
+            }
         }
 
         if let Some(ie) = self.indexers.get(&key) {
             ie.indexer.remove_worker(instance_id).await;
-        } else {
-            tracing::warn!(
-                instance_id,
-                model_name,
-                tenant_id,
-                "indexer key not found on deregister; tree will not be cleaned up"
-            );
         }
-
+        self.maybe_remove_indexer(&key);
         Ok(())
     }
 
@@ -260,39 +534,44 @@ impl WorkerRegistry {
         model_name: &str,
         tenant_id: &str,
     ) -> Result<()> {
-        let mut entry = self
-            .workers
-            .get_mut(&instance_id)
-            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
-
-        if entry.endpoints.remove(&dp_rank).is_none() {
-            bail!("instance {instance_id} dp_rank {dp_rank} not found");
-        }
-
-        if let Some(cancel) = entry.cancels.remove(&dp_rank) {
-            cancel.cancel();
-        }
-
-        if entry.endpoints.is_empty() {
-            drop(entry);
-            return self.deregister(instance_id, model_name, tenant_id).await;
-        }
-        drop(entry);
-
         let key = IndexerKey {
             model_name: model_name.to_string(),
             tenant_id: tenant_id.to_string(),
         };
-        if let Some(ie) = self.indexers.get(&key) {
+
+        let (record, remove_worker) = {
+            let mut entry = self
+                .workers
+                .get_mut(&instance_id)
+                .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+            if entry.key != key {
+                bail!(
+                    "instance {instance_id} is registered for model={} tenant={}",
+                    entry.key.model_name,
+                    entry.key.tenant_id
+                );
+            }
+
+            let record = entry.listeners.remove(&dp_rank).ok_or_else(|| {
+                anyhow::anyhow!("instance {instance_id} dp_rank {dp_rank} not found")
+            })?;
+            let remove_worker = entry.listeners.is_empty();
+            (record, remove_worker)
+        };
+
+        if let Some(cancel_token) = record.take_cancel() {
+            cancel_token.cancel();
+        }
+
+        if remove_worker {
+            self.workers.remove(&instance_id);
+            if let Some(ie) = self.indexers.get(&key) {
+                ie.indexer.remove_worker(instance_id).await;
+            }
+            self.maybe_remove_indexer(&key);
+        } else if let Some(ie) = self.indexers.get(&key) {
             ie.indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
-        } else {
-            tracing::warn!(
-                instance_id,
-                dp_rank,
-                model_name,
-                tenant_id,
-                "indexer key not found on deregister_dp_rank; tree will not be cleaned up"
-            );
         }
 
         Ok(())
@@ -303,120 +582,148 @@ impl WorkerRegistry {
         instance_id: WorkerId,
         model_name: &str,
     ) -> Result<()> {
-        // Check ZMQ-registered workers first, then discovery workers (if runtime mode)
-        if let Some((_, entry)) = self.workers.remove(&instance_id) {
-            super::metrics::dec_workers();
-            for cancel in entry.cancels.values() {
-                cancel.cancel();
+        let key = if let Some(entry) = self.workers.get(&instance_id) {
+            if entry.key.model_name != model_name {
+                bail!(
+                    "instance {instance_id} is registered for model={} tenant={}",
+                    entry.key.model_name,
+                    entry.key.tenant_id
+                );
             }
-        } else if self.remove_discovered_worker(instance_id) {
-            super::metrics::dec_workers();
-            tracing::info!(
-                instance_id,
-                "Deregistering discovered worker (all tenants) via HTTP"
-            );
+            entry.key.clone()
         } else {
-            bail!("instance {instance_id} not found");
-        }
+            #[cfg(feature = "indexer-runtime")]
+            if let Some(discovered_key) = self.discovered_workers.get(&instance_id) {
+                if discovered_key.value().model_name != model_name {
+                    bail!(
+                        "instance {instance_id} is registered for model={} tenant={}",
+                        discovered_key.value().model_name,
+                        discovered_key.value().tenant_id
+                    );
+                }
+                discovered_key.value().clone()
+            } else {
+                bail!("instance {instance_id} not found");
+            }
 
-        let mut found = false;
-        for ie in self.indexers.iter() {
-            if ie.key().model_name == model_name {
-                ie.indexer.remove_worker(instance_id).await;
-                found = true;
+            #[cfg(not(feature = "indexer-runtime"))]
+            bail!("instance {instance_id} not found");
+        };
+
+        if let Some((_, entry)) = self.workers.remove(&instance_id) {
+            for record in entry.listeners.values() {
+                if let Some(cancel_token) = record.take_cancel() {
+                    cancel_token.cancel();
+                }
+            }
+        } else {
+            #[cfg(feature = "indexer-runtime")]
+            {
+                self.discovered_workers.remove(&instance_id);
             }
         }
-        if !found {
-            tracing::warn!(
-                instance_id,
-                model_name,
-                "no indexers found for model on deregister_all_tenants; tree will not be cleaned up"
-            );
-        }
 
+        if let Some(ie) = self.indexers.get(&key) {
+            ie.indexer.remove_worker(instance_id).await;
+        }
+        self.maybe_remove_indexer(&key);
         Ok(())
     }
 
-    pub fn pause_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
-        let mut entry = self
-            .workers
-            .get_mut(&instance_id)
-            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+    pub fn pause_listener(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<(), ListenerControlError> {
+        let record = if let Some(entry) = self.workers.get(&instance_id) {
+            entry.listeners.get(&dp_rank).cloned().ok_or(
+                ListenerControlError::ListenerNotFound {
+                    instance_id,
+                    dp_rank,
+                },
+            )?
+        } else {
+            #[cfg(feature = "indexer-runtime")]
+            if self.discovered_workers.contains_key(&instance_id) {
+                return Err(ListenerControlError::DiscoveryManaged { instance_id });
+            }
 
-        let cancel = entry.cancels.remove(&dp_rank).ok_or_else(|| {
-            anyhow::anyhow!("instance {instance_id} dp_rank {dp_rank} not active")
-        })?;
-        cancel.cancel();
+            return Err(ListenerControlError::WorkerNotFound { instance_id });
+        };
 
+        let cancel_token = record.pause(instance_id, dp_rank)?;
+        cancel_token.cancel();
         tracing::info!(instance_id, dp_rank, "Paused ZMQ listener");
         Ok(())
     }
 
-    pub async fn resume_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
-        {
-            let entry = self
-                .workers
-                .get(&instance_id)
-                .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
-
-            if entry.cancels.contains_key(&dp_rank) {
-                bail!("instance {instance_id} dp_rank {dp_rank} already running");
+    pub async fn resume_listener(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<(), ListenerControlError> {
+        let record = if let Some(entry) = self.workers.get(&instance_id) {
+            entry.listeners.get(&dp_rank).cloned().ok_or(
+                ListenerControlError::ListenerNotFound {
+                    instance_id,
+                    dp_rank,
+                },
+            )?
+        } else {
+            #[cfg(feature = "indexer-runtime")]
+            if self.discovered_workers.contains_key(&instance_id) {
+                return Err(ListenerControlError::DiscoveryManaged { instance_id });
             }
-        }
 
-        let state = self
-            .listener_states
-            .get(&(instance_id, dp_rank))
-            .ok_or_else(|| anyhow::anyhow!("no saved state for {instance_id} dp_rank {dp_rank}"))?;
+            return Err(ListenerControlError::WorkerNotFound { instance_id });
+        };
 
-        let cancel = CancellationToken::new();
-        let child_cancel = cancel.child_token();
-        let ready = self.ready_rx();
-        let addr = state.endpoint.clone();
-        let bs = state.block_size;
-        let indexer = state.indexer.clone();
-        let replay_ep = state.replay_endpoint.clone();
-        let watermark = state.watermark.clone();
-        drop(state);
-
-        run_zmq_listener(
-            instance_id,
-            dp_rank,
-            addr,
-            bs,
-            indexer,
-            child_cancel,
-            ready,
-            replay_ep,
-            watermark,
-        )
-        .await;
-
-        let mut entry = self
-            .workers
-            .get_mut(&instance_id)
-            .expect("worker entry disappeared during listener resume");
-        entry.cancels.insert(dp_rank, cancel);
+        let attempt = record.resume(instance_id, dp_rank)?;
+        self.spawn_listener(instance_id, dp_rank, attempt, record);
+        tracing::info!(instance_id, dp_rank, "Resumed ZMQ listener");
         Ok(())
     }
 
-    pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
+    pub fn list(&self) -> Vec<WorkerInfo> {
         #[allow(unused_mut)]
-        let mut result: Vec<(WorkerId, HashMap<u32, String>)> = self
+        let mut result: Vec<WorkerInfo> = self
             .workers
             .iter()
-            .map(|entry| (*entry.key(), entry.value().endpoints.clone()))
+            .map(|entry| {
+                let listeners: HashMap<u32, ListenerInfo> = entry
+                    .value()
+                    .listeners
+                    .iter()
+                    .map(|(dp_rank, record)| (*dp_rank, record.snapshot()))
+                    .collect();
+                let endpoints = listeners
+                    .iter()
+                    .map(|(dp_rank, info)| (*dp_rank, info.endpoint.clone()))
+                    .collect();
+                let status = ListenerStatus::aggregate(listeners.values().map(|info| info.status));
+                WorkerInfo {
+                    instance_id: *entry.key(),
+                    source: WorkerSource::Zmq,
+                    status,
+                    endpoints,
+                    listeners,
+                }
+            })
             .collect();
 
-        // Include discovered workers (no ZMQ endpoints)
         #[cfg(feature = "indexer-runtime")]
         for entry in self.discovered_workers.iter() {
             let worker_id = *entry.key();
-            // Skip if already in the workers map (shouldn't happen, but be safe)
             if self.workers.contains_key(&worker_id) {
                 continue;
             }
-            result.push((worker_id, HashMap::new()));
+            result.push(WorkerInfo {
+                instance_id: worker_id,
+                source: WorkerSource::Discovery,
+                status: ListenerStatus::Active,
+                endpoints: HashMap::new(),
+                listeners: HashMap::new(),
+            });
         }
 
         result
@@ -464,25 +771,6 @@ impl WorkerRegistry {
             .collect()
     }
 
-    /// Helper: try to remove a worker from the discovered_workers map.
-    /// Returns false when the feature is disabled (no discovered workers exist).
-    fn remove_discovered_worker(&self, _instance_id: WorkerId) -> bool {
-        #[cfg(feature = "indexer-runtime")]
-        {
-            self.discovered_workers.remove(&_instance_id).is_some()
-        }
-        #[cfg(not(feature = "indexer-runtime"))]
-        {
-            false
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Discovery-based worker management (no ZMQ listener)
-    // ---------------------------------------------------------------
-
-    /// Register a worker discovered via MDC. Creates the indexer if needed but
-    /// does NOT start a ZMQ listener — events arrive via the event plane.
     #[cfg(feature = "indexer-runtime")]
     pub fn add_worker_from_discovery(
         &self,
@@ -491,7 +779,6 @@ impl WorkerRegistry {
         tenant_id: String,
         block_size: u32,
     ) -> Result<()> {
-        // Reject if this worker is already registered via ZMQ (--workers or /register)
         if self.workers.contains_key(&instance_id) {
             bail!(
                 "instance {instance_id} is already registered via ZMQ; \
@@ -503,6 +790,17 @@ impl WorkerRegistry {
             model_name,
             tenant_id,
         };
+
+        if let Some(existing) = self.discovered_workers.get(&instance_id) {
+            if existing.value() != &key {
+                bail!(
+                    "instance {instance_id} is already registered for model={} tenant={}",
+                    existing.value().model_name,
+                    existing.value().tenant_id
+                );
+            }
+            return Ok(());
+        }
 
         let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
@@ -532,13 +830,13 @@ impl WorkerRegistry {
         Ok(())
     }
 
-    /// Remove a worker that was discovered via MDC.
     #[cfg(feature = "indexer-runtime")]
     pub async fn remove_worker_from_discovery(&self, instance_id: WorkerId) {
         if let Some((_, key)) = self.discovered_workers.remove(&instance_id) {
             if let Some(ie) = self.indexers.get(&key) {
                 ie.indexer.remove_worker(instance_id).await;
             }
+            self.maybe_remove_indexer(&key);
         } else {
             tracing::debug!(
                 instance_id,
@@ -547,21 +845,54 @@ impl WorkerRegistry {
         }
     }
 
-    /// Look up the indexer responsible for a given worker_id.
-    /// Checks both discovery-registered and CLI-registered workers.
     #[cfg(feature = "indexer-runtime")]
     pub fn get_indexer_for_worker(&self, worker_id: WorkerId) -> Option<Indexer> {
-        // Check discovery workers first (more common in runtime mode)
         if let Some(key) = self.discovered_workers.get(&worker_id)
             && let Some(ie) = self.indexers.get(key.value())
         {
             return Some(ie.indexer.clone());
         }
-        // Fall back for legacy --workers mode: only if this worker is actually
-        // in the ZMQ-registered workers map, route to the first indexer.
-        if self.workers.contains_key(&worker_id) {
-            return self.indexers.iter().next().map(|ie| ie.indexer.clone());
+
+        if let Some(entry) = self.workers.get(&worker_id)
+            && let Some(ie) = self.indexers.get(&entry.key)
+        {
+            return Some(ie.indexer.clone());
         }
+
         None
+    }
+
+    fn spawn_listener(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        (generation, cancel_token): (u64, CancellationToken),
+        record: Arc<ListenerRecord>,
+    ) {
+        spawn_zmq_listener(
+            instance_id,
+            dp_rank,
+            record,
+            self.ready_rx(),
+            generation,
+            cancel_token.child_token(),
+        );
+    }
+
+    fn maybe_remove_indexer(&self, key: &IndexerKey) {
+        if self.workers.iter().any(|entry| entry.value().key == *key) {
+            return;
+        }
+
+        #[cfg(feature = "indexer-runtime")]
+        if self
+            .discovered_workers
+            .iter()
+            .any(|entry| entry.value() == key)
+        {
+            return;
+        }
+
+        self.indexers.remove(key);
     }
 }
