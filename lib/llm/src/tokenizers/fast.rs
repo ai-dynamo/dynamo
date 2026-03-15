@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fasttokens backend using the `fastokens` crate for high-performance BPE encoding.
+//! Fastokens backend using the `fastokens` crate for high-performance BPE encoding.
 //!
 //! `fastokens` only supports encoding, so this module provides a hybrid tokenizer that
 //! uses `fastokens` for encoding and falls back to `HuggingFaceTokenizer` for decoding.
@@ -28,7 +28,7 @@ pub struct FastTokenizer {
 impl FastTokenizer {
     pub fn from_file(path: &str) -> Result<Self> {
         let fast_encoder = fastokens::Tokenizer::from_file(Path::new(path))
-            .map_err(|e| Error::msg(format!("Error loading fasttokens tokenizer: {e}")))?;
+            .map_err(|e| Error::msg(format!("Error loading fastokens tokenizer: {e}")))?;
         let hf_decoder = HuggingFaceTokenizer::from_file(path)?;
         Ok(Self {
             fast_encoder,
@@ -42,7 +42,7 @@ impl Encoder for FastTokenizer {
         let ids = self
             .fast_encoder
             .encode(input)
-            .map_err(|e| Error::msg(format!("Fasttokens encode error: {e}")))?;
+            .map_err(|e| Error::msg(format!("Fastokens encode error: {e}")))?;
         Ok(Encoding::Sp(ids))
     }
 
@@ -103,7 +103,7 @@ mod tests {
             assert_eq!(
                 fast_ids.token_ids(),
                 hf_ids.token_ids(),
-                "fasttokens and HuggingFace must produce identical token IDs for '{text}'"
+                "fastokens and HuggingFace must produce identical token IDs for '{text}'"
             );
         }
     }

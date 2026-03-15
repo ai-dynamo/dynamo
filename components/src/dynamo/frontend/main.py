@@ -165,8 +165,8 @@ async def async_main():
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
-    if config.tokenizer_backend == "fasttokens":
-        os.environ["DYN_TOKENIZER_BACKEND"] = "fasttokens"
+    if config.tokenizer_backend == "fastokens":
+        os.environ["DYN_TOKENIZER_BACKEND"] = "fastokens"
     else:
         os.environ.pop("DYN_TOKENIZER_BACKEND", None)
     logger.info(

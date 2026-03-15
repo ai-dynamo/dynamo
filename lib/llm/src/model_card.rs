@@ -379,15 +379,15 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// When the `DYN_TOKENIZER_BACKEND=fasttokens` env var is set, uses `fastokens` for encoding
+    /// When the `DYN_TOKENIZER_BACKEND=fastokens` env var is set, uses `fastokens` for encoding
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER_BACKEND") {
-            Ok(v) if v == "fasttokens" => true,
+            Ok(v) if v == "fastokens" => true,
             Ok(v) if v == "default" || v.is_empty() => false,
             Ok(v) => {
                 tracing::warn!(
                     value = %v,
-                    "Unrecognized DYN_TOKENIZER_BACKEND value, expected 'fasttokens' or 'default'; falling back to default"
+                    "Unrecognized DYN_TOKENIZER_BACKEND value, expected 'fastokens' or 'default'; falling back to default"
                 );
                 false
             }
@@ -400,25 +400,25 @@ impl ModelDeploymentCard {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
 
-                // Try fasttokens backend if requested
+                // Try fastokens backend if requested
                 if use_fast {
                     if let Some(path_str) = p.to_str() {
                         match crate::tokenizers::FastTokenizer::from_file(path_str) {
                             Ok(fast) => {
-                                tracing::info!("Using fasttokens tokenizer backend");
+                                tracing::info!("Using fastokens tokenizer backend");
                                 return Ok(crate::tokenizers::Tokenizer::from(Arc::new(fast)));
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     %e,
-                                    "Failed to load fasttokens, falling back to HuggingFace"
+                                    "Failed to load fastokens, falling back to HuggingFace"
                                 );
                             }
                         }
                     } else {
                         tracing::warn!(
                             path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fasttokens; falling back to HuggingFace"
+                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                         );
                     }
                 }
