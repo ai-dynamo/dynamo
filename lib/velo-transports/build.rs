@@ -5,7 +5,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Only compile proto files if grpc feature is enabled
     #[cfg(feature = "grpc")]
     {
-        tonic_build::compile_protos("proto/velo.proto")?;
+        tonic_build::configure()
+            .bytes(["velo.streaming.v1.FramedData"])
+            .compile_protos(&["proto/velo.proto"], &["proto"])?;
     }
     Ok(())
 }

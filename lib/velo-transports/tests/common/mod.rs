@@ -8,8 +8,8 @@
 
 #![allow(dead_code)]
 
-// #[cfg(feature = "grpc")]
-// use velo_transports::grpc::{GrpcTransport, GrpcTransportBuilder};
+#[cfg(feature = "grpc")]
+use velo_transports::grpc::{GrpcTransport, GrpcTransportBuilder};
 // #[cfg(feature = "http")]
 // use velo_transports::http::{HttpTransport, HttpTransportBuilder};
 // #[cfg(feature = "nats")]
@@ -43,6 +43,7 @@ pub fn init_tracing() {
 }
 
 pub mod scenarios;
+pub mod shutdown_scenarios;
 
 /// Test error handler that tracks errors for verification
 #[derive(Clone)]
@@ -346,21 +347,18 @@ impl TestTransportHandle<UdsTransport> {
 //     }
 // }
 
-// // gRPC-specific convenience constructors
-// #[cfg(feature = "grpc")]
-// impl TestTransportHandle<GrpcTransport> {
-//     /// Create a new gRPC transport with OS-provided port
-//     ///
-//     /// This is a convenience method for creating gRPC transports.
-//     /// For other transport types, use `with_factory()`.
-//     pub async fn new_grpc() -> anyhow::Result<Self> {
-//         Self::with_factory(|| {
-//             // Use default builder which binds to 0.0.0.0:0 (OS-provided port)
-//             GrpcTransportBuilder::new().build()
-//         })
-//         .await
-//     }
-// }
+// gRPC-specific convenience constructors
+#[cfg(feature = "grpc")]
+impl TestTransportHandle<GrpcTransport> {
+    /// Create a new gRPC transport with OS-provided port
+    pub async fn new_grpc() -> anyhow::Result<Self> {
+        Self::with_factory(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            GrpcTransportBuilder::new().from_listener(listener)?.build()
+        })
+        .await
+    }
+}
 
 /// Multi-transport test cluster
 ///
@@ -502,21 +500,18 @@ impl TestCluster<UdsTransport> {
 //     }
 // }
 
-// // gRPC-specific convenience constructor
-// #[cfg(feature = "grpc")]
-// impl TestCluster<GrpcTransport> {
-//     /// Create a new gRPC test cluster with the specified number of transports
-//     ///
-//     /// This is a convenience method for creating gRPC clusters.
-//     /// For other transport types, use `with_factory()`.
-//     pub async fn new_grpc(size: usize) -> anyhow::Result<Self> {
-//         Self::with_factory(size, || {
-//             // Use default builder which binds to OS-provided ports
-//             GrpcTransportBuilder::new().build()
-//         })
-//         .await
-//     }
-// }
+// gRPC-specific convenience constructor
+#[cfg(feature = "grpc")]
+impl TestCluster<GrpcTransport> {
+    /// Create a new gRPC test cluster with the specified number of transports
+    pub async fn new_grpc(size: usize) -> anyhow::Result<Self> {
+        Self::with_factory(size, || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            GrpcTransportBuilder::new().from_listener(listener)?.build()
+        })
+        .await
+    }
+}
 
 // Helper utilities
 
@@ -547,6 +542,315 @@ pub fn assert_message_eq(
 ) {
     assert_eq!(received.0.as_ref(), expected_header, "Header mismatch");
     assert_eq!(received.1.as_ref(), expected_payload, "Payload mismatch");
+}
+
+// ---------------------------------------------------------------------------
+// ShutdownTestClient trait + implementations
+// ---------------------------------------------------------------------------
+
+/// Trait abstracting over transport-specific shutdown test operations.
+///
+/// This allows shutdown tests to be written generically and instantiated
+/// for TCP, UDS, etc. via the `transport_shutdown_tests!` macro.
+pub trait ShutdownTestClient {
+    type Transport: Transport;
+    type Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send;
+
+    /// Create a new transport handle for testing.
+    fn new_handle()
+    -> impl std::future::Future<Output = anyhow::Result<TestTransportHandle<Self::Transport>>> + Send;
+
+    /// Connect a raw client to the transport and send one frame. Returns the stream.
+    fn connect_and_send_frame(
+        handle: &TestTransportHandle<Self::Transport>,
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> impl std::future::Future<Output = Self::Stream> + Send;
+
+    /// Read one frame from the raw stream.
+    fn read_one_frame(
+        stream: &mut Self::Stream,
+    ) -> impl std::future::Future<Output = (MessageType, Bytes, Bytes)> + Send;
+}
+
+/// TCP shutdown test client
+pub struct TcpShutdownClient;
+
+impl ShutdownTestClient for TcpShutdownClient {
+    type Transport = TcpTransport;
+    type Stream = tokio::net::TcpStream;
+
+    async fn new_handle() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_tcp().await
+    }
+
+    async fn connect_and_send_frame(
+        handle: &TestTransportHandle<Self::Transport>,
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> Self::Stream {
+        use velo_transports::tcp::TcpFrameCodec;
+
+        let addr = {
+            let wa = handle.transport.address();
+            let key = handle.transport.key();
+            let endpoint = wa.get_entry(&key).unwrap().unwrap();
+            let s = std::str::from_utf8(&endpoint).unwrap();
+            let s = s.strip_prefix("tcp://").unwrap_or(s);
+            s.parse::<std::net::SocketAddr>().unwrap()
+        };
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
+            .await
+            .unwrap();
+        stream
+    }
+
+    async fn read_one_frame(stream: &mut Self::Stream) -> (MessageType, Bytes, Bytes) {
+        use futures::StreamExt;
+        use tokio_util::codec::Framed;
+        use velo_transports::tcp::TcpFrameCodec;
+
+        let mut framed = Framed::new(stream, TcpFrameCodec::new());
+        framed.next().await.unwrap().unwrap()
+    }
+}
+
+/// UDS shutdown test client
+#[cfg(unix)]
+pub struct UdsShutdownClient;
+
+#[cfg(unix)]
+impl ShutdownTestClient for UdsShutdownClient {
+    type Transport = UdsTransport;
+    type Stream = tokio::net::UnixStream;
+
+    async fn new_handle() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_uds().await
+    }
+
+    async fn connect_and_send_frame(
+        handle: &TestTransportHandle<Self::Transport>,
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> Self::Stream {
+        use velo_transports::tcp::TcpFrameCodec;
+
+        let socket_path = {
+            let wa = handle.transport.address();
+            let key = handle.transport.key();
+            let endpoint = wa.get_entry(&key).unwrap().unwrap();
+            let s = std::str::from_utf8(&endpoint).unwrap();
+            let s = s.strip_prefix("uds://").unwrap_or(s);
+            std::path::PathBuf::from(s)
+        };
+        let mut stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
+            .await
+            .unwrap();
+        stream
+    }
+
+    async fn read_one_frame(stream: &mut Self::Stream) -> (MessageType, Bytes, Bytes) {
+        use futures::StreamExt;
+        use tokio_util::codec::Framed;
+        use velo_transports::tcp::TcpFrameCodec;
+
+        let mut framed = Framed::new(stream, TcpFrameCodec::new());
+        framed.next().await.unwrap().unwrap()
+    }
+}
+
+/// gRPC shutdown test client
+///
+/// gRPC shutdown tests connect via raw TCP to the tonic server's bind address
+/// and send framed data directly. The tonic server's connection handler
+/// uses the same frame codec, so raw TCP connections work for testing.
+#[cfg(feature = "grpc")]
+pub struct GrpcShutdownClient;
+
+#[cfg(feature = "grpc")]
+impl ShutdownTestClient for GrpcShutdownClient {
+    type Transport = GrpcTransport;
+    type Stream = tokio::net::TcpStream;
+
+    async fn new_handle() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_grpc().await
+    }
+
+    async fn connect_and_send_frame(
+        handle: &TestTransportHandle<Self::Transport>,
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> Self::Stream {
+        use velo_transports::tcp::TcpFrameCodec;
+
+        let addr = {
+            let wa = handle.transport.address();
+            let key = handle.transport.key();
+            let endpoint = wa.get_entry(&key).unwrap().unwrap();
+            let s = std::str::from_utf8(&endpoint).unwrap();
+            let s = s.strip_prefix("grpc://").unwrap_or(s);
+            s.parse::<std::net::SocketAddr>().unwrap()
+        };
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
+            .await
+            .unwrap();
+        stream
+    }
+
+    async fn read_one_frame(stream: &mut Self::Stream) -> (MessageType, Bytes, Bytes) {
+        use futures::StreamExt;
+        use tokio_util::codec::Framed;
+        use velo_transports::tcp::TcpFrameCodec;
+
+        let mut framed = Framed::new(stream, TcpFrameCodec::new());
+        framed.next().await.unwrap().unwrap()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test generation macros
+// ---------------------------------------------------------------------------
+
+/// Macro to generate integration tests for a transport factory.
+///
+/// This eliminates the boilerplate of writing individual `#[tokio::test]` functions
+/// for each scenario when the only difference is the factory type parameter.
+#[allow(unused_macros)]
+macro_rules! transport_integration_tests {
+    ($factory:ty) => {
+        paste::paste! {
+            #[tokio::test]
+            async fn test_single_message_round_trip() {
+                scenarios::single_message_round_trip::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_bidirectional_messaging() {
+                scenarios::bidirectional_messaging::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_multiple_messages_same_connection() {
+                scenarios::multiple_messages_same_connection::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_response_message_type() {
+                scenarios::response_message_type::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_event_message_type() {
+                scenarios::event_message_type::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_ack_message_type() {
+                scenarios::ack_message_type::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_mixed_message_types() {
+                scenarios::mixed_message_types::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_large_payload() {
+                scenarios::large_payload::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_empty_header_and_payload() {
+                scenarios::empty_header_and_payload::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_cluster_mesh_communication() {
+                scenarios::cluster_mesh_communication::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_concurrent_senders() {
+                scenarios::concurrent_senders::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_send_to_unregistered_peer() {
+                scenarios::send_to_unregistered_peer::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_connection_reuse() {
+                scenarios::connection_reuse::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_graceful_shutdown() {
+                scenarios::graceful_shutdown::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_high_throughput() {
+                scenarios::high_throughput::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_zero_copy_efficiency() {
+                scenarios::zero_copy_efficiency::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_drain_rejects_messages() {
+                scenarios::drain_rejects_messages::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_drain_accepts_responses() {
+                scenarios::drain_accepts_responses::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_drain_accepts_events() {
+                scenarios::drain_accepts_events::<$factory>().await;
+            }
+            #[tokio::test]
+            async fn test_health_during_drain() {
+                scenarios::health_during_drain::<$factory>().await;
+            }
+        }
+    };
+}
+
+/// Macro to generate shutdown tests for a transport.
+///
+/// Generates tests with names like `test_{prefix}_drain_rejects_messages`.
+#[allow(unused_macros)]
+macro_rules! transport_shutdown_tests {
+    ($prefix:ident, $client:ty) => {
+        paste::paste! {
+            #[tokio::test]
+            async fn [<test_ $prefix _drain_rejects_messages>]() {
+                shutdown_scenarios::drain_rejects_messages::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _drain_accepts_responses>]() {
+                shutdown_scenarios::drain_accepts_responses::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _drain_accepts_events>]() {
+                shutdown_scenarios::drain_accepts_events::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _new_connection_during_drain>]() {
+                shutdown_scenarios::new_connection_during_drain::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _graceful_shutdown_lifecycle>]() {
+                shutdown_scenarios::graceful_shutdown_lifecycle::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _shutdown_timeout_forces_teardown>]() {
+                shutdown_scenarios::shutdown_timeout_forces_teardown::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _outbound_sends_during_drain>]() {
+                shutdown_scenarios::outbound_sends_during_drain::<$client>().await;
+            }
+            #[tokio::test]
+            async fn [<test_ $prefix _connection_writer_exits_on_teardown>]() {
+                shutdown_scenarios::connection_writer_exits_on_teardown::<$client>().await;
+            }
+        }
+    };
 }
 
 // Transport factory abstraction for parameterized tests
@@ -642,19 +946,19 @@ impl TransportFactory for UdsFactory {
 //     }
 // }
 
-// /// gRPC transport factory
-// #[cfg(feature = "grpc")]
-// pub struct GrpcFactory;
+/// gRPC transport factory
+#[cfg(feature = "grpc")]
+pub struct GrpcFactory;
 
-// #[cfg(feature = "grpc")]
-// impl TransportFactory for GrpcFactory {
-//     type Transport = GrpcTransport;
+#[cfg(feature = "grpc")]
+impl TransportFactory for GrpcFactory {
+    type Transport = GrpcTransport;
 
-//     async fn create() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
-//         TestTransportHandle::new_grpc().await
-//     }
+    async fn create() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_grpc().await
+    }
 
-//     async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
-//         TestCluster::new_grpc(size).await
-//     }
-// }
+    async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
+        TestCluster::new_grpc(size).await
+    }
+}

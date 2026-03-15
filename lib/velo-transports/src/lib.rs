@@ -31,6 +31,9 @@ mod address;
 
 pub mod tcp;
 
+/// Shared utility functions for transport implementations.
+pub mod utils;
+
 #[cfg(unix)]
 pub mod uds;
 
@@ -43,8 +46,8 @@ pub mod uds;
 // #[cfg(feature = "nats")]
 // pub mod nats;
 
-// #[cfg(feature = "grpc")]
-// pub mod grpc;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 
 mod transport;
 

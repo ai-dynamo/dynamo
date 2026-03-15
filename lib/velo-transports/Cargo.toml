@@ -66,6 +66,7 @@ tokio-stream = { version = "0.1", optional = true, features = ["sync"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tower = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+paste = "1"
 
 [build-dependencies]
 tonic-build = "0.13.1"
