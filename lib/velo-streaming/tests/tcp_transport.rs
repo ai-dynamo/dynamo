@@ -293,13 +293,18 @@ async fn test_anchor_manager_tcp_registry() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: VeloBuilder with TCP transport (TCP-09)
+// Test 6: VeloBuilder with TCP transport (TCP-09 / GRPC-08)
 // ---------------------------------------------------------------------------
 
-/// Validates that VeloBuilder.stream_bind_addr() creates a TcpFrameTransport
-/// and populates the transport_registry with both "tcp" and "velo" schemes.
+/// Validates that VeloBuilder.stream_config(StreamConfig::Tcp(None)) creates a
+/// TcpFrameTransport and populates the transport_registry with both "tcp" and
+/// "velo" schemes. This is the canonical backward-compat test for GRPC-08:
+/// StreamConfig::Tcp(None) must produce identical AnchorManager setup as the
+/// old stream_bind_addr(0.0.0.0) call.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_velo_builder_tcp_transport() {
+    use velo::StreamConfig;
+
     let transport = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         Arc::new(
@@ -313,7 +318,8 @@ async fn test_velo_builder_tcp_transport() {
 
     let velo = velo::Velo::builder()
         .add_transport(transport)
-        .stream_bind_addr(std::net::Ipv4Addr::LOCALHOST.into())
+        .stream_config(StreamConfig::Tcp(None))
+        .expect("stream_config should succeed on first call")
         .build()
         .await
         .unwrap();
