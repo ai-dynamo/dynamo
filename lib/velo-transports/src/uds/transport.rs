@@ -349,11 +349,6 @@ impl Transport for UdsTransport {
 
         // Clear connections
         self.connections.clear();
-
-        // Clean up socket file
-        if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).ok();
-        }
     }
 
     fn check_health(

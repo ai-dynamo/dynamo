@@ -367,7 +367,10 @@ async fn test_uds_connection_writer_exits_on_teardown() {
     // Give writer tasks time to exit
     sleep(Duration::from_millis(200)).await;
 
-    // Sending should now fail (error handler gets invoked, not a panic)
+    // Sending after shutdown: the cancel_token is already cancelled, so any new
+    // writer task returns immediately without connecting. The error handler must
+    // be invoked and the message must not arrive on handle_b.
+    handle_a.error_handler.clear();
     handle_a.send(
         handle_b.instance_id,
         b"should-fail".to_vec(),
@@ -375,11 +378,25 @@ async fn test_uds_connection_writer_exits_on_teardown() {
         MessageType::Message,
     );
 
-    // Give time for async error path
+    // Give time for the async error path to complete
     sleep(Duration::from_millis(100)).await;
 
-    // The message either goes to error handler or is silently dropped
-    // (connection cleared during shutdown). Just verify no panic occurred.
+    // Error handler must have been invoked for the failed send
+    assert!(
+        handle_a.error_handler.error_count() >= 1,
+        "error handler should be invoked for post-shutdown send"
+    );
+
+    // The message must not have been delivered to handle_b
+    let not_delivered = timeout(
+        Duration::from_millis(100),
+        handle_b.streams.message_stream.recv_async(),
+    )
+    .await;
+    assert!(
+        not_delivered.is_err(),
+        "post-shutdown message must not arrive at handle_b"
+    );
 
     handle_b.streams.shutdown_state.teardown_token().cancel();
 }
