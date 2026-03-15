@@ -63,7 +63,7 @@ impl LocalKvIndexer {
     /// ### Returns
     ///
     /// - `Events`: Buffered events with original IDs (when range is within buffer)
-    /// - `TreeDump`: Full tree dump with synthetic IDs (when range is too old or unspecified)
+    /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
     pub async fn get_events_in_id_range(
@@ -99,7 +99,10 @@ impl LocalKvIndexer {
         if start_id.is_none() {
             tracing::debug!("No start_id specified, dumping entire tree");
             let events = self.dump_events().await.unwrap_or_default();
-            return WorkerKvQueryResponse::TreeDump(events);
+            return WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id: last_id.unwrap_or(0),
+            };
         }
 
         let start_id = start_id.unwrap();
@@ -109,7 +112,10 @@ impl LocalKvIndexer {
         let Some(first_buffered) = first_id else {
             tracing::debug!("Buffer empty, dumping entire tree");
             let events = self.dump_events().await.unwrap_or_default();
-            return WorkerKvQueryResponse::TreeDump(events);
+            return WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id: 0,
+            };
         };
         let last_buffered = last_id.unwrap();
 
@@ -135,7 +141,10 @@ impl LocalKvIndexer {
                 "Requested start_id is older than buffer, dumping entire tree"
             );
             let events = self.dump_events().await.unwrap_or_default();
-            return WorkerKvQueryResponse::TreeDump(events);
+            return WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id: last_buffered,
+            };
         }
 
         // Serve from buffer
@@ -198,15 +207,17 @@ impl LocalKvIndexer {
     ///
     /// This records the event in the buffer and forwards it to the underlying indexer.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
-        // Record in buffer
-        self.record_event(event.clone());
-
         // Forward to underlying indexer
-        self.indexer
+        let result = self
+            .indexer
             .event_sender()
-            .send(event)
+            .send(event.clone())
             .await
-            .map_err(|_| KvRouterError::IndexerOffline)
+            .map_err(|_| KvRouterError::IndexerOffline);
+        // Record in buffer
+        self.record_event(event);
+
+        result
     }
 
     /// Clear the event buffer.

@@ -2024,7 +2024,7 @@ mod tests_startup_helpers {
             .await;
         let missed_events = match response {
             crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
-            crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+            crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             crate::kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")
             }

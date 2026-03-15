@@ -64,7 +64,7 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
+        let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
@@ -194,6 +194,10 @@ impl KvIndexer {
                         }
 
                         Some(dump_req) = dump_rx.recv() => {
+                            // Flush pending events so tree is consistent with buffer
+                            while let Ok(event) = event_rx.try_recv() {
+                                let _ = trie.apply_event(event);
+                            }
                             let events = trie.dump_tree_as_events();
                             let _ = dump_req.resp.send(events);
                         }
