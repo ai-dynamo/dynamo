@@ -78,6 +78,8 @@ class FrontendConfig(KvRouterConfigBase):
     preprocess_workers: int
     tokenizer_backend: str
 
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
@@ -89,6 +91,11 @@ class FrontendConfig(KvRouterConfigBase):
             )
         if self.router_enable_cache_control and self.router_mode != "kv":
             raise ValueError("--enable-cache-control requires --router-mode=kv")
+        if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
+            raise ValueError(
+                f"--tokenizer: invalid value '{self.tokenizer_backend}' "
+                f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
 
 
 @register_encoder(FrontendConfig)
