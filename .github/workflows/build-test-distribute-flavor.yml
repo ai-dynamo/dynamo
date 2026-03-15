@@ -352,8 +352,7 @@ jobs:
     if: |
         !inputs.build_only &&
         ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
-        inputs.build_image &&
-        ( matrix.arch == 'amd64' || contains(inputs.platform, 'arm64') )
+        inputs.build_image
     needs: [build]
     name: Test cuda${{ inputs.cuda_version }} (${{ matrix.arch }})
     strategy:
@@ -598,3 +597,4 @@ jobs:
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          override_arch: amd64
