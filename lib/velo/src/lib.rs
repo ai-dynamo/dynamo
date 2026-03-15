@@ -286,6 +286,25 @@ impl Velo {
 mod tests {
     use super::*;
 
+    /// Test: stream_config double-call returns Err (GRPC-07)
+    ///
+    /// VeloBuilder enforces one streaming server per instance.
+    /// A second call to stream_config() must return Err, not panic.
+    #[test]
+    fn test_stream_config_double_call_error() {
+        let builder = Velo::builder();
+        let builder = builder.stream_config(StreamConfig::Tcp(None))
+            .expect("first stream_config should succeed");
+        let result = builder.stream_config(StreamConfig::Tcp(None));
+        assert!(result.is_err(), "second stream_config call should return Err");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("more than once") || err.to_string().contains("one streaming"),
+            "error message should indicate double-call: {}",
+            err
+        );
+    }
+
     /// Test 1: Velo struct has anchor_manager field of type Arc<AnchorManager>
     /// (compile-time check via field accessor)
     #[test]
