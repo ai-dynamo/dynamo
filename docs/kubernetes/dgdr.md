@@ -40,7 +40,7 @@ Set these variables once — they are referenced throughout the guide:
 
 ```bash
 export NAMESPACE=dynamo-system      # namespace where the platform is installed
-export RELEASE_VERSION=1.x.x       # match the installed platform version (e.g. 1.0.0)
+export RELEASE_VERSION=1.x.x       # match the installed platform version (e.g. 1.0.1)
 export HF_TOKEN=<your-hf-token>    # HuggingFace token
 ```
 

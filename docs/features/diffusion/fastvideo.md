@@ -28,7 +28,7 @@ The local Docker workflow builds a runtime image from the [`Dockerfile`](https:/
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
 - Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
-- Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
+- Installs Dynamo from the `release/1.0.1` branch (for `/v1/videos` support)
 - Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
 
 > [!WARNING]

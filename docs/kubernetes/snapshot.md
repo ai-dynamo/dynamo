@@ -32,8 +32,8 @@ This guide assumes a normal Dynamo deployment workflow is already present on you
 Snapshot-enabled workers must use a placeholder image that wraps the normal runtime image with the restore tooling. If you do not already have one, build it with the snapshot placeholder target and push it to a registry your cluster can pull from:
 
 ```bash
-export RUNTIME_IMAGE=registry.example.com/dynamo/vllm-runtime:1.0.0
-export PLACEHOLDER_IMAGE=registry.example.com/dynamo/vllm-placeholder:1.0.0
+export RUNTIME_IMAGE=registry.example.com/dynamo/vllm-runtime:1.0.1
+export PLACEHOLDER_IMAGE=registry.example.com/dynamo/vllm-placeholder:1.0.1
 
 cd deploy/snapshot
 
@@ -115,7 +115,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: registry.example.com/dynamo/vllm-runtime:1.0.0
+          image: registry.example.com/dynamo/vllm-runtime:1.0.1
 
     VllmDecodeWorker:
       componentType: worker
@@ -138,7 +138,7 @@ spec:
           backendFramework: vllm
       extraPodSpec:
         mainContainer:
-          image: registry.example.com/dynamo/vllm-placeholder:1.0.0
+          image: registry.example.com/dynamo/vllm-placeholder:1.0.1
           command:
             - python3
             - -m
@@ -270,7 +270,7 @@ Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) 
 |-------|----------|-------------|---------|
 | `model` | ✓ | ✓ | `meta-llama/Llama-3-8B` |
 | `backendFramework` | ✓ | ✓ | `sglang`, `vllm` |
-| `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0` |
+| `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0`, `1.0.1` |
 | `tensorParallelSize` | | ✓ | `1`, `2`, `4`, `8` (default: 1) |
 | `pipelineParallelSize` | | ✓ | `1`, `2` (default: 1) |
 | `dtype` | | ✓ | `float16`, `bfloat16`, `fp8` |
@@ -291,7 +291,7 @@ checkpoint:
   identity:
     model: "meta-llama/Llama-3-8B"
     backendFramework: "vllm"
-    dynamoVersion: "1.0.0"
+    dynamoVersion: "1.0.1"
     tensorParallelSize: 1
     pipelineParallelSize: 1
     dtype: "bfloat16"
@@ -337,7 +337,7 @@ spec:
         restartPolicy: Never
         containers:
           - name: main
-            image: registry.example.com/dynamo/vllm-placeholder:1.0.0
+            image: registry.example.com/dynamo/vllm-placeholder:1.0.1
             command:
               - python3
               - -m
