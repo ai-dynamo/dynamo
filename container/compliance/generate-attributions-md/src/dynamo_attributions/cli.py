@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
@@ -13,6 +14,8 @@ from pathlib import Path
 from .extractor import _get_direct_python_packages, extract_transitive
 from .licenses import fetch_all_licenses
 from .types import Ecosystem
+
+logger = logging.getLogger(__name__)
 
 
 class _ExitCodes(IntEnum):
@@ -32,9 +35,36 @@ def _check_prerequisites(dynamo_path: str) -> str | None:
     if not shutil.which("git"):
         return "git is required but not found in PATH."
     p = Path(dynamo_path)
-    if not (p / ".git").exists() and not (p / ".git").is_file():
+    if not (p / ".git").exists():
         return f"{p.resolve()} is not a git repository (no .git found)."
     return None
+
+
+def _extract_python_from_image(
+    image: str,
+    dynamo_path: str,
+) -> list[dict[str, str]]:
+    """Extract Python packages from a container image using v1's extractor.
+
+    Calls container/compliance/extractors/python_pkgs.extract_python() which
+    mounts python_helper.py into the container and runs importlib.metadata
+    to get package names, versions, and SPDX-normalized licenses.
+    """
+    repo_root = str(Path(dynamo_path).resolve())
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    try:
+        from container.compliance.extractors.python_pkgs import extract_python
+    except ImportError:
+        logger.error(
+            "Could not import container.compliance.extractors. "
+            "Ensure --dynamo-path points to the dynamo repo root."
+        )
+        return []
+
+    print(f"Extracting Python packages from {image} via importlib.metadata...")
+    return extract_python(image)
 
 
 def main() -> int:
@@ -57,8 +87,12 @@ def main() -> int:
         help="Ecosystem to generate attributions for (default: all)",
     )
     parser.add_argument(
+        "--image",
+        help="Container image to extract Python packages from (preferred over --pip-freeze-file)",
+    )
+    parser.add_argument(
         "--pip-freeze-file",
-        help="Path to pip freeze output file (required for Python ecosystem)",
+        help="Path to pip freeze output file (fallback for Python; use --image instead)",
     )
     parser.add_argument(
         "--output-dir",
@@ -82,15 +116,19 @@ def main() -> int:
     args = parser.parse_args()
     eco = _resolve_ecosystem(args.ecosystem)
 
-    # Validate prerequisites
     prereq_err = _check_prerequisites(args.dynamo_path)
     if prereq_err:
         print(f"Error: {prereq_err}", file=sys.stderr)
         return _ExitCodes.FAILURE
 
-    # Validate --pip-freeze-file
+    # --- Python: --image (preferred) or --pip-freeze-file (fallback) ---
+    python_from_image: list[dict[str, str]] | None = None
     pip_freeze = None
-    if args.pip_freeze_file:
+    wants_python = eco is None or eco == Ecosystem.PYTHON
+
+    if args.image and wants_python:
+        python_from_image = _extract_python_from_image(args.image, args.dynamo_path)
+    elif args.pip_freeze_file:
         freeze_path = Path(args.pip_freeze_file)
         if not freeze_path.is_file():
             print(f"Error: pip freeze file not found: {freeze_path}", file=sys.stderr)
@@ -98,12 +136,14 @@ def main() -> int:
         pip_freeze = freeze_path.read_text()
     elif eco == Ecosystem.PYTHON:
         print(
-            "Error: --pip-freeze-file is required for the Python ecosystem.\n"
-            "Extract one from a container: docker run --rm IMAGE pip freeze > freeze.txt",
+            "Error: Python ecosystem requires --image or --pip-freeze-file.\n"
+            "  --image IMAGE          Extract from container (preferred)\n"
+            "  --pip-freeze-file FILE Fallback using pip freeze output",
             file=sys.stderr,
         )
         return _ExitCodes.BAD_INPUT
 
+    # --- Build transitive dep tree (Rust + Go, and Python via pip-freeze) ---
     direct_py: list[str] | None = None
     if pip_freeze:
         direct_py = _get_direct_python_packages(args.dynamo_path, args.branch)
@@ -117,7 +157,10 @@ def main() -> int:
     )
     packages = tree.all_packages()
 
-    if not packages:
+    if python_from_image:
+        packages = [p for p in packages if p.ecosystem != Ecosystem.PYTHON]
+
+    if not packages and not python_from_image:
         print("No packages found. Diagnostics:", file=sys.stderr)
         if eco in (None, Ecosystem.RUST):
             print(
@@ -129,39 +172,74 @@ def main() -> int:
                 f"  Go: could not read deploy/operator/go.mod from branch '{args.branch}'",
                 file=sys.stderr,
             )
-        if eco in (None, Ecosystem.PYTHON) and not pip_freeze:
-            print("  Python: --pip-freeze-file not provided", file=sys.stderr)
-        elif eco in (None, Ecosystem.PYTHON) and pip_freeze:
+        if eco in (None, Ecosystem.PYTHON) and not pip_freeze and not python_from_image:
             print(
-                "  Python: pip freeze file parsed but contained 0 packages",
-                file=sys.stderr,
+                "  Python: --image or --pip-freeze-file not provided", file=sys.stderr
             )
+        elif eco in (None, Ecosystem.PYTHON):
+            print("  Python: extraction returned 0 packages", file=sys.stderr)
         print(
-            f"\nVerify branch '{args.branch}' exists and --dynamo-path '{args.dynamo_path}' is correct.",
+            f"\nVerify branch '{args.branch}' exists and --dynamo-path "
+            f"'{args.dynamo_path}' is correct.",
             file=sys.stderr,
         )
         return _ExitCodes.BAD_INPUT
 
-    github_token = args.github_token or os.environ.get("GITHUB_TOKEN")
-    cache_path = Path(args.license_cache) if args.license_cache else None
-
-    print(f"Fetching licenses for {len(packages)} packages...")
-
-    def _progress(current: int, total: int, name: str) -> None:
-        if current % 25 == 0 or current == total or current == 1:
-            print(f"  [{current}/{total}] {name}")
-
-    license_results = fetch_all_licenses(
-        packages,
-        cache_path=cache_path,
-        github_token=github_token,
-        on_progress=_progress,
-    )
-
+    # --- Fetch licenses for Rust/Go (Python via --image already has licenses) ---
     eco_packages: dict[str, list[dict]] = {"cargo": [], "pypi": [], "golang": []}
-    for lic in license_results:
-        eco_packages[lic.ecosystem].append(lic.to_resolver_dict())
 
+    if packages:
+        github_token = args.github_token or os.environ.get("GITHUB_TOKEN")
+        cache_path = Path(args.license_cache) if args.license_cache else None
+
+        print(f"Fetching licenses for {len(packages)} packages...")
+
+        def _progress(current: int, total: int, name: str) -> None:
+            if current % 25 == 0 or current == total or current == 1:
+                print(f"  [{current}/{total}] {name}")
+
+        license_results = fetch_all_licenses(
+            packages,
+            cache_path=cache_path,
+            github_token=github_token,
+            on_progress=_progress,
+        )
+
+        for lic in license_results:
+            eco_packages[lic.ecosystem].append(lic.to_resolver_dict())
+
+        errors = [r for r in license_results if r.error]
+        if errors:
+            print(
+                f"\n{len(errors)} packages had license lookup errors:",
+                file=sys.stderr,
+            )
+            for e in errors[:10]:
+                print(
+                    f"  {e.ecosystem}:{e.name}:{e.version} - {e.error}",
+                    file=sys.stderr,
+                )
+            if len(errors) > 10:
+                print(f"  ... and {len(errors) - 10} more", file=sys.stderr)
+
+    # --- Add Python packages from --image (already have SPDX licenses) ---
+    if python_from_image:
+        print(
+            f"Adding {len(python_from_image)} Python packages from container image..."
+        )
+        for r in python_from_image:
+            eco_packages["pypi"].append(
+                {
+                    "name": r["package_name"],
+                    "version": r["version"],
+                    "ecosystem": "pypi",
+                    "license_expression": r["spdx_license"],
+                    "repository": "",
+                    "homepage": "",
+                }
+            )
+
+    # --- Render ---
     from .renderer import _generate_go, _generate_python, _generate_rust, _write_file
 
     output_dir = Path(args.output_dir)
@@ -188,14 +266,6 @@ def main() -> int:
 
     if not wrote_any:
         print("No attribution files generated.")
-
-    errors = [r for r in license_results if r.error]
-    if errors:
-        print(f"\n{len(errors)} packages had license lookup errors:", file=sys.stderr)
-        for e in errors[:10]:
-            print(f"  {e.ecosystem}:{e.name}:{e.version} - {e.error}", file=sys.stderr)
-        if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more", file=sys.stderr)
 
     return _ExitCodes.SUCCESS
 

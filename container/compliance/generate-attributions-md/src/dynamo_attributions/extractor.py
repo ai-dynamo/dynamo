@@ -35,7 +35,11 @@ def _git_read(dynamo_path: str, branch: str, file_path: str) -> str:
 
 
 def _get_cargo_workspace_members(dynamo_path: str, branch: str) -> list[str]:
-    """Extract workspace member crate names from Cargo.toml."""
+    """Extract workspace member crate names from Cargo.toml.
+
+    Note: only literal member paths are supported (no glob patterns like "lib/*").
+    Dynamo's Cargo.toml uses literal paths, so this is sufficient.
+    """
     content = _git_read(dynamo_path, branch, "Cargo.toml")
     if not content:
         return []

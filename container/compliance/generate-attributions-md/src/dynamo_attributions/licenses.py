@@ -106,6 +106,8 @@ class LicenseCache:
         entry = self._data.get(key)
         if entry is None:
             return None
+        if entry.get("error"):
+            return None
         valid = {
             k: v for k, v in entry.items() if k in _PKG_LICENSE_FIELDS and k != "error"
         }
