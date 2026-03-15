@@ -42,7 +42,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
-| **[Kimi-K2.5](kimi-k2.5/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | ❌ | MoE model, TP8×EP8, reasoning + tool calling | ❌ |
+| **[Kimi-K2.5](kimi-k2.5/)** 🚧 | TensorRT-LLM | Aggregated | 8x B200 | ✅ | ❌ | Experimental — MoE model, TP8×EP8, reasoning + tool calling | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available

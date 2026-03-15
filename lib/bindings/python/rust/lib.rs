@@ -77,7 +77,6 @@ type JsonServerStreamingIngress =
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
-
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
     logging::make_client_request_span(

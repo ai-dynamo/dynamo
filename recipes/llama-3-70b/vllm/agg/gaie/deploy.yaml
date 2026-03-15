@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/frontend:1.0.0
       eppConfig:
         # This config uses the same disagg-profile-handler as disaggregated deployments.
         # The handler's graceful degradation feature makes this possible:
@@ -60,7 +60,7 @@ spec:
       sharedMemory:
         size: 20Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
         args:
           - -m
           - dynamo.frontend
@@ -83,7 +83,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:

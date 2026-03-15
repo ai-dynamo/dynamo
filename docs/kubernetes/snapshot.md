@@ -291,7 +291,7 @@ checkpoint:
   identity:
     model: "meta-llama/Llama-3-8B"
     backendFramework: "vllm"
-    dynamoVersion: "0.9.0"
+    dynamoVersion: "1.0.0"
     tensorParallelSize: 1
     pipelineParallelSize: 1
     dtype: "bfloat16"
