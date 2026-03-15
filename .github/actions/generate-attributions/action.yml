@@ -32,7 +32,7 @@ runs:
 
     - name: Install dynamo-attributions
       shell: bash
-      run: pip install ./tools/attributions/
+      run: pip install ./container/compliance/generate-attributions-md/
 
     - name: Restore license cache
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
@@ -41,15 +41,12 @@ runs:
         key: license-cache-${{ hashFiles('Cargo.lock', 'deploy/operator/go.mod') }}
         restore-keys: license-cache-
 
-    - name: Extract pip freeze from container
+    - name: Pull container image
       if: inputs.image != ''
       shell: bash
       run: |
         source ./.github/scripts/retry_docker.sh
         retry_pull ${{ inputs.image }}
-        docker run --rm --entrypoint /bin/sh ${{ inputs.image }} \
-          -c "pip freeze 2>/dev/null" > /tmp/pip-freeze.txt
-        echo "Extracted $(wc -l < /tmp/pip-freeze.txt) Python packages"
 
     - name: Generate attributions
       shell: bash
@@ -58,8 +55,8 @@ runs:
         ARGS="--branch ${{ github.sha }} --ecosystem ${{ inputs.ecosystem }}"
         ARGS+=" --output-dir ./attributions-output"
         ARGS+=" --github-token ${{ github.token }}"
-        if [ -f /tmp/pip-freeze.txt ]; then
-          ARGS+=" --pip-freeze-file /tmp/pip-freeze.txt"
+        if [ -n "${{ inputs.image }}" ]; then
+          ARGS+=" --image ${{ inputs.image }}"
         fi
         dynamo-attributions ${ARGS}
 
