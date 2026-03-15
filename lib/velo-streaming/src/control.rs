@@ -245,11 +245,8 @@ pub(crate) async fn reader_pump(
                         missed_heartbeats += 1;
                         if missed_heartbeats >= 3 {
                             // Inject Dropped sentinel -- sender is dead
-                            if let Ok(dropped_bytes) = rmp_serde::to_vec(
-                                &crate::frame::StreamFrame::<()>::Dropped
-                            ) {
-                                let _ = frame_tx.try_send(dropped_bytes);
-                            }
+                            let dropped_bytes = crate::sender::cached_dropped().clone();
+                            let _ = frame_tx.try_send(dropped_bytes);
                             // LIVE-02: Full anchor cleanup -- remove from registry
                             // so no stale entry remains (ANCR-04)
                             if let Some((_, entry)) = registry.remove(&local_id) {
@@ -396,10 +393,7 @@ pub fn create_anchor_detach_handler(manager: Arc<AnchorManager>) -> velo_messeng
 
                 if let Some((cancel_token, frame_tx)) = maybe_entry_info {
                     cancel_token.cancel();
-                    let sentinel_bytes = rmp_serde::to_vec(
-                        &crate::frame::StreamFrame::<Vec<u8>>::Detached,
-                    )
-                    .expect("serialize Detached sentinel");
+                    let sentinel_bytes = crate::sender::cached_detached().clone();
                     let _ = frame_tx.try_send(sentinel_bytes);
                 }
 
@@ -428,10 +422,7 @@ pub fn create_anchor_finalize_handler(manager: Arc<AnchorManager>) -> velo_messe
 
                 // remove_anchor cancels the token and returns the entry
                 if let Some(entry) = manager.remove_anchor(local_id) {
-                    let sentinel_bytes = rmp_serde::to_vec(
-                        &crate::frame::StreamFrame::<Vec<u8>>::Finalized,
-                    )
-                    .expect("serialize Finalized sentinel");
+                    let sentinel_bytes = crate::sender::cached_finalized().clone();
                     let _ = entry.frame_tx.try_send(sentinel_bytes);
                 }
 
