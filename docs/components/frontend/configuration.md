@@ -95,7 +95,7 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--dyn-tokenizer-backend` | `DYN_TOKENIZER_BACKEND` | `default` | Tokenizer backend: `default` (HuggingFace) or `fasttokens` (fastokens crate for high-performance BPE encoding). See [Tokenizer Backends](tokenizer-backends.md) |
+| `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer backend: `default` (HuggingFace) or `fastokens` (fastokens crate for high-performance BPE encoding). See [Tokenizer Backends](tokenizer-backends.md) |
 
 ## Experimental
 

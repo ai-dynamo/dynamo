@@ -13,9 +13,9 @@ The Dynamo Frontend supports multiple tokenizer backends for BPE-based models. T
 The default backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust). 
 It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback).
 
-#### `fasttokens` High-Performance BPE Encoding
+#### `fastokens` High-Performance BPE Encoding
 
-The `fasttokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built BPE encoder optimized for throughput. 
+The `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built BPE encoder optimized for throughput.
 It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
 
 Use this backend when tokenization is a measurable bottleneck, for example on high-concurrency prefill-heavy workloads.
@@ -32,22 +32,22 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
-| `--dyn-tokenizer-backend` | `DYN_TOKENIZER_BACKEND` | `default`, `fasttokens` | `default` |
+| `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens` | `default` |
 
 **Examples:**
 
 ```bash
 # CLI flag
-python -m dynamo.frontend --dyn-tokenizer-backend fasttokens
+python -m dynamo.frontend --tokenizer fastokens
 
 # Environment variable
-export DYN_TOKENIZER_BACKEND=fasttokens
+export DYN_TOKENIZER=fastokens
 python -m dynamo.frontend
 ```
 
 ## Dynamo Frontend Behavior
 
-When `DYN_TOKENIZER_BACKEND=fasttokens` is set:
+When `DYN_TOKENIZER=fastokens` is set:
 
 1. The frontend passes the environment variable to the Rust runtime.
 2. When building the tokenizer for a model, `ModelDeploymentCard::tokenizer()` attempts to load `fastokens::Tokenizer` from the same `tokenizer.json` file.
