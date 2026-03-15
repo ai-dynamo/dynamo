@@ -67,6 +67,39 @@
 //! - Memory alignment requirements
 //! - Error handling for CUDA operations
 
+/// Whether to use write-combined pinned allocations.
+///
+/// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
+/// is set, or if a test allocation reveals the hardware does not support it
+/// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
+/// a CUDA context has been bound to the current thread.
+static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    if std::env::var("DYN_KVBM_DISABLE_WRITE_COMBINED").is_ok() {
+        tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
+        return false;
+    }
+    // Probe hardware support with a 1-byte test allocation.
+    // SAFETY: called from an allocation path that has already bound a CUDA context.
+    unsafe {
+        match cudarc::driver::result::malloc_host(
+            1,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+        ) {
+            Ok(ptr) => {
+                let _ = cudarc::driver::result::free_host(ptr);
+                true
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Write-combined memory not supported on this system; \
+                     will use regular pinned memory"
+                );
+                false
+            }
+        }
+    }
+});
+
 use super::*;
 
 use std::{
@@ -78,35 +111,31 @@ use cudarc::driver::CudaContext;
 
 use crate::block_manager::numa_allocator;
 
-/// Allocates pinned host memory, preferring write-combined if supported.
+/// Allocates pinned host memory, using write-combined if [`USE_WRITE_COMBINED`]
+/// allows it, otherwise falling back to [`malloc_host_devicemap`].
 ///
-/// Write-combined (WC) memory is optimal for PCIe DMA transfers but may not be
-/// supported on systems with cache-coherent CPU-GPU interconnects (e.g., Grace
-/// Hopper/Blackwell with NVLink-C2C). This function tries WC first and falls
-/// back to regular pinned memory if not supported.
+/// Write-combined (WC) memory is optimal for PCIe DMA transfers but degrades
+/// performance on cache-coherent CPU-GPU interconnects (e.g., Grace
+/// Hopper/Blackwell with NVLink-C2C). [`USE_WRITE_COMBINED`] is probed once and
+/// cached so this function pays no per-call detection cost.
 ///
 /// # Safety
 ///
 /// Caller must ensure a valid CUDA context is bound to the current thread.
 unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, StorageError> {
-    // First, try write-combined allocation (optimal for PCIe systems)
-    // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
-    match unsafe {
-        cudarc::driver::result::malloc_host(
-            size,
-            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-        )
-    } {
-        Ok(ptr) => Ok(ptr as *mut u8),
-        Err(_) => {
-            // Write-combined not supported (e.g., Grace Hopper/Blackwell),
-            // fall back to regular pinned memory
-            tracing::debug!("Write-combined memory not supported, using regular pinned memory");
-            // SAFETY: Same as above - caller guarantees valid CUDA context
-            unsafe { cudarc::driver::result::malloc_host(size, 0) }
-                .map(|ptr| ptr as *mut u8)
-                .map_err(StorageError::Cuda)
+    if *USE_WRITE_COMBINED {
+        // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+            )
         }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(StorageError::Cuda)
+    } else {
+        // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
+        unsafe { malloc_host_devicemap(size) }
     }
 }
 
@@ -276,8 +305,9 @@ impl PinnedStorage {
     /// Creates a [`CudaContext`] internally. When `device_id` is `Some`, tries
     /// NUMA-aware allocation on the GPU's NUMA node unless the global kill
     /// switch `DYN_MEMORY_DISABLE_NUMA` is set. Uses
-    /// `CU_MEMHOSTALLOC_DEVICEMAP` (not write-combined) for the
-    /// fallback/default path.
+    /// [`malloc_host_prefer_writecombined`] for the fallback/direct path, which
+    /// selects write-combined or regular pinned memory based on hardware support
+    /// and `DYN_KVBM_DISABLE_WRITE_COMBINED`.
     ///
     /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
     pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
@@ -311,21 +341,21 @@ impl PinnedStorage {
                                 "NUMA node unknown for GPU {}, using direct allocation",
                                 gpu_id
                             );
-                            malloc_host_devicemap(size)?
+                            malloc_host_prefer_writecombined(size)?
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "NUMA allocation failed: {}, using direct allocation",
                                 e
                             );
-                            malloc_host_devicemap(size)?
+                            malloc_host_prefer_writecombined(size)?
                         }
                     }
                 } else {
-                    malloc_host_devicemap(size)?
+                    malloc_host_prefer_writecombined(size)?
                 }
             } else {
-                malloc_host_devicemap(size)?
+                malloc_host_prefer_writecombined(size)?
             };
 
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
