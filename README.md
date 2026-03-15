@@ -240,6 +240,7 @@ See [recipes/README.md](recipes/README.md) for the full list and deployment inst
 
 - [Amazon EKS](examples/deployments/EKS/)
 - [Google GKE](examples/deployments/GKE/)
+- [Microsoft AKS](examples/deployments/AKS/AKS-deployment.md)
 
 # Building from Source
 
