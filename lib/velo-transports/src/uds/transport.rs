@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -277,12 +278,39 @@ impl Transport for UdsTransport {
                 }
             }
 
-            // Remove stale socket file if it exists
+            // Remove a stale socket file only when it is safe to do so.
             if socket_path.exists() {
-                std::fs::remove_file(&socket_path).ok();
+                let is_socket = std::fs::metadata(&socket_path)
+                    .map(|m| m.file_type().is_socket())
+                    .unwrap_or(false);
+                if !is_socket {
+                    anyhow::bail!(
+                        "path {:?} exists and is not a Unix domain socket",
+                        socket_path
+                    );
+                }
+                // Probe liveness: a successful connect means a live listener owns it.
+                match tokio::time::timeout(
+                    Duration::from_millis(100),
+                    UnixStream::connect(&socket_path),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        anyhow::bail!(
+                            "a live UDS listener is already running at {:?}",
+                            socket_path
+                        );
+                    }
+                    _ => {
+                        // Stale (connection refused / timeout) — safe to unlink.
+                        std::fs::remove_file(&socket_path).ok();
+                    }
+                }
             }
 
-            // Start UDS listener
+            // Build and bind before spawning so that start() only returns Ok
+            // after the OS-level bind succeeds.
             let uds_listener = UdsListener::builder()
                 .socket_path(socket_path.clone())
                 .adapter(channels)
@@ -290,8 +318,10 @@ impl Transport for UdsTransport {
                 .shutdown_state(shutdown_state)
                 .build()?;
 
+            let bound_listener = uds_listener.bind()?;
+
             rt.spawn(async move {
-                if let Err(e) = uds_listener.serve().await {
+                if let Err(e) = bound_listener.serve().await {
                     error!("UDS listener error: {}", e);
                 }
             });
@@ -303,7 +333,9 @@ impl Transport for UdsTransport {
     }
 
     fn begin_drain(&self) {
-        // Per-frame gate in the listener handles drain — no-op here.
+        if let Some(state) = self.shutdown_state.get() {
+            state.begin_drain();
+        }
     }
 
     fn shutdown(&self) {

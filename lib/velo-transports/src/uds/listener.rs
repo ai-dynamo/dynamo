@@ -34,68 +34,45 @@ pub struct UdsListener {
     shutdown_state: ShutdownState,
 }
 
+/// UDS listener that has been bound to a socket path, ready to accept connections.
+///
+/// Created by [`UdsListener::bind`]. Holding this value proves the OS-level bind
+/// succeeded, so callers can detect failures before spawning a task.
+pub struct BoundUdsListener {
+    socket_path: PathBuf,
+    adapter: TransportAdapter,
+    error_handler: Arc<dyn TransportErrorHandler>,
+    shutdown_state: ShutdownState,
+    listener: TokioUnixListener,
+}
+
 impl UdsListener {
     /// Create a new builder for UdsListener
     pub fn builder() -> UdsListenerBuilder {
         UdsListenerBuilder::new()
     }
 
-    /// Start the listener and serve incoming connections
-    pub async fn serve(self) -> Result<()> {
-        self.run_server().await
+    /// Bind to the socket path and return a [`BoundUdsListener`] ready to serve.
+    ///
+    /// `TokioUnixListener::bind` is synchronous, so this method is also
+    /// synchronous. Callers that need to propagate bind failures before spawning
+    /// a task should call `bind()` first, then spawn `bound.serve()`.
+    pub fn bind(self) -> Result<BoundUdsListener> {
+        let listener = TokioUnixListener::bind(&self.socket_path)
+            .with_context(|| format!("Failed to bind UDS listener to {:?}", self.socket_path))?;
+        info!("UDS listener bound to {:?}", self.socket_path);
+        Ok(BoundUdsListener {
+            socket_path: self.socket_path,
+            adapter: self.adapter,
+            error_handler: self.error_handler,
+            shutdown_state: self.shutdown_state,
+            listener,
+        })
     }
 
-    /// Main server loop that accepts connections
-    async fn run_server(self) -> Result<()> {
-        let listener = TokioUnixListener::bind(&self.socket_path).context(format!(
-            "Failed to bind UDS listener to {:?}",
-            self.socket_path
-        ))?;
-
-        info!("UDS listener bound to {:?}", self.socket_path);
-
-        let teardown_token = self.shutdown_state.teardown_token().clone();
-
-        loop {
-            tokio::select! {
-                accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((stream, _addr)) => {
-                            debug!("Accepted UDS connection");
-
-                            let adapter = self.adapter.clone();
-                            let error_handler = self.error_handler.clone();
-                            let shutdown_state = self.shutdown_state.clone();
-
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(
-                                    stream,
-                                    adapter,
-                                    error_handler,
-                                    shutdown_state,
-                                )
-                                .await
-                                {
-                                    warn!("Error handling UDS connection: {}", e);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            error!("Failed to accept UDS connection: {}", e);
-                        }
-                    }
-                }
-                _ = teardown_token.cancelled() => {
-                    info!("UDS listener shutting down (teardown)");
-                    break;
-                }
-            }
-        }
-
-        // Clean up socket file
-        std::fs::remove_file(&self.socket_path).ok();
-
-        Ok(())
+    /// Convenience shim: bind and serve in one call.
+    pub async fn serve(self) -> Result<()> {
+        self.bind()?.serve().await
     }
 
     /// Handle a single UDS connection
@@ -203,6 +180,54 @@ impl UdsListener {
                 Err(anyhow::anyhow!("Failed to send to stream"))
             }
         }
+    }
+}
+
+impl BoundUdsListener {
+    /// Accept connections until the teardown token is cancelled.
+    pub async fn serve(self) -> Result<()> {
+        let teardown_token = self.shutdown_state.teardown_token().clone();
+
+        loop {
+            tokio::select! {
+                accept_result = self.listener.accept() => {
+                    match accept_result {
+                        Ok((stream, _addr)) => {
+                            debug!("Accepted UDS connection");
+
+                            let adapter = self.adapter.clone();
+                            let error_handler = self.error_handler.clone();
+                            let shutdown_state = self.shutdown_state.clone();
+
+                            tokio::spawn(async move {
+                                if let Err(e) = UdsListener::handle_connection(
+                                    stream,
+                                    adapter,
+                                    error_handler,
+                                    shutdown_state,
+                                )
+                                .await
+                                {
+                                    warn!("Error handling UDS connection: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to accept UDS connection: {}", e);
+                        }
+                    }
+                }
+                _ = teardown_token.cancelled() => {
+                    info!("UDS listener shutting down (teardown)");
+                    break;
+                }
+            }
+        }
+
+        // Clean up socket file
+        std::fs::remove_file(&self.socket_path).ok();
+
+        Ok(())
     }
 }
 
