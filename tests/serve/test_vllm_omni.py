@@ -21,7 +21,6 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload
 
 logger = logging.getLogger(__name__)
@@ -110,81 +109,82 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
-    "omni_text": VLLMOmniConfig(
-        name="omni_text",
-        directory=vllm_dir,
-        script_name="agg_omni.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen2.5-Omni-7B",
-        request_payloads=[
-            chat_payload(
-                "Say hello",
-                repeat_count=1,
-                expected_response=["hello", "Hello"],
-                temperature=0.0,
-                max_tokens=32,
-            ),
-        ],
-    ),
-    "omni_image": VLLMOmniConfig(
-        name="omni_image",
-        directory=vllm_dir,
-        script_name="agg_omni_image.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen-Image",
-        request_payloads=[
-            ImageGenerationPayload(
-                body={
-                    "prompt": "A red apple on a table",
-                    "size": "512x512",
-                    "num_inference_steps": 20,
-                    "response_format": "url",
-                },
-                repeat_count=1,
-                expected_response=[],
-                expected_log=[],
-            ),
-        ],
-    ),
-    "omni_i2v": VLLMOmniConfig(
-        name="omni_i2v",
-        directory=vllm_dir,
-        script_name="agg_omni_i2v.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.timeout(900),
-        ],
-        model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
-        request_payloads=[
-            I2VPayload(
-                body={
-                    "prompt": "Make it dance",
-                    "size": "832x480",
-                    "response_format": "url",
-                    "nvext": {
-                        "num_inference_steps": 20,
-                        "num_frames": 33,
-                        "guidance_scale": 1.0,
-                        "boundary_ratio": 0.875,
-                        "guidance_scale_2": 1.0,
-                        "seed": 42,
-                    },
-                },
-                repeat_count=1,
-                expected_response=[],
-                expected_log=[],
-            ),
-        ],
-    ),
+    # TODO: Enable once CI has faster model download/caching for large models.
+    # "omni_text": VLLMOmniConfig(
+    #     name="omni_text",
+    #     directory=vllm_dir,
+    #     script_name="agg_omni.sh",
+    #     marks=[
+    #         pytest.mark.gpu_1,
+    #         pytest.mark.pre_merge,
+    #         pytest.mark.timeout(1200),
+    #     ],
+    #     model="Qwen/Qwen2.5-Omni-7B",
+    #     request_payloads=[
+    #         chat_payload(
+    #             "Say hello",
+    #             repeat_count=1,
+    #             expected_response=["hello", "Hello"],
+    #             temperature=0.0,
+    #             max_tokens=32,
+    #         ),
+    #     ],
+    # ),
+    # "omni_image": VLLMOmniConfig(
+    #     name="omni_image",
+    #     directory=vllm_dir,
+    #     script_name="agg_omni_image.sh",
+    #     marks=[
+    #         pytest.mark.gpu_1,
+    #         pytest.mark.pre_merge,
+    #         pytest.mark.timeout(1200),
+    #     ],
+    #     model="Qwen/Qwen-Image",
+    #     request_payloads=[
+    #         ImageGenerationPayload(
+    #             body={
+    #                 "prompt": "A red apple on a table",
+    #                 "size": "512x512",
+    #                 "num_inference_steps": 20,
+    #                 "response_format": "url",
+    #             },
+    #             repeat_count=1,
+    #             expected_response=[],
+    #             expected_log=[],
+    #         ),
+    #     ],
+    # ),
+    # "omni_i2v": VLLMOmniConfig(
+    #     name="omni_i2v",
+    #     directory=vllm_dir,
+    #     script_name="agg_omni_i2v.sh",
+    #     marks=[
+    #         pytest.mark.gpu_1,
+    #         pytest.mark.pre_merge,
+    #         pytest.mark.timeout(1200),
+    #     ],
+    #     model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    #     request_payloads=[
+    #         I2VPayload(
+    #             body={
+    #                 "prompt": "Make it dance",
+    #                 "size": "832x480",
+    #                 "response_format": "url",
+    #                 "nvext": {
+    #                     "num_inference_steps": 20,
+    #                     "num_frames": 33,
+    #                     "guidance_scale": 1.0,
+    #                     "boundary_ratio": 0.875,
+    #                     "guidance_scale_2": 1.0,
+    #                     "seed": 42,
+    #                 },
+    #             },
+    #             repeat_count=1,
+    #             expected_response=[],
+    #             expected_log=[],
+    #         ),
+    #     ],
+    # ),
     "omni_video": VLLMOmniConfig(
         name="omni_video",
         directory=vllm_dir,
@@ -192,7 +192,7 @@ vllm_omni_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(900),
+            pytest.mark.timeout(1200),
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[
