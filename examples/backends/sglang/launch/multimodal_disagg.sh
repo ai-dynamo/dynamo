@@ -76,9 +76,12 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
     DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
 
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.10}
-    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.25}
-    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.25}
+    # Lower fractions for 3-worker single-GPU: encode (vision only) needs
+    # minimal KV, prefill/decode each load full model weights so keep
+    # fractions small to avoid OOM on CI GPUs (tested on 24 GB+).
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.05}
+    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.20}
+    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.20}
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
