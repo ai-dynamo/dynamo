@@ -67,7 +67,7 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.post_merge],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -121,7 +121,7 @@ trtllm_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.trtllm,
         ],
         model="Qwen/Qwen3-0.6B",

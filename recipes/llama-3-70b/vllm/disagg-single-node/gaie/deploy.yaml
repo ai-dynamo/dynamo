@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
       eppConfig:
         config:
           plugins:
@@ -68,7 +68,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -101,7 +101,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 2
       resources:
@@ -119,7 +119,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -152,7 +152,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
