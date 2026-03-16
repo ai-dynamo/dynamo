@@ -107,10 +107,10 @@ class WorkerFactory:
             # multimodal decode worker can only be DECODE.
             if (
                 config.multimodal_decode_worker
-                and config.disaggregation_mode != DisaggregationMode.DECODE
+                and config.disaggregation_mode == DisaggregationMode.PREFILL
             ):
                 raise ValueError(
-                    "Multimodal decode worker with non-DECODE disaggregation mode is not supported."
+                    "Multimodal decode worker with PREFILL disaggregation mode is not supported."
                 )
             if (
                 config.multimodal_worker
