@@ -31,10 +31,10 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 180
-      cpu_only_test_markers: 'nightly and vllm and gpu_0'
-      single_gpu_test_markers: 'nightly and vllm and gpu_1'
+      cpu_only_test_markers: 'vllm and gpu_0'
+      single_gpu_test_markers: 'vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
-      multi_gpu_test_markers: 'nightly and vllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_markers: 'vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
@@ -54,9 +54,9 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 180
-      cpu_only_test_markers: 'nightly and sglang and gpu_0'
-      single_gpu_test_markers: 'nightly and sglang and gpu_1'
-      multi_gpu_test_markers: 'nightly and sglang and (gpu_2 or gpu_4)'
+      cpu_only_test_markers: 'sglang and gpu_0'
+      single_gpu_test_markers: 'sglang and gpu_1'
+      multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
@@ -76,9 +76,9 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 180
-      cpu_only_test_markers: 'nightly and trtllm and gpu_0'
-      single_gpu_test_markers: 'nightly and trtllm and gpu_1'
-      multi_gpu_test_markers: 'nightly and trtllm and (gpu_2 or gpu_4)'
+      cpu_only_test_markers: 'trtllm and gpu_0'
+      single_gpu_test_markers: 'trtllm and gpu_1'
+      multi_gpu_test_markers: 'trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
