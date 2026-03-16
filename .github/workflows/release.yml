@@ -84,6 +84,7 @@ jobs:
           ref: ${{ needs.prepare-release.outputs.commit_sha }}
           fetch-depth: 0
           fetch-tags: true
+          token: ${{ secrets.RC_GITHUB_PAT }}
 
       - name: Determine next RC tag
         id: rc_tag
@@ -118,11 +119,17 @@ jobs:
           fi
 
           RC_TAG="v${VERSION}-rc${NEXT_RC}"
+
+          # Normalize version for Helm SemVer: X.Y.Z.suffix → X.Y.Z-suffix
+          SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
+          HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
+
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
-          echo "helm_chart_version=${VERSION}-rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
+          echo "Helm chart version: ${HELM_CHART_VERSION}"
 
       - name: Create RC tag
         env:
@@ -216,7 +223,7 @@ jobs:
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-cuda12-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12-${ARCH}"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
               copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
             done
@@ -240,7 +247,7 @@ jobs:
             fi
 
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-cuda13-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13-${ARCH}"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
               copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
             done
@@ -257,36 +264,21 @@ jobs:
           echo "=== EFA Runtime Images ==="
 
           # vllm EFA (CUDA 12, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-efa-cuda12-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12-amd64"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # trtllm EFA (CUDA 13, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-efa-cuda13-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13-amd64"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # ---- Frontend images ----
+          # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
           echo ""
-          echo "=== Frontend Images ==="
-          FRONTEND_IMAGES=()
-          for ARCH in "${ARCHITECTURES[@]}"; do
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend-${ARCH}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"
-            if copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"; then
-              FRONTEND_IMAGES+=("${TARGET}")
-            fi
-          done
-
-          if [ ${#FRONTEND_IMAGES[@]} -eq 2 ]; then
-            create_manifest \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}" \
-              "${FRONTEND_IMAGES[0]}" "${FRONTEND_IMAGES[1]}" \
-              "dynamo-frontend:${NGC_VERSION_TAG}"
-          else
-            echo "Warning: Not all frontend architectures available, skipping multi-arch manifest"
-            FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch - missing archs)")
-          fi
+          echo "=== Frontend Image ==="
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+          copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
 
           # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
           echo ""
