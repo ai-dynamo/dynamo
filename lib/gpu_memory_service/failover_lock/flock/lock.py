@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class FlockFailoverLock(FailoverLock):
-    """flock-based failover lock for single-node leader election.
+    """flock-based failover lock.
 
     Uses POSIX flock(LOCK_EX) on a shared file as the lock primitive.
     The Linux kernel is the lock manager — no server process, no sidecar,
@@ -20,8 +20,8 @@ class FlockFailoverLock(FailoverLock):
     process dies (even via SIGKILL), because the kernel closes all file
     descriptors.
 
-    Cross-container operation: A lock held by one container is visible to any other container accessing the same file
-    on a shared emptyDir volume.
+    Cross-container operation: containers sharing an emptyDir volume
+    can contend for the same lock file.
     """
 
     def __init__(self, lock_path: str):
