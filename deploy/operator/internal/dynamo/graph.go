@@ -1198,7 +1198,15 @@ func GenerateBasePodSpec(
 	}
 
 	if isFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName, numberOfNodes, role); err != nil {
+		// Resolve coordination endpoint for multinode failover harness
+		coordinationEndpoint := ""
+		if component.Failover != nil && component.Failover.CoordinationEndpoint != "" {
+			coordinationEndpoint = component.Failover.CoordinationEndpoint
+		} else if operatorConfig.Infrastructure.ETCDAddress != "" {
+			coordinationEndpoint = operatorConfig.Infrastructure.ETCDAddress
+		}
+
+		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName, numberOfNodes, role, coordinationEndpoint); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}

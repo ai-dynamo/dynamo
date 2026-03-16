@@ -662,6 +662,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			logger.Error(err, "failed to sync failover ResourceClaimTemplate", "service", svcName)
 			return ReconcileResult{}, fmt.Errorf("failed to sync failover ResourceClaimTemplate for %s: %w", svcName, err)
 		}
+
+		// Sync harness ConfigMap for multinode+failover components
+		_, _, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+			return dynamo.GenerateFailoverHarnessConfigMap(dynamoDeployment.Name, dynamoDeployment.Namespace, svcName, svcComponent)
+		})
+		if err != nil {
+			logger.Error(err, "failed to sync failover harness ConfigMap", "service", svcName)
+			return ReconcileResult{}, fmt.Errorf("failed to sync failover harness ConfigMap for %s: %w", svcName, err)
+		}
 	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
