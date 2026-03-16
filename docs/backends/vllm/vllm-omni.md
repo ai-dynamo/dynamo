@@ -215,9 +215,17 @@ The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 | `--flow-shift <float>` | Scheduler flow_shift (5.0 for 720p, 12.0 for 480p) |
 | `--vae-use-slicing` | Enable VAE slicing for memory optimization |
 | `--vae-use-tiling` | Enable VAE tiling for memory optimization |
+| `--default-video-fps <int>` | Default frames per second for generated videos (default: 16) |
+| `--enable-layerwise-offload` | Enable layerwise offloading on DiT modules to reduce GPU memory |
+| `--layerwise-num-gpu-layers <int>` | Number of ready layers to keep on GPU during generation (default: 1) |
 | `--cache-backend <backend>` | Diffusion cache: `cache_dit` or `tea_cache` |
+| `--cache-config <json>` | Cache configuration as JSON string (overrides defaults) |
+| `--enable-cache-dit-summary` | Enable cache-dit summary logging after diffusion forward passes |
 | `--enforce-eager` | Disable torch.compile for diffusion models |
 | `--enable-cpu-offload` | Enable CPU offloading for diffusion models |
+| `--ulysses-degree <int>` | GPUs for Ulysses sequence parallelism in diffusion (default: 1) |
+| `--ring-degree <int>` | GPUs for ring sequence parallelism in diffusion (default: 1) |
+| `--cfg-parallel-size <int>` | GPUs for classifier-free guidance parallelism (1 or 2, default: 1) |
 | `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
 | `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
 

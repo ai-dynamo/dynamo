@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 class OmniArgGroup(ArgGroup):
-    """Diffusion pipeline kwargs passed through to AsyncOmni() constructor."""
+    """Diffusion pipeline kwargs passed through to AsyncOmni() constructor.
+
+    These are NOT part of AsyncOmniEngineArgs (which handles vLLM engine-level
+    args like model, tp, max_model_len). Instead they are direct constructor
+    kwargs for AsyncOmni and need Dynamo-side env-var (DYN_OMNI_*) support,
+    so we define them here rather than relying on the upstream arg parser.
+    """
 
     name = "dynamo-omni"
 
