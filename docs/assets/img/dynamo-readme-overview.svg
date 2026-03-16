@@ -1,0 +1,228 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 70 560 525" width="1680" height="1575">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#EFF2F6"/>
+    </linearGradient>
+    <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8BD420"/>
+      <stop offset="100%" stop-color="#6AAF00"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-8%" y="-10%" width="116%" height="128%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="rgba(15,23,42,0.10)"/>
+    </filter>
+    <filter id="green-glow" x="-12%" y="-14%" width="124%" height="136%">
+      <feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(118,185,0,0.35)"/>
+    </filter>
+    <filter id="blue-glow" x="-4%" y="-4%" width="108%" height="114%">
+      <feDropShadow dx="0" dy="2" stdDeviation="10" flood-color="rgba(59,130,246,0.15)"/>
+    </filter>
+    <linearGradient id="accent-fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#76B900" stop-opacity="0"/>
+      <stop offset="12%" stop-color="#76B900" stop-opacity="0.65"/>
+      <stop offset="88%" stop-color="#76B900" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#76B900" stop-opacity="0"/>
+    </linearGradient>
+
+    <pattern id="grid-dots" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="20" cy="20" r="0.5" fill="rgba(148,163,184,0.2)"/>
+    </pattern>
+
+    <marker id="arrow" viewBox="0 0 6 6" refX="5" refY="3"
+            markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0,0.5 L6,3 L0,5.5 Z" fill="#CBD5E1"/>
+    </marker>
+    <marker id="arrow-dark" viewBox="0 0 6 6" refX="5" refY="3"
+            markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0,0.5 L6,3 L0,5.5 Z" fill="#64748B"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 6 6" refX="5" refY="3"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L6,3 L0,5.5 Z" fill="#D97706"/>
+    </marker>
+    <marker id="arrow-green-rev" viewBox="0 0 6 6" refX="1" refY="3"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M6,0.5 L0,3 L6,5.5 Z" fill="#D97706"/>
+    </marker>
+
+    <symbol id="sym-monitor" viewBox="0 0 14 14">
+      <rect x="2" y="1" width="10" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <line x1="7" y1="9" x2="7" y2="12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="4" y1="12" x2="10" y2="12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="sym-fork" viewBox="0 0 14 14">
+      <path d="M2,7 L7,7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <path d="M7,7 L12,3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <path d="M7,7 L12,11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="12" cy="3" r="1.2" fill="currentColor"/>
+      <circle cx="12" cy="11" r="1.2" fill="currentColor"/>
+    </symbol>
+    <symbol id="sym-gauge" viewBox="0 0 14 14">
+      <path d="M2,10 A5.5,5.5 0 1,1 12,10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="7" y1="9" x2="9.5" y2="4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="7" cy="9" r="1" fill="currentColor"/>
+    </symbol>
+    <symbol id="sym-layers" viewBox="0 0 14 14">
+      <path d="M1,8 L7,11 L13,8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M1,5.5 L7,8.5 L13,5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M1,3 L7,6 L13,3 L7,0 Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="sym-stream" viewBox="0 0 14 14">
+      <line x1="2" y1="3" x2="8" y2="3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="2" y1="7" x2="10" y2="7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="2" y1="11" x2="6" y2="11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="12" y1="0" x2="12" y2="14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+    </symbol>
+    <symbol id="sym-blocks" viewBox="0 0 14 14">
+      <rect x="0.5" y="0.5" width="5.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <rect x="7" y="0.5" width="5.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <rect x="0.5" y="7" width="5.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <rect x="8" y="8" width="5.5" height="5.5" rx="1" fill="currentColor" opacity="0.25" stroke="currentColor" stroke-width="1.3"/>
+    </symbol>
+    <symbol id="sym-gate" viewBox="0 0 14 14">
+      <rect x="2" y="1" width="4" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <rect x="8" y="1" width="4" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+    <symbol id="sym-transfer" viewBox="0 0 14 12">
+      <line x1="0" y1="6" x2="14" y2="6" stroke="currentColor" stroke-width="0.8" stroke-dasharray="2 2"/>
+      <path d="M3,2 L7,6 L3,10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M11,2 L7,6 L11,10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <clipPath id="clip-prefill"><rect x="50" y="256" width="160" height="88" rx="10"/></clipPath>
+    <clipPath id="clip-decode"><rect x="330" y="256" width="160" height="88" rx="10"/></clipPath>
+  </defs>
+
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; }
+    .subtitle { font-size: 12px; font-weight: 400; fill: #94A3B8; letter-spacing: 0.3px; }
+    .box-label { font-size: 13.5px; font-weight: 600; fill: #1E293B; text-anchor: start; }
+    .box-label-center { font-size: 14px; font-weight: 600; fill: #1E293B; text-anchor: middle; }
+    .box-label-white { font-size: 14px; font-weight: 700; fill: #FFFFFF; text-anchor: middle; }
+    .box-sub { font-size: 10px; font-weight: 400; fill: #64748B; text-anchor: start; }
+    .box-sub-center { font-size: 10px; font-weight: 400; fill: #64748B; text-anchor: middle; }
+    .box-sub-white { font-size: 10px; font-weight: 400; fill: rgba(255,255,255,0.75); text-anchor: middle; }
+    .conn-label { font-size: 10px; font-weight: 600; text-anchor: middle; }
+    .pill-blue { fill: rgba(59,130,246,0.12); stroke: rgba(59,130,246,0.15); stroke-width: 0.5; }
+    .pill-green { fill: rgba(217,119,6,0.12); stroke: rgba(217,119,6,0.15); stroke-width: 0.5; }
+    .pill-slate { fill: rgba(100,116,139,0.08); stroke: rgba(100,116,139,0.12); stroke-width: 0.5; }
+    .label-blue { fill: #3B82F6; }
+    .label-green { fill: #B45309; }
+    .label-slate { fill: #64748B; }
+    .zone-label { font-size: 9.5px; font-weight: 600; fill: #94A3B8; letter-spacing: 1.2px; text-anchor: middle; }
+    .connector { fill: none; stroke: #CBD5E1; stroke-width: 1.8; }
+    .connector-kv { fill: none; stroke: #D97706; stroke-width: 2.4; }
+    .connector-dashed { fill: none; stroke: #CBD5E1; stroke-width: 1.8; stroke-dasharray: 6 4; }
+  </style>
+
+  <!-- ================================================ -->
+  <!-- ROW 1                                            -->
+  <!-- ================================================ -->
+
+  <!-- Router (green, wider, centered above workers) -->
+  <rect x="130" y="84" width="280" height="88" rx="10"
+        fill="url(#green-fill)" filter="url(#green-glow)"/>
+  <use href="#sym-fork" x="136" y="88" width="20" height="20" style="color:rgba(255,255,255,0.8)"/>
+  <text x="270" y="125" class="box-label-white">Router</text>
+  <text x="270" y="138" class="box-sub-white">KV-Aware Routing</text>
+
+  <!-- ================================================ -->
+  <!-- ROW 2                                            -->
+  <!-- ================================================ -->
+
+  <!-- Worker group container -->
+  <rect x="30" y="232" width="480" height="120" rx="14"
+        fill="rgba(219,234,254,0.25)" stroke="rgba(147,197,253,0.5)" stroke-width="1.2"
+        stroke-dasharray="6 3" filter="url(#blue-glow)"/>
+
+  <!-- Prefill Worker -->
+  <rect x="48" y="256" width="160" height="88" rx="10" fill="#76B900" opacity="0.7"/>
+  <rect x="50" y="256" width="160" height="88" rx="10"
+        fill="white" stroke="rgba(226,232,240,0.6)" stroke-width="1" filter="url(#shadow)"/>
+  <use href="#sym-layers" x="54" y="258" width="20" height="20" style="color:#76B900;opacity:0.8"/>
+  <text x="60" y="296" class="box-label">Prefill</text>
+  <text x="60" y="309" class="box-sub">Worker</text>
+
+  <!-- Decode Worker -->
+  <rect x="328" y="256" width="160" height="88" rx="10" fill="#76B900" opacity="0.7"/>
+  <rect x="330" y="256" width="160" height="88" rx="10"
+        fill="white" stroke="rgba(226,232,240,0.6)" stroke-width="1" filter="url(#shadow)"/>
+  <use href="#sym-stream" x="334" y="258" width="20" height="20" style="color:#76B900;opacity:0.8"/>
+  <text x="340" y="296" class="box-label">Decode</text>
+  <text x="340" y="309" class="box-sub">Worker</text>
+
+  <!-- KV Cache lines (drawn before NIXL so NIXL renders on top) -->
+  <line x1="130" y1="348" x2="130" y2="496" class="connector" marker-end="url(#arrow)"/>
+  <line x1="410" y1="348" x2="410" y2="496" class="connector" marker-end="url(#arrow)"/>
+
+  <!-- ================================================ -->
+  <!-- ROW 3: NIXL                                      -->
+  <!-- ================================================ -->
+
+  <g>
+    <rect x="30" y="420" width="480" height="48" rx="10"
+          fill="url(#green-fill)" filter="url(#green-glow)" opacity="0.75"/>
+  </g>
+  <use href="#sym-transfer" x="36" y="422" width="20" height="18" style="color:white"/>
+  <text x="270" y="440" class="box-label-white">NIXL</text>
+  <text x="270" y="453" class="box-sub-white">Accelerated KV Transfer</text>
+
+  <!-- ================================================ -->
+  <!-- ROW 4: Memory Hierarchy container                -->
+  <!-- ================================================ -->
+
+  <rect x="20" y="500" width="500" height="80" rx="14"
+        fill="rgba(219,234,254,0.2)" stroke="rgba(147,197,253,0.4)" stroke-width="1"
+        stroke-dasharray="6 3"/>
+
+  <rect x="40" y="520" width="100" height="44" rx="10"
+        fill="white" stroke="rgba(226,232,240,0.6)" stroke-width="1" filter="url(#shadow)"/>
+  <text x="90" y="547" class="box-label-center" style="font-size:12px;">Block</text>
+
+  <rect x="160" y="520" width="100" height="44" rx="10"
+        fill="white" stroke="rgba(226,232,240,0.6)" stroke-width="1" filter="url(#shadow)"/>
+  <text x="210" y="547" class="box-label-center" style="font-size:12px;">Local File</text>
+
+  <rect x="280" y="520" width="100" height="44" rx="10"
+        fill="white" stroke="rgba(226,232,240,0.6)" stroke-width="1" filter="url(#shadow)"/>
+  <text x="330" y="540" class="box-label-center" style="font-size:12px;">Remote File</text>
+  <text x="330" y="555" class="box-label-center" style="font-size:12px;">/ Object</text>
+
+  <rect x="400" y="520" width="100" height="44" rx="10"
+        fill="white" stroke="rgba(226,232,240,0.6)" stroke-width="1" filter="url(#shadow)"/>
+  <text x="450" y="547" class="box-label-center" style="font-size:12px;">Cloud</text>
+
+  <!-- ================================================ -->
+  <!-- ZONE ANNOTATIONS                                 -->
+  <!-- ================================================ -->
+
+  <text x="270" y="245" class="zone-label" style="fill:rgba(59,130,246,0.45);">DISAGGREGATED SERVING</text>
+  <text x="270" y="513" class="zone-label" style="fill:rgba(59,130,246,0.45);">MEMORY HIERARCHY</text>
+
+  <!-- ================================================ -->
+  <!-- CONNECTORS                                       -->
+  <!-- ================================================ -->
+
+  <!-- Tokens: arrow stops 4px outside Prefill (y=252) -->
+  <path d="M230,176 L230,210 L130,210 L130,252" class="connector" marker-end="url(#arrow)"/>
+  <rect x="154" y="188" width="48" height="16" rx="8" class="pill-blue"/>
+  <text x="178" y="199" class="conn-label label-blue">Tokens</text>
+
+  <!-- Route: arrow stops 4px outside Decode (y=252) -->
+  <path d="M310,176 L310,210 L410,210 L410,252" class="connector" marker-end="url(#arrow)"/>
+  <rect x="338" y="188" width="42" height="16" rx="8" class="pill-blue"/>
+  <text x="359" y="199" class="conn-label label-blue">Route</text>
+
+  <!-- KV Transfer: bidirectional between Prefill and Decode -->
+  <line x1="214" y1="300" x2="326" y2="300" class="connector-kv" marker-start="url(#arrow-green-rev)" marker-end="url(#arrow-green)"/>
+  <rect x="236" y="278" width="68" height="16" rx="8" class="pill-green"/>
+  <text x="270" y="289" class="conn-label label-green">KV Transfer</text>
+
+  <!-- KV Cache pills (lines drawn earlier, before NIXL) -->
+  <rect x="136" y="384" width="60" height="16" rx="8" class="pill-green"/>
+  <text x="166" y="395" class="conn-label label-green">KV Cache</text>
+  <rect x="344" y="384" width="60" height="16" rx="8" class="pill-green"/>
+  <text x="374" y="395" class="conn-label label-green">KV Cache</text>
+
+</svg>
