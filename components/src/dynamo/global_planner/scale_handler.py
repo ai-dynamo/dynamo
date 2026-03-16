@@ -195,7 +195,6 @@ class ScaleRequestHandler:
                 "scaling decisions may use outdated data.",
                 exc_info=True,
             )
-            raise
 
     def is_dgd_watch_healthy(self) -> bool:
         """Return True if the DGD watch thread is running. List+watch is always started."""
