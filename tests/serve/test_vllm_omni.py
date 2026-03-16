@@ -4,6 +4,7 @@
 import dataclasses
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -84,6 +85,24 @@ class VideoGenerationPayload(BasePayload):
 
 
 @dataclass
+class I2VPayload(VideoGenerationPayload):
+    """Payload for image-to-video via /v1/videos with input_reference."""
+
+    _image_path: str = ""
+
+    def __post_init__(self):
+        # Create a minimal test image for the input_reference
+        if not self._image_path:
+            from PIL import Image
+
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            Image.new("RGB", (64, 64), color="red").save(path)
+            self._image_path = path
+            self.body["input_reference"] = path
+
+
+@dataclass
 class VLLMOmniConfig(EngineConfig):
     """Configuration for vLLM-Omni test scenarios."""
 
@@ -128,6 +147,37 @@ vllm_omni_configs = {
                     "size": "512x512",
                     "num_inference_steps": 20,
                     "response_format": "url",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "omni_i2v": VLLMOmniConfig(
+        name="omni_i2v",
+        directory=vllm_dir,
+        script_name="agg_omni_i2v.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(900),
+        ],
+        model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        request_payloads=[
+            I2VPayload(
+                body={
+                    "prompt": "Make it dance",
+                    "size": "832x480",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 20,
+                        "num_frames": 33,
+                        "guidance_scale": 1.0,
+                        "boundary_ratio": 0.875,
+                        "guidance_scale_2": 1.0,
+                        "seed": 42,
+                    },
                 },
                 repeat_count=1,
                 expected_response=[],
