@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-coder-480b-agg-kvbm
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                    - qwen3-coder-480b-agg-kvbm-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-mode
+            - kv
+            - --http-port
+            - "8000"
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 256Gi
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /mnt/model-cache
+      extraPodSpec:
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          env:
+            - name: HF_HOME
+              value: /mnt/model-cache
+            # Adjust CPU cache size as needed; start small for faster startup
+            - name: DYN_KVBM_CPU_CACHE_GB
+              value: "880"
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4
+            - --served-model-name
+            - nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4
+            - --tensor-parallel-size
+            - "4"
+            - --max-model-len
+            - "131072"
+            - --gpu-memory-utilization
+            - "0.8"
+            - --max-num-seqs
+            - "128"
+            - --enable-chunked-prefill
+            - --trust-remote-code
+            - --kv-transfer-config
+            - '{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_connector_module_path":"kvbm.vllm_integration.connector"}'
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

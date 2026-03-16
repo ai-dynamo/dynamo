@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test pod for KV cache testing against the aggregated deployment.
+# Runs inside the cluster so measurements are not skewed by port-forward latency.
+#
+# Deploy:
+#   kubectl apply -f 07-pod-test.yaml -n <namespace>
+#
+# Run tests:
+#   kubectl exec kv-cache-tester -n <namespace> -- bash -c \
+#     "cd /workspace/kv-cache-tester; python single_prompt_tester.py \
+#      --api-endpoint http://qwen3-coder-480b-agg-frontend:8000 \
+#      --context-sizes 1000 16000 32000 64000 128000 \
+#      --num-iterations 2 --cached-repeats 1 2>&1"
+#
+# Cleanup:
+#   kubectl delete pod kv-cache-tester -n <namespace>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kv-cache-tester
+spec:
+  restartPolicy: Never
+  containers:
+    - name: tester
+      image: python:3.11-slim
+      resources:
+        requests:
+          cpu: "1"
+          memory: 4Gi
+        limits:
+          cpu: "2"
+          memory: 8Gi
+      command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          apt-get update -qq && apt-get install -y -qq git
+          pip install --quiet requests
+          git clone https://github.com/callanjfox/kv-cache-tester /workspace/kv-cache-tester
+          pip install --quiet -r /workspace/kv-cache-tester/requirements.txt
+          echo "Setup complete. Pod is ready."
+          sleep infinity
