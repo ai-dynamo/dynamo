@@ -50,7 +50,7 @@ jobs:
           fi
 
           if [[ "$BRANCH_NAME" == "pvijayakrish/use-pat-for-rc-tagging" ]]; then
-            VERSION="0.0.0test1"
+            VERSION="0.0.0.test1"
             echo "Devel branch detected — using test version: ${VERSION}"
           elif [[ "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             VERSION="${BRANCH_NAME#release/}"
@@ -123,11 +123,17 @@ jobs:
           fi
 
           RC_TAG="v${VERSION}-rc${NEXT_RC}"
+
+          # Normalize version for Helm SemVer: X.Y.Z.suffix → X.Y.Z-suffix
+          SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
+          HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
+
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
-          echo "helm_chart_version=${VERSION}-rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
+          echo "Helm chart version: ${HELM_CHART_VERSION}"
 
       - name: Create RC tag
         env:
