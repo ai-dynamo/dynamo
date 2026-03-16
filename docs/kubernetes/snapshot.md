@@ -32,8 +32,8 @@ This guide assumes a normal Dynamo deployment workflow is already present on you
 Snapshot-enabled workers must use a placeholder image that wraps the normal runtime image with the restore tooling. If you do not already have one, build it with the snapshot placeholder target and push it to a registry your cluster can pull from:
 
 ```bash
-export RUNTIME_IMAGE=registry.example.com/dynamo/vllm-runtime:1.0.0
-export PLACEHOLDER_IMAGE=registry.example.com/dynamo/vllm-placeholder:1.0.0
+export RUNTIME_IMAGE=registry.example.com/dynamo/vllm-runtime:1.0.1
+export PLACEHOLDER_IMAGE=registry.example.com/dynamo/vllm-placeholder:1.0.1
 
 cd deploy/snapshot
 
@@ -45,7 +45,7 @@ make docker-push-placeholder \
   PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
 ```
 
-This flow is defined in [deploy/snapshot/Makefile](../../deploy/snapshot/Makefile) and [deploy/snapshot/Dockerfile](../../deploy/snapshot/Dockerfile). The placeholder image preserves the base runtime entrypoint and command contract, and adds the CRIU, `cuda-checkpoint`, and `nsrestore` tooling needed for restore.
+This flow is defined in [deploy/snapshot/Makefile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/Makefile) and [deploy/snapshot/Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/Dockerfile). The placeholder image preserves the base runtime entrypoint and command contract, and adds the CRIU, `cuda-checkpoint`, and `nsrestore` tooling needed for restore.
 
 ### 2. Enable checkpointing in the platform and verify it
 
@@ -75,7 +75,7 @@ kubectl get configmap "${OPERATOR_CONFIG}" -n "${PLATFORM_NAMESPACE}" \
 
 Verify that the rendered config includes `enabled: true` and the same PVC name and base path you plan to use for the snapshot chart.
 
-For the full platform/operator configuration surface, see [deploy/helm/charts/platform/README.md](../../deploy/helm/charts/platform/README.md) and [deploy/helm/charts/platform/components/operator/values.yaml](../../deploy/helm/charts/platform/components/operator/values.yaml).
+For the full platform/operator configuration surface, see [deploy/helm/charts/platform/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md) and [deploy/helm/charts/platform/components/operator/values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/components/operator/values.yaml).
 
 ### 3. Install the snapshot chart
 
@@ -97,11 +97,11 @@ kubectl get pvc snapshot-pvc -n ${NAMESPACE}
 kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
 ```
 
-For the full snapshot chart configuration surface, see [deploy/helm/charts/snapshot/README.md](../../deploy/helm/charts/snapshot/README.md) and [deploy/helm/charts/snapshot/values.yaml](../../deploy/helm/charts/snapshot/values.yaml).
+For the full snapshot chart configuration surface, see [deploy/helm/charts/snapshot/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/README.md) and [deploy/helm/charts/snapshot/values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/values.yaml).
 
 ### 4. Apply a snapshot-compatible `DynamoGraphDeployment`
 
-This example is adapted from [examples/backends/vllm/deploy/agg.yaml](../../examples/backends/vllm/deploy/agg.yaml). The worker must use the placeholder image from step 1, and the checkpoint identity must describe the runtime state you want to reuse.
+This example is adapted from [examples/backends/vllm/deploy/agg.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml). The worker must use the placeholder image from step 1, and the checkpoint identity must describe the runtime state you want to reuse.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -115,7 +115,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: registry.example.com/dynamo/vllm-runtime:1.0.0
+          image: registry.example.com/dynamo/vllm-runtime:1.0.1
 
     VllmDecodeWorker:
       componentType: worker
@@ -138,7 +138,7 @@ spec:
           backendFramework: vllm
       extraPodSpec:
         mainContainer:
-          image: registry.example.com/dynamo/vllm-placeholder:1.0.0
+          image: registry.example.com/dynamo/vllm-placeholder:1.0.1
           command:
             - python3
             - -m
@@ -270,7 +270,7 @@ Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) 
 |-------|----------|-------------|---------|
 | `model` | ✓ | ✓ | `meta-llama/Llama-3-8B` |
 | `backendFramework` | ✓ | ✓ | `sglang`, `vllm` |
-| `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0` |
+| `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0`, `1.0.1` |
 | `tensorParallelSize` | | ✓ | `1`, `2`, `4`, `8` (default: 1) |
 | `pipelineParallelSize` | | ✓ | `1`, `2` (default: 1) |
 | `dtype` | | ✓ | `float16`, `bfloat16`, `fp8` |
@@ -291,7 +291,7 @@ checkpoint:
   identity:
     model: "meta-llama/Llama-3-8B"
     backendFramework: "vllm"
-    dynamoVersion: "0.9.0"
+    dynamoVersion: "1.0.1"
     tensorParallelSize: 1
     pipelineParallelSize: 1
     dtype: "bfloat16"
@@ -337,7 +337,7 @@ spec:
         restartPolicy: Never
         containers:
           - name: main
-            image: registry.example.com/dynamo/vllm-placeholder:1.0.0
+            image: registry.example.com/dynamo/vllm-placeholder:1.0.1
             command:
               - python3
               - -m
@@ -490,6 +490,6 @@ Or use `mode: Auto` with the same identity and snapshot-hash label, and the oper
 
 ## Related Documentation
 
-- [Dynamo Snapshot Helm Chart README](../../deploy/helm/charts/snapshot/README.md) - Chart configuration
+- [Dynamo Snapshot Helm Chart README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/README.md) - Chart configuration
 - [Installation Guide](installation-guide.md) - Platform installation
 - [API Reference](api-reference.md) - Complete CRD specifications

@@ -79,7 +79,7 @@ A **cluster-wide operator** manages most namespaces, while **one or more namespa
 **Setup Example:**
 
 ```bash
-# 1. Install cluster-wide operator (production, v1.0.0)
+# 1. Install cluster-wide operator (production, v1.0.1)
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace dynamo-system \
   --create-namespace

@@ -10,6 +10,57 @@ subtitle: Enable KV-aware routing using Router for Dynamo deployments
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 This guide helps you get started with using the Dynamo router, with further details on configuration, disaggregated serving setup, and parameter tuning.
 
+## Deployment Modes
+
+The Dynamo router can be deployed in several configurations. The table below shows every combination and when to use it:
+
+| Mode | Command | Routing Logic | KV Events | Topology | Use Case |
+|------|---------|---------------|-----------|----------|----------|
+| **Frontend + Round-Robin** | `python -m dynamo.frontend --router-mode round-robin` | Cycles through workers | None | Aggregated | Simplest baseline; no KV awareness |
+| **Frontend + Random** | `python -m dynamo.frontend --router-mode random` | Random worker selection | None | Aggregated | Stateless load balancing |
+| **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
+| **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
+| **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
+| **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
+
+### Routing Modes (`--router-mode`)
+
+| Mode | Value | How Workers Are Selected |
+|------|-------|-------------------------|
+| **Round-Robin** | `round-robin` (default) | Cycles through available workers in order |
+| **Random** | `random` | Selects a random worker for each request |
+| **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
+| **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
+
+### KV Event Transport Modes (within `--router-mode kv`)
+
+When using KV routing, the router needs to know what each worker has cached. There are four ways to get this information:
+
+| Event Mode | How to Enable | Description |
+|------------|---------------|-------------|
+| **NATS Core (local indexer)** | Default (no extra flags) | Workers maintain a local indexer; router queries workers on startup and receives events via NATS Core |
+| **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
+| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; standalone indexer aggregates events |
+| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
+
+### Aggregated vs. Disaggregated Topology
+
+| Topology | Workers | How It Works |
+|----------|---------|--------------|
+| **Aggregated** | Single pool (prefill + decode in one process) | All workers handle the full request lifecycle |
+| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `ModelType.Prefill` |
+
+Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](#disaggregated-serving) for details.
+
+### Frontend-Embedded vs. Standalone Router
+
+| Deployment | Process | Metrics Port | Use Case |
+|------------|---------|--------------|----------|
+| **Frontend-embedded** | `python -m dynamo.frontend --router-mode kv` | Frontend HTTP port (default 8000) | Standard deployment; router runs inside the frontend process |
+| **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, SGLang disagg prefill routing, custom pipelines |
+
+The standalone router does not include the HTTP frontend (no `/v1/chat/completions` endpoint). It exposes only the `RouterRequestMetrics` via the system status server. See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
+
 ## Quick Start
 
 ### Python / CLI Deployment
@@ -84,7 +135,7 @@ For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guid
 
 ### Standalone Router
 
-You can also run the KV router as a standalone service (without the Dynamo frontend) for disaggregated serving (e.g., routing to prefill workers), multi-tier architectures, or any scenario requiring intelligent KV cache-aware routing decisions. See the [Standalone Router component](../../../components/src/dynamo/router/) for more details.
+You can also run the KV router as a standalone service (without the Dynamo frontend) for disaggregated serving (e.g., routing to prefill workers), multi-tier architectures, or any scenario requiring intelligent KV cache-aware routing decisions. See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
 
 ## KV Cache Routing
 
@@ -267,7 +318,49 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
 
-## Prometheus Metrics
+- `--router-reset-states`: Only applies in JetStream mode (`--router-durable-kv-events`). When specified, resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting with a fresh state. **Warning**: Using `--router-reset-states` can bring existing router replicas into an inconsistent state. Only use this flag when launching the first router replica in a component, or consider using a different namespace/component for a clean slate.
+
+- `--router-snapshot-threshold`: Only applies in JetStream mode (`--router-durable-kv-events`). Sets the number of messages in the JetStream before triggering a snapshot. When the message count exceeds this threshold, a router will attempt to purge acknowledged messages from the stream and create a snapshot of the current radix tree state in NATS object store. Defaults to 1000000. This helps manage stream size and provides faster initialization for routers that restart.
+
+### Block Tracking
+
+- `--no-router-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
+
+- `--router-track-output-blocks`: **(Experimental)** Enables tracking of output blocks during generation (default: disabled). When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in nvext). This improves load balancing accuracy for long-running generation requests by accounting for output-side KV cache growth.
+
+- `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
+
+- `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
+
+### KV Indexer / Approx KV Indexer
+
+- `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Blocks older than this duration will be automatically expired and removed from the router's radix tree. Defaults to 120.0 seconds when `--no-router-kv-events` is used. This helps manage memory usage by removing stale cache predictions that are unlikely to be accurate.
+
+- `--router-max-tree-size`: Maximum tree size (number of blocks) before pruning is triggered. When the total number of blocks in the radix tree exceeds this threshold, the router will prune the least recently used blocks. Defaults to 1048576 (2^20 blocks) when `--no-router-kv-events` is used. This prevents unbounded memory growth in long-running deployments.
+
+- `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. For example, with a value of 0.8 (default) and max tree size of 1048576, the router will prune down to approximately 838860 blocks when the threshold is exceeded. Defaults to 0.8 when `--no-router-kv-events` is used. This creates headroom before the next pruning cycle.
+
+- `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). When set to 1, the router uses a single-threaded radix tree with channel-based event processing. When set to a value greater than 1 (the default), the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. This setting only applies when KV events are enabled (the default). When `--no-router-kv-events` is set (approximate mode), the router always uses a single-threaded indexer with TTL-based expiration and pruning regardless of this setting. This can be set via the `DYN_ROUTER_EVENT_THREADS` environment variable. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md).
+
+To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
+
+For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints) documentation.
+
+### Tuning Guidelines
+
+The `--router-kv-overlap-score-weight` parameter is the primary knob for balancing prefill efficiency against decode load. Prefill-heavy workloads (long prompts, short generations) benefit from a higher weight, which steers requests toward workers with better cache overlap and reduces TTFT. Decode-heavy workloads (short prompts, long generations) benefit from a lower weight, which distributes decode load more evenly and reduces ITL. The default of 1.0 is a reasonable starting point; monitor TTFT and ITL metrics and adjust from there. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`, which is useful when different request types in the same deployment have different latency profiles.
+
+Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly — for example, with hybrid models or custom engines that haven't been validated for event accuracy. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration and pruning, rather than relying on real-time block creation/deletion events from workers.
+
+Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. By default the router assumes KV blocks transferred from prefill to decode will be deduplicated on the decode side, but vLLM and SGLang decode workers currently do not support this — only TensorRT-LLM does. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
+
+Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
+
+The `--router-queue-threshold` (default: 2.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. Set to None to disable queueing entirely.
+
+Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize **average** TTFT. WSPT (Smith's rule) schedules short or high-priority requests first, reducing mean latency across the batch. Use the default `fcfs` when you want to minimize **tail** TTFT — no request waits longer than necessary, since ordering is purely by (adjusted) arrival time.
+
+### Prometheus Metrics
 
 The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`:
 
@@ -323,7 +416,7 @@ await register_model(
 await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
-<Note>The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](../../../components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).</Note>
+<Note>The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).</Note>
 
 ### Request Flow
 
@@ -356,7 +449,7 @@ graph TD
 
 ## Serving Multiple Router Replicas
 
-For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](../../../components/src/dynamo/router/README.md).
+For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
 
 ### Router State Management
 
@@ -449,7 +542,8 @@ curl http://localhost:8000/busy_threshold
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
-- **[KV Router Index Data Structures](../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
+- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
+- **[KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)**: How Dynamo's local indexer compares to vLLM's replay buffer for gap detection and recovery
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
 - **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
