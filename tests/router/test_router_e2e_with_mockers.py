@@ -40,7 +40,11 @@ from tests.router.helper import (
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -226,14 +230,12 @@ class MockerProcess:
         # Alias for consistency with vLLM/SGLang workers
         self.data_parallel_size = self.dp_size
 
-        # Allocate ZMQ base ports for KV event publishing.
-        # Each worker's DP ranks bind on base_port + dp_rank, so we need bases
-        # spaced dp_size apart. Allocate num_mockers * dp_size ports total,
-        # then pick every dp_size'th port as a base.
+        # Allocate contiguous ZMQ port blocks for KV event publishing because
+        # the mocker binds base_port + dp_rank for each DP rank.
         if zmq_kv_events:
             dp_size = mocker_args.get("dp_size", 1)
-            self._zmq_kv_events_ports = allocate_ports(
-                num_mockers * dp_size, BASE_PORT_ZMQ
+            self._zmq_kv_events_ports = allocate_contiguous_ports(
+                num_mockers, dp_size, BASE_PORT_ZMQ
             )
             bases = [self._zmq_kv_events_ports[i * dp_size] for i in range(num_mockers)]
             if not standalone_indexer:
@@ -243,11 +245,11 @@ class MockerProcess:
                 f"(bases: {bases}) for {num_mockers} workers"
             )
 
-        # Allocate ZMQ replay ports (same layout as event ports)
+        # Allocate contiguous ZMQ replay port blocks with the same layout.
         if zmq_replay and zmq_kv_events:
             dp_size = mocker_args.get("dp_size", 1)
-            self._zmq_replay_ports = allocate_ports(
-                num_mockers * dp_size, BASE_PORT_ZMQ + 1000
+            self._zmq_replay_ports = allocate_contiguous_ports(
+                num_mockers, dp_size, BASE_PORT_ZMQ + 1000
             )
             replay_bases = [
                 self._zmq_replay_ports[i * dp_size] for i in range(num_mockers)
