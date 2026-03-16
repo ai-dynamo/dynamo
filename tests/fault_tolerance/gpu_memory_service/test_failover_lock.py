@@ -17,6 +17,8 @@ import pytest
 import pytest_asyncio  # noqa: F401 — ensures the plugin is available
 from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
 
 @pytest.fixture
 def lock_path(tmp_path):
