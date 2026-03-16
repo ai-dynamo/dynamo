@@ -131,9 +131,10 @@ async def worker() -> None:
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
-        config.namespace, config.discovery_backend = (
-            snapshot_controller.reload_restore_identity()
-        )
+        (
+            config.namespace,
+            config.discovery_backend,
+        ) = snapshot_controller.reload_restore_identity()
         logger.info(
             "Reloaded snapshot identity after restore (namespace=%s, discovery_backend=%s)",
             config.namespace,

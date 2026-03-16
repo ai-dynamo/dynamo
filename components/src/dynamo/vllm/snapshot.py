@@ -4,10 +4,7 @@
 import logging
 from collections.abc import Callable
 
-from dynamo.common.utils.snapshot import (
-    EngineSnapshotController,
-    get_checkpoint_config,
-)
+from dynamo.common.utils.snapshot import EngineSnapshotController, get_checkpoint_config
 
 from .args import Config
 from .handlers import VllmEngineQuiesceController
