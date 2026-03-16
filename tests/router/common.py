@@ -21,6 +21,7 @@ from tests.router.helper import (
     send_request_with_retry,
     verify_response_timing,
     wait_for_frontend_ready,
+    wait_for_indexer_workers_active,
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
@@ -980,6 +981,9 @@ def _test_router_indexers_sync(
         # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
         if standalone_indexer_b_url:
             engine_workers.launch_indexer()
+            await wait_for_indexer_workers_active(
+                standalone_indexer_b_url, engine_workers.worker_id_to_zmq_ports
+            )
             logger.info(
                 f"Launched Indexer B at {standalone_indexer_b_url} "
                 f"(P2P recovery from Indexer A)"
