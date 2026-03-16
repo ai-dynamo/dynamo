@@ -11,15 +11,17 @@ SPDX-License-Identifier: Apache-2.0
 
 ### Docker Version Compatibility
 
-**Docker 29.x has compatibility issues with Dev Containers (by Anysphere):**
-- It is known that Docker Engine version **29.0.1** (released November 14, 2025) may cause Dev Containers to hang all the time, rendering it unusable
-- The Dev Containers extension (v1.0.26) and devcontainer CLI (v0.75.0) were not tested against Docker 29.x
-- Symptoms: Container builds successfully but connection hangs, requiring a manual reload to connect
-- This may be fixed in a later version of the Anysphere Dev Containers extension and/or Docker Engine patch
+**Docker 29.x had a known incompatibility with Dev Containers extension at and before v1.0.26 (CLI v0.75.0):**
 
-**Recommended Docker Version:**
-- Use Docker Engine **28.5.2** or earlier for stable Dev Container operation
-- Docker 27.x and 28.x series are confirmed working with current Dev Containers tooling
+- **Symptom:** Container builds and starts successfully (prints "Container started"), but the IDE hangs indefinitely and never connects. The `postCreateCommand` never runs.
+- **Root cause:** The bundled devcontainers CLI spawns `docker events --format {{json .}} --filter event=start` to detect when a container starts. It checks `i.status || i.Status` in the parsed JSON. However, Docker 29.x emits the event type under the field name `"Action"` (e.g., `{"Action":"start",...}`), not `"status"`. The start event is received but silently discarded because the field name doesn't match, so the CLI waits forever.
+- **Affected:** Docker Engine 29.0.0+ with Dev Containers extension v1.0.26 (CLI v0.75.0)
+- **Fixed in:** Dev Containers extension **v1.0.32+**
+- **Confirmed working combinations:**
+  - Docker 27.x / 28.x with any extension version
+  - Docker 29.x with Dev Containers extension v1.0.32+
+
+**Recommended fix:** If you are using Docker 29.x, update the Dev Containers extension to **v1.0.32 or later**. Docker Engine 28.5.2 or earlier have been stable with all extension versions.
 
 ## Framework-Specific Devcontainers
 

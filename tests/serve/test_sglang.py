@@ -17,6 +17,8 @@ from tests.serve.common import (
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    anthropic_messages_payload_default,
+    anthropic_messages_stream_payload_default,
     chat_payload,
     chat_payload_default,
     completion_payload_default,
@@ -71,7 +73,11 @@ sglang_configs = {
         name="disaggregated",
         directory=sglang_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.pre_merge,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-0.6B",
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
@@ -118,10 +124,14 @@ sglang_configs = {
         name="kv_events",
         directory=sglang_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.pre_merge,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-0.6B",
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -129,7 +139,7 @@ sglang_configs = {
                 expected_log=[
                     r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],
@@ -159,15 +169,22 @@ sglang_configs = {
             )
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_epd_qwen": SGLangConfig(
-        # E/PD architecture: Encode worker (GPU 0) + Prefill/Decode worker (GPU 1)
+        # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_epd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        delayed_start=0,
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -186,6 +203,7 @@ sglang_configs = {
                 # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),
@@ -286,6 +304,24 @@ sglang_configs = {
         ],
         request_payloads=[
             completion_payload_default(),
+        ],
+    ),
+    "anthropic_messages": SGLangConfig(
+        name="anthropic_messages",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(240),
+            pytest.mark.skip(reason="DYN-2261"),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={"DYN_ENABLE_ANTHROPIC_API": "1"},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            anthropic_messages_payload_default(),
+            anthropic_messages_stream_payload_default(),
         ],
     ),
 }

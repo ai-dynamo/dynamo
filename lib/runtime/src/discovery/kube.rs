@@ -67,7 +67,7 @@ impl KubeDiscoveryClient {
 
         tokio::spawn(async move {
             if let Err(e) = daemon.run(watch_tx).await {
-                tracing::error!("Discovery daemon failed: {}", e);
+                tracing::error!("Discovery daemon failed: {e}");
             }
         });
 

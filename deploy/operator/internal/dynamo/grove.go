@@ -126,6 +126,7 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 	serviceStatus := v1alpha1.ServiceReplicaStatus{
 		ComponentKind:   v1alpha1.ComponentKindPodClique,
 		ComponentName:   resourceName,
+		ComponentNames:  []string{resourceName},
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
 		ReadyReplicas:   &readyReplicas,
@@ -199,6 +200,7 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	serviceStatus := v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 		ComponentName:     resourceName,
+		ComponentNames:    []string{resourceName},
 		Replicas:          pcsg.Status.Replicas,
 		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
 		AvailableReplicas: &availableReplicas,
@@ -303,11 +305,11 @@ func ResolveKaiSchedulerQueue(annotations map[string]string) string {
 // injectKaiSchedulerIfEnabled injects kai-scheduler settings into a clique if kai-scheduler is enabled and grove is enabled
 func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
-	controllerConfig controller_common.Config,
+	runtimeConfig *controller_common.RuntimeConfig,
 	validatedQueueName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
-	if !controllerConfig.Grove.Enabled || !controllerConfig.KaiScheduler.Enabled {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
 		return
 	}
 

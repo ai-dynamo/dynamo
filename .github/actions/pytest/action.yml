@@ -130,7 +130,7 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -147,10 +147,15 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
+        DOCKER_ENV_FLAGS=()
+        if [[ -n "${HF_TOKEN:-}" ]]; then
+          DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
-          --env HF_TOKEN="${HF_TOKEN}" \
+          "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -238,9 +243,14 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
         echo "▶️ Executing: $PYTEST_CMD"
 
+        DOCKER_ENV_FLAGS=()
+        if [[ -n "${HF_TOKEN:-}" ]]; then
+          DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
+        fi
+
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
-          --env HF_TOKEN="${HF_TOKEN}" \
+          "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -293,7 +303,6 @@ runs:
           ERROR_TESTS=0
         fi
 
-        # Exit with original test result to maintain workflow behavior
         exit ${TEST_EXIT_CODE}
 
     - name: Cleanup MinIO Service

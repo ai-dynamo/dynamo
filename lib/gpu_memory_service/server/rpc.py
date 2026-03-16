@@ -3,8 +3,8 @@
 
 """Async Allocation RPC Server - Single-threaded event loop with explicit state machine.
 
-State transitions are explicit and validated by the GlobalLockFSM class.
-Operations are checked against state/mode permissions before execution.
+State transitions are explicit and validated by the GMSLocalFSM class.
+Operations are checked against state/mode permissions before operation.
 
 State Machine (see locking.py for full diagram):
     EMPTY: No connections, not committed
@@ -49,7 +49,7 @@ from gpu_memory_service.common.types import (
 )
 
 from .handler import RequestHandler
-from .locking import Connection, GlobalLockFSM
+from .locking import Connection, GMSLocalFSM
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +57,16 @@ logger = logging.getLogger(__name__)
 class GMSRPCServer:
     """GPU Memory Service RPC Server.
 
-    Async single-threaded server using GlobalLockFSM for explicit state transitions
+    Async single-threaded server using GMSLocalFSM for explicit state transitions
     and operation validation. All state mutations happen through the state machine's
     transition() method.
     """
 
-    def __init__(self, socket_path: str, device: int = 0):
+    def __init__(
+        self,
+        socket_path: str,
+        device: int = 0,
+    ):
         self.socket_path = socket_path
         self.device = device
 
@@ -70,7 +74,7 @@ class GMSRPCServer:
         self._handler = RequestHandler(device)
 
         # State machine - handles all state transitions and permission checks
-        self._sm = GlobalLockFSM(on_rw_abort=self._handler.on_rw_abort)
+        self._sm = GMSLocalFSM(on_rw_abort=self._handler.on_rw_abort)
         self._waiting_writers: int = 0
 
         # Async waiting for lock acquisition
@@ -162,7 +166,13 @@ class GMSRPCServer:
             writer.close()
             return None
 
-        conn = Connection(reader, writer, granted_mode, session_id, recv_buffer)
+        conn = Connection(
+            reader=reader,
+            writer=writer,
+            mode=granted_mode,
+            session_id=session_id,
+            recv_buffer=recv_buffer,
+        )
 
         # State transition: connect
         event = (
@@ -183,7 +193,9 @@ class GMSRPCServer:
         return conn
 
     async def _acquire_lock(
-        self, mode: RequestedLockType, timeout_ms: Optional[int]
+        self,
+        mode: RequestedLockType,
+        timeout_ms: Optional[int],
     ) -> Optional[GrantedLockType]:
         """Wait until lock can be acquired (uses state machine predicates).
 
@@ -368,9 +380,7 @@ class GMSRPCServer:
 
     async def _handle_commit(self, conn: Connection) -> tuple[object, int, bool]:
         """Handle commit via state machine transition - atomic with disconnect."""
-        # Compute state hash before transitioning
         self._handler.on_commit()
-        # State transition: commit
         self._sm.transition(StateEvent.RW_COMMIT, conn)
 
         await send_message(conn.writer, CommitResponse(success=True))

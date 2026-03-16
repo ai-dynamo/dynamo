@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from prometheus_client import CollectorRegistry
 from vllm.config import VllmConfig
@@ -12,29 +12,11 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import WorkerMetricsPublisher
-from dynamo.runtime import Component
+from dynamo.runtime import Endpoint
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
-
-
-class NullStatLogger(StatLoggerBase):
-    def __init__(self):
-        pass
-
-    def record(
-        self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
-        pass
-
-    def log_engine_initialized(self):
-        pass
 
 
 class DynamoStatLoggerPublisher(StatLoggerBase):
@@ -42,15 +24,14 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def __init__(
         self,
-        component: Component,
-        dp_rank: int,
-        component_gauges: LLMBackendMetrics,
-        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+        endpoint: Endpoint,
+        dp_rank: int = 0,
+        component_gauges: Optional[LLMBackendMetrics] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
-        self._component = component
+        self._endpoint = endpoint
         self.dp_rank = dp_rank
-        self.component_gauges = component_gauges
+        self.component_gauges = component_gauges or LLMBackendMetrics()
         self.num_gpu_block = 1
         # Schedule async endpoint creation
         self._endpoint_task = asyncio.create_task(self._create_endpoint())
@@ -58,14 +39,14 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     async def _create_endpoint(self) -> None:
         """Create the NATS endpoint asynchronously."""
         try:
-            await self.inner.create_endpoint(self._component)
+            await self.inner.create_endpoint(self._endpoint)
             logging.debug("vLLM metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create vLLM metrics publisher endpoint")
             raise
 
     # TODO: Remove this and pass as metadata through shared storage
-    def set_num_gpu_block(self, num_blocks):
+    def set_num_gpu_block(self, num_blocks: int) -> None:
         self.num_gpu_block = num_blocks
 
     def record(
@@ -73,9 +54,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
+        *args: object,
+        **kwargs: object,
+    ) -> None:
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
@@ -90,7 +71,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             dp_rank_str, scheduler_stats.kv_cache_usage
         )
 
-    def init_publish(self):
+    def init_publish(self) -> None:
         self.inner.publish(self.dp_rank, 0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
@@ -105,30 +86,23 @@ class StatLoggerFactory:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
-        dp_rank: int = 0,
-        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
-        self.component = component
+        self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
-        self.dp_rank = dp_rank
-        self.metrics_labels = metrics_labels or []
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
-        if self.dp_rank != dp_rank:
-            return NullStatLogger()
         # component_gauges must be set by setup_vllm_engine() before vLLM
         # calls create_stat_logger() during engine initialization.
         assert (
             self.component_gauges is not None
         ), "component_gauges must be set before creating stat loggers"
         logger = DynamoStatLoggerPublisher(
-            self.component,
-            dp_rank,
+            endpoint=self.endpoint,
+            dp_rank=dp_rank,
             component_gauges=self.component_gauges,
-            metrics_labels=self.metrics_labels,
         )
         self.created_logger = logger
 
@@ -138,10 +112,10 @@ class StatLoggerFactory:
         return self.create_stat_logger(dp_rank=dp_rank)
 
     # TODO Remove once we publish metadata to shared storage
-    def set_num_gpu_blocks_all(self, num_blocks):
+    def set_num_gpu_blocks_all(self, num_blocks: int) -> None:
         if self.created_logger:
             self.created_logger.set_num_gpu_block(num_blocks)
 
-    def init_publish(self):
+    def init_publish(self) -> None:
         if self.created_logger:
             self.created_logger.init_publish()

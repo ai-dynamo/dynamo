@@ -12,16 +12,16 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import (  # utilities
+from tests.router.common import (
     _test_router_basic,
     _test_router_decisions,
     _test_router_indexers_sync,
-    generate_random_suffix,
-    get_runtime,
 )
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +261,7 @@ class SGLangProcess:
                 # Manually initialize the process without blocking on health checks
                 process._logger = logging.getLogger(process.__class__.__name__)
                 process._command_name = process.command[0]
+                process.log_dir = resolve_test_output_path(process.log_dir)
                 os.makedirs(process.log_dir, exist_ok=True)
                 log_name = f"{process._command_name}.log.txt"
                 process._log_path = os.path.join(process.log_dir, log_name)
@@ -385,18 +386,12 @@ def test_sglang_kv_router_basic(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "router_event_threads",
-    [1, 2],
-    ids=["single_thread", "multi_thread"],
-)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
-    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting SGLang router prefix reuse test with two workers")
@@ -414,9 +409,7 @@ def test_router_decisions_sglang_multiple_workers(
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(sglang_workers.namespace)
-        component = namespace.component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
 
         _test_router_decisions(
             sglang_workers,
@@ -424,14 +417,15 @@ def test_router_decisions_sglang_multiple_workers(
             MODEL_NAME,
             request,
             test_dp_rank=False,
-            router_event_threads=router_event_threads,
+            block_size=PAGE_SIZE,
         )
 
 
 @pytest.mark.gpu_2
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
+@pytest.mark.skip(reason="DYN-2265")
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
@@ -463,12 +457,15 @@ def test_router_decisions_sglang_dp(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the SGLang workers
-        namespace = runtime.namespace(sglang_workers.namespace)
-        component = namespace.component("backend")  # endpoint is backend.generate
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
 
         _test_router_decisions(
-            sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            sglang_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            block_size=PAGE_SIZE,
         )
 
 

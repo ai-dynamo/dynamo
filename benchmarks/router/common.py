@@ -136,6 +136,12 @@ def add_synthesis_args(parser):
         help="Maximum output sequence length - clips values above this threshold (default: None, no clipping)",
     )
     parser.add_argument(
+        "--osl-multiplier",
+        type=float,
+        default=1.0,
+        help="Multiplier for output sequence lengths (default: 1.0)",
+    )
+    parser.add_argument(
         "--block-size",
         type=int,
         default=DEFAULT_MOONCAKE_BLOCK_SIZE,
@@ -220,6 +226,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         or args.prefix_len_multiplier != 1.0
         or args.prefix_root_multiplier != 1
         or args.prompt_len_multiplier != 1.0
+        or args.osl_multiplier != 1.0
         or args.max_isl is not None
         or args.min_isl is not None
         or args.min_osl is not None
@@ -269,6 +276,7 @@ def prepare_trace_dataset(args, output_dir, logger):
     logger.info(f"  Prefix len multiplier: {args.prefix_len_multiplier}")
     logger.info(f"  Prefix root multiplier: {args.prefix_root_multiplier}")
     logger.info(f"  Prompt len multiplier: {args.prompt_len_multiplier}")
+    logger.info(f"  OSL multiplier: {args.osl_multiplier}")
     logger.info(
         f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'} (filtering)"
     )
@@ -292,6 +300,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         prefix_len_multiplier=args.prefix_len_multiplier,
         prefix_root_multiplier=args.prefix_root_multiplier,
         prompt_len_multiplier=args.prompt_len_multiplier,
+        osl_multiplier=args.osl_multiplier,
     )
 
     if args.num_requests is None:

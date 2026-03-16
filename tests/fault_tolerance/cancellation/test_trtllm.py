@@ -36,7 +36,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
     pytest.mark.xfail(reason="Cancellation is temporarily disabled", strict=True),
 ]
@@ -187,8 +187,7 @@ def test_request_cancellation_trtllm_aggregated(
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start an aggregated worker
-        # Step 2: Start a single worker (allocates its own system_port)
+        # Step 2: Start an aggregated worker (allocates its own system_port)
         with DynamoWorkerProcess(
             request, frontend.frontend_port, mode="prefill_and_decode"
         ) as worker:
@@ -217,10 +216,10 @@ def test_request_cancellation_trtllm_aggregated(
                     frontend.frontend_port, request_type
                 )
 
-                # Poll for "New Request ID" pattern
+                # Poll for "AggregatedHandler Request ID" pattern
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
-                    pattern="New Request ID: ",
+                    pattern="AggregatedHandler Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
                 )

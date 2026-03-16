@@ -176,7 +176,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
             cfg, backend="sglang", sub_component_type=component_type
@@ -213,7 +213,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         tep_size: int,
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
             cfg, backend="sglang", sub_component_type=component_type
@@ -254,7 +254,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         dep_size: int,
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
             cfg, backend="sglang", sub_component_type=component_type

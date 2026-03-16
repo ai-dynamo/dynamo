@@ -37,7 +37,7 @@ impl EngineRouteRegistry {
     pub fn register(&self, route: &str, callback: EngineRouteCallback) {
         let mut routes = self.routes.write().unwrap();
         routes.insert(route.to_string(), callback);
-        tracing::debug!("Registered engine route: /engine/{}", route);
+        tracing::debug!("Registered engine route: /engine/{route}");
     }
 
     /// Get callback for a route

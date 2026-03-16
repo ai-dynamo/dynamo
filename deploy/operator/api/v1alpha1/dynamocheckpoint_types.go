@@ -128,8 +128,6 @@ const (
 	DynamoCheckpointConditionJobCreated DynamoCheckpointConditionType = "JobCreated"
 	// DynamoCheckpointConditionJobCompleted indicates whether the checkpoint Job has completed
 	DynamoCheckpointConditionJobCompleted DynamoCheckpointConditionType = "JobCompleted"
-	// DynamoCheckpointConditionTarAvailable indicates whether the checkpoint tar file exists
-	DynamoCheckpointConditionTarAvailable DynamoCheckpointConditionType = "TarAvailable"
 )
 
 // DynamoCheckpointStatus defines the observed state of DynamoCheckpoint

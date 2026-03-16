@@ -13,8 +13,9 @@ ARG TARGETARCH
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
-# Install common dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends git && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Install common dependencies (python3-pip needed for generate-pydantic target)
+RUN apt-get update && apt-get install -y --no-install-recommends git python3-pip && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir pydantic --break-system-packages
 
 WORKDIR /workspace
 
@@ -46,13 +47,15 @@ RUN make test
 # Build stage - depends on successful lint and test
 FROM base AS builder
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go
 
 # Runtime stage
 FROM nvcr.io/nvidia/distroless/go:v3.1.13
 WORKDIR /
 COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/crd-apply .
+COPY --from=builder /workspace/config/crd/bases/ /opt/dynamo-operator/crds/
 USER 65532:65532
 
 ENTRYPOINT ["./manager"]

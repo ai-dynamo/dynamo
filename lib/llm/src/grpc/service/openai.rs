@@ -9,6 +9,7 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
@@ -43,7 +44,13 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
-) -> Result<impl Stream<Item = Annotated<NvCreateCompletionResponse>>, Status> {
+) -> Result<
+    (
+        impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
+        ParsingOptions,
+    ),
+    Status,
+> {
     // create the context for the request
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());
@@ -66,9 +73,9 @@ pub async fn completion_response_stream(
     let model = &request.inner.model;
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(model)
+        .get_completions_engine_with_parsing(model)
         .map_err(|_| Status::not_found("model not found"))?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
@@ -130,7 +137,7 @@ pub async fn completion_response_stream(
     // without need to be cancelled.
     connection_handle.disarm();
 
-    Ok(stream)
+    Ok((stream, parsing_options))
 }
 
 /// This method will consume an AsyncEngineStream and monitor for disconnects or context cancellation.

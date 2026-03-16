@@ -123,6 +123,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 data: Some(response),
                 event: None,
                 comment: None,
+                error: None,
             }
         })
         .collect();
@@ -151,6 +152,7 @@ async fn parse_response_stream(
             Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
                 stream,
                 reasoning_parser,
+                false,
             ))
         } else {
             Box::pin(stream)

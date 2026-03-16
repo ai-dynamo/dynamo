@@ -635,7 +635,7 @@ impl PyKvConnectorLeader {
         // Initialize logging for the vLLM connector
         dynamo_runtime::logging::init();
 
-        let enable_kvbm_record = std::env::var(env_kvbm::ENABLE_KVBM_RECORD)
+        let enable_kvbm_record = std::env::var(env_kvbm::DYN_KVBM_ENABLE_RECORD)
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 

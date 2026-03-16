@@ -25,6 +25,7 @@ import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 # Check if engines are available and build list of available engines
 from .common import check_module_available
@@ -58,7 +59,7 @@ FRONTEND_PORT = 8000
 @pytest.fixture
 def test_directory(request):
     """Create a test directory for logs and temporary files."""
-    test_dir = Path(request.node.name)
+    test_dir = Path(resolve_test_output_path(request.node.name))
     test_dir.mkdir(parents=True, exist_ok=True)
     yield test_dir
     # Cleanup handled by pytest (logs are kept for debugging)
@@ -353,8 +354,8 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             "dynamo.vllm",
             "--model",
             model_id,
-            "--connector",
-            "kvbm",
+            "--kv-transfer-config",
+            '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
             "--enforce-eager",  # For faster startup in tests
         ]
     else:  # trtllm
@@ -776,8 +777,8 @@ class TestConsolidatorRouterE2E:
                     "dynamo.vllm",
                     "--model",
                     model_id,
-                    "--connector",
-                    "kvbm",
+                    "--kv-transfer-config",
+                    '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
                     "--enforce-eager",
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",

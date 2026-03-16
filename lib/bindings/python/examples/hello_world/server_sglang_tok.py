@@ -101,9 +101,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    endpoint = component.endpoint(config.endpoint)
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
     await register_model(
         ModelInput.Text, ModelType.Chat | ModelType.Completions, endpoint, config.model
     )

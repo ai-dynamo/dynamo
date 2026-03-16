@@ -195,7 +195,16 @@ fn fill_memory_region(
 mod tests {
     use super::super::tests::*;
     use super::*;
-    use crate::block_manager::v2::memory::actions::Slice;
+
+    /// Get a byte slice from a MemoryDescriptor.
+    ///
+    /// # Safety
+    /// The memory region must be valid and no mutable references may exist.
+    unsafe fn descriptor_as_slice(
+        desc: &crate::block_manager::v2::memory::MemoryDescriptor,
+    ) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(desc.addr as *const u8, desc.size) }
+    }
 
     #[test]
     fn test_fill_blocks_constant() {
@@ -208,15 +217,9 @@ mod tests {
         fill_blocks(&physical, &[0, 1], FillPattern::Constant(42)).unwrap();
 
         // Verify all bytes are set to 42
-        assert!(
-            physical
-                .memory_region(0, 0, 0)
-                .unwrap()
-                .as_slice()
-                .unwrap()
-                .iter()
-                .all(|&b| b == 42)
-        );
+        let mr = physical.memory_region(0, 0, 0).unwrap();
+        let mr_slice = unsafe { descriptor_as_slice(&mr) };
+        assert!(mr_slice.iter().all(|&b| b == 42));
     }
 
     #[test]
@@ -230,7 +233,7 @@ mod tests {
         fill_blocks(&physical, &[0, 1], FillPattern::Sequential).unwrap();
 
         let mr = physical.memory_region(0, 0, 0).unwrap();
-        let mr_slice = mr.as_slice().unwrap();
+        let mr_slice = unsafe { descriptor_as_slice(&mr) };
 
         // Verify pattern is applied (spot check a few bytes)
         let first_byte = mr_slice[0];
@@ -239,7 +242,7 @@ mod tests {
         assert_eq!(second_byte, first_byte.wrapping_add(1));
 
         let mr = physical.memory_region(1, 1, 0).unwrap();
-        let mr_slice = mr.as_slice().unwrap();
+        let mr_slice = unsafe { descriptor_as_slice(&mr) };
 
         let first_byte = mr_slice[0];
         let second_byte = mr_slice[1];
@@ -261,10 +264,14 @@ mod tests {
         fill_layers(&physical, &[1], 0..1, FillPattern::Constant(100)).unwrap();
         fill_layers(&physical, &[1], 1..2, FillPattern::Constant(101)).unwrap();
 
-        let mr_00 = physical.memory_region(0, 0, 0).unwrap().as_slice().unwrap()[0];
-        let mr_01 = physical.memory_region(0, 1, 0).unwrap().as_slice().unwrap()[0];
-        let mr_10 = physical.memory_region(1, 0, 0).unwrap().as_slice().unwrap()[0];
-        let mr_11 = physical.memory_region(1, 1, 0).unwrap().as_slice().unwrap()[0];
+        let desc = physical.memory_region(0, 0, 0).unwrap();
+        let mr_00 = unsafe { descriptor_as_slice(&desc) }[0];
+        let desc = physical.memory_region(0, 1, 0).unwrap();
+        let mr_01 = unsafe { descriptor_as_slice(&desc) }[0];
+        let desc = physical.memory_region(1, 0, 0).unwrap();
+        let mr_10 = unsafe { descriptor_as_slice(&desc) }[0];
+        let desc = physical.memory_region(1, 1, 0).unwrap();
+        let mr_11 = unsafe { descriptor_as_slice(&desc) }[0];
         assert_eq!(mr_00, 0);
         assert_eq!(mr_01, 1);
         assert_eq!(mr_10, 100);

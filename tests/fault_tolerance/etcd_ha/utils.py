@@ -19,6 +19,7 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,9 @@ class EtcdCluster:
         self.base_port = base_port
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
-        self.log_base_dir = f"{request.node.name}_etcd_cluster"
+        self.log_base_dir = resolve_test_output_path(
+            f"{request.node.name}_etcd_cluster"
+        )
 
         # Clean up any existing log directory
         try:
@@ -291,9 +294,12 @@ class EtcdCluster:
         except Exception as e:
             raise RuntimeError(f"Error during member removal: {e}")
 
-        # Add the new member to the cluster
+        # Add the new member to the cluster, retrying if the cluster is temporarily unhealthy
+        # after member removal (etcd may reject adds until raft peers are fully connected)
         logger.info(f"Adding new member {name} to cluster with peer URL {peer_url}")
-        try:
+        max_attempts = 20
+        last_err = ""
+        for attempt in range(max_attempts):
             add_result = subprocess.run(
                 ["etcdctl", "member", "add", name, f"--peer-urls={peer_url}"],
                 env=etcdctl_env,
@@ -301,11 +307,18 @@ class EtcdCluster:
                 text=True,
                 timeout=5,
             )
-            if add_result.returncode != 0:
-                raise RuntimeError(f"Failed to add new member: {add_result.stderr}")
-            logger.info(f"Successfully added new member {name}")
-        except Exception as e:
-            raise RuntimeError(f"Error adding new member: {e}")
+            if add_result.returncode == 0:
+                logger.info(f"Successfully added new member {name}")
+                break
+            last_err = add_result.stderr.strip()
+            logger.warning(
+                f"Member add attempt {attempt + 1}/{max_attempts} failed: {last_err}"
+            )
+            time.sleep(0.5)  # time for cluster to stabilize before retrying
+        else:
+            raise RuntimeError(
+                f"Failed to add new member after {max_attempts} attempts: {last_err}"
+            )
 
     def start(self):
         """Start ETCD cluster with configured number of replicas"""

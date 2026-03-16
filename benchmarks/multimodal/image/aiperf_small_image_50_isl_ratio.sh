@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 CONCURRENCY=1
+OSL=150
 
 # 500 * 333 pixels image
 IMG_URL="http://images.cocodataset.org/test2017/000000000183.jpg"
@@ -16,7 +17,12 @@ DUMMY_PROMPT="This is a prompt to describe the image content briefly."
 for i in {1..1500}; do
     DUMMY_PROMPT+=" This is a prompt to describe the image content briefly."
 done
-echo '{"texts": ["'"$DUMMY_PROMPT"'"], "images": ["'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'","'"$IMG_URL"'"]}' \
+IMAGE_LIST='"'"$IMG_URL"'"'
+for i in {2..30}; do
+    IMAGE_LIST+=',"'$IMG_URL'"'
+done
+
+echo '{"texts": ["'"$DUMMY_PROMPT"'"], "images": ['"$IMAGE_LIST"']}' \
     > data_small.jsonl
 echo "This benchmark uses duplicate image urls, so any kind of caching can significantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
 
@@ -31,11 +37,16 @@ while [[ $# -gt 0 ]]; do
             CONCURRENCY=$2
             shift 2
             ;;
+        --osl)
+            OSL=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --concurrency <level> Specify the concurrency level to use (default: $CONCURRENCY)"
+            echo "  --osl <level>         Specify the OSL to use (default: $OSL)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -49,7 +60,8 @@ done
 
 aiperf profile -m $MODEL_NAME --endpoint-type chat \
     --streaming --request-count 100 --warmup-request-count 5 \
-    --concurrency $CONCURRENCY --osl 1 \
+    --concurrency $CONCURRENCY --osl $OSL \
     --input-file data_small.jsonl \
     --custom-dataset-type single_turn --ui none \
+    --extra-inputs 'ignore_eos:true' \
     --no-server-metrics

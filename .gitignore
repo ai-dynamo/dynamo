@@ -2,6 +2,8 @@
 .vs/
 .vscode/
 .helix
+issues/
+plans/
 *rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
@@ -35,6 +37,7 @@ CMakeCache.txt
 *_pb2.py
 *_pb2.pyi
 *.svg
+!docs/assets/**/*.svg
 
 *pytest_report.md
 *pytest_report.xml
@@ -111,7 +114,8 @@ core
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
 /.cursor
-/.claude
+/.claude/*
+!/.claude/skills/
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -131,3 +135,7 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+# macOS
+.DS_Store
+**/.DS_Store

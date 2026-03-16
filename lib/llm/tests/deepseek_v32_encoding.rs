@@ -321,6 +321,76 @@ fn test_reasoning_content_survives_chat_request_parsing_and_rendering() {
     assert!(rendered.contains("</think>"));
 }
 
+// Regression test for the KV-cache flattening bug.
+//
+// Models like GLM-5 and Qwen3 (Pattern A) emit interleaved thinking:
+//
+//   <think>A</think> <call>t1</call> <think>B</think> <call>t2</call>
+//
+// `convert_assistant_blocks` now serialises this as a JSON *array*:
+//
+//   "reasoning_content": ["A", "B", ""]
+//
+// OLD CODE stored `reasoning_content: Option<String>` — a JSON array would fail
+// to deserialise into that type, so this test panics at `.unwrap()` on old code.
+// NEW CODE stores `Option<ReasoningContent>` which accepts both string and array,
+// and round-trips the array form faithfully.
+#[test]
+fn test_reasoning_segments_roundtrip_through_parse_and_render() {
+    // Simulate what convert_assistant_blocks produces for an interleaved GLM-5 turn:
+    //   [Think("A"), Tool(t1), Think("B"), Tool(t2)]  →  segments = ["A", "B", ""]
+    let json = r#"{
+        "model": "glm-5",
+        "messages": [
+            {"role": "user", "content": "call two tools"},
+            {
+                "role": "assistant",
+                "reasoning_content": ["A", "B", ""],
+                "tool_calls": [
+                    {"id": "t1", "type": "function", "function": {"name": "f1", "arguments": "{}"}},
+                    {"id": "t2", "type": "function", "function": {"name": "f2", "arguments": "{}"}}
+                ]
+            },
+            {"role": "tool", "tool_call_id": "t1", "content": "r1"},
+            {"role": "tool", "tool_call_id": "t2", "content": "r2"}
+        ]
+    }"#;
+
+    // OLD CODE: serde_json::from_str fails here because Option<String> can't
+    // deserialise a JSON array.  NEW CODE: succeeds.
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+
+    // Segments must survive the round-trip through serde_json
+    let messages_json = serde_json::to_value(request.messages()).unwrap();
+    assert!(
+        messages_json[1]["reasoning_content"].is_array(),
+        "reasoning_content must serialise as a JSON array to preserve positional info; \
+         a string would lose which reasoning preceded which tool call"
+    );
+    let segs = messages_json[1]["reasoning_content"].as_array().unwrap();
+    assert_eq!(segs.len(), 3);
+    assert_eq!(segs[0].as_str().unwrap(), "A"); // precedes t1
+    assert_eq!(segs[1].as_str().unwrap(), "B"); // precedes t2
+    assert_eq!(segs[2].as_str().unwrap(), ""); // no trailing reasoning
+
+    // The formatter must not drop the reasoning content when segments are used.
+    // (DeepSeek V3.2 joins segments into one <think> block; this confirms the
+    // content is not silently discarded.)
+    let formatter =
+        dynamo_llm::preprocessor::prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
+    let rendered = formatter.render(&request).unwrap();
+    assert!(
+        rendered.contains("A"),
+        "segment A must appear in rendered output"
+    );
+    assert!(
+        rendered.contains("B"),
+        "segment B must appear in rendered output"
+    );
+    assert!(rendered.contains("<think>"));
+    assert!(rendered.contains("</think>"));
+}
+
 #[test]
 fn test_tool_call_formatting() {
     let messages = serde_json::json!([
