@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated (prefill+decode) engine config for co-located deployment.
+# Used when an encoder process shares the same GPU — reduced KV cache
+# fraction to leave headroom for the encoder's memory (~3GB).
+#
+# Based on agg.yaml with free_gpu_memory_fraction reduced from 0.95 to 0.85.
+tensor_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 16384
+max_batch_size: 64
+max_seq_len: 16384
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.85
+  enable_block_reuse: false
+
+cache_transceiver_config:
+  backend: DEFAULT
