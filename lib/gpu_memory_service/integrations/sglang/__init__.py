@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Module-level GMS lock mode, set by setup_gms() before loader is instantiated.
+# Read by patches.py when creating GMSMemorySaverImpl.
+_gms_lock_mode = None
+
 
 def setup_gms(server_args) -> Type["GMSModelLoader"]:
     """Setup GPU Memory Service for SGLang.
@@ -45,6 +49,19 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
         raise ValueError(
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
+
+    # Resolve lock mode from model_loader_extra_config before patches fire
+    global _gms_lock_mode
+    extra = getattr(server_args, "model_loader_extra_config", None)
+    if isinstance(extra, str):
+        import json
+
+        extra = json.loads(extra) if extra else {}
+    extra = extra or {}
+
+    from gpu_memory_service.integrations.common.utils import get_gms_lock_mode
+
+    _gms_lock_mode = get_gms_lock_mode(extra)
 
     # Import triggers patches at module level
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader

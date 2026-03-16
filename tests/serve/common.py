@@ -156,6 +156,7 @@ def run_serve_deployment(
                     payload=payload.body,
                     timeout=payload.timeout,
                     method=payload.method,
+                    stream=payload.http_stream,
                 )
                 server_process.check_response(payload, response)
 

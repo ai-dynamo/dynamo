@@ -1,9 +1,8 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Metrics Developer Guide
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Metrics Developer Guide
+---
 
 This guide explains how to create and use custom metrics in Dynamo components using the Dynamo metrics API.
 
@@ -22,7 +21,7 @@ Prometheus Exposition Format text metrics will be available at: `http://localhos
 
 ## Metric Name Constants
 
-The [prometheus_names.rs](../../lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
+The [prometheus_names.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
 
 ---
 
@@ -133,5 +132,5 @@ let counter = endpoint.metrics().create_counter(
 
 - [Metrics Overview](metrics.md)
 - [Prometheus and Grafana Setup](prometheus-grafana.md)
-- [Distributed Runtime Architecture](../design_docs/distributed_runtime.md)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 

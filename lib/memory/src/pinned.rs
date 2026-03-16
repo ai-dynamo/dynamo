@@ -3,32 +3,20 @@
 
 //! CUDA pinned host memory storage.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
 use cudarc::driver::sys;
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-
-/// Get or create a CUDA context for the given device.
-fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
-    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
-
-    if let Some(existing) = map.get(&device_id) {
-        return Ok(existing.clone());
-    }
-
-    let ctx = CudaContext::new(device_id as usize)?;
-    map.insert(device_id, ctx.clone());
-    Ok(ctx)
-}
+use std::sync::Arc;
 
 /// CUDA pinned host memory allocated via cudaHostAlloc.
 #[derive(Debug)]
 pub struct PinnedStorage {
+    /// Host pointer to the pinned memory.
     ptr: usize,
+    /// Size of the allocation in bytes.
     len: usize,
+    /// CUDA context used for allocation and deallocation.
     ctx: Arc<CudaContext>,
 }
 
@@ -38,29 +26,87 @@ unsafe impl Sync for PinnedStorage {}
 impl PinnedStorage {
     /// Allocate new pinned memory of the given size.
     ///
+    /// This is a convenience method that calls `new_for_device(len, None)`.
+    ///
     /// # Arguments
     /// * `len` - Size in bytes to allocate
-    /// * `device_id` - CUDA device to associate with the allocation
     pub fn new(len: usize) -> Result<Self> {
+        Self::new_for_device(len, None)
+    }
+
+    /// Allocate pinned memory, optionally NUMA-aware for a specific GPU.
+    ///
+    /// When `device_id` is `Some`, NUMA-aware allocation is attempted by default:
+    /// a worker thread pinned to the GPU's NUMA node performs the allocation,
+    /// ensuring optimal memory placement via first-touch policy. If the GPU's
+    /// NUMA node cannot be determined, allocation falls back to the direct path.
+    /// Set `DYN_MEMORY_DISABLE_NUMA=1` to skip NUMA optimization entirely.
+    ///
+    /// When `device_id` is `None`, a direct allocation is performed on device 0.
+    ///
+    /// # Arguments
+    /// * `len` - Size in bytes to allocate
+    /// * `device_id` - If Some, use NUMA-aware allocation on the GPU's NUMA node
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - `len` is 0
+    /// - CUDA context creation fails
+    /// - Memory allocation fails
+    pub fn new_for_device(len: usize, device_id: Option<u32>) -> Result<Self> {
         if len == 0 {
             return Err(StorageError::AllocationFailed(
                 "zero-sized allocations are not supported".into(),
             ));
         }
 
-        let ctx = cuda_context(0)?;
-        let ptr = unsafe {
-            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
+        let gpu_id = device_id.unwrap_or(0);
+        let ctx = crate::device::cuda_context(gpu_id)?;
 
-            let ptr = cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                .map_err(StorageError::Cuda)?;
+        // Try NUMA-aware allocation unless explicitly disabled
+        #[cfg(target_os = "linux")]
+        let numa_ptr = if let Some(gpu_id) = device_id {
+            if !super::numa::is_numa_disabled() {
+                match super::numa::worker_pool::NumaWorkerPool::global()
+                    .allocate_pinned_for_gpu(len, gpu_id)
+                {
+                    Ok(Some(ptr)) => {
+                        tracing::debug!(
+                            "Using NUMA-aware allocation for {} bytes on GPU {}",
+                            len,
+                            gpu_id
+                        );
+                        Some(ptr as usize)
+                    }
+                    Ok(None) => None, // NUMA node unknown, fall through
+                    Err(e) => return Err(StorageError::AllocationFailed(e)),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-            let ptr = ptr as *mut u8;
-            assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-            assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-            assert!(len < isize::MAX as usize);
+        #[cfg(not(target_os = "linux"))]
+        let numa_ptr: Option<usize> = None;
 
-            ptr as usize
+        let ptr = if let Some(ptr) = numa_ptr {
+            ptr
+        } else {
+            unsafe {
+                ctx.bind_to_thread().map_err(StorageError::Cuda)?;
+
+                let ptr = cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_DEVICEMAP)
+                    .map_err(StorageError::Cuda)?;
+
+                let ptr = ptr as *mut u8;
+                assert!(!ptr.is_null(), "Failed to allocate pinned memory");
+                assert!(ptr.is_aligned(), "Pinned memory is not aligned");
+                assert!(len < isize::MAX as usize);
+
+                ptr as usize
+            }
         };
 
         Ok(Self { ptr, len, ctx })
@@ -97,7 +143,7 @@ impl Drop for PinnedStorage {
     }
 }
 
-impl MemoryDescription for PinnedStorage {
+impl MemoryDescriptor for PinnedStorage {
     fn addr(&self) -> usize {
         unsafe { self.as_ptr() as usize }
     }

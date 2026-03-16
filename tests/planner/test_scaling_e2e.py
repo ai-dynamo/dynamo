@@ -261,10 +261,12 @@ class ScalingE2ETest:
         namespace: str = "default",
         base_url: str = "http://localhost:8000",
         save_results: bool = False,
+        mode: str = "throughput",
     ):
         self.namespace = namespace
         self.base_url = base_url
         self.save_results = save_results
+        self.mode = mode
 
         self.k8s_monitor = KubernetesMonitor(namespace)
         self.load_generator = LoadGenerator(
@@ -281,7 +283,7 @@ class ScalingE2ETest:
         - Phase 1 (8 req/s): Should maintain 1P1D
         - Phase 2 (18 req/s): Should scale to 2P1D
         """
-        logger.info("Starting scaling integration test")
+        logger.info(f"Starting scaling integration test (mode={self.mode})")
 
         test_start_time = time.time()
 
@@ -291,8 +293,12 @@ class ScalingE2ETest:
 
         # Start background monitoring
         # Calculate based on actual phases from load generator
-        # Phase durations: baseline(90s) + transition(30s) + trigger(120s) + buffer
-        total_test_duration = 90 + 30 + 120 + BUFFER_DURATION
+        if self.mode == "load":
+            # Load-based: baseline(120s) + transition(30s) + trigger(120s) + buffer
+            total_test_duration = 120 + 30 + 120 + BUFFER_DURATION
+        else:
+            # Throughput: baseline(90s) + transition(30s) + trigger(120s) + buffer
+            total_test_duration = 90 + 30 + 120 + BUFFER_DURATION
         monitoring_task = asyncio.create_task(
             self.k8s_monitor.monitor_scaling(
                 total_test_duration, interval=MONITORING_INTERVAL
@@ -305,8 +311,10 @@ class ScalingE2ETest:
 
         try:
             # Use the load generator's built-in scaling test
-            logger.info("Running scaling scenario (8 req/s -> 18 req/s)")
-            load_results = await self.load_generator.run_scaling_test()
+            logger.info(
+                f"Running scaling scenario (8 req/s -> 18 req/s, mode={self.mode})"
+            )
+            load_results = await self.load_generator.run_scaling_test(mode=self.mode)
 
             # Extract load results for analysis (2-phase structure)
             phase_results = load_results.get("phase_results", {})
@@ -475,12 +483,20 @@ async def main():
         action="store_true",
         help="Save results to tests/planner/e2e_scaling_results instead of /tmp",
     )
-    # No additional arguments needed - test is hardcoded
+    parser.add_argument(
+        "--mode",
+        choices=["throughput", "load"],
+        default="throughput",
+        help="Scaling mode to test: throughput (default) or load",
+    )
 
     args = parser.parse_args()
 
     test = ScalingE2ETest(
-        namespace=args.namespace, base_url=args.base_url, save_results=args.save_results
+        namespace=args.namespace,
+        base_url=args.base_url,
+        save_results=args.save_results,
+        mode=args.mode,
     )
 
     try:

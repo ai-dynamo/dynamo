@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import logging
 import os
 import shutil
@@ -20,6 +21,7 @@ from tests.utils.port_utils import (
     deallocate_port,
     deallocate_ports,
 )
+from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
@@ -48,9 +50,11 @@ def pytest_configure(config):
         "vllm: marks tests as requiring vllm",
         "trtllm: marks tests as requiring trtllm",
         "sglang: marks tests as requiring sglang",
+        "lmcache: mark tests as requiring lmcache",
         "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
+        "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
         "router: marks tests for router component",
         "planner: marks tests for planner component",
         "kvbm: marks tests for KV behavior and model determinism",
@@ -60,9 +64,43 @@ def pytest_configure(config):
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
         "fault_tolerance: marks tests as fault tolerance tests",
+        "deploy: marks tests as deployment tests",
+        # Third-party plugin markers
+        "timeout: test timeout in seconds (pytest-timeout plugin)",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add shared command-line options for all tests.
+
+    Shared options that apply across multiple test suites are defined here.
+    Suite-specific options (e.g., deploy, fault-tolerance) are defined in
+    their respective subdirectory conftest.py files.
+    """
+    # -------------------------------------------------------------------------
+    # Shared Deployment Options (used by multiple test suites)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--image",
+        type=str,
+        default=None,
+        help="Container image to use for deployment (overrides YAML default)",
+    )
+    parser.addoption(
+        "--namespace",
+        type=str,
+        default=None,  # No default here - subdirectories provide their own
+        help="Kubernetes namespace for deployment",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=None,  # None = use fixture's default behavior
+        help="Skip restarting NATS and etcd services before deployment. "
+        "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -85,7 +123,11 @@ def set_ucx_tls_no_mm():
     #   (uct_mem.c:482: mem.memh != UCT_MEM_HANDLE_NULL) when two workers
     #   start on the same node (maybe a shared-memory segment collision/limits).
     # - Mitigation: disable UCX "mm" shared-memory transport globally for tests
-    mp.setenv("UCX_TLS", "^mm")
+    #
+    # Also exclude gdr_copy transport to prevent GDRCopy driver initialization
+    # failures (driverInitFileInfo result=11) that can abort the process when
+    # the gdrdrv kernel module is not loaded.
+    mp.setenv("UCX_TLS", "^mm,gdr_copy")
     yield
     mp.undo()
 
@@ -101,7 +143,7 @@ def download_models(model_list=None, ignore_weights=False):
         model_list = TEST_MODELS
 
     # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
     if hf_token:
         logging.info("HF_TOKEN found in environment")
     else:
@@ -113,45 +155,50 @@ def download_models(model_list=None, ignore_weights=False):
 
     try:
         from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to pre-download models for tests"
+        ) from exc
 
-        for model_id in model_list:
-            logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
-            )
+    failures = []
+    for model_id in model_list:
+        logging.info(
+            f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+        )
 
-            try:
-                if ignore_weights:
-                    # Weight file patterns to exclude (based on hub.rs implementation)
-                    weight_patterns = [
-                        "*.bin",
-                        "*.safetensors",
-                        "*.h5",
-                        "*.msgpack",
-                        "*.ckpt.index",
-                    ]
+        try:
+            if ignore_weights:
+                # Weight file patterns to exclude (based on hub.rs implementation)
+                weight_patterns = [
+                    "*.bin",
+                    "*.safetensors",
+                    "*.h5",
+                    "*.msgpack",
+                    "*.ckpt.index",
+                ]
 
-                    # Download everything except weight files
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                        ignore_patterns=weight_patterns,
-                    )
-                else:
-                    # Download the full model snapshot (includes all files)
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                    )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
+                # Download everything except weight files
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                    ignore_patterns=weight_patterns,
+                )
+            else:
+                # Download the full model snapshot (includes all files)
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                )
+            logging.info(f"Successfully pre-downloaded: {model_id}")
 
-            except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
-                # Don't fail the fixture - let individual tests handle missing models
+        except Exception as exc:
+            logging.error(f"Failed to pre-download {model_id}: {exc}")
+            failures.append(f"{model_id}: {exc}")
 
-    except ImportError:
-        logging.warning(
-            "huggingface_hub not installed. "
-            "Models will be downloaded during test execution."
+    if failures:
+        raise RuntimeError(
+            "Failed to pre-download required Hugging Face models:\n"
+            + "\n".join(failures)
         )
 
 
@@ -168,7 +215,10 @@ def predownload_models(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models()
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(scope="session")
@@ -184,15 +234,22 @@ def predownload_tokenizers(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models(ignore_weights=True)
+
+    # Skip redundant HuggingFace API calls in worker subprocesses since
+    # tokenizers are already cached. This avoids flaky timeouts from slow
+    # HF API responses (the RepoInfo fetch still happens even for cached models).
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name, "test.log.txt")
+    log_dir = resolve_test_output_path(request.node.name)
+    log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(request.node.name, ignore_errors=True)
-    os.makedirs(request.node.name, exist_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    os.makedirs(log_dir, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)
@@ -202,11 +259,40 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+def _item_has_marker(item, marker_name):
+    """Check if a test item has a marker, including module-level pytestmark."""
+    if item.get_closest_marker(marker_name):
+        return True
+    module = getattr(item, "module", None)
+    if module is not None:
+        marks = getattr(module, "pytestmark", [])
+        if not isinstance(marks, list):
+            marks = [marks]
+        if any(getattr(m, "name", "") == marker_name for m in marks):
+            return True
+    return False
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Auto-skip tests marked with a framework marker when the framework is not installed
+    framework_markers = {
+        "trtllm": "tensorrt_llm",
+        "vllm": "vllm",
+        "sglang": "sglang",
+        "kvbm": "kvbm",
+        "lmcache": "lmcache",
+    }
+    for marker_name, module_name in framework_markers.items():
+        if importlib.util.find_spec(module_name) is None:
+            skip = pytest.mark.skip(reason=f"{module_name} is not installed")
+            for item in items:
+                if _item_has_marker(item, marker_name):
+                    item.add_marker(skip)
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
@@ -276,7 +362,7 @@ class EtcdServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
+            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
             health_check_ports=[port],
             data_dir=data_dir,
             log_dir=request.node.name,
@@ -323,7 +409,7 @@ class NatsServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
+            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
             data_dir=data_dir,
             health_check_ports=[port],
             health_check_funcs=[self._nats_ready],
@@ -379,14 +465,7 @@ class NatsServer(ManagedProcess):
     def stop(self):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
-        self._terminate_process_group()
-        proc = self.proc  # type: ignore[has-type]
-        if proc is not None:
-            try:
-                proc.wait(timeout=10)
-            except Exception as e:
-                _logger.warning(f"Error waiting for NATS process to stop: {e}")
-            self.proc = None
+        self._stop_started_processes()
 
     def start(self):
         """Restart a stopped NATS server with fresh state."""
@@ -550,12 +629,12 @@ class SharedNatsServer(SharedManagedProcess):
 
 
 @pytest.fixture
-def store_kv(request):
+def discovery_backend(request):
     """
-    KV store for runtime. Defaults to "etcd".
+    Discovery backend for runtime. Defaults to "etcd".
 
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
         def test_example(runtime_services):
             ...
     """
@@ -576,20 +655,20 @@ def request_plane(request):
 
 
 @pytest.fixture
-def use_nats_core(request):
+def durable_kv_events(request):
     """
-    Whether to use NATS Core mode (local indexer) instead of JetStream. Defaults to False.
-
-    When True:
-    - NATS server starts without JetStream (-js flag omitted) for faster startup
-    - Tests should use enable_local_indexer=True in mocker_args
+    Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
 
     When False (default):
-    - NATS server starts with JetStream for KV event distribution
-    - Tests use JetStream-based indexer synchronization
+    - NATS server starts without JetStream (-js flag omitted) for faster startup
+    - Workers use local indexer mode (NATS Core / fire-and-forget events)
 
-    To use NATS Core mode:
-        @pytest.mark.parametrize("use_nats_core", [True], indirect=True)
+    When True:
+    - NATS server starts with JetStream for durable KV event distribution
+    - Workers use --durable-kv-events flag to publish to JetStream
+
+    To use JetStream mode:
+        @pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
         def test_example(runtime_services_dynamic_ports):
             ...
     """
@@ -597,24 +676,24 @@ def use_nats_core(request):
 
 
 @pytest.fixture()
-def runtime_services(request, store_kv, request_plane):
+def runtime_services(request, discovery_backend, request_plane):
     """
-    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+    Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:
             yield nats_process, None
-    elif store_kv == "etcd":
+    elif discovery_backend == "etcd":
         with EtcdServer(request) as etcd_process:
             yield None, etcd_process
     else:
@@ -622,7 +701,9 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_core):
+def runtime_services_dynamic_ports(
+    request, discovery_backend, request_plane, durable_kv_events
+):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -634,10 +715,10 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
     - Each pytest-xdist worker runs tests in a separate process, so env vars do not
       leak across workers.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
-    - JetStream is enabled by default; disabled when use_nats_core=True for faster startup
+    - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -645,10 +726,10 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
-    # When use_nats_core=True, disable JetStream for faster startup
-    if store_kv == "etcd":
+    # When durable_kv_events=False (default), disable JetStream for faster startup
+    if discovery_backend == "etcd":
         with NatsServer(
-            request, port=0, disable_jetstream=use_nats_core
+            request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Save original env vars (may be set by session-scoped fixture)
@@ -672,7 +753,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
                     os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
         with NatsServer(
-            request, port=0, disable_jetstream=use_nats_core
+            request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"

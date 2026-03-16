@@ -33,7 +33,7 @@ If `enable_image` or `enable_video` are not called, requests containing the corr
 Register the LLM as usual, adding the media configuration:
 
 ```python
-register_llm(
+register_model(
   ...,
   media_decoder=decoder,
   media_fetcher=fetcher,
@@ -44,13 +44,13 @@ register_llm(
 ## Known Limitations
 
 > [!WARNING]
-> **Incompatible with `Dockerfile.frontend`**: Frontend media decoding (enabled with `--features media-nixl`) is not supported when using `Dockerfile.frontend`. The frontend image built from `Dockerfile.frontend` does not enable the feature + include the required NIXL/UCX dependencies.
+> **Incompatible with `Dockerfile.frontend`**: Frontend media decoding is not supported when using `Dockerfile.frontend`. The frontend image built from `Dockerfile.frontend` does not include the required NIXL/UCX dependencies.
 
 > [!WARNING]
 > **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `Failed to initialize required backends: [UCX: No UCX plugin found]`.
 
 > [!WARNING]
-> **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo containers built with `container/build.sh --enable-media-ffmpeg ...`
+> **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.
 
 ## Image decoding options
 

@@ -20,15 +20,15 @@ from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_check
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    RequestResponseMetadata,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
+from vllm.renderers.registry import renderer_from_config
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
@@ -41,6 +41,7 @@ class StubEngineClient:
 
     def __init__(self, model_config: ModelConfig):
         self.model_config = model_config
+        self.renderer = renderer_from_config(model_config)
         self.input_processor = None
         self.io_processor = None
 
@@ -154,9 +155,6 @@ class ChatProcessor:
     async def preprocess(self, raw_request: ChatCompletionRequest) -> PreprocessResult:
         request = self.parse_raw_request(raw_request)
 
-        # TODO: Revisit this later when adding multi-modal support for the frontend.
-        # If no chat template is provided and tokenizer doesn't have one,
-        # use a simple format that just concatenates messages
         if not request.chat_template and not self.tokenizer.chat_template:
             chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}User: {{ message['content'] }}\n{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}\n{% endif %}{% endfor %}Assistant:"
         else:
@@ -167,20 +165,14 @@ class ChatProcessor:
             engine_prompts,
         ) = await self.openai_serving._preprocess_chat(
             request,
-            self.tokenizer,
             request.messages,
-            chat_template=chat_template,
-            chat_template_content_format=self.openai_serving.chat_template_content_format,
-            add_generation_prompt=request.add_generation_prompt,
-            continue_final_message=request.continue_final_message,
+            default_template=chat_template,
+            default_template_content_format=self.openai_serving.chat_template_content_format,
+            default_template_kwargs=None,
             tool_dicts=None,
-            documents=request.documents,
-            chat_template_kwargs=request.chat_template_kwargs,
-            tool_parser=self.openai_serving.tool_parser,
-            add_special_tokens=request.add_special_tokens,
+            tool_parser=None,
         )
 
-        # In newer vLLM, _preprocess_chat returns (conversation, engine_prompts) - 2 values
         if not conversation or not engine_prompts:
             raise ValueError(
                 "Preprocessing returned empty conversation or engine_prompts"
@@ -305,19 +297,14 @@ class CompletionsProcessor:
     async def preprocess(self, raw_request: CompletionRequest) -> PreprocessResult:
         request = self.parse_raw_request(raw_request)
 
-        # In newer vLLM, _preprocess_completion was removed
-        # Use the renderer approach instead
-        renderer = self.openai_serving._get_renderer(self.tokenizer)
-        config = self.openai_serving._build_render_config(request)
-        engine_prompts = await renderer.render_prompt_and_embeds(
-            prompt_or_prompts=request.prompt,
+        engine_prompts = await self.openai_serving._preprocess_completion(
+            request,
+            prompt_input=request.prompt,
             prompt_embeds=getattr(request, "prompt_embeds", None),
-            config=config,
         )
 
-        # engine_prompts is now a list of TokensPrompt
         if not engine_prompts:
-            raise ValueError("Renderer returned empty engine_prompts")
+            raise ValueError("Preprocessing returned empty engine_prompts")
         return PreprocessResult(None, engine_prompts[0])
 
     async def stream_response(
@@ -332,6 +319,7 @@ class CompletionsProcessor:
             raise ValueError("Only streaming responses are supported")
         async for raw_response in self.openai_serving.completion_stream_generator(
             request,
+            [],  # engine_prompts (not needed for streaming output)
             result_generator,
             request_id,
             int(time.time()),  # created_time

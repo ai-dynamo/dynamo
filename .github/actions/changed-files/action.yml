@@ -25,12 +25,18 @@ outputs:
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
+  planner:
+    description: 'Whether planner files changed'
+    value: ${{ steps.filter.outputs.planner_any_modified }}
   frontend:
     description: 'Whether frontend files changed'
     value: ${{ steps.filter.outputs.frontend_any_modified }}
   rust:
     description: 'Whether rust files changed'
     value: ${{ steps.filter.outputs.rust_any_modified }}
+  docs:
+    description: 'Whether docs files changed'
+    value: ${{ steps.filter.outputs.docs_any_modified }}
 
 runs:
   using: "composite"

@@ -90,7 +90,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --no-enable-prefix-caching --block-size 128 --tensor-parallel-size 2 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --no-enable-prefix-caching --block-size 128 --tensor-parallel-size 2 --disaggregation-mode decode 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -137,4 +137,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --is-prefill-worker --no-enable-prefix-caching --block-size 128 --tensor-parallel-size 2 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --disaggregation-mode prefill --no-enable-prefix-caching --block-size 128 --tensor-parallel-size 2 2>&1 | tee /tmp/vllm.log"

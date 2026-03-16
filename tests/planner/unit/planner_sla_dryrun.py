@@ -13,15 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import logging
 
 from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
-from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
+from dynamo.planner.utils.planner_config import PlannerConfig
 
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
-    parser = create_sla_planner_parser()
+    parser = argparse.ArgumentParser(description="Planner Dryrun")
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="JSON string or path to a JSON/YAML config file",
+    )
     parser.add_argument(
         "--dataset", type=str, required=True, help="Path to the jsonl dataset file"
     )
@@ -44,5 +50,12 @@ if __name__ == "__main__":
         help="Path to the output plot file",
     )
     args = parser.parse_args()
+    config = PlannerConfig.from_config_arg(args.config)
 
-    run_sla_planner_dryrun(args)
+    run_sla_planner_dryrun(
+        config,
+        dataset=args.dataset,
+        start_num_p=args.start_num_p,
+        start_num_d=args.start_num_d,
+        output_plot=args.output_plot,
+    )

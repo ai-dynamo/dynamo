@@ -222,7 +222,7 @@ impl DistributedRWLock {
             // Execute the atomic transaction
             match etcd_client.etcd_client().kv_client().txn(txn).await {
                 Ok(response) if response.succeeded() => {
-                    tracing::debug!("Acquired read lock for reader {}", reader_id);
+                    tracing::debug!("Acquired read lock for reader {reader_id}");
                     return Ok(ReadLockGuard {
                         rwlock: self,
                         etcd_client,

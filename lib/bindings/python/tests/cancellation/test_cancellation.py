@@ -7,7 +7,11 @@ import pytest
 
 from dynamo.runtime import Context
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 class MockServer:
@@ -128,8 +132,7 @@ async def server(runtime, namespace):
 
     async def init_server():
         """Initialize the test server component and serve the generate endpoint"""
-        component = runtime.namespace(namespace).component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{namespace}.backend.generate")
         print("Started test server instance")
 
         # Serve the endpoint - this will block until shutdown
@@ -156,7 +159,7 @@ async def server(runtime, namespace):
 async def client(runtime, namespace):
     """Create a client connected to the test server"""
     # Create client
-    endpoint = runtime.namespace(namespace).component("backend").endpoint("generate")
+    endpoint = runtime.endpoint(f"{namespace}.backend.generate")
     client = await endpoint.client()
     await client.wait_for_instances()
 
@@ -248,7 +251,9 @@ async def test_server_context_cancel(temp_file_store, server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert str(e).startswith("Stream ended before generation completed")
+        assert str(e).startswith(
+            "Disconnected: Stream ended before generation completed"
+        )
 
     # Verify server context cancellation status
     assert handler.context_is_stopped
@@ -273,9 +278,8 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert (
-            str(e)
-            == "a python exception was caught while processing the async generator: CancelledError: "
+        assert str(e).endswith(
+            "a python exception was caught while processing the async generator: CancelledError: "
         )
 
     # Verify server context cancellation status

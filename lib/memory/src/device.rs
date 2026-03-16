@@ -3,14 +3,14 @@
 
 //! CUDA device memory storage.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Get or create a CUDA context for the given device.
-fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
+pub(crate) fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
     static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
     let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
 
@@ -26,9 +26,13 @@ fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
 /// CUDA device memory allocated via cudaMalloc.
 #[derive(Debug)]
 pub struct DeviceStorage {
+    /// CUDA context used for allocation and deallocation.
     ctx: Arc<CudaContext>,
+    /// Device pointer to the allocated memory.
     ptr: u64,
+    /// CUDA device ID where memory is allocated.
     device_id: u32,
+    /// Size of the allocation in bytes.
     len: usize,
 }
 
@@ -84,7 +88,7 @@ impl Drop for DeviceStorage {
     }
 }
 
-impl MemoryDescription for DeviceStorage {
+impl MemoryDescriptor for DeviceStorage {
     fn addr(&self) -> usize {
         self.device_ptr() as usize
     }

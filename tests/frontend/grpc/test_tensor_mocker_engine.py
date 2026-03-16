@@ -20,8 +20,16 @@ from functools import partial
 
 import numpy as np
 import pytest
-import triton_echo_client
-import tritonclient.grpc as grpcclient
+
+try:
+    import tritonclient.grpc as grpcclient
+except ImportError:
+    grpcclient = None
+
+try:
+    import triton_echo_client
+except ImportError:
+    triton_echo_client = None
 
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
@@ -63,7 +71,7 @@ class MockWorkerProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=[],
             straggler_commands=["echo_tensor_worker.py"],
             log_dir=log_dir,

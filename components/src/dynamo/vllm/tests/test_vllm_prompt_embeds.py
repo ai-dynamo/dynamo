@@ -16,6 +16,8 @@ from dynamo.vllm.handlers import BaseWorkerHandler
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
 ]
 
 
@@ -27,7 +29,7 @@ def mock_handler():
         pass
 
     handler = MockHandler()
-    handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(
+    handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
     return handler

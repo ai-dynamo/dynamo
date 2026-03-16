@@ -253,7 +253,8 @@ fn make_key(bucket_name: &str, key: &Key) -> String {
 #[cfg(test)]
 mod concurrent_create_tests {
     use super::*;
-    use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use crate::Runtime;
+    use crate::transports::etcd as etcd_transport;
     use std::sync::Arc;
     use tokio::sync::Barrier;
 
@@ -261,17 +262,20 @@ mod concurrent_create_tests {
     fn test_concurrent_etcd_create_race_condition() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
-            let drt = DistributedRuntime::new(rt, config).await.unwrap();
-            test_concurrent_create(drt).await.unwrap();
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let storage = crate::storage::kv::Manager::etcd(etcd_client);
+            test_concurrent_create(&storage).await.unwrap();
         });
     }
 
-    async fn test_concurrent_create(drt: DistributedRuntime) -> Result<(), StoreError> {
-        let storage = drt.store();
-
+    async fn test_concurrent_create(
+        storage: &crate::storage::kv::Manager,
+    ) -> Result<(), StoreError> {
         // Create a bucket for testing
         let bucket = Arc::new(tokio::sync::Mutex::new(
             storage

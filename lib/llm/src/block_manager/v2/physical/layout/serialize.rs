@@ -17,16 +17,11 @@ use serde::{Deserialize, Serialize};
 /// This enum describes how the blocks are organized and formatted in memory.
 /// Currently only `Operational` is supported, but future variants may include
 /// different compression schemes or memory layouts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BlockFormat {
     /// Standard operational format - blocks are stored in their normal, uncompressed form.
+    #[default]
     Operational,
-}
-
-impl Default for BlockFormat {
-    fn default() -> Self {
-        Self::Operational
-    }
 }
 
 /// Details specific to fully contiguous layouts.

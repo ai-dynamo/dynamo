@@ -18,6 +18,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.planner,
+    pytest.mark.sglang,
 ]
 logger = logging.getLogger(__name__)
 

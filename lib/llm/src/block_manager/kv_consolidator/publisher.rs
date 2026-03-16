@@ -31,7 +31,6 @@ struct EventBatch(
 );
 
 /// Event types matching vLLM's format
-/// Note: Uses i32 for token_ids, block_size, and lora_id to match vLLM's ZmqEventPublisher
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum Event {
@@ -41,7 +40,8 @@ enum Event {
         parent_block_hash: Option<u64>,
         token_ids: Vec<i32>,
         block_size: i32,
-        lora_id: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
     },
@@ -68,15 +68,13 @@ impl Event {
                 parent_hash,
                 token_ids,
                 block_size,
-                lora_id,
-                source: _, // Source used for logging only, not sent to router
+                lora_name,
+                source: _,
             } => {
-                // Parse block hash - fail if invalid to prevent corruption
                 let parsed_hash = block_hash
                     .parse::<u64>()
                     .with_context(|| format!("Failed to parse block_hash: {}", block_hash))?;
 
-                // Parse parent hash if present - fail if invalid
                 let parsed_parent = parent_hash
                     .map(|h| {
                         h.parse::<u64>()
@@ -84,8 +82,6 @@ impl Event {
                     })
                     .transpose()?;
 
-                // Convert u32 token_ids to i32 for vLLM compatibility
-                // Token IDs should never exceed i32::MAX in practice, but we handle it gracefully
                 let token_ids_i32: Vec<i32> = token_ids
                     .into_iter()
                     .map(|t| {
@@ -96,7 +92,6 @@ impl Event {
                     })
                     .collect();
 
-                // Convert usize block_size to i32 for vLLM compatibility
                 let block_size_i32 = i32::try_from(block_size).unwrap_or_else(|_| {
                     tracing::warn!(
                         "Block size {} exceeds i32::MAX, clamping to i32::MAX",
@@ -105,16 +100,13 @@ impl Event {
                     i32::MAX
                 });
 
-                // lora_id is already Option<i32> in ConsolidatedEvent::Store
-                let lora_id_i32 = lora_id;
-
                 Ok(Event::BlockStored {
                     block_hashes: vec![parsed_hash],
                     parent_block_hash: parsed_parent,
                     token_ids: token_ids_i32,
                     block_size: block_size_i32,
-                    lora_id: lora_id_i32,
-                    medium: None, // Not provided by ConsolidatedEvent
+                    lora_name,
+                    medium: None,
                 })
             }
             ConsolidatedEvent::Remove {

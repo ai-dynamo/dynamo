@@ -10,9 +10,15 @@
 import argparse
 
 import numpy as np
-import tritonclient.grpc as triton_grpc
+
+try:
+    import tritonclient.grpc as triton_grpc
+    from tritonclient.utils import InferenceServerException
+except ImportError:
+    triton_grpc = None
+    InferenceServerException = None
+
 from google.protobuf.json_format import MessageToDict
-from tritonclient.utils import InferenceServerException
 
 
 def main() -> None:

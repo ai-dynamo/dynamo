@@ -1,15 +1,15 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated embedding model serving.
+# GPUs: 1
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -31,10 +31,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+MODEL="Qwen/Qwen3-Embedding-4B"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --no-curl "Launching Embedding Worker" "$MODEL" "$HTTP_PORT"
+
+print_curl_footer <<CURL
+  curl http://localhost:${HTTP_PORT}/v1/embeddings \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "model": "${MODEL}",
+      "input": "${EXAMPLE_PROMPT}"
+    }'
+CURL
+
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run worker
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
@@ -46,4 +58,7 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --use-sglang-tokenizer \
-  --enable-metrics
+  --enable-metrics &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
