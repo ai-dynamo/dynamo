@@ -52,7 +52,7 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/baseten/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
-# Update the image tag in deploy.yaml to your Dynamo release tag
+# Update the image tag in trtllm/agg/baseten/deploy.yaml to your Dynamo release tag
 
 # Deploy
 kubectl apply -f trtllm/agg/baseten/deploy.yaml -n ${NAMESPACE}
