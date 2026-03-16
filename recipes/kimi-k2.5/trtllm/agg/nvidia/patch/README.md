@@ -16,7 +16,7 @@ For example:
 
 ```bash
 ./patch-container.sh nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
-# produces image:    nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0-patched
+# produces image:    nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
 ```
 
 If `KimiK25ForConditionalGeneration` is already registered, the patch is skipped. The script is idempotent -- re-running it on an already-patched image is a no-op.
