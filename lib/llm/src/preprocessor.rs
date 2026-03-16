@@ -1218,39 +1218,6 @@ impl OpenAIPreprocessor {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.choices.iter_mut() {
-                            // If the backend already provides reasoning_content
-                            // (e.g., SGLang with --reasoning-parser), skip the
-                            // Dynamo-side parser — the split is already done.
-                            // Running the parser again with force_reasoning=true
-                            // would misclassify the post-think content as reasoning
-                            // because </think> was consumed by the backend's tokenizer.
-                            //
-                            // However, some backends (vLLM) leave <think> tags in
-                            // delta.content even when reasoning_content is set.
-                            // Strip those tags so downstream processors see clean text.
-                            if choice.delta.reasoning_content.is_some() {
-                                if let Some(
-                                    dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                        ref text,
-                                    ),
-                                ) = choice.delta.content
-                                {
-                                    let stripped = text
-                                        .replace("<think>", "")
-                                        .replace("</think>", "")
-                                        .trim()
-                                        .to_string();
-                                    if stripped.is_empty() {
-                                        choice.delta.content = None;
-                                    } else {
-                                        choice.delta.content = Some(
-                                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(stripped),
-                                        );
-                                    }
-                                }
-                                continue;
-                            }
-
                             // Reasoning parsing only applies to text content
                             if let Some(
                                 dynamo_async_openai::types::ChatCompletionMessageContent::Text(
