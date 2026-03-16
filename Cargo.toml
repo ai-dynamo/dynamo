@@ -46,6 +46,7 @@ dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics", "runtime-protocols"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
+fastokens = { version = "0.1.0" }
 
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "0.1.0" }
