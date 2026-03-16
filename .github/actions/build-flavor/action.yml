@@ -48,7 +48,7 @@ inputs:
     required: false
     default: ''
   build_timeout_minutes:
-    description: 'Timeout in minutes for the build step'
+    description: 'Timeout value for display/logging only — actual timeout must be set via timeout-minutes at the calling job level'
     required: false
     default: '60'
   push_image:
