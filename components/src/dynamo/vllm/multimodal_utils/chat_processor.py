@@ -22,7 +22,11 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
+
+try:
+    from vllm.tokenizers import TokenizerLike as AnyTokenizer
+except ImportError:
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 # Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/32369), fallback to old structure
 try:
