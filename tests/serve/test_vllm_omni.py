@@ -30,7 +30,6 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 )
 
 
-
 @dataclass
 class ImageGenerationPayload(BasePayload):
     """Payload for /v1/images/generations endpoint."""
@@ -41,12 +40,14 @@ class ImageGenerationPayload(BasePayload):
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
         result = response.json()
-        assert "data" in result, f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in image response"
         entry = result["data"][0]
-        assert "b64_json" in entry or "url" in entry, (
-            f"Expected 'b64_json' or 'url' in data entry. Keys: {list(entry.keys())}"
-        )
+        assert (
+            "b64_json" in entry or "url" in entry
+        ), f"Expected 'b64_json' or 'url' in data entry. Keys: {list(entry.keys())}"
         return entry.get("url") or "b64_image_returned"
 
 
@@ -64,12 +65,14 @@ class VideoGenerationPayload(BasePayload):
             f"Video generation not completed. Status: {result.get('status')}, "
             f"Error: {result.get('error', 'none')}"
         )
-        assert "data" in result, f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
-        assert "url" in entry or "b64_json" in entry, (
-            f"Expected 'url' or 'b64_json' in data entry. Keys: {list(entry.keys())}"
-        )
+        assert (
+            "url" in entry or "b64_json" in entry
+        ), f"Expected 'url' or 'b64_json' in data entry. Keys: {list(entry.keys())}"
         return entry.get("url") or "b64_video_returned"
 
     def validate(self, response: Any, content: str) -> None:
