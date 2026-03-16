@@ -420,6 +420,11 @@ class BasePlanner:
 
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
+
+        # Counter of consecutive intervals in which metrics were all NaN/None
+        # (i.e. zero-traffic periods).  When this reaches nan_scaledown_threshold
+        # the planner scales down to min_endpoint to release idle GPUs.
+        self._consecutive_nan_count: int = 0
         if self.dryrun:
             self.no_correction = True
         else:
@@ -692,12 +697,37 @@ class BasePlanner:
         self.osl_predictor.add_data_point(osl_avg)
 
     def plan_adjustment(self) -> Optional[int]:
-        # Skip adjustment if no traffic
+        # When metrics are invalid (zero/near-zero traffic), Prometheus returns
+        # NaN for rate-based averages (e.g. ISL, TTFT are 0/0).  Rather than
+        # skipping the adjustment forever and leaking GPUs, we count consecutive
+        # invalid-metric intervals and scale down to min_endpoint once the
+        # threshold is reached.
         if not self.last_metrics.is_valid():
-            logger.info(
-                "Metrics contain None or NaN values (no active requests), skipping adjustment"
-            )
+            if self.config.nan_scaledown_threshold > 0:
+                self._consecutive_nan_count += 1
+                if self._consecutive_nan_count >= self.config.nan_scaledown_threshold:
+                    logger.info(
+                        f"No valid traffic metrics for {self._consecutive_nan_count} "
+                        f"consecutive interval(s); scaling down to "
+                        f"min_endpoint={self.config.min_endpoint} to release idle GPUs."
+                    )
+                    self._consecutive_nan_count = 0
+                    return self.config.min_endpoint
+                else:
+                    logger.info(
+                        f"Metrics contain None or NaN values (no active requests), "
+                        f"skipping adjustment "
+                        f"({self._consecutive_nan_count}/{self.config.nan_scaledown_threshold} "
+                        f"before scale-down)."
+                    )
+            else:
+                logger.info(
+                    "Metrics contain None or NaN values (no active requests), skipping adjustment"
+                )
             return None
+
+        # Valid metrics received — reset the consecutive-NaN counter.
+        self._consecutive_nan_count = 0
 
         if not self.no_correction:
             try:

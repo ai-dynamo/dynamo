@@ -98,6 +98,7 @@ class PlannerConfig(BaseModel):
     ] = SLAPlannerDefaults.throughput_metrics_source
 
     no_correction: bool = SLAPlannerDefaults.no_correction
+    nan_scaledown_threshold: int = SLAPlannerDefaults.nan_scaledown_threshold
     model_name: Optional[str] = None
 
     # Global planner environment
