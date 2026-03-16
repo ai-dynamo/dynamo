@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-vl-agg
+spec:
+  pvcs:
+    - create: false
+      name: model-cache
+    - create: false
+      name: compilation-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+        limits:
+          cpu: "1"
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              SITE_PACKAGES="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"
+              cd "${SITE_PACKAGES}"
+              curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
+              curl -sL https://github.com/vllm-project/vllm/pull/34783.diff | python3 -c "
+              import sys
+              chunks = sys.stdin.read().split('diff --git ')
+              filtered = [c for c in chunks if c.startswith('a/vllm/')]
+              print(''.join('diff --git ' + c for c in filtered))
+              " | patch -p1
+              cd /workspace
+
+              python3 -m dynamo.vllm \
+                --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+                --enable-multimodal \
+                --tensor-parallel-size 1 \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 16384 \
+                --disable-log-requests \
+                --enable-prefix-caching \
+                --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
+              value: nixl-write
+            - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
+              value: "10"
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      subComponentType: null
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+        - name: compilation-cache
+          mountPoint: /home/dynamo/.cache/vllm
+          useAsCompilationCache: true

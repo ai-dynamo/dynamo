@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+  Dynamo Dev Container
+  ====================
+
+  /workspace is bind-mounted from your host. Before running or testing,
+  compile the Rust extensions and install the Python packages:
+
+    cargo build --features dynamo-llm/block-manager
+    cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
+    uv pip install --no-deps -e /workspace
+
+  Verify with:
+
+    /workspace/deploy/sanity_check.py
