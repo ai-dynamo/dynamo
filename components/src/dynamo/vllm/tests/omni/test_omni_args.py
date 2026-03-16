@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.vllm.omni.args import OmniConfig
+try:
+    from dynamo.vllm.omni.args import OmniConfig
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
