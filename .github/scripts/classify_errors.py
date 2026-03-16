@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import requests
 
-MAX_LOG_CHARS = 400_000
+MAX_LOG_CHARS = 50_000
 
 
 def main():
@@ -85,7 +85,11 @@ def main():
             print(f"    Warning: Could not fetch log for job {job_name}")
             continue
 
-        result = classify_errors(log, job_name, system_prompt, api_key, model, base_url)
+        try:
+            result = classify_errors(log, job_name, system_prompt, api_key, model, base_url)
+        except Exception as e:
+            print(f"    Error classifying job {job_name}: {e}")
+            continue
         if result and result.get("errors_found"):
             for error in result["errors_found"]:
                 all_errors.append(
