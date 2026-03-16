@@ -26,7 +26,6 @@ jobs:
           restore-keys: cache-lychee-
 
       - name: Check documentation links with lychee
-        if: github.event_name != 'pull_request'
         uses: lycheeverse/lychee-action@v2
         with:
           args: >-
@@ -45,32 +44,6 @@ jobs:
             --host-concurrency 10
             --host-request-interval 1s
             --host-stats
-            .
-          fail: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check documentation links with lychee (offline for PRs)
-        if: github.event_name == 'pull_request'
-        uses: lycheeverse/lychee-action@v2
-        with:
-          args: >-
-            --cache
-            --no-progress
-            --max-retries 4
-            --retry-wait-time 3
-            --timeout 30
-            --root-dir ${{ github.workspace }}
-            --exclude-path ".*ATTRIBUTIONS.*"
-            --exclude-path "./lib/llm/tests/data/.*"
-            --accept "200..=299, 403, 429"
-            --exclude-all-private
-            --exclude 0.0.0.0
-            --verbose
-            --host-concurrency 10
-            --host-request-interval 1s
-            --host-stats
-            --offline
             .
           fail: true
         env:

@@ -392,9 +392,9 @@ async fn connection_writer_task(
     instance_id: crate::InstanceId,
     rx: flume::Receiver<SendTask>,
     connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
-    _cancel_token: CancellationToken,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
-    let result = connection_writer_inner(addr, instance_id, &rx).await;
+    let result = connection_writer_inner(addr, instance_id, &rx, &cancel_token).await;
 
     // Always drain queued messages and notify their error handlers.
     //
@@ -426,10 +426,14 @@ async fn connection_writer_inner(
     addr: SocketAddr,
     instance_id: crate::InstanceId,
     rx: &flume::Receiver<SendTask>,
+    cancel_token: &CancellationToken,
 ) -> Result<()> {
     debug!("Connecting to {}", addr);
 
-    let mut stream = TcpStream::connect(addr).await.context("connect failed")?;
+    let mut stream = tokio::select! {
+        _ = cancel_token.cancelled() => return Ok(()),
+        res = TcpStream::connect(addr) => res.context("connect failed")?,
+    };
 
     if let Err(e) = stream.set_nodelay(true) {
         warn!("Failed to set TCP_NODELAY: {}", e);
@@ -450,7 +454,14 @@ async fn connection_writer_inner(
 
     debug!("Connected to {}", addr);
 
-    while let Ok(msg) = rx.recv_async().await {
+    loop {
+        let msg = tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            res = rx.recv_async() => match res {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
         if let Err(e) =
             TcpFrameCodec::encode_frame(&mut stream, msg.msg_type, &msg.header, &msg.payload).await
         {
