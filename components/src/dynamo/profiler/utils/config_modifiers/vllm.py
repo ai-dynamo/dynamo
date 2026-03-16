@@ -168,7 +168,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
             cfg, backend="vllm", sub_component_type=component_type

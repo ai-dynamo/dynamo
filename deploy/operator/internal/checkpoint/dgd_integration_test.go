@@ -44,7 +44,7 @@ func testPVCConfig() *configv1alpha1.CheckpointConfiguration {
 		Storage: configv1alpha1.CheckpointStorageConfiguration{
 			Type: configv1alpha1.CheckpointStorageTypePVC,
 			PVC: configv1alpha1.CheckpointPVCConfig{
-				PVCName:  "chrek-pvc",
+				PVCName:  "snapshot-pvc",
 				BasePath: "/checkpoints",
 			},
 		},
@@ -113,7 +113,7 @@ func TestHelpers(t *testing.T) {
 func TestInjectionIdempotency(t *testing.T) {
 	// Volume injection is idempotent
 	podSpec := &corev1.PodSpec{Volumes: []corev1.Volume{{Name: consts.CheckpointVolumeName}, {Name: consts.PodInfoVolumeName}}}
-	InjectCheckpointVolume(podSpec, "chrek-pvc")
+	InjectCheckpointVolume(podSpec, "snapshot-pvc")
 	InjectPodInfoVolume(podSpec)
 	assert.Len(t, podSpec.Volumes, 2)
 
@@ -260,7 +260,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, v := range podSpec.Volumes {
 			volNames[v.Name] = true
 			if v.Name == consts.CheckpointVolumeName {
-				assert.Equal(t, "chrek-pvc", v.PersistentVolumeClaim.ClaimName)
+				assert.Equal(t, "snapshot-pvc", v.PersistentVolumeClaim.ClaimName)
 			}
 		}
 		assert.True(t, volNames[consts.CheckpointVolumeName])
@@ -329,7 +329,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
 			}, "no PVC name"},
 			{"PVC base path missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{PVCName: "chrek-pvc"}},
+				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{PVCName: "snapshot-pvc"}},
 			}, "no PVC base path"},
 			{"S3 URI missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "s3"},

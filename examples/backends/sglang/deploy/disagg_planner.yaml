@@ -19,9 +19,10 @@
 #       prefill_ttft (time-to-first-token in ms), prefill_thpt_per_gpu
 #       (tokens/s per GPU) — all 1-D arrays of equal length.
 #   decode_raw_data.json  — x_kv_usage (KV-cache utilisation fractions),
-#       y_context_length (context lengths), z_itl (inter-token latency in ms,
-#       shape [len(x_kv_usage), len(y_context_length)]), z_thpt_per_gpu
-#       (tokens/s per GPU, same shape), max_kv_tokens (scalar).
+#       y_context_length (context lengths), z_itl (inter-token latency in ms),
+#       z_thpt_per_gpu (tokens/s per GPU), max_kv_tokens (scalar).
+#       x_kv_usage, y_context_length, z_itl, and z_thpt_per_gpu must all be
+#       flat 1-D arrays of the same length (one entry per measurement point).
 # ──────────────────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: ConfigMap
@@ -36,22 +37,10 @@ data:
     }
   decode_raw_data.json: |
     {
-      "x_kv_usage":       [0.1, 0.3, 0.5, 0.7, 0.9],
-      "y_context_length":  [128, 512, 1024, 2048],
-      "z_itl": [
-        [5,  6,  7,  9 ],
-        [6,  7,  8,  10],
-        [7,  8,  10, 12],
-        [8,  10, 12, 15],
-        [10, 12, 15, 20]
-      ],
-      "z_thpt_per_gpu": [
-        [4500, 4000, 3500, 2800],
-        [4200, 3700, 3200, 2500],
-        [3800, 3300, 2800, 2200],
-        [3400, 2900, 2400, 1800],
-        [2800, 2400, 1900, 1400]
-      ],
+      "x_kv_usage":       [0.1, 0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 0.7, 0.9, 0.9, 0.9, 0.9],
+      "y_context_length": [128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048],
+      "z_itl":            [5, 6, 7, 9, 6, 7, 8, 10, 7, 8, 10, 12, 8, 10, 12, 15, 10, 12, 15, 20],
+      "z_thpt_per_gpu":   [4500, 4000, 3500, 2800, 4200, 3700, 3200, 2500, 3800, 3300, 2800, 2200, 3400, 2900, 2400, 1800, 2800, 2400, 1900, 1400],
       "max_kv_tokens": 32768
     }
 ---

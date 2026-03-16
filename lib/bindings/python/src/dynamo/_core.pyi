@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from typing import (
     Any,
     AsyncGenerator,
@@ -13,8 +14,6 @@ from typing import (
     Tuple,
 )
 
-from ._prometheus_names import prometheus_names
-
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
@@ -22,6 +21,14 @@ def log_message(level: str, message: str, module: str, file: str, line: int) -> 
     """
     Log a message from Python with file and line info
     """
+    ...
+
+def get_tool_parser_names() -> list[str]:
+    """Get list of available tool parser names."""
+    ...
+
+def get_reasoning_parser_names() -> list[str]:
+    """Get list of available reasoning parser names."""
     ...
 
 class JsonLike:
@@ -202,21 +209,48 @@ class Client:
         """
         ...
 
-    async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+    async def random(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick a random instance of the endpoint and issue the request
         """
         ...
 
-    async def round_robin(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+    async def round_robin(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick the next instance of the endpoint in a round-robin fashion
         """
         ...
 
-    async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
+    async def direct(
+            self,
+            request: JsonLike,
+            instance_id: int,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
+        """
+        ...
+
+    async def generate(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
+        """
+        Generate a response from the endpoint
         """
         ...
 
@@ -322,7 +356,7 @@ class Context:
         """
         ...
 
-    async def async_killed_or_stopped(self) -> bool:
+    def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
 
@@ -412,7 +446,17 @@ class ModelDeploymentCard:
         """Deserialize a model deployment card from a JSON string."""
         ...
 
-    ...
+    def model_type(self) -> ModelType:
+        """Return the model type of this deployment card."""
+        ...
+
+    def source_path(self) -> str:
+        """Return the source path of this deployment card."""
+        ...
+
+    def runtime_config(self) -> Any:
+        """Return the runtime configuration as a dict."""
+        ...
 
 class ModelRuntimeConfig:
     """
@@ -424,9 +468,15 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    data_parallel_start_rank: int
+    data_parallel_size: int
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
+    data_parallel_size: int
+    data_parallel_start_rank: int
+    bootstrap_host: str | None
+    bootstrap_port: int | None
 
     def __init__(self) -> None: ...
 
@@ -436,6 +486,22 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
+        ...
+
+    def set_disaggregated_endpoint(
+            self,
+            bootstrap_host: str | None = None,
+            bootstrap_port: int | None = None,
+        ) -> None:
+        """Set the disaggregated endpoint for the model"""
+        ...
+
+    def set_tensor_model_config(self, tensor_model_config: Dict[str, Any]) -> None:
+        """Set the tensor model configuration from a dictionary."""
+        ...
+
+    def get_tensor_model_config(self) -> Any | None:
+        """Get the tensor model configuration."""
         ...
 
 class OverlapScores:
@@ -729,6 +795,64 @@ class KvEventPublisher:
         """
         ...
 
+
+class FpmEventRelay:
+    """
+    Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
+    (InstrumentedScheduler in EngineCore child process) to the Dynamo event
+    plane with automatic discovery registration.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        zmq_endpoint: str,
+    ) -> None:
+        """
+        Create a relay.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+            zmq_endpoint: Local ZMQ PUB address to subscribe to
+                (e.g., "tcp://127.0.0.1:20380").
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the relay task."""
+        ...
+
+
+class FpmEventSubscriber:
+    """
+    Subscriber for ForwardPassMetrics from the Dynamo event plane.
+    Auto-discovers engine publishers via the discovery plane.
+    """
+
+    def __init__(self, endpoint: Endpoint) -> None:
+        """
+        Create a subscriber that auto-discovers FPM publishers.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+        """
+        ...
+
+    def recv(self) -> Optional[bytes]:
+        """
+        Blocking receive of the next message (raw msgspec bytes).
+        Releases the GIL while waiting.
+
+        Returns:
+            Raw msgspec payload, or None if the stream is closed.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the subscriber."""
+        ...
+
+
 class HttpService:
     """
     A HTTP service for dynamo applications.
@@ -915,7 +1039,10 @@ class KserveGrpcService:
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
-    ...
+    Text: ModelInput
+    Tokens: ModelInput
+    Tensor: ModelInput
+
 
 class ModelType:
     """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
@@ -927,7 +1054,13 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
-    ...
+
+    def __or__(self, other: ModelType) -> ModelType:
+        ...
+
+    def supports_chat(self) -> bool:
+        """Return True if this model type supports chat."""
+        ...
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
@@ -939,6 +1072,8 @@ class RouterMode:
 
 class RouterConfig:
     """How to route the request"""
+    router_mode: RouterMode
+    kv_router_config: KvRouterConfig
 
     def __init__(
         self,
@@ -947,7 +1082,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        decode_fallback: bool = False,
+        enforce_disagg: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -958,7 +1093,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
+            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
         """
         ...
 
@@ -980,8 +1115,10 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
-        router_queue_threshold: Optional[float] = None,
+        router_queue_threshold: Optional[float] = 2.0,
         router_event_threads: int = 4,
+        router_enable_cache_control: bool = False,
+        router_queue_policy: str = "fcfs",
     ) -> None:
         """
         Create a KV router configuration.
@@ -1006,12 +1143,17 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
-            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: None).
-                When set, requests are queued if all workers exceed this fraction of
-                max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints.
-                If None, queueing is disabled and all requests go directly to the scheduler.
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 2.0).
+                Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+                Enables priority scheduling via latency_sensitivity hints.
+                Set to None to disable queueing (all requests go directly to the scheduler).
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
+            router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
+                cache_control service mesh endpoint (default: False).
+            router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+                "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
+                "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
         """
         ...
 
@@ -1027,6 +1169,8 @@ async def register_model(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    media_decoder: Optional[MediaDecoder] = None,
+    media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
 ) -> None:
@@ -1058,6 +1202,36 @@ async def unregister_model(
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
+
+class LoRADownloader:
+    """Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs)."""
+
+    def __init__(self, cache_path: Optional[str] = None) -> None: ...
+    def download_if_needed(self, lora_uri: str) -> Awaitable[str]: ...
+    def get_cache_path(self, cache_key: str) -> str: ...
+    def is_cached(self, cache_key: str) -> bool: ...
+    def validate_cached(self, cache_key: str) -> bool: ...
+
+    @staticmethod
+    def uri_to_cache_key(uri: str) -> str: ...
+
+
+class MediaDecoder:
+    """Media decoder for image and video preprocessing."""
+
+    def __init__(self) -> None: ...
+    def enable_image(self, decoder_options: Dict[str, Any]) -> None: ...
+
+
+class MediaFetcher:
+    """Media fetcher for loading remote image/video URLs."""
+
+    def __init__(self) -> None: ...
+    def user_agent(self, user_agent: str) -> None: ...
+    def allow_direct_ip(self, allow: bool) -> None: ...
+    def allow_direct_port(self, allow: bool) -> None: ...
+    def allowed_media_domains(self, domains: List[str]) -> None: ...
+    def timeout_ms(self, timeout_ms: int) -> None: ...
 
 async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
@@ -1378,6 +1552,18 @@ class KvRouter:
         """
         ...
 
+    async def generate_from_request(
+        self,
+        request: JsonLike,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate from a preprocessed request dict (PreprocessedRequest format).
+
+        Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Returns an async iterator yielding generation responses.
+        """
+        ...
+
     async def best_worker(
         self,
         token_ids: List[int],
@@ -1503,7 +1689,9 @@ class EntrypointArgs:
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
+        runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
+        namespace_prefix: Optional[str] = None,
         is_prefill: bool = False,
         migration_limit: int = 0,
         chat_engine_factory: Optional[Callable] = None,
@@ -1526,7 +1714,9 @@ class EntrypointArgs:
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
             extra_engine_args: Path to extra engine arguments file
+            runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
+            namespace_prefix: Optional namespace prefix
             is_prefill: Whether this is a prefill worker
             migration_limit: Maximum number of request migrations (0=disabled)
             chat_engine_factory: Optional Python chat completions engine factory callback
@@ -1539,6 +1729,8 @@ class PlannerDecision:
             -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
     Call VirtualConnectorClient.complete(event) when action is completed.
     """
+    num_prefill_workers: int
+    num_decode_workers: int
     ...
 
 class VirtualConnectorCoordinator:
@@ -1577,12 +1769,3 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
-__all__ = [
-    "Client",
-    "Context",
-    "KserveGrpcService",
-    "ModelDeploymentCard",
-    "PythonAsyncEngine",
-    "prometheus_names",
-    "ModelCardInstanceId",
-]

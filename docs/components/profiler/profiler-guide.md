@@ -38,18 +38,18 @@ flowchart TD
     Pick --> DGDGen
     Naive --> DGDGen
 
-    DGDGen --> PlannerCheck{"Planner\nenabled?"}
-    PlannerCheck -->|yes| Interpolation["Interpolation\nCurves"]
-    PlannerCheck -->|no| MockerCheck
+    DGDGen --> Interpolation["Interpolation\nCurves"]
 
-    Interpolation --> AddPlanner["Add Planner\nService + ConfigMaps"]
-    AddPlanner --> MockerCheck{"Mocker\nenabled?"}
-
-    MockerCheck -->|yes| Mocker["Output Mocker DGD"]
-    MockerCheck -->|no| RealDGD["Output Real DGD"]
-
-    Mocker --> Final["final_config.yaml"]
-    RealDGD --> Final
+    Interpolation --> MockerCheck{mocker?}
+    MockerCheck -->|yes| MockerBase["generate_mocker_config()"]
+    MockerCheck -->|no| PlannerCheck
+    MockerBase --> PlannerCheck{planner?}
+    PlannerCheck -->|yes| AddPlanner["add_planner_to_config()"]
+    PlannerCheck -->|no| ProfileCheck
+    AddPlanner --> ProfileCheck{"needs profile data?\n(mocker or throughput\nplanner enabled)"}
+    ProfileCheck -->|yes| AddProfile["add_profile_data_to_config()"]
+    ProfileCheck -->|no| Final
+    AddProfile --> Final["final_config.yaml"]
 ```
 
 ### Stage-by-stage walkthrough
@@ -64,9 +64,14 @@ flowchart TD
 
 4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
 
-5. **Interpolation** (planner only): When the planner is enabled, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. These are saved into ConfigMaps for the planner to use at runtime.
+5. **Interpolation** (throughput planner/mocker): When the planner is enabled, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. These are stored as NPZ files and later packaged into a ConfigMap during final assembly.
 
-6. **Final Assembly**: The planner service is added to the DGD if enabled. If mocker is enabled, the mocker DGD is used instead of real workers. The result is written to `final_config.yaml`.
+6. **Final Assembly** (3 composable layers):
+   1. **Mocker base**: If mocker is enabled, the base DGD is swapped for the mocker DGD template (`generate_mocker_config`). Otherwise the AIC-picked DGD is kept.
+   2. **Planner service**: If the planner is enabled, the Planner pod and its planner-config ConfigMap are injected into the DGD (`add_planner_to_config`).
+   3. **Profile data**: If mocker is enabled or planner throughput-based scaling is enabled, the interpolation data ConfigMap is created and mounted into all consumers — the Planner service and/or mocker workers (`add_profile_data_to_config`).
+
+   The result is written to `final_config.yaml`.
 
 ## Search Strategies
 
@@ -195,7 +200,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -366,7 +371,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
 
   searchStrategy: rapid  # or thorough
   autoApply: true

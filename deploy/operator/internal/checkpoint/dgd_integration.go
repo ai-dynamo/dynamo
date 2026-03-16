@@ -325,7 +325,7 @@ func InjectPodInfoVolumeMount(container *corev1.Container) {
 }
 
 // InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec for
-// external restore via the chrek DaemonSet. The pod image is expected to be a
+// external restore via the snapshot DaemonSet. The pod image is expected to be a
 // runtime-compatible restore image (runtime + CRIU tooling). For ready checkpoints,
 // the operator overrides command to `sleep infinity` so the watcher can trigger
 // external restore via nsenter + nsrestore.

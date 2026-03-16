@@ -30,7 +30,7 @@
 #     --build-context dynamo=../../.. \
 #     -t dynamo/dynamo-epp:dev .
 
-ARG RUST_IMAGE=rust:1.90
+ARG RUST_IMAGE=rust:1.93.1
 ARG BUILDER_IMAGE=golang:1.24
 ARG BASE_IMAGE=ubuntu:24.04
 
@@ -53,6 +53,7 @@ WORKDIR /dynamo
 
 # Copy Cargo workspace manifests, lockfile, and README (some crates inherit
 # readme.workspace = true, so cargo needs README.md at the workspace root)
+COPY --from=dynamo .cargo/ .cargo/
 COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
 # Copy all workspace crates (libdynamo_llm depends transitively on many)

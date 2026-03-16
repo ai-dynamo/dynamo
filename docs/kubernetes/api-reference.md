@@ -176,7 +176,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
-| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0" |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
@@ -945,7 +945,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
-| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0" |  | Required: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
 | `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
@@ -1402,6 +1402,28 @@ _Appears in:_
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
+#### GPUSKUType
+
+_Underlying type:_ _string_
+
+GPUSKUType is the AIC hardware system identifier for a supported GPU.
+
+_Validation:_
+- Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s]
+
+_Appears in:_
+- [HardwareSpec](#hardwarespec)
+
+| Field | Description |
+| --- | --- |
+| `gb200_sxm` |  |
+| `h200_sxm` |  |
+| `h100_sxm` |  |
+| `b200_sxm` |  |
+| `a100_sxm` |  |
+| `l40s` |  |
+
+
 #### HardwareSpec
 
 
@@ -1416,7 +1438,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  | Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
@@ -1456,24 +1478,6 @@ _Appears in:_
 | `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  | Optional: \{\} <br /> |
 | `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
 | `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
-
-
-#### OptimizationType
-
-_Underlying type:_ _string_
-
-OptimizationType specifies the profiling optimization strategy.
-
-_Validation:_
-- Enum: [latency throughput]
-
-_Appears in:_
-- [SLASpec](#slaspec)
-
-| Field | Description |
-| --- | --- |
-| `latency` |  |
-| `throughput` |  |
 
 
 #### OverridesSpec
@@ -1557,7 +1561,6 @@ _Appears in:_
 
 
 SLASpec defines the service-level agreement targets for profiling optimization.
-Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 
 
 
@@ -1566,7 +1569,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
 | `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
 | `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
 | `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
@@ -1618,6 +1620,23 @@ _Appears in:_
 
 
 
+#### CertProvisionMode
+
+_Underlying type:_ _string_
+
+CertProvisionMode controls how webhook TLS certificates are managed.
+
+
+
+_Appears in:_
+- [WebhookServer](#webhookserver)
+
+| Field | Description |
+| --- | --- |
+| `auto` | CertProvisionModeAuto uses the built-in cert-controller to generate and rotate certificates.<br /> |
+| `manual` | CertProvisionModeManual expects certificates to be provided externally (e.g., cert-manager, admin).<br /> |
+
+
 #### CheckpointConfiguration
 
 
@@ -1666,7 +1685,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PVC | chrek-pvc |  |
+| `pvcName` _string_ | PVCName is the name of the PVC | snapshot-pvc |  |
 | `basePath` _string_ | BasePath is the base directory within the PVC | /checkpoints |  |
 
 
@@ -1909,7 +1928,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
 | `port` _integer_ | Port is the port the server listens on |  |  |
-| `secure` _boolean_ | Secure enables secure serving for the metrics endpoint |  |  |
+| `secure` _boolean_ | Secure enables secure serving for the metrics endpoint.<br />nil = default to true (secure by default). |  |  |
 
 
 #### NamespaceConfiguration
@@ -2059,7 +2078,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:127.0.0.1 port:8080 \} |  |
+| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:0.0.0.0 port:8080 secure:true \} |  |
 | `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:0.0.0.0 port:8081 \} |  |
 | `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} |  |
 
@@ -2081,6 +2100,9 @@ _Appears in:_
 | `port` _integer_ | Port is the port the server listens on |  |  |
 | `host` _string_ | Host is the address the webhook server binds to |  |  |
 | `certDir` _string_ | CertDir is the directory containing TLS certificates |  |  |
+| `certProvisionMode` _[CertProvisionMode](#certprovisionmode)_ | CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external) | auto |  |
+| `secretName` _string_ | SecretName is the name of the Kubernetes Secret holding webhook TLS certificates | webhook-server-cert |  |
+| `serviceName` _string_ | ServiceName is the name of the Kubernetes Service fronting the webhook server.<br />Used to generate certificate SANs. Set by the Helm chart. |  |  |
 
 
 # Operator Default Values Injection

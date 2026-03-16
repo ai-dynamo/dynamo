@@ -6,8 +6,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
+    from PIL import Image
+
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
-    from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
+    from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
 except ImportError:
@@ -151,7 +153,6 @@ class TestFormatTextChunk:
     def test_finish_reason_included(self):
         """Final chunk includes finish_reason and usage stats."""
         handler = _make_handler()
-        handler._normalize_finish_reason = lambda r: r
         handler._build_completion_usage = lambda ro: {
             "prompt_tokens": 3,
             "completion_tokens": 1,
@@ -160,6 +161,24 @@ class TestFormatTextChunk:
         chunk = handler._format_text_chunk(ro, "req-1", "")
         assert chunk["choices"][0]["finish_reason"] == "stop"
         assert "usage" in chunk
+
+    def test_finish_reason_abort_normalized(self):
+        """Abort finish reason is normalized to 'cancelled'."""
+        handler = _make_handler()
+        handler._build_completion_usage = lambda ro: {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+        }
+        ro = self._make_output("done", finish_reason="abort")
+        chunk = handler._format_text_chunk(ro, "req-1", "")
+        assert chunk["choices"][0]["finish_reason"] == "cancelled"
+
+    def test_finish_reason_none_when_not_finished(self):
+        """finish_reason is None when output has no finish_reason."""
+        handler = _make_handler()
+        ro = self._make_output("partial")
+        chunk = handler._format_text_chunk(ro, "req-1", "")
+        assert chunk["choices"][0]["finish_reason"] is None
 
 
 class TestFormatImageChunk:
@@ -230,3 +249,60 @@ class TestFormatVideoChunk:
             chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
+
+
+class TestI2VEngineInputs:
+    """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
+
+    def test_t2v_no_multi_modal_data_and_i2v_attaches_image(self):
+        """T2V has no multi_modal_data; I2V attaches image to prompt."""
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone", model="test", size="832x480", seconds=2
+        )
+
+        # T2V: no image
+        t2v = handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        assert "multi_modal_data" not in t2v.prompt
+
+        # I2V: image attached
+        img = Image.new("RGB", (64, 64), color="red")
+        i2v = handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION, image=img)
+        assert i2v.prompt["multi_modal_data"]["image"] is img
+
+    def test_i2v_nvext_params_on_sampling_params(self):
+        """boundary_ratio and guidance_scale_2 are forwarded to sampling params."""
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="bear",
+            model="test",
+            size="832x480",
+            nvext=VideoNvExt(
+                boundary_ratio=0.875, guidance_scale_2=1.0, num_inference_steps=40
+            ),
+        )
+        sp = handler.build_engine_inputs(
+            req, RequestType.VIDEO_GENERATION
+        ).sampling_params_list[0]
+        assert sp.boundary_ratio == 0.875
+        assert sp.guidance_scale_2 == 1.0
+        assert sp.num_inference_steps == 40
+
+    def test_i2v_protocol_roundtrip(self):
+        """VideoNvExt and NvCreateVideoRequest serialize/deserialize I2V fields correctly."""
+        req = NvCreateVideoRequest(
+            prompt="bear playing",
+            model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            input_reference="/tmp/bear.png",
+            size="832x480",
+            nvext=VideoNvExt(boundary_ratio=0.9, guidance_scale_2=2.0, seed=42),
+        )
+        data = req.model_dump()
+        assert data["input_reference"] == "/tmp/bear.png"
+        assert data["nvext"]["boundary_ratio"] == 0.9
+        assert data["nvext"]["guidance_scale_2"] == 2.0
+
+        # Defaults are None
+        empty = VideoNvExt()
+        assert empty.boundary_ratio is None
+        assert empty.guidance_scale_2 is None

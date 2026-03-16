@@ -104,6 +104,8 @@ pub struct MmRoutingInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    #[serde(rename(serialize = "Url"))]
+    RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
 }
 

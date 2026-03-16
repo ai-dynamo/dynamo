@@ -132,7 +132,7 @@ class BaseOmniHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Omni Request ID: {request_id}")
 
-        async for chunk in self._generate_openai_mode(request, context, request_id):
+        async for chunk in self._generate_openai_mode(request, context, request_id):  # type: ignore
             yield chunk
 
     async def _generate_openai_mode(

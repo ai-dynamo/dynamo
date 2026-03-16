@@ -1,12 +1,14 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
+from typing import Any, Optional
+
 
 class InputParamManager:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer: Any) -> None:
         self.tokenizer = tokenizer
 
-    def get_input_param(self, request: dict, use_tokenizer: bool):
+    def get_input_param(self, request: dict, use_tokenizer: bool) -> Optional[Any]:
         """
         Get the input parameter for the request.
         """

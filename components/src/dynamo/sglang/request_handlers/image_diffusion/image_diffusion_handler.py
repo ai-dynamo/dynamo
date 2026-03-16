@@ -109,13 +109,14 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 seed=nvext.seed,
             )
 
-            user_id = req.user if req.user else context.id()
-
+            context_id = context.id()
+            assert context_id is not None
+            user_id = req.user or context_id
             image_data = []
             for img in images:
                 # uploading or encoding the image
                 if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context.id())
+                    url = await self._upload_to_fs(img, user_id, context_id)
                     image_data.append(ImageData(url=url))
                 else:
                     b64 = self._encode_base64(img)

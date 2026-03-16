@@ -207,7 +207,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         cfg = Config.model_validate(config)
 
         # Get the worker service using helper function
@@ -245,7 +245,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         tep_size: int,
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         raise NotImplementedError(
             "TEP (Tensor Expert Parallelism) is not implemented for TrtLLM backend"
         )
@@ -257,7 +257,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         dep_size: int,
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         raise NotImplementedError(
             "DEP (Data Expert Parallelism) is not implemented for TrtLLM backend"
         )

@@ -56,14 +56,9 @@ runs:
           echo "Namespace $NAMESPACE exists, will reuse it"
         else
           echo "exists=false" >> $GITHUB_OUTPUT
-          # Generate a unique namespace for this framework+profile to avoid collisions on parallel reruns
-          # Replace underscores with hyphens for k8s naming compliance
-          PROFILE_SANITIZED="${PROFILE//_/-}"
-          SELF_NS="${NAMESPACE}-${FRAMEWORK}-${PROFILE_SANITIZED}"
-          #TODO: Improve this truncation logic. The operator creates k8s labels as "{namespace}-{deployment_name} which restricts max length to 44 chars
-          # (largest deployment name is "vllm-disagg-router" (18 chars)).
-          SELF_NS="${SELF_NS:0:44}"
-          # Remove trailing dash from truncation
+          # Use check_run_id (unique per job+retry) to keep namespace under k8s 63-char label limit
+          SELF_NS="${NAMESPACE}-${{ job.check_run_id }}"
+          SELF_NS="${SELF_NS:0:36}"
           SELF_NS="${SELF_NS%-}"
           echo "ns=${SELF_NS}" >> $GITHUB_OUTPUT
           echo "Namespace $NAMESPACE not found, will self-bootstrap as ${SELF_NS}"

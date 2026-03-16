@@ -185,7 +185,7 @@ def _compile_include_pattern(metric_prefixes: tuple[str, ...]) -> Pattern:
 
 
 def get_prometheus_expfmt(
-    registry,
+    registry: "CollectorRegistry",
     metric_prefix_filters: Optional[list[str]] = None,
     exclude_prefixes: Optional[list[str]] = None,
     inject_custom_labels: Optional[dict[str, str]] = None,
@@ -310,7 +310,12 @@ class LLMBackendMetrics:
         metrics.set_model_load_time(5.2)
     """
 
-    def __init__(self, registry=None, model_name: str = "", component_name: str = ""):
+    def __init__(
+        self,
+        registry: Optional["CollectorRegistry"] = None,
+        model_name: str = "",
+        component_name: str = "",
+    ) -> None:
         """Create all Dynamo component gauges."""
         from prometheus_client import Gauge
 
