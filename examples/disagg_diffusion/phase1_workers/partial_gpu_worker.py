@@ -72,19 +72,52 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class DeviceMoveStage(PipelineStage):
-    """Move tensor fields on ``Req`` to the current CUDA device.
+class NixlReceiveStage(PipelineStage):
+    """Pull tensor fields onto the current GPU via NIXL RDMA.
 
-    Tensors arriving via ZMQ (pickle) land on CPU.  Prepend this stage
-    at the start of denoiser / VAE pipelines that receive tensors from
-    other processes.
+    Prepend at the start of denoiser / VAE pipelines.  The ``Req``
+    carries NIXL metadata (set by the orchestrator); this stage uses
+    it to pull the actual tensor data directly from the sender's GPU
+    without a CPU round-trip.
     """
 
     def __init__(self, tensor_fields: List[str]):
         super().__init__()
         self._tensor_fields = tensor_fields
+        self._receiver = None
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        nixl_meta = getattr(batch, "_nixl_transfer_meta", None)
+        if nixl_meta is not None:
+            return self._nixl_pull(batch, nixl_meta)
+        # Fallback: tensors arrived via ZMQ pickle — just move to GPU
+        return self._device_move(batch)
+
+    def _nixl_pull(self, batch: Req, meta: dict) -> Req:
+        from nixl_transfer import NixlTensorReceiver
+        if self._receiver is None:
+            self._receiver = NixlTensorReceiver()
+        tensors = self._receiver.recv(meta, device="cuda")
+        # Reconstruct indexed fields (e.g. prompt_embeds_0, prompt_embeds_1
+        # + __prompt_embeds_count → prompt_embeds list)
+        reconstructed = {}
+        indexed = {}  # base_name → {idx: tensor}
+        for k, v in tensors.items():
+            if k.startswith("__") and k.endswith("_count"):
+                continue
+            parts = k.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                indexed.setdefault(parts[0], {})[int(parts[1])] = v
+            else:
+                reconstructed[k] = v
+        for base, idx_map in indexed.items():
+            reconstructed[base] = [idx_map[i] for i in sorted(idx_map)]
+        from sglang_utils import inject_tensors_to_req
+        inject_tensors_to_req(batch, reconstructed)
+        return batch
+
+    def _device_move(self, batch: Req) -> Req:
+        """Fallback: move CPU tensors to GPU (ZMQ pickle path)."""
         device = torch.device("cuda")
         for field in self._tensor_fields:
             val = getattr(batch, field, None)
@@ -100,26 +133,36 @@ class DeviceMoveStage(PipelineStage):
         return batch
 
 
-class IntermediateOutputStage(PipelineStage):
-    """Pipeline stage that packages ``Req`` tensors into ``OutputBatch``.
+class NixlSendStage(PipelineStage):
+    """Register ``Req`` tensors as NIXL-readable and return metadata.
 
     Append as the **last** stage in encoder / denoiser partial pipelines.
-    ``GPUWorker.execute_forward`` sees an ``OutputBatch`` (not a ``Req``)
-    and returns it through ZMQ without any custom override.
+    Returns an ``OutputBatch`` whose ``output`` dict contains:
+    - ``_nixl_transfer_meta``: NIXL metadata for the receiver (~1.5 KB)
+    - tensor shapes/dtypes for logging
 
-    ``output_fields`` lists the ``Req`` attributes to extract.
-    Single-element lists are unwrapped to bare tensors.
-    Multi-element lists (e.g. dual-encoder embeddings) are preserved as
-    lists so the receiver can reconstruct them correctly.
-    The handler receives ``OutputBatch.output`` as ``dict[str, Tensor|list]``.
+    Actual tensor data stays on GPU — only metadata travels over ZMQ.
+    Falls back to sending raw tensors when NIXL is unavailable.
     """
 
     def __init__(self, output_fields: List[str]):
         super().__init__()
         self._output_fields = output_fields
+        self._sender = None
 
     def forward(self, batch: Req, server_args: ServerArgs) -> OutputBatch:
-        tensors: Dict[str, object] = {}
+        tensors = self._extract_tensors(batch)
+        if not tensors:
+            return OutputBatch(output={})
+
+        from nixl_transfer import NIXL_AVAILABLE
+        if NIXL_AVAILABLE:
+            return self._nixl_send(tensors)
+        return self._fallback_send(tensors)
+
+    def _extract_tensors(self, batch: Req) -> Dict[str, torch.Tensor]:
+        """Flatten list-valued fields into individual tensors."""
+        result: Dict[str, torch.Tensor] = {}
         for field in self._output_fields:
             val = getattr(batch, field, None)
             if val is None:
@@ -128,14 +171,51 @@ class IntermediateOutputStage(PipelineStage):
                 if len(val) == 0:
                     continue
                 if len(val) == 1:
-                    tensors[field] = val[0]
+                    result[field] = val[0]
                 else:
-                    # Preserve multi-element lists (e.g. dual-encoder outputs
-                    # with incompatible shapes) so they survive ZMQ pickle.
-                    tensors[field] = val
+                    # Dual-encoder: store each element separately for NIXL
+                    for i, t in enumerate(val):
+                        result[f"{field}_{i}"] = t
+                    result[f"__{field}_count"] = torch.tensor(len(val))
             elif isinstance(val, torch.Tensor):
-                tensors[field] = val
-        return OutputBatch(output=tensors)
+                result[field] = val
+        return result
+
+    def _nixl_send(self, tensors: Dict[str, torch.Tensor]) -> OutputBatch:
+        from nixl_transfer import NixlTensorSender
+        if self._sender is None:
+            self._sender = NixlTensorSender()
+        # Filter out non-GPU metadata tensors for NIXL
+        gpu_tensors = {k: v for k, v in tensors.items()
+                       if isinstance(v, torch.Tensor) and v.is_cuda}
+        cpu_tensors = {k: v for k, v in tensors.items()
+                       if isinstance(v, torch.Tensor) and not v.is_cuda}
+        meta = self._sender.send(gpu_tensors)
+        # Include CPU metadata tensors directly (e.g. __count fields)
+        meta["cpu_tensors"] = cpu_tensors
+        return OutputBatch(output={"_nixl_transfer_meta": meta})
+
+    def _fallback_send(self, tensors: Dict[str, torch.Tensor]) -> OutputBatch:
+        """Fallback: send raw tensors via ZMQ pickle."""
+        # Reconstruct list-valued fields for backward compat
+        output: Dict[str, object] = {}
+        counts = {}
+        for k, v in tensors.items():
+            if k.startswith("__") and k.endswith("_count"):
+                base = k[2:-6]
+                counts[base] = int(v.item())
+            elif "_" in k and k.rsplit("_", 1)[1].isdigit():
+                base, idx = k.rsplit("_", 1)
+                output.setdefault(f"_list_{base}", {})[int(idx)] = v
+            else:
+                output[k] = v
+        # Reassemble lists
+        for base, idx_map in list(output.items()):
+            if base.startswith("_list_"):
+                real_key = base[6:]
+                output[real_key] = [idx_map[i] for i in sorted(idx_map)]
+                del output[base]
+        return OutputBatch(output=output)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -172,11 +252,11 @@ def build_encoder_stages(pipeline, server_args):
         f"Encoder/tokenizer count mismatch: {len(text_encoders)} vs {len(tokenizers)}"
     )
 
-    # Always list both fields; IntermediateOutputStage skips None values,
+    # Always list both fields; NixlSendStage skips None values,
     # so negative_prompt_embeds is simply omitted when CFG is disabled.
     return [
         TextEncodingStage(text_encoders=text_encoders, tokenizers=tokenizers),
-        IntermediateOutputStage(["prompt_embeds", "negative_prompt_embeds"]),
+        NixlSendStage(["prompt_embeds", "negative_prompt_embeds"]),
     ]
 
 
@@ -197,22 +277,17 @@ def build_denoiser_stages(pipeline, server_args):
     scheduler = pipeline.get_module("scheduler")
     logger.info("transformer backend: %s", get_component_backend(transformer))
 
-    # Fields that arrive from the encoder via ZMQ and need GPU placement.
-    # prompt_embeds may be a single tensor (Wan) or list of tensors
-    # (HunyuanVideo dual-encoder) — DeviceMoveStage handles both.
-    device_move_fields = ["prompt_embeds", "negative_prompt_embeds"]
-
     return [
-        DeviceMoveStage(device_move_fields),
+        NixlReceiveStage(["prompt_embeds", "negative_prompt_embeds"]),
         LatentPreparationStage(scheduler=scheduler, transformer=transformer),
         TimestepPreparationStage(scheduler=scheduler),
         DenoisingStage(transformer=transformer, scheduler=scheduler),
-        IntermediateOutputStage(["latents"]),
+        NixlSendStage(["latents"]),
     ]
 
 
 def build_vae_stages(pipeline, server_args):
-    """DecodingStage (already returns OutputBatch — no extra stage needed)."""
+    """NixlReceive → DecodingStage."""
     from sglang.multimodal_gen.runtime.pipelines.stages.decoding import (
         DecodingStage,
     )
@@ -220,7 +295,10 @@ def build_vae_stages(pipeline, server_args):
 
     vae = pipeline.get_module("vae")
     logger.info("vae backend: %s", get_component_backend(vae))
-    return [DecodingStage(vae=vae, pipeline=pipeline)]
+    return [
+        NixlReceiveStage(["latents"]),
+        DecodingStage(vae=vae, pipeline=pipeline),
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════

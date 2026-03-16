@@ -235,26 +235,36 @@ async def run_single_pipeline(
     timings["encoder_s"] = time.monotonic() - t0
     if enc_output.error:
         raise RuntimeError(f"Encoder error: {enc_output.error}")
-    enc_tensors = enc_output.output
+    enc_result = enc_output.output
+    # enc_result is either {"_nixl_transfer_meta": {...}} (NIXL) or
+    # {"prompt_embeds": tensor, ...} (ZMQ fallback)
+    nixl_mode = "_nixl_transfer_meta" in enc_result
     logger.info(
-        "req %d | Encoder done %.2fs — keys: %s", req_id, timings["encoder_s"],
-        {k: (list(v.shape) if hasattr(v, "shape") else f"list[{len(v)}]")
-         for k, v in enc_tensors.items()},
+        "req %d | Encoder done %.2fs — transfer: %s",
+        req_id, timings["encoder_s"],
+        "NIXL RDMA" if nixl_mode else f"ZMQ (keys: {list(enc_result.keys())})",
     )
 
     # ── Denoiser ─────────────────────────────────────────────────────
     t0 = time.monotonic()
     den_req = build_req(**req_kwargs)
-    inject_tensors_to_req(den_req, enc_tensors)
     den_req.do_classifier_free_guidance = (GUIDANCE > 1.0)
+    if nixl_mode:
+        # Pass NIXL metadata — NixlReceiveStage will RDMA-pull the tensors
+        den_req._nixl_transfer_meta = enc_result["_nixl_transfer_meta"]
+    else:
+        # ZMQ fallback — tensors already in enc_result
+        inject_tensors_to_req(den_req, enc_result)
     den_output = await denoiser_client.forward([den_req])
     timings["denoiser_s"] = time.monotonic() - t0
     if den_output.error:
         raise RuntimeError(f"Denoiser error: {den_output.error}")
-    latents = den_output.output["latents"]
+    den_result = den_output.output
+    nixl_mode_den = "_nixl_transfer_meta" in den_result
     logger.info(
-        "req %d | Denoiser done %.2fs — latents: %s",
-        req_id, timings["denoiser_s"], list(latents.shape),
+        "req %d | Denoiser done %.2fs — transfer: %s",
+        req_id, timings["denoiser_s"],
+        "NIXL RDMA" if nixl_mode_den else "ZMQ",
     )
 
     # ── VAE ──────────────────────────────────────────────────────────
@@ -262,7 +272,10 @@ async def run_single_pipeline(
     vae_req = build_req(prompt="", height=HEIGHT, width=WIDTH,
                         num_frames=NUM_FRAMES, num_inference_steps=NUM_STEPS,
                         guidance_scale=0.0, seed=seed)
-    vae_req.latents = latents.cpu()
+    if nixl_mode_den:
+        vae_req._nixl_transfer_meta = den_result["_nixl_transfer_meta"]
+    else:
+        vae_req.latents = den_result["latents"].cpu()
     vae_output = await vae_client.forward([vae_req])
     timings["vae_s"] = time.monotonic() - t0
     if vae_output.error:
