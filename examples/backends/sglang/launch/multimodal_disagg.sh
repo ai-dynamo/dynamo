@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Multimodal E/P/D: encoder (GPU 0), prefill (GPU 1), decode (GPU 2).
-# GPUs: 3 (or 1 with --single-gpu)
+# Multimodal E/P/D: separate encoder, prefill, and decode workers.
+# Default: 3 GPUs (one per worker). Use --single-gpu to co-locate all on GPU 0.
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -104,12 +104,7 @@ fi
 unset DYN_SYSTEM_PORT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-if [[ "$SINGLE_GPU" == "true" ]]; then
-    GPU_LABEL="1 GPU"
-else
-    GPU_LABEL="3 GPUs"
-fi
-print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU_LABEL)" "$MODEL_NAME" "$HTTP_PORT"
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D" "$MODEL_NAME" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

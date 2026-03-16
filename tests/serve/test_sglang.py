@@ -207,7 +207,6 @@ sglang_configs = {
             )
         ],
     ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_disagg_qwen",
