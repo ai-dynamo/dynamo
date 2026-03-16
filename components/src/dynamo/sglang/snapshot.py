@@ -29,7 +29,6 @@ Signals handled in checkpoint mode:
 """
 
 import asyncio
-import ctypes
 import gc
 import logging
 import os
@@ -43,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 def _try_release_memory(label: str) -> None:
-    """Force Python GC and glibc malloc_trim to return freed memory to the OS.
+    """Force Python GC to return freed memory to the OS.
 
     Logs RSS before/after so you can see how much memory was actually reclaimable.
     """
@@ -64,24 +63,14 @@ def _try_release_memory(label: str) -> None:
     collected = gc.collect()
     rss_after_gc = _get_rss_kb()
 
-    try:
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim(0)
-    except Exception as e:
-        logger.debug("[MemRelease:%s] malloc_trim failed: %s", label, e)
-
-    rss_after_trim = _get_rss_kb()
-
     logger.info(
         "[MemRelease:%s] gc.collect freed %d objects, "
-        "RSS: %.2f MiB -> %.2f MiB (gc) -> %.2f MiB (malloc_trim), "
-        "reclaimed=%.2f MiB",
+        "RSS: %.2f MiB -> %.2f MiB, reclaimed=%.2f MiB",
         label,
         collected,
         rss_before / 1024,
         rss_after_gc / 1024,
-        rss_after_trim / 1024,
-        (rss_before - rss_after_trim) / 1024,
+        (rss_before - rss_after_gc) / 1024,
     )
 
 
