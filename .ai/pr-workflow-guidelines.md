@@ -51,7 +51,7 @@ git fetch upstream && git rebase upstream/main
 > **Fork contributors:** The examples below use `origin` to mean
 > `ai-dynamo/dynamo`. If you cloned your fork, replace `origin` with
 > `upstream` in fetch/rebase commands. See the
-> [Contribution Guide](https://docs.nvidia.com/dynamo/latest/contribution-guide.html)
+> [Contribution Guide](https://docs.dynamo.nvidia.com/dynamo/dev/getting-started/contribution-guide)
 > for fork setup (`git remote add upstream`).
 
 - **Rebase when you are more than ~25 commits behind main.**
