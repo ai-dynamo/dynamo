@@ -19,14 +19,15 @@ RUN uv venv /opt/dynamo/venv --python 3.12 \
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV TORCH_CUDA_ARCH_LIST="9.0 9.0a 10.0 10.0a"
 
 # flash-attn compilation is memory-intensive. If the build OOMs, lower MAX_JOBS.
 # The flash-attn install notes call this out for machines with <96GB RAM and many CPU cores.
 RUN git clone https://github.com/RandNMR73/flash-attention \
  && cd flash-attention \
  && git switch fa4-compile \
- && TORCH_CUDA_ARCH_LIST="10.0 10.0a" MAX_JOBS=4 uv pip install . --no-build-isolation \
- && TORCH_CUDA_ARCH_LIST="10.0 10.0a" MAX_JOBS=4 uv pip install ./flash_attn/cute \
+ && MAX_JOBS=4 uv pip install . --no-build-isolation \
+ && MAX_JOBS=4 uv pip install ./flash_attn/cute \
  && rm -rf ../flash-attention
 
 # Install Dynamo with /v1/videos support.
@@ -38,7 +39,7 @@ RUN uv pip install 'git+https://github.com/ai-dynamo/dynamo@release/1.0.0#subdir
 RUN . /opt/dynamo/venv/bin/activate \
  && uv pip install setuptools_scm scikit-build-core cmake ninja \
  && git clone --recurse-submodules https://github.com/hao-ai-lab/FastVideo.git /tmp/FastVideo \
- && TORCH_CUDA_ARCH_LIST="10.0 10.0a" uv pip install --no-build-isolation /tmp/FastVideo
+ && uv pip install --no-build-isolation /tmp/FastVideo
 
 ENV FASTVIDEO_VIDEO_CODEC=libx264
 ENV FASTVIDEO_X264_PRESET=ultrafast
