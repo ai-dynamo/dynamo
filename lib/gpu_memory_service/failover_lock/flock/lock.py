@@ -6,7 +6,7 @@ import fcntl
 import logging
 import os
 
-from gpu_memory_service.failover_lock.interface import FailoverLock
+from gpu_memory_service.failover_lock.interface import FailoverLock, FailoverLockError
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +51,18 @@ class FlockFailoverLock(FailoverLock):
                     break
                 except BlockingIOError:
                     await asyncio.sleep(poll_interval)
-        except Exception:
+        except Exception as e:
             os.close(fd)
-            raise
+            logger.error(
+                "Failed to acquire failover lock at %s for engine %s: %s",
+                self._lock_path,
+                engine_id,
+                e,
+            )
+            raise FailoverLockError(
+                f"Failed to acquire flock at {self._lock_path} for engine "
+                f"{engine_id}: {e}"
+            ) from e
 
         self._fd = fd
         self._engine_id = engine_id

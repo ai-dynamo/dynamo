@@ -18,6 +18,10 @@ CUDA contexts) has been reclaimed by the OS/driver.
 from abc import ABC, abstractmethod
 
 
+class FailoverLockError(Exception):
+    """Raised when a failover lock operation fails unexpectedly."""
+
+
 class FailoverLock(ABC):
     @abstractmethod
     async def acquire(self, engine_id: str) -> None:

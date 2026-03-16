@@ -15,7 +15,6 @@ import time
 
 import pytest
 import pytest_asyncio  # noqa: F401 — ensures the plugin is available
-
 from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
 
