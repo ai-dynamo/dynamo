@@ -77,6 +77,15 @@ pub mod name_prefix {
 
     /// Prefix for standalone KV indexer metrics
     pub const KVINDEXER: &str = "dynamo_kvindexer";
+
+    /// Prefix for request-plane metrics at AddressedPushRouter
+    pub const REQUEST_PLANE: &str = "dynamo_request_plane";
+
+    /// Prefix for transport-layer metrics (TCP / NATS)
+    pub const TRANSPORT: &str = "dynamo_transport";
+
+    /// Prefix for work-handler transport breakdown metrics (backend side)
+    pub const WORK_HANDLER: &str = "dynamo_work_handler";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -538,6 +547,33 @@ pub mod kvindexer {
 
     /// Number of registered worker instances
     pub const WORKERS: &str = "workers";
+}
+
+/// Request plane metrics at AddressedPushRouter
+pub mod request_plane {
+    /// Time from generate() entry to send_request() (serialization + encoding)
+    pub const QUEUE_SECONDS: &str = "queue_seconds";
+    /// Time for send_request() to complete (frontend view: network + queue + ack)
+    pub const SEND_SECONDS: &str = "send_seconds";
+    /// Time from send_request() to first response item (transport roundtrip TTFT)
+    pub const ROUNDTRIP_TTFT_SECONDS: &str = "roundtrip_ttft_seconds";
+    /// Currently in-flight requests (gauge)
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+}
+
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const POOL_ACTIVE: &str = "tcp_pool_active";
+        pub const POOL_IDLE: &str = "tcp_pool_idle";
+        pub const BYTES_SENT_TOTAL: &str = "tcp_bytes_sent_total";
+        pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+        pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
+    }
+    pub mod nats {
+        pub const ERRORS_TOTAL: &str = "nats_errors_total";
+    }
 }
 
 // KvRouter (including KvIndexer) Prometheus metric names

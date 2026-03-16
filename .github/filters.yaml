@@ -103,6 +103,11 @@ operator:
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
   - 'docs/kubernetes/api-reference.md'
+  - 'deploy/helm/charts/platform/components/operator/crds/**'
+  - 'deploy/helm/charts/platform/values.yaml'
+  - 'deploy/helm/charts/platform/README.md'
+  - 'deploy/helm/charts/platform/README.md.gotmpl'
+  - 'deploy/helm/charts/platform/components/operator/values.yaml'
 
 deploy:
   - '!**/*.md'
