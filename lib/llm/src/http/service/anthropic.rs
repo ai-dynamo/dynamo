@@ -272,7 +272,7 @@ async fn anthropic_messages(
 
     let ctx = engine_stream.context();
 
-    // NOTE: We intentionally do NOT apply a second reasoning parser here.
+    // NOTE: We intentionally do NOT apply a reasoning parser here.
     //
     // For ModelInput::Tokens backends (skip_tokenizer_init=True), the engine
     // pipeline includes the OpenAI preprocessor which already applies reasoning
@@ -283,11 +283,11 @@ async fn anthropic_messages(
     // </think> boundary was consumed by the first parser and doesn't appear
     // in the detokenized text.
     //
-    // For ModelInput::Text backends (PushRouter, no preprocessor), the backend
-    // handler (e.g., SGLang _process_text_stream) puts all text in delta.content.
-    // The </think> tag may or may not survive detokenization depending on the
-    // tokenizer. The non-streaming aggregator (from_annotated_stream) handles
-    // reasoning parsing for that path via parsing_options.
+    // For ModelInput::Text backends (PushRouter, no preprocessor), reasoning
+    // parsing is NOT handled in the streaming path — the backend puts raw text
+    // (including <think> tags) in delta.content with reasoning_content=None.
+    // This is a known gap that affects all streaming handlers (OpenAI, Anthropic,
+    // Responses API) equally.
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = Box::pin(engine_stream);
