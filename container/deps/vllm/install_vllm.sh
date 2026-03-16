@@ -37,6 +37,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --vllm-ref)
             VLLM_REF="$2"
+	    VLLM_VER="${VLLM_REF#v}"
             shift 2
             ;;
         --max-jobs)
@@ -233,10 +234,9 @@ if [ "$VLLM_VER" = "0.17.1" ]; then
     fi
     echo "✓ vLLM multi-node TP hotfix applied"
 else
-    echo "❌ ERROR: vLLM version is ${VLLM_VER}, not 0.17.1."
+    echo "⚠️  WARN: vLLM version is ${VLLM_VER}, not 0.17.1."
     echo "   The multi-node TP hotfix patch (multinode-tp-init-order.patch) and"
     echo "   this block in install_vllm.sh are no longer needed — please remove them."
-    exit 1
 fi
 
 echo "\n=== Installing LMCache from source ==="
