@@ -9,7 +9,7 @@ There are two model weight variants, each with its own model download and deploy
 | Variant | Model | Status | Modality | Deploy Configs | Notes |
 |---------|-------|--------|----------|---------------|-------|
 | **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
-| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Multimodal | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/) |
+| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/). Vision input is not yet functional — the patch loads the text backbone only. |
 
 All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 
@@ -78,14 +78,18 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## nvidia/Kimi-K2.5-NVFP4
 
-**Status:** Experimental | **Modality:** Multimodal
+**Status:** Experimental | **Modality:** Text only upstream support
 
 > **Experimental:** Upstream TensorRT-LLM does not yet include native support for Kimi K2.5.
 > This recipe works around that limitation by directly patching the container image with an
 > append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path.
 > See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for the patch script and full instructions.
 
-The nvidia variant supports multimodal inputs, reasoning parsing (`--dyn-reasoning-parser kimi_k25`), and tool calling (`--dyn-tool-call-parser kimi_k2`). It also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
+> **Text only:** The patch loads the DeepSeek-V3 text backbone from the Kimi K2.5 config
+> (`text_config`). The vision encoder is not loaded, so image inputs are not processed.
+> Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
+
+The nvidia variant supports text inference with reasoning parsing (`--dyn-reasoning-parser kimi_k25`) and tool calling (`--dyn-tool-call-parser kimi_k2`). It also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
 
 ### Quick Start
 

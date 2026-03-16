@@ -4,6 +4,10 @@
 > upstream TRT-LLM support for Kimi K2.5 has not yet been released. You must build the patched image before
 > deploying either configuration below. See [`patch/`](patch/) for the script and instructions.
 
+> **Text only:** The patch registers `KimiK25ForConditionalGeneration` by loading the DeepSeek-V3
+> text backbone (`text_config`) only. The vision encoder is not loaded, so image inputs are not
+> processed. Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
+
 This directory contains two aggregated deployment configurations for the `nvidia/Kimi-K2.5-NVFP4` model:
 
 | Deployment | Manifest | Description |
