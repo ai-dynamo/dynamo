@@ -189,7 +189,7 @@ Deploy one control DGD that contains:
 - `GlobalRouter`: chooses which pool receives each request.
 - `GlobalPlanner`: receives scale requests from pool planners and applies replica changes.
 
-The vLLM example topology is in [examples/global_planner/global-planner-vllm-test.yaml](../../../examples/global_planner/global-planner-vllm-test.yaml).
+The vLLM example topology is in [examples/global_planner/global-planner-vllm-test.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml).
 
 The `GlobalPlanner` section is minimal:
 
@@ -215,7 +215,7 @@ The values passed to `--managed-namespaces` are the pool planners' **Dynamo name
 
 **Management modes**: When `--managed-namespaces` is set (explicit mode), only the listed Dynamo namespaces are authorized to send scale requests, and only their corresponding DGDs count toward the GPU budget. DGD names are derived from the Dynamo namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`. When omitted (implicit mode), any caller is accepted and all DGDs in the Kubernetes namespace count toward the GPU budget.
 
-If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/global_planner/global-planner-gpu-budget.yaml](../../../examples/global_planner/global-planner-gpu-budget.yaml).
+If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/global_planner/global-planner-gpu-budget.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-gpu-budget.yaml).
 
 ## Step 3: Create One DGD Per Pool
 
@@ -258,7 +258,7 @@ In the reference vLLM example:
 - `gp-prefill-1` uses a 2-GPU TP2 prefill worker
 - `gp-decode-0` uses a 1-GPU TP1 decode worker
 
-See [global-planner-vllm-test.yaml](../../../examples/global_planner/global-planner-vllm-test.yaml).
+See [global-planner-vllm-test.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml).
 
 ## Step 4: Configure GlobalRouter To Select Pools
 
@@ -317,7 +317,7 @@ Clients can pass request targets through `extra_args`:
 }
 ```
 
-For more details, see [Global Router README](../../../components/src/dynamo/global_router/README.md).
+For more details, see [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md).
 
 ## Step 5: Deploy In Order
 
@@ -391,6 +391,6 @@ This keeps profiling and pool selection simple while still giving you one public
 - [Planner Guide](planner-guide.md) — Planner configuration reference
 - [Planner Examples](planner-examples.md) — DGDR examples for generating per-pool configs
 - [Profiler Guide](../profiler/profiler-guide.md) — Pre-deployment profiling workflow
-- [Global Planner README](../../../components/src/dynamo/global_planner/README.md) — Centralized scale execution
-- [Global Router README](../../../components/src/dynamo/global_router/README.md) — Cross-pool request routing
-- [vLLM global planner example](../../../examples/global_planner/global-planner-vllm-test.yaml) — End-to-end reference manifest
+- [Global Planner README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_planner/README.md) — Centralized scale execution
+- [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md) — Cross-pool request routing
+- [vLLM global planner example](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml) — End-to-end reference manifest

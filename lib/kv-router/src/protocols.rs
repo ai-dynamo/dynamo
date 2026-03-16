@@ -6,6 +6,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
+/// The event subject that workers publish KV cache events on.
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
+
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
