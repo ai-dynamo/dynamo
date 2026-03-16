@@ -61,6 +61,6 @@ python -m dynamo.frontend &
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 DYN_HEALTH_CHECK_ENABLED=true \
     python -m dynamo.vllm --model "$MODEL" "${BLOCK_SIZE_ARG[@]}" --enforce-eager &
-    
+
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

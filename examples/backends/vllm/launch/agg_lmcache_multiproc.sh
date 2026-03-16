@@ -42,6 +42,6 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   python -m dynamo.vllm --model "$MODEL" \
     "${BLOCK_SIZE_ARG[@]}" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}" &
-    
+
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
