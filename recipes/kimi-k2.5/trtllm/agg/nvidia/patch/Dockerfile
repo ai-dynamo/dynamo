@@ -14,9 +14,7 @@ USER root
 
 COPY kimi.patch /tmp/kimi.patch
 
-# Resolve site-packages dynamically (no hardcoded Python version) and apply
-# the upstream unified diff with --forward (idempotent) and --fuzz=0 (exact
-# context match — fails loudly if the target file has changed).
+# Apply upstream diff — idempotent, fails if target file has diverged
 RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))") && \
     cd "$SITE_PKGS" && \
     if patch -p1 --forward --fuzz=0 --dry-run < /tmp/kimi.patch > /dev/null 2>&1; then \
@@ -26,7 +24,7 @@ RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'
     fi && \
     rm -f /tmp/kimi.patch
 
-# Smoke test — verify the class was registered (no GPU needed at build time)
+# Smoke test
 RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))") && \
     grep -q 'class KimiK25ForConditionalGeneration' \
         "$SITE_PKGS/tensorrt_llm/_torch/models/modeling_deepseekv3.py"
