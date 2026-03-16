@@ -130,7 +130,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	cudaPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
 	var gpuUUIDs []string
 	if len(cudaPIDs) > 0 {
-		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName)
+		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}

@@ -48,7 +48,7 @@ func extractGPUUUIDFromCDIDevices(cdiDevices []*podresourcesv1.CDIDevice) string
 // GetDynamicResources()), extracting the UUID from CDI device names rather than
 // the opaque device name. DRA entries whose CDI names lack a valid GPU UUID are
 // skipped so the caller can fall back to nvidia-smi discovery.
-func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
+func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string, log logr.Logger) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
 	}
@@ -88,12 +88,20 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 						if cr.GetDriverName() != nvidiaGPUDRADriver {
 							continue
 						}
-						uuid := extractGPUUUIDFromCDIDevices(cr.GetCdiDevices())
+						cdiDevices := cr.GetCdiDevices()
+						if len(cdiDevices) > 0 {
+							names := make([]string, len(cdiDevices))
+							for i, d := range cdiDevices {
+								names[i] = d.GetName()
+							}
+							log.Info("DRA claim resource has CDI devices", "device", cr.GetDeviceName(), "cdi_names", names)
+						}
+						uuid := extractGPUUUIDFromCDIDevices(cdiDevices)
 						if uuid == "" {
-							fmt.Println("GetPodGPUUUIDs: DRA device has no valid GPU UUID in CDI names, skipping", "device", cr.GetDeviceName())
+							log.V(1).Info("DRA device has no valid GPU UUID in CDI names, skipping", "device", cr.GetDeviceName())
 							continue
 						}
-						fmt.Println("GetPodGPUUUIDs: found DRA GPU", "uuid", uuid)
+						log.Info("found DRA GPU", "uuid", uuid)
 						uuids = append(uuids, uuid)
 					}
 				}
@@ -160,15 +168,14 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 // When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
 // unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
 // Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
-func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
+func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
 	}
 	if len(sourceUUIDs) == 0 {
 		return "", fmt.Errorf("GPU UUID list is empty")
 	}
-	fmt.Println("BuildDeviceMap: source UUIDs", "uuids", sourceUUIDs)
-	fmt.Println("BuildDeviceMap: target UUIDs", "uuids", targetUUIDs)
+	log.V(1).Info("BuildDeviceMap inputs", "source_uuids", sourceUUIDs, "target_uuids", targetUUIDs)
 
 	targetSet := make(map[string]bool, len(targetUUIDs))
 	for _, t := range targetUUIDs {

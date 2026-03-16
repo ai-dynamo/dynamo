@@ -112,7 +112,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		targetGPUUUIDs, err := cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, containerName)
+		targetGPUUUIDs, err := cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, containerName, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
@@ -131,7 +131,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 			"source_uuids", m.CUDA.SourceGPUUUIDs,
 			"target_uuids", targetGPUUUIDs,
 		)
-		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs)
+		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
