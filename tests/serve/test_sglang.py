@@ -213,18 +213,15 @@ sglang_configs = {
         name="multimodal_disagg_qwen",
         directory=sglang_dir,
         script_name="multimodal_disagg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(360),
+        ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.25",
-            "DYN_DECODE_GPU_MEM": "0.25",
-        },
+        env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
