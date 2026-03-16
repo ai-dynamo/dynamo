@@ -71,7 +71,7 @@ If you're running a single model on a single GPU, your inference engine alone is
 Most inference engines optimize a single GPU or a single node. Dynamo is the **orchestration layer above them** — it turns a cluster of GPUs into a coordinated inference system.
 
 <p align="center">
-  <img src="./docs/assets/img/frontpage-architecture.png" alt="Dynamo architecture" width="550" />
+  <img src="./docs/assets/dynamo-readme-overview.svg" alt="Dynamo architecture overview" width="600" />
 </p>
 
 **[Architecture Deep Dive →](https://docs.nvidia.com/dynamo/design-docs/overall-architecture)**
