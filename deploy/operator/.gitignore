@@ -30,6 +30,7 @@ go.work
 *.swp
 *.swo
 *~
+vendor
 
 
 !env*

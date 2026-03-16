@@ -35,14 +35,21 @@ Client
   -> Client
 ```
 
-在 Kubernetes 里，它不会直接变成 Pod，而是经历两层控制面转换：
+在 Kubernetes 里，它不会直接变成 Pod，而是先经过 Operator，再根据编排路径落到不同的底层资源：
 
 ```text
 agg.yaml
   -> DynamoGraphDeployment (DGD)
   -> Operator Reconcile
-  -> DynamoComponentDeployment (DCD)
-  -> Deployment / Service / Pod
+  -> 选择编排路径
+     -> Grove 路径
+        -> PodCliqueSet / PodClique / PodCliqueScalingGroup
+        -> 可选注入 kai-scheduler
+        -> Pod
+     -> Component 路径
+        -> DynamoComponentDeployment (DCD)
+        -> Deployment / Service / Pod
+        -> 多机时可走 LeaderWorkerSet，并可配合 Volcano
   -> 容器内启动 dynamo.frontend / dynamo.sglang
 ```
 
@@ -50,7 +57,24 @@ agg.yaml
 
 - `DGD` 负责描述“整张图”。
 - `DCD` 负责描述“图中的单个组件”。
-- Operator 负责把“图”拆成“组件”，再把“组件”落成原生 K8s 资源。
+- Operator 负责把“图”拆成“组件”，并选择底层编排器。
+- Grove 是 Dynamo 在 Kubernetes 上的一条重要编排路径，不只是外围项目。
+- 调度器不是同一个层面的概念，它通常在 Pod 模板生成后参与最终 placement。
+
+这里要特别纠正我前一版里省略掉的部分：
+
+- Grove 不是可有可无的“额外项目”，而是 Dynamo Operator 可能直接生成的目标资源类型。
+- `agg.yaml` 虽然是单机聚合例子，但只要 Operator 运行时判定走 Grove 路径，它也可能被编排成 Grove 的 `PodCliqueSet`，而不一定是 `DCD -> Deployment`。
+- `DCD -> Deployment` 更准确地说是 “非 Grove 的组件路径”。
+
+所以更完整的理解应该是：
+
+```text
+DGD 负责声明目标拓扑
+Operator 负责选编排路径
+Grove / DCD / LWS 负责把组件组织成 K8s 工作负载
+Volcano / Kai-Scheduler 负责调度这些工作负载到合适节点
+```
 
 ---
 
@@ -128,7 +152,6 @@ command:
 args:
   - --model-path
   - Qwen/Qwen3-0.6B
-  ...
 ```
 
 这告诉你两个事实：
@@ -204,7 +227,29 @@ resources:
 3. 把目标资源和集群现状做对齐。
 4. 更新 DGD 的 status。
 
-这段 controller 的主逻辑可以重点看两个阶段。
+这段 controller 的主逻辑可以重点看三个问题。
+
+### 0. 先决定走哪条编排路径
+
+`dynamographdeployment_controller.go` 里有个很关键的方法：
+
+- `isGrovePathway`
+
+它的逻辑大意是：
+
+- 如果 Grove 在当前集群可用，并且 DGD 没有显式加 `nvidia.com/enable-grove=false`
+- 那么优先走 Grove 路径
+- 否则走普通组件路径
+
+所以从 controller 角度，真实主线不是一条，而是：
+
+```text
+DGD
+  -> Reconcile
+  -> isGrovePathway?
+     -> yes: reconcileGroveResources
+     -> no:  reconcileDynamoComponentsDeployments
+```
 
 ### 1. `reconcileResources`
 
@@ -216,19 +261,239 @@ resources:
 - k8s discovery 相关资源
 - EPP 相关资源
 
-### 2. `reconcileDynamoComponentsDeployments`
+### 2. `reconcileGroveResources` 或 `reconcileDynamoComponentsDeployments`
 
-这是本教程里最重要的方法之一。
+这是本教程里最重要的一组分叉。
 
-它负责把：
+- Grove 路径：生成 `PodCliqueSet`，并由 Grove operator 继续展开成 `PodClique` / `PodCliqueScalingGroup`
+- Component 路径：生成多个 `DCD`
 
-- 一个 DGD
+也就是说，DGD 并不总是先变成 DCD。
 
-转换成：
+---
 
-- 多个 DCD
+## 四点五、补上你提到的 Grove、Volcano、Kai-Scheduler
 
-也就是把“整张推理图”拆成“一个个组件部署”。
+这一层最容易混淆，因为“编排器”和“调度器”不是一个概念。
+
+### 1. Grove 在哪里参与
+
+推荐源码：
+
+- `deploy/operator/internal/controller/dynamographdeployment_controller.go`
+- `deploy/operator/internal/dynamo/graph.go`
+- `deploy/operator/internal/dynamo/grove.go`
+
+当 controller 走 Grove 路径时，会调用：
+
+- `reconcileGroveResources`
+- `GenerateGrovePodCliqueSet`
+
+这时 Operator 生成的就不是 DCD，而是：
+
+- `PodCliqueSet`
+
+随后 Grove operator 再根据这个 `PodCliqueSet` 去管理：
+
+- `PodClique`
+- `PodCliqueScalingGroup`
+
+所以 Grove 是“底层工作负载编排器”，不是纯粹文档里顺手提一下的依赖。
+
+### 2. LeaderWorkerSet 在哪里参与
+
+推荐源码：
+
+- `deploy/operator/internal/controller/dynamocomponentdeployment_controller.go`
+- `deploy/operator/internal/dynamo/lws.go`
+
+如果不走 Grove，但服务是多机部署，DCD controller 会优先尝试：
+
+- `LeaderWorkerSet`
+
+这条路径主要是 Dynamo 的“非 Grove 多机编排方案”。
+
+### 3. Volcano 在哪里参与
+
+Volcano 主要出现在非 Grove 的多机组件路径里。
+
+推荐源码：
+
+- `deploy/operator/internal/controller/dynamocomponentdeployment_controller.go`
+
+当 DCD 走 `LeaderWorkerSet` 路径时，controller 会为每个实例生成：
+
+- `PodGroup`
+
+这是 Volcano 的 gang scheduling 资源，用来保证一组相关 Pod 尽量整体调度。
+
+所以你可以理解为：
+
+- LWS 负责 leader/worker 结构
+- Volcano 负责 gang scheduling
+
+### 4. Kai-Scheduler 在哪里参与
+
+推荐源码：
+
+- `deploy/operator/internal/dynamo/grove.go`
+- `deploy/helm/charts/platform/values.yaml`
+
+Kai-Scheduler 主要和 Grove 路径集成。
+
+在 `GenerateGrovePodCliqueSet` 里，如果：
+
+- Grove 已启用
+- Kai-Scheduler 已启用
+
+那么 Operator 会在生成的 Grove clique 上自动注入：
+
+- `schedulerName: kai-scheduler`
+- `kai.scheduler/queue` label
+
+也就是说：
+
+- Grove 负责组织 cliques/scaling groups
+- Kai-Scheduler 负责更智能地把这些 Pod 放到具体节点
+
+这两者经常一起出现，但职责不同。
+
+### 5. 所以完整链路应该怎么记
+
+你可以把 Kubernetes 这层拆成两层：
+
+```text
+编排层:
+  Operator -> Grove 或 DCD/LWS
+
+调度层:
+  kube-scheduler / Volcano / kai-scheduler
+```
+
+如果进一步代入 Dynamo 的常见路径，可以记成：
+
+```text
+路径 A: DGD -> Grove -> PodCliqueSet/PodCliqueScalingGroup -> kai-scheduler -> Pod
+路径 B: DGD -> DCD -> Deployment -> kube-scheduler -> Pod
+路径 C: DGD -> DCD -> LeaderWorkerSet + PodGroup -> Volcano -> Pod
+```
+
+### 6. Operator 怎么知道这些能力是否存在
+
+推荐源码：
+
+- `deploy/operator/api/config/v1alpha1/types.go`
+- `deploy/operator/internal/controller_common/runtime.go`
+- `deploy/operator/internal/controller_common/predicate.go`
+
+这里还有一个容易忽略但非常关键的点：
+
+- Grove/LWS/Kai-Scheduler 是否启用，并不只是看 YAML
+- Operator 启动后会把“配置覆盖”和“集群自动探测”合并成运行时状态
+
+相关运行时结构是：
+
+- `RuntimeConfig`
+
+里面有：
+
+- `GroveEnabled`
+- `LWSEnabled`
+- `KaiSchedulerEnabled`
+
+而自动探测逻辑会去检查对应 API group 是否已经注册到集群里，比如：
+
+- `grove.io`
+- `leaderworkerset.x-k8s.io`
+- `scheduling.volcano.sh`
+- `scheduling.run.ai`
+
+这意味着从源码阅读角度，你可以这样理解：
+
+```text
+静态配置层:
+  OperatorConfiguration.Orchestrators
+
+运行时能力层:
+  RuntimeConfig
+
+控制器决策层:
+  isGrovePathway / reconcileLeaderWorkerSetResources / injectKaiSchedulerIfEnabled
+```
+
+也就是说，Operator 不是“盲目假设集群有 Grove/Volcano/Kai-Scheduler”，而是会先探测，再决定能不能走那条路径。
+
+### 7. 为什么要把“编排器”和“调度器”分开记
+
+这个项目最容易让人脑子打结的地方，就是下面几个名字会一起出现：
+
+- Grove
+- LeaderWorkerSet
+- Volcano
+- Kai-Scheduler
+
+但它们在语义上不是同一类东西。
+
+#### 编排器更像“怎么组织一组 Pod”
+
+例如：
+
+- Grove 把一组相关 Pod 组织成 `PodCliqueSet / PodClique / PodCliqueScalingGroup`
+- LWS 把一组相关 Pod 组织成 `LeaderWorkerSet`
+
+它们重点解决的是：
+
+- 哪些 Pod 属于同一个分布式组件
+- leader 和 worker 的关系是什么
+- 组件扩缩容时要把哪些 Pod 当成一个整体
+
+#### 调度器更像“把这些 Pod 放到哪里”
+
+例如：
+
+- 默认 `kube-scheduler`
+- `Volcano`
+- `kai-scheduler`
+
+它们重点解决的是：
+
+- 这些 Pod 最终落到哪些节点
+- 是否需要 gang scheduling
+- 是否需要按 queue / topology / 资源约束做更智能放置
+
+如果你把这两层混在一起，就会误以为：
+
+- “用了 Grove 就等于用了 Kai-Scheduler”
+- “用了 LWS 就等于一定是 Volcano”
+
+但源码上并不是这个关系。
+
+更准确地说：
+
+- Grove 可以不配 Kai-Scheduler
+- LWS 路径强调的是 `LeaderWorkerSet`，而 Volcano 是它常见的 gang scheduling 配套
+- 单机 `Deployment` 路径可能完全只用默认 `kube-scheduler`
+
+### 8. 结合 `agg.yaml` 应该怎么落地理解
+
+回到你最初关心的 `agg.yaml`，这一份 YAML 最适合被当成：
+
+- “理解 Dynamo 控制面与运行时主链路的最小入口”
+
+但它不是：
+
+- “整个 Kubernetes 编排分支的完整代表”
+
+更准确地说：
+
+- 它让你最容易先看懂 `Frontend + 单 worker` 这条最短业务链
+- 但在 Operator 层，背后仍然有 Grove 路径、DCD 路径、LWS 路径这些分支逻辑
+- 在调度层，又可能叠加默认调度器、Volcano、Kai-Scheduler
+
+所以你后面学习时最好始终把问题拆成两句：
+
+1. 这个组件是被谁编排出来的？
+2. 这些 Pod 最终由谁调度到节点上？
 
 ---
 
@@ -244,6 +509,10 @@ resources:
 - `reconcileDynamoComponentsDeployments`
 - `GenerateDynamoComponentsDeployments`
 - `generateSingleDCD`
+
+这一章要带一个前提去看：
+
+- 只有在“不走 Grove 的组件路径”下，DGD 才会先被拆成多个 DCD
 
 `GenerateDynamoComponentsDeployments` 会遍历：
 
