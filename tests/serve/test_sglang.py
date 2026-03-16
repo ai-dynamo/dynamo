@@ -76,7 +76,6 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -127,7 +126,6 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
