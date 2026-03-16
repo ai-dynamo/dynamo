@@ -49,7 +49,6 @@ import uuid
 import uvloop
 from fastvideo import VideoGenerator
 from fastvideo.configs.pipelines.base import PipelineConfig
-from fastvideo.layers.quantization.fp4_config import FP4Config
 from pydantic import BaseModel, Field
 
 from dynamo.llm import ModelInput, ModelType, register_llm  # type: ignore[attr-defined]
@@ -155,6 +154,16 @@ class FastVideoBackend:
                     "Using FP4 quantization for VideoGenerator model=%s",
                     self.model_name,
                 )
+                try:
+                    from fastvideo.layers.quantization.fp4_config import FP4Config
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "FastVideo optimizations require "
+                        "fastvideo.layers.quantization.fp4_config, but this "
+                        "FastVideo build does not provide it. Re-run "
+                        "worker.py with --disable-optimizations or install a "
+                        "FastVideo version that includes fp4_config."
+                    ) from exc
                 pipeline_config.dit_config.quant_config = FP4Config()
 
             return VideoGenerator.from_pretrained(
