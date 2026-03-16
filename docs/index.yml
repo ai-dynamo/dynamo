@@ -155,6 +155,9 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Writing Python Workers
         path: development/backend-guide.md
+      - page: Glossary
+        path: reference/glossary.md
+
 
   # ==================== Backends ====================
   - section: Backends
