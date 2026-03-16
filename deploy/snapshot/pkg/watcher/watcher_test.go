@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,7 +11,9 @@ import (
 	"github.com/go-logr/logr/testr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	clientgotesting "k8s.io/client-go/testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
 )
@@ -27,7 +30,7 @@ func makeTestWatcher(t *testing.T) *Watcher {
 			NodeName: testNodeName,
 			BasePath: t.TempDir(),
 		},
-		clientset: fake.NewSimpleClientset(),
+		clientset: fake.NewClientset(),
 		log:       testr.New(t),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
@@ -352,5 +355,94 @@ func TestHandleRestorePodEvent(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestDoCheckpointKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+	}
+
+	clientset := fake.NewClientset(pod.DeepCopy())
+	patchCalls := 0
+	clientset.PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		patchCalls++
+		if patchCalls == 1 {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("terminal patch failed")
+	})
+
+	w := &Watcher{
+		config: &types.AgentConfig{
+			NodeName: testNodeName,
+			BasePath: t.TempDir(),
+		},
+		clientset: clientset,
+		log:       testr.New(t),
+		inFlight: map[string]struct{}{
+			"default/test-pod": {},
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	err := w.doCheckpoint(context.Background(), pod, "abc123", "default/test-pod")
+	if err == nil {
+		t.Fatal("expected terminal checkpoint status update to fail")
+	}
+	if _, ok := w.inFlight["default/test-pod"]; !ok {
+		t.Fatal("checkpoint terminal status failure should keep pod in-flight")
+	}
+	if patchCalls != 1+terminalStatusPatchRetryAttempts {
+		t.Fatalf("patchCalls = %d, want %d", patchCalls, 1+terminalStatusPatchRetryAttempts)
+	}
+}
+
+func TestDoRestoreKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	clientset := fake.NewClientset(pod.DeepCopy())
+	patchCalls := 0
+	clientset.PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		patchCalls++
+		if patchCalls == 1 {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("terminal patch failed")
+	})
+
+	w := &Watcher{
+		config: &types.AgentConfig{
+			NodeName: testNodeName,
+			BasePath: t.TempDir(),
+		},
+		clientset: clientset,
+		log:       testr.New(t),
+		inFlight: map[string]struct{}{
+			"default/test-pod": {},
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	err := w.doRestore(context.Background(), pod, "abc123", "default/test-pod")
+	if err == nil {
+		t.Fatal("expected terminal restore status update to fail")
+	}
+	if _, ok := w.inFlight["default/test-pod"]; !ok {
+		t.Fatal("restore terminal status failure should keep pod in-flight")
+	}
+	if patchCalls != 1+terminalStatusPatchRetryAttempts {
+		t.Fatalf("patchCalls = %d, want %d", patchCalls, 1+terminalStatusPatchRetryAttempts)
 	}
 }

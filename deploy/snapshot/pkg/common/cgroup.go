@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
 )
 
 const HostCgroupPath = "/sys/fs/cgroup"

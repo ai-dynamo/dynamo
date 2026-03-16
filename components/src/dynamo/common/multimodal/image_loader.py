@@ -17,6 +17,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import os
 from io import BytesIO
 from typing import Any, Dict, Final, List, Optional
 from urllib.parse import urlparse
@@ -32,13 +33,14 @@ from .http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
+
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 
 
 class ImageLoader:
-    CACHE_SIZE_MAXIMUM = 8
+    CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_CACHE_SIZE", "8"))
 
     def __init__(
         self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
@@ -86,6 +88,16 @@ class ImageLoader:
                         raise ValueError("Empty response content from image URL")
 
                     image_data = BytesIO(response.content)
+            elif parsed_url.scheme in ("", "file"):
+                # Local file path (plain path or file:// URI)
+                path = image_url if parsed_url.scheme == "" else parsed_url.path
+
+                def _read_local_file(p: str) -> bytes:
+                    with open(p, "rb") as f:
+                        return f.read()
+
+                image_bytes = await asyncio.to_thread(_read_local_file, path)
+                image_data = BytesIO(image_bytes)
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 

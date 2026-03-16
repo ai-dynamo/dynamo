@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	dumpLogFilename = "dump.log"
+	dumpLogFilename  = "dump.log"
 	criuConfFilename = "criu.conf"
 )
 

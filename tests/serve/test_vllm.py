@@ -114,13 +114,13 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
         marks=[
+            pytest.mark.lmcache,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
-            pytest.mark.xfail(
+            pytest.mark.skipif(
                 _is_cuda13(),
                 reason="lmcache does not support CUDA 13 as of v0.3.11",
-                strict=False,
             ),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -136,13 +136,13 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache_multiproc.sh",
         marks=[
+            pytest.mark.lmcache,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
-            pytest.mark.xfail(
+            pytest.mark.skipif(
                 _is_cuda13(),
                 reason="lmcache does not support CUDA 13 as of v0.3.11",
-                strict=False,
             ),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -194,7 +194,7 @@ vllm_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -203,7 +203,7 @@ vllm_configs = {
                 expected_log=[
                     r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],
@@ -217,7 +217,7 @@ vllm_configs = {
         script_name="agg_router_approx.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -228,7 +228,7 @@ vllm_configs = {
                 repeat_count=3,
                 expected_log=[
                     # Verify scheduler is selecting workers with cache awareness
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                     # After first request, should see cached blocks being tracked
                     r"with \d+ cached blocks",
                 ],
@@ -250,7 +250,7 @@ vllm_configs = {
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
@@ -317,7 +317,8 @@ vllm_configs = {
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        # post_merge because needs real NIXL not stub
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen2-VL-2B-Instruct",
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
         script_args=[
@@ -351,7 +352,7 @@ vllm_configs = {
         script_name="disagg_multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -388,7 +389,7 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
@@ -667,7 +668,7 @@ vllm_configs = {
         script_name="multi_node_tp_headless.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.timeout(300),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -901,7 +902,7 @@ def test_lora_aggregated(
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 @pytest.mark.skip(reason="DYN-2265")
 def test_lora_aggregated_router(

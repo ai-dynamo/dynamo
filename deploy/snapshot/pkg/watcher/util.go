@@ -14,6 +14,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+const (
+	terminalStatusPatchRetryAttempts = 3
+	terminalStatusPatchRetryDelay    = 10 * time.Millisecond
+)
+
 func podFromInformerObj(obj interface{}) (*corev1.Pod, bool) {
 	if pod, ok := obj.(*corev1.Pod); ok {
 		return pod, true
@@ -71,6 +76,32 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 		)
 	}
 	return err
+}
+
+func annotatePodRetry(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, annotations map[string]string) error {
+	delay := terminalStatusPatchRetryDelay
+	var lastErr error
+
+	for attempt := 1; attempt <= terminalStatusPatchRetryAttempts; attempt++ {
+		if err := annotatePod(ctx, clientset, log, pod, annotations); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if attempt == terminalStatusPatchRetryAttempts {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("pod annotation retry interrupted: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+
+	return fmt.Errorf("failed to annotate pod after %d attempts: %w", terminalStatusPatchRetryAttempts, lastErr)
 }
 
 func waitForPodReady(ctx context.Context, clientset kubernetes.Interface, namespace, podName, containerName string) error {

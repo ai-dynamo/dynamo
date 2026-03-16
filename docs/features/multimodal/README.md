@@ -11,7 +11,6 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 **Security Requirement**: Multimodal processing must be explicitly enabled at startup. See the relevant backend documentation ([vLLM](multimodal-vllm.md), [SGLang](multimodal-sglang.md), [TRT-LLM](multimodal-trtllm.md)) for the necessary flags. This prevents unintended processing of multimodal data from untrusted sources.
 </Warning>
 
-## Key Features
 ```mermaid
 ---
 title: Sample flow for an aggregated VLM serving scenario
@@ -28,6 +27,9 @@ flowchart TD
     C --> I[DECODE]
     H --> I
     I --> J[Response]
+```
+
+## Key Features
 
 Dynamo provides support for improving latency and throughput for vision-and-language workloads through the following features, that can be used together or separately, depending on your workload characteristics:
 | Feature | Description |
@@ -45,14 +47,6 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 | **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)** | ✅ | ❌ | ❌ |
 
 **Status:** ✅ Supported | 🧪 Experimental | ❌ Not supported
-
-### Input Format Support
-
-| Format | SGLang | TRT-LLM | vLLM |
-|--------|--------|---------|------|
-| HTTP/HTTPS URL | ✅ | ✅ | ✅ |
-| Data URL (Base64) | ❌ | ❌ | ✅ |
-| Pre-computed Embeddings (.pt) | ❌ | ✅ | ❌ |
 
 ## Example Workflows
 

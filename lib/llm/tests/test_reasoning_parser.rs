@@ -118,6 +118,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             stream::iter(chunks),
             parser.to_string(),
+            false,
         );
         let mut output_stream = std::pin::pin!(output_stream);
         let mut all_reasoning = String::new();
@@ -162,6 +163,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -207,6 +209,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -251,6 +254,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -286,6 +290,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -328,6 +333,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -397,6 +403,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "gpt_oss".to_string(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -537,6 +544,7 @@ mod tests {
         let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "nemotron_deci".to_string(),
+            false,
         );
 
         // Step 2: Apply tool calling jail transformation
@@ -650,6 +658,7 @@ mod tests {
         let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "kimi_k25".to_string(),
+            false,
         );
 
         // Step 2: tool calling jail (kimi_k2) extracts tool calls from remaining content
@@ -741,6 +750,7 @@ mod tests {
         let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "gpt_oss".to_string(),
+            false,
         );
 
         let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);

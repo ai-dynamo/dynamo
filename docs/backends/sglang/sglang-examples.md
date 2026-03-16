@@ -6,16 +6,6 @@ title: Examples
 
 For quick start instructions, see the [SGLang README](README.md). This document provides all deployment patterns for running SGLang with Dynamo, including LLMs, multimodal, and diffusion models, and Kubernetes deployment.
 
-## Table of Contents
-
-- [Infrastructure Setup](#infrastructure-setup)
-- [LLM Serving](#llm-serving)
-- [Embedding Models](#embedding-models)
-- [Vision Models](#vision-models)
-- [Diffusion Models](#diffusion-models)
-- [Kubernetes Deployment](#kubernetes-deployment)
-- [Testing](#testing)
-
 ## Infrastructure Setup
 
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
