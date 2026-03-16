@@ -64,6 +64,9 @@ pub use velo_common::{
 // Internal builder for address construction
 use address::WorkerAddressBuilder;
 
+// Re-export interface discovery types
+pub use utils::interfaces::{InterfaceEndpoint, InterfaceFilter};
+
 // Re-export transport types
 pub use transport::{
     DataStreams, HealthCheckError, InFlightGuard, MessageType, ShutdownPolicy, ShutdownState,

@@ -592,14 +592,20 @@ impl ShutdownTestClient for TcpShutdownClient {
         payload: &[u8],
     ) -> Self::Stream {
         use velo_transports::tcp::TcpFrameCodec;
+        use velo_transports::InterfaceEndpoint;
 
         let addr = {
             let wa = handle.transport.address();
             let key = handle.transport.key();
             let endpoint = wa.get_entry(&key).unwrap().unwrap();
-            let s = std::str::from_utf8(&endpoint).unwrap();
-            let s = s.strip_prefix("tcp://").unwrap_or(s);
-            s.parse::<std::net::SocketAddr>().unwrap()
+            // Try new msgpack format first, fall back to legacy string
+            if let Ok(endpoints) = rmp_serde::from_slice::<Vec<InterfaceEndpoint>>(&endpoint) {
+                endpoints[0].socket_addr().unwrap()
+            } else {
+                let s = std::str::from_utf8(&endpoint).unwrap();
+                let s = s.strip_prefix("tcp://").unwrap_or(s);
+                s.parse::<std::net::SocketAddr>().unwrap()
+            }
         };
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
@@ -648,56 +654,6 @@ impl ShutdownTestClient for UdsShutdownClient {
             std::path::PathBuf::from(s)
         };
         let mut stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
-        TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
-            .await
-            .unwrap();
-        stream
-    }
-
-    async fn read_one_frame(stream: &mut Self::Stream) -> (MessageType, Bytes, Bytes) {
-        use futures::StreamExt;
-        use tokio_util::codec::Framed;
-        use velo_transports::tcp::TcpFrameCodec;
-
-        let mut framed = Framed::new(stream, TcpFrameCodec::new());
-        framed.next().await.unwrap().unwrap()
-    }
-}
-
-/// gRPC shutdown test client
-///
-/// gRPC shutdown tests connect via raw TCP to the tonic server's bind address
-/// and send framed data directly. The tonic server's connection handler
-/// uses the same frame codec, so raw TCP connections work for testing.
-#[cfg(feature = "grpc")]
-pub struct GrpcShutdownClient;
-
-#[cfg(feature = "grpc")]
-impl ShutdownTestClient for GrpcShutdownClient {
-    type Transport = GrpcTransport;
-    type Stream = tokio::net::TcpStream;
-
-    async fn new_handle() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
-        TestTransportHandle::new_grpc().await
-    }
-
-    async fn connect_and_send_frame(
-        handle: &TestTransportHandle<Self::Transport>,
-        msg_type: MessageType,
-        header: &[u8],
-        payload: &[u8],
-    ) -> Self::Stream {
-        use velo_transports::tcp::TcpFrameCodec;
-
-        let addr = {
-            let wa = handle.transport.address();
-            let key = handle.transport.key();
-            let endpoint = wa.get_entry(&key).unwrap().unwrap();
-            let s = std::str::from_utf8(&endpoint).unwrap();
-            let s = s.strip_prefix("grpc://").unwrap_or(s);
-            s.parse::<std::net::SocketAddr>().unwrap()
-        };
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         TcpFrameCodec::encode_frame(&mut stream, msg_type, header, payload)
             .await
             .unwrap();

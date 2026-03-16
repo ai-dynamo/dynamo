@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
@@ -19,6 +19,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::tcp::TcpFrameCodec;
 use crate::transport::{HealthCheckError, ShutdownState, TransportError, TransportErrorHandler};
+use crate::utils::interfaces::{
+    InterfaceEndpoint, InterfaceFilter, parse_endpoints, resolve_advertise_endpoints,
+    select_best_endpoint,
+};
 use crate::{MessageType, PeerInfo, Transport, TransportAdapter, TransportKey, WorkerAddress};
 
 use super::proto;
@@ -62,6 +66,12 @@ pub struct GrpcTransport {
 
     /// Optional pre-bound listener (used for tests to avoid port races).
     listener: std::sync::Mutex<Option<std::net::TcpListener>>,
+
+    /// Cached local interfaces for endpoint selection.
+    local_interfaces: OnceLock<Vec<InterfaceEndpoint>>,
+
+    /// NUMA hint for topology-aware NIC selection.
+    numa_hint: Option<u32>,
 }
 
 /// Handle to a connection's writer task.
@@ -174,10 +184,20 @@ impl Transport for GrpcTransport {
             .map_err(|_| TransportError::NoEndpoint)?
             .ok_or(TransportError::NoEndpoint)?;
 
-        let addr = parse_grpc_endpoint(&endpoint).map_err(|e| {
+        // Parse endpoints (supports both new multi-endpoint and legacy formats)
+        let remote_endpoints = parse_endpoints(&endpoint).map_err(|e| {
             error!("Failed to parse gRPC endpoint: {}", e);
             TransportError::InvalidEndpoint
         })?;
+
+        // Lazy-init local interfaces for endpoint selection
+        let local = self.local_interfaces.get_or_init(|| {
+            resolve_advertise_endpoints(self.bind_addr, &InterfaceFilter::All).unwrap_or_default()
+        });
+
+        // Select best endpoint based on NUMA + subnet affinity
+        let addr = select_best_endpoint(&remote_endpoints, local, self.numa_hint)
+            .ok_or(TransportError::InvalidEndpoint)?;
 
         self.peers.insert(peer_info.instance_id(), addr);
         debug!("Registered peer {} at {}", peer_info.instance_id(), addr);
@@ -521,12 +541,11 @@ async fn connection_writer_inner(
     Ok(())
 }
 
-/// Parse a gRPC endpoint string into a `SocketAddr`.
-///
-/// Accepts formats:
-/// - `"grpc://host:port"`
-/// - `"host:port"`
+/// Parse a gRPC endpoint string into a `SocketAddr` (legacy format, used in tests).
+#[cfg(test)]
 fn parse_grpc_endpoint(endpoint: &[u8]) -> Result<SocketAddr> {
+    use std::net::ToSocketAddrs;
+
     let endpoint_str = std::str::from_utf8(endpoint).context("endpoint is not valid UTF-8")?;
 
     let addr_str = endpoint_str.strip_prefix("grpc://").unwrap_or(endpoint_str);
@@ -547,6 +566,8 @@ pub struct GrpcTransportBuilder {
     channel_capacity: usize,
     connect_timeout: Duration,
     listener: Option<std::net::TcpListener>,
+    interface_filter: InterfaceFilter,
+    numa_hint: Option<u32>,
 }
 
 impl GrpcTransportBuilder {
@@ -558,6 +579,8 @@ impl GrpcTransportBuilder {
             channel_capacity: 256,
             connect_timeout: Duration::from_secs(5),
             listener: None,
+            interface_filter: InterfaceFilter::default(),
+            numa_hint: None,
         }
     }
 
@@ -585,6 +608,20 @@ impl GrpcTransportBuilder {
         self
     }
 
+    /// Set the interface selection filter for multi-NIC environments.
+    pub fn interface_filter(mut self, filter: InterfaceFilter) -> Self {
+        self.interface_filter = filter;
+        self
+    }
+
+    /// Set the NUMA node hint for topology-aware NIC selection.
+    ///
+    /// Callers typically resolve this via `dynamo_memory::numa::get_device_numa_node(gpu_id)`.
+    pub fn numa_hint(mut self, node: u32) -> Self {
+        self.numa_hint = Some(node);
+        self
+    }
+
     /// Use a pre-bound TcpListener instead of binding to a specific address.
     ///
     /// This is useful for tests where you want to bind to port 0 and get an OS-assigned
@@ -605,15 +642,45 @@ impl GrpcTransportBuilder {
 
     /// Build the `GrpcTransport`.
     pub fn build(self) -> Result<GrpcTransport> {
-        let bind_addr = self
-            .bind_addr
-            .ok_or_else(|| anyhow::anyhow!("bind_addr is required"))?;
         let key = self.key.unwrap_or_else(|| TransportKey::from("grpc"));
 
-        let advertise_addr = crate::utils::resolve_advertise_address(bind_addr);
-        let local_endpoint = format!("grpc://{}", advertise_addr);
+        // If we have a listener, use its address; otherwise pre-bind to resolve port 0.
+        let (bind_addr, listener) = if let Some(listener) = self.listener {
+            let addr = listener.local_addr()?;
+            (addr, Some(listener))
+        } else {
+            let requested = self
+                .bind_addr
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let std_listener = std::net::TcpListener::bind(requested)
+                .context("Failed to pre-bind gRPC listener")?;
+            let actual = std_listener.local_addr()?;
+            (actual, Some(std_listener))
+        };
+
+        // Resolve advertise endpoints (multi-interface discovery)
+        let endpoints = resolve_advertise_endpoints(bind_addr, &self.interface_filter)?;
+
+        // Warn if NUMA hint conflicts with interface filter
+        if let (Some(numa), InterfaceFilter::ByName(name)) =
+            (self.numa_hint, &self.interface_filter)
+        {
+            for ep in &endpoints {
+                if let Some(ep_numa) = ep.numa_node {
+                    if ep_numa != numa as i32 {
+                        warn!(
+                            "NIC {} is on NUMA node {} but GPU NUMA hint is {}",
+                            name, ep_numa, numa
+                        );
+                    }
+                }
+            }
+        }
+
+        let encoded = rmp_serde::to_vec(&endpoints)
+            .context("Failed to encode interface endpoints")?;
         let mut addr_builder = crate::address::WorkerAddressBuilder::new();
-        addr_builder.add_entry(key.clone(), local_endpoint.as_bytes().to_vec())?;
+        addr_builder.add_entry(key.clone(), encoded)?;
         let local_address = addr_builder.build()?;
 
         Ok(GrpcTransport {
@@ -628,7 +695,9 @@ impl GrpcTransportBuilder {
             channel_capacity: self.channel_capacity,
             connect_timeout: self.connect_timeout,
             adapter: OnceLock::new(),
-            listener: std::sync::Mutex::new(self.listener),
+            listener: std::sync::Mutex::new(listener),
+            local_interfaces: OnceLock::new(),
+            numa_hint: self.numa_hint,
         })
     }
 }
@@ -689,9 +758,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_requires_bind_addr() {
+    fn test_builder_default_prebinds() {
+        // Builder without explicit bind_addr should pre-bind to 0.0.0.0:0
         let result = GrpcTransportBuilder::new().build();
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -713,9 +783,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_peer() {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let transport = GrpcTransportBuilder::new().bind_addr(addr).build().unwrap();
+    fn test_register_peer_legacy_format() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let transport = GrpcTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap();
 
         let peer_addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
         let peer = make_grpc_peer(peer_addr);
@@ -727,8 +801,12 @@ mod tests {
 
     #[test]
     fn test_register_peer_no_endpoint() {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let transport = GrpcTransportBuilder::new().bind_addr(addr).build().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let transport = GrpcTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap();
 
         // Create a peer with a "tcp" entry, not "grpc"
         let instance_id = crate::InstanceId::new_v4();
@@ -744,8 +822,12 @@ mod tests {
 
     #[test]
     fn test_send_message_not_started() {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let transport = GrpcTransportBuilder::new().bind_addr(addr).build().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let transport = GrpcTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap();
 
         let error_handler = Arc::new(TrackingErrorHandler::new());
         transport.send_message(
@@ -760,12 +842,22 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_advertise_address() {
-        use std::net::{IpAddr, Ipv4Addr};
+    fn test_builder_multi_endpoint_format() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let transport = GrpcTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap();
 
-        let bind_addr: SocketAddr = "0.0.0.0:12345".parse().unwrap();
-        let resolved = crate::utils::resolve_advertise_address(bind_addr);
-        assert_eq!(resolved.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(resolved.port(), 12345);
+        // The address should contain msgpack-encoded endpoints
+        let wa = transport.address();
+        let raw = wa.get_entry("grpc").unwrap().unwrap();
+        let endpoints: Vec<InterfaceEndpoint> = rmp_serde::from_slice(&raw).unwrap();
+        assert!(!endpoints.is_empty());
+        for ep in &endpoints {
+            assert_eq!(ep.port, addr.port());
+        }
     }
 }

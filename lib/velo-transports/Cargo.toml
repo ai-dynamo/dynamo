@@ -26,7 +26,7 @@ bytes = { workspace = true }
 dashmap = { workspace = true }
 # derive_builder = { workspace = true }
 parking_lot.workspace = true
-# serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -45,7 +45,7 @@ socket2 = "0.6"
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["sched"] }
+nix = { version = "0.30", features = ["sched", "net"] }
 
 # optional dependencies
 axum = { version = "0.8", optional = true }
