@@ -1,203 +1,210 @@
-# Design Doc: Disaggregated Diffusion Inference (Diff-Disagg) in Dynamo
+# Design Doc: Disaggregated Diffusion Inference in Dynamo
 
 ## 1. Motivation
 
-Current diffusion inference in Dynamo (e.g., SGLang backend) is monolithic: a single worker loads all model components (Text Encoder, Transformer/UNet, VAE). This design faces several challenges with modern large-scale diffusion models (Flux, SD3, Video Models):
+Modern video diffusion models (HunyuanVideo 13B, Wan2.2-14B, etc.) comprise
+heterogeneous components with vastly different compute profiles:
 
-1.  **Huge Text Encoders**: Models like Flux use T5-XXL, consuming 10-20GB VRAM just for the encoder, which is only used once at the beginning.
-2.  **Resource Inefficiency**: During the long denoising loop (20-50 steps), the text encoder weights occupy precious H100/H200 memory without being used.
-3.  **Heterogeneous Compute**:
-    *   **Text Encoding**: Compute-intensive, single pass. Can run on lower-end GPUs or even CPU.
-    *   **Denoising**: Memory-bandwidth and compute-intensive, iterative. Requires high-end GPUs (H100/H200).
-    *   **VAE Decoding**: Memory-intensive, single pass. Can be offloaded.
+| Component | Params | Compute Pattern | VRAM (bf16) |
+|-----------|--------|----------------|-------------|
+| Text Encoder (e.g. Llama3-8B) | 8B | Single forward pass | ~16 GB |
+| DiT Denoiser | 5-13B | 30-50 iterative steps | 10-26 GB |
+| 3D VAE Decoder | ~200M | Single forward pass | ~2 GB |
 
-**Goal**: Decompose the diffusion pipeline into flexible, independent stages (Encoder, Denoiser, VAE) that can be deployed on different hardware and scaled independently.
+In a monolithic deployment, **all components occupy a single GPU** throughout
+the entire request lifetime, even though the encoder is idle during denoising
+(96%+ of wall time) and the VAE is idle during encoding+denoising.
 
-## 2. Architecture: Router-Orchestrated Multi-Stage Pipeline
+**Disaggregated diffusion** decomposes the pipeline into independently
+deployable stages, enabling:
 
-We adopt a **Router-Centric** architecture similar to Dynamo's existing EPD (Encoder-Prefill-Decode) flow for LLMs. The Frontend/Router acts as the orchestrator, chaining calls between specialized workers.
+- **Independent scaling** per stage (e.g. 1 encoder : 4 denoisers : 1 VAE)
+- **Heterogeneous hardware** (encoder on cost-efficient GPUs, denoiser on high-end)
+- **Pipeline parallelism** across concurrent requests
+- **Memory efficiency** (each GPU loads only its stage's weights)
 
-### 2.1 Component Roles
+## 2. Architecture
 
-1.  **Frontend / Global Router**:
-    *   Acts as the conductor.
-    *   Receives the initial user request.
-    *   Orchestrates the sequence: `Encoder -> Denoiser -> VAE`.
-    *   Maintains the request state and context.
+### 2.1 Three-Stage Pipeline
 
-2.  **Stage Workers**:
-    *   **Encoder Worker**: Loads CLIP/T5. Input: Text. Output: Embeddings (Tensor Bytes).
-    *   **Denoiser Worker**: Loads Transformer/UNet. Input: Embeddings + Latents (optional). Output: Denoised Latents.
-    *   **VAE Worker**: Loads VAE. Input: Denoised Latents. Output: Image/Video (Pixel Data).
+```
+                    ZMQ                    ZMQ                    ZMQ
+  Client ──► [ Encoder ] ─── embeds ──► [ Denoiser ] ─── latents ──► [ VAE ] ──► Video
+               GPU 0                     GPU 1,2 (TP=2)              GPU 3
+             Llama3-8B                   HunyuanVideo DiT            3D Causal VAE
+             + CLIP                      13B params                  ~200M params
+```
 
-### 2.2 Data Flow (Request/Response)
+Each stage runs as a separate SGLang `Scheduler` subprocess with its own CUDA
+context.  Inter-stage communication uses ZMQ (pickle serialization).
+
+### 2.2 Request Flow
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Frontend
-    participant Router
-    participant EncoderWorker
-    participant DenoiserWorker
-    participant VAEWorker
+    participant Orchestrator
+    participant Encoder as Encoder (GPU 0)
+    participant Denoiser as Denoiser (GPU 1,2)
+    participant VAE as VAE (GPU 3)
 
-    Client->>Frontend: POST /v1/images/generations (Prompt)
-    
-    Note over Frontend: Step 1: Text Encoding
-    Frontend->>Router: Route(ModelType.Encoder, Prompt)
-    Router->>EncoderWorker: GenerateEmbeddings(Prompt)
-    EncoderWorker-->>Frontend: Return {prompt_embeds, pooled_embeds}
-    
-    Note over Frontend: Step 2: Denoising
-    Frontend->>Router: Route(ModelType.Denoiser, Embeddings)
-    Router->>DenoiserWorker: Denoise(Embeddings, Latents=None)
-    DenoiserWorker-->>Frontend: Return {denoised_latents}
-    
-    Note over Frontend: Step 3: VAE Decoding
-    Frontend->>Router: Route(ModelType.VAE, Latents)
-    Router->>VAEWorker: Decode(Latents)
-    VAEWorker-->>Frontend: Return {image_data / url}
-    
-    Frontend-->>Client: Final Response
+    Client->>Orchestrator: generate(prompt, params)
+
+    Orchestrator->>Encoder: Req(prompt)
+    Encoder-->>Orchestrator: {prompt_embeds: [Llama, CLIP]}
+
+    Orchestrator->>Denoiser: Req(prompt_embeds, params)
+    Note over Denoiser: 50 denoising steps (TP=2)
+    Denoiser-->>Orchestrator: {latents: [B,C,T,H,W]}
+
+    Orchestrator->>VAE: Req(latents)
+    VAE-->>Orchestrator: decoded video [B,C,T,H,W]
+
+    Orchestrator-->>Client: video.mp4
 ```
 
-*Optimization Note*: For large data (like Video Latents), we can use **Reference Passing** via a shared storage (Object Store / Shared Memory) instead of passing raw bytes through the Router/Frontend.
+### 2.3 Concurrent Request Pipelining
 
-## 3. Detailed Design
+With disaggregation, stages process different requests simultaneously:
 
-### 3.1 Protocol Extensions (`dynamo/common/protocols`)
+```
+Time ──────────────────────────────────────────────────────►
 
-We need to define data structures for intermediate results.
+Encoder:  |req0 enc|req1 enc|                |req2 enc|req3 enc|
+Denoiser:          |   req0 denoise (50 steps)   |   req1 denoise ...
+VAE:                                             |req0 vae|
+```
 
-**New Protocol Types:**
+The encoder and VAE are freed immediately after their stage completes,
+allowing them to serve the next request while the denoiser is busy.
+
+## 3. Implementation
+
+### 3.1 Core Components
+
+| File | Role |
+|------|------|
+| `partial_gpu_worker.py` | `PartialGPUWorker` — loads a subset of pipeline modules; `IntermediateOutputStage` / `DeviceMoveStage` for inter-stage tensor transfer |
+| `sglang_utils.py` | `build_partial_pipeline()` — suppresses default stage creation, syncs component configs; tensor injection/extraction helpers |
+| `run_e2e_sglang.py` | Orchestrator — launches 3 stage schedulers, connects ZMQ clients, runs E2E pipeline with timing |
+
+### 3.2 Partial Pipeline Loading
+
+Each stage loads only its required modules via `build_partial_pipeline()`:
 
 ```python
-class DiffusionEmbeddingData(BaseModel):
-    """Output from Encoder Stage"""
-    prompt_embeds: bytes          # Serialized Tensor (e.g., safetensors/numpy)
-    pooled_prompt_embeds: Optional[bytes] = None
-    negative_prompt_embeds: Optional[bytes] = None
-    negative_pooled_prompt_embeds: Optional[bytes] = None
+# Encoder: loads text encoders + tokenizers only (~16 GB)
+pipeline = build_partial_pipeline(server_args,
+    required_modules=["text_encoder", "text_encoder_2",
+                       "tokenizer", "tokenizer_2", "scheduler"])
 
-class DiffusionLatentData(BaseModel):
-    """Output from Denoiser Stage"""
-    latents: bytes                # Serialized Tensor
-    shape: List[int]
-    dtype: str
+# Denoiser: loads transformer only (~26 GB, or ~13 GB/GPU with TP=2)
+pipeline = build_partial_pipeline(server_args,
+    required_modules=["transformer", "scheduler"])
 
-class StageRequest(BaseModel):
-    """Generic Request for a specific stage"""
-    stage: str                    # "encoder", "denoiser", "vae"
-    input_data: Union[str, DiffusionEmbeddingData, DiffusionLatentData]
-    params: Dict[str, Any]        # Generation params (steps, cfg, etc.)
+# VAE: loads VAE only (~2 GB)
+pipeline = build_partial_pipeline(server_args,
+    required_modules=["vae", "scheduler"])
 ```
 
-### 3.2 ModelType Expansion (`dynamo/llm/src/model.rs` & Python Enums)
+A dynamic subclass of the model's pipeline is created at runtime to:
+1. Suppress automatic stage creation (`create_pipeline_stages` → no-op)
+2. Skip LoRA init (which assumes `transformer` always exists)
+3. Sync all component configs (VAE z_dim, DiT patch_size, etc.) even for unloaded modules
 
-Extend `ModelType` to support fine-grained stages.
+### 3.3 Multi-Encoder Support
 
-```python
-class ModelType(IntFlag):
-    # Existing
-    Tokens = auto()
-    # ...
-    
-    # New Diffusion Stages
-    DiffusionEncoder = auto()  # Text Encoder only
-    DiffusionDenoiser = auto() # Transformer/UNet only
-    DiffusionVAE = auto()      # VAE only
+Models with dual text encoders (e.g. HunyuanVideo: Llama3-8B + CLIP) produce
+embedding lists with incompatible shapes. The pipeline handles this transparently:
+
+- `IntermediateOutputStage`: preserves multi-element lists as-is (no `torch.cat`)
+- `inject_tensors_to_req()`: accepts both bare tensors and lists
+- `DeviceMoveStage`: moves each tensor in the list to GPU with `.contiguous()`
+
+### 3.4 SGLang Compatibility Patches
+
+Two runtime patches are applied for HunyuanVideo compatibility:
+
+1. **`HunyuanConfig` task_type**: The upstream config class lacks a default
+   `task_type`, causing instantiation to fail. We wrap `__init__` to supply
+   `ModelTaskType.T2V` when omitted.
+
+2. **Triton norm contiguous**: HunyuanVideo's transformer produces
+   non-contiguous intermediate tensors from attention reshapes. SGLang's triton
+   layernorm kernel asserts `x.stride(-1) == 1`. We patch `norm_infer` to call
+   `.contiguous()` when needed.
+
+## 4. Supported Models
+
+| Model | Pipeline Class | Text Encoders | DiT | Status |
+|-------|---------------|---------------|-----|--------|
+| **HunyuanVideo v1** | `HunyuanVideoPipeline` | Llama3-8B + CLIP | 13B | **Validated** |
+| Wan2.2-TI2V-5B | `WanPipeline` | T5 | 5B | Validated |
+| Wan2.1-T2V-14B | `WanPipeline` | T5 | 14B | Untested |
+| FLUX.1 (image) | `FluxPipeline` | CLIP + T5 | 12B | Phase 0 only |
+
+The encoder module detection is automatic via `model_index.json` — any SGLang-supported
+diffusion model with the standard 3-stage structure should work without code changes.
+
+## 5. Benchmarks (HunyuanVideo v1, 544x960, 50 steps, 61 frames)
+
+### Single Request Latency
+
+| | Native SGLang (1 GPU) | Disagg (4 GPUs, TP=2) |
+|---|---|---|
+| Encoder | 0.31s | 0.35s |
+| Denoiser | 512.19s (10.24s/step) | 477.14s (9.42s/step) |
+| VAE | 24.53s | 18.32s |
+| **Total** | **537.12s** | **495.81s** |
+
+### 2 Concurrent Requests (9 frames, 3 steps — smoke test)
+
+```
+req 0 | enc=0.34s  den=2.92s  vae=2.26s  total=5.52s
+req 1 | enc=0.66s  den=5.50s  vae=2.25s  total=8.41s
+Wall time: 8.44s | Throughput: 0.24 req/s
 ```
 
-### 3.3 SGLang Backend Adaptation (`components/src/dynamo/sglang`)
+Pipeline parallelism observed: req 1's encoder overlapped with req 0's denoiser.
 
-We need to modify `init_diffusion.py` and handlers to support partial loading.
+## 6. Milestone Tracker
 
-**Configuration:**
-Add `--diffusion-stage` argument to `sglang` worker.
+### Completed
 
-*   `--diffusion-stage full` (Default): Loads everything (current behavior).
-*   `--diffusion-stage encoder`: Loads only Text Encoders.
-*   `--diffusion-stage denoiser`: Loads only Transformer, accepts Embeddings.
-*   `--diffusion-stage vae`: Loads only VAE, accepts Latents.
+- [x] **Phase 0**: Offline split validation (FLUX.1-schnell, diffusers)
+- [x] **Phase 1a**: Dynamo stage workers (encoder/denoiser/VAE as Dynamo services, FLUX)
+- [x] **Phase 1b**: SGLang backend integration
+  - [x] `PartialGPUWorker` with monkey-patched `GPUWorker`
+  - [x] `build_partial_pipeline()` with auto-detected pipeline class
+  - [x] `IntermediateOutputStage` for ZMQ tensor transfer
+  - [x] TP=2 denoiser support (multi-process pipe wiring)
+  - [x] HunyuanVideo v1 dual-encoder support (Llama + CLIP)
+  - [x] E2E orchestrator with per-stage timing and mp4 output
+  - [x] Concurrent request support with pipeline parallelism
+- [x] **Phase 2**: Orchestrator client (ZMQ-based, async)
 
-**Handler Implementation:**
+### In Progress
 
-1.  **`EncoderHandler`**:
-    *   Uses `pipe.encode_prompt()`.
-    *   Returns serialized embeddings.
+- [ ] **Phase 3**: Dynamo Router integration
+  - [ ] Register stage workers as typed endpoints (`DiffusionEncoder`, `DiffusionDenoiser`, `DiffusionVAE`)
+  - [ ] Router-orchestrated multi-stage chaining (replace manual ZMQ orchestrator)
+  - [ ] Frontend API: `POST /v1/video/generations`
 
-2.  **`DenoiserHandler`**:
-    *   Initializes pipeline with `text_encoder=None`, `vae=None`.
-    *   Implements `generate(prompt_embeds=...)`.
-    *   Returns latents (skips VAE decode).
+### Scaling Roadmap
 
-3.  **`VAEHandler`**:
-    *   Initializes pipeline with `text_encoder=None`, `transformer=None`.
-    *   Implements `decode(latents=...)`.
-
-### 3.4 Router Logic (`components/src/dynamo/global_router`)
-
-The Global Router needs to be aware of these new `ModelType`s.
-
-*   **Registration**: Workers register with specific types (e.g., `ModelType.DiffusionEncoder`).
-*   **Routing**:
-    *   `handle_encoder_request`: Routes to Encoder Pool.
-    *   `handle_denoiser_request`: Routes to Denoiser Pool.
-    *   `handle_vae_request`: Routes to VAE Pool.
-
-## 4. Implementation Plan
-
-### POC (Proof of Concept)
-
-Full POC code lives in [`examples/disagg_diffusion/`](../../examples/disagg_diffusion/).
-
-#### Phase 0: Offline Validation (`phase0_validate/`)
-
-Single-GPU script that proves diffusers supports split execution.
-Runs Encoder → Denoiser → VAE as three separate stages with serialized
-intermediate tensors, then compares the result against a monolithic run.
-
-**Key risk validated**: Can diffusers pipelines accept `prompt_embeds` and
-return `output_type="latent"` to bypass text encoder / VAE respectively?
-
-#### Phase 1: Dynamo Stage Workers (`phase1_workers/`)
-
-Three independent Dynamo workers, each loading only its model component:
-
-| Worker | Loads | Endpoint | Input | Output |
-|--------|-------|----------|-------|--------|
-| `encoder_worker.py` | CLIP + T5 | `disagg_diffusion.encoder.encode` | text prompt | embeddings (b64) |
-| `denoiser_worker.py` | Transformer | `disagg_diffusion.denoiser.denoise` | embeddings + params | latents (b64) |
-| `vae_worker.py` | VAE | `disagg_diffusion.vae.decode` | latents | image (b64 PNG) |
-
-Intermediate data is serialized as base64-encoded `torch.save` bytes.
-Protocol types are defined in `protocol.py`.
-
-#### Phase 2: Orchestrator Client (`phase2_orchestrator/`)
-
-A lightweight Python client that connects to the Dynamo runtime, calls the
-three stage endpoints in sequence, and produces the final image.
-
-### Production Roadmap
-
-#### Phase 3: Protocol & Types
-1.  Define `DiffusionEmbeddingData` and `DiffusionLatentData` in `dynamo/common/protocols`.
-2.  Add `DiffusionEncoder`, `DiffusionDenoiser`, `DiffusionVAE` to `ModelType` enum (Rust + Python).
-
-#### Phase 4: SGLang Modularization
-1.  Modify `init_diffusion.py` to accept `--diffusion-stage {full,encoder,denoiser,vae}`.
-2.  Implement `EncoderHandler`, `DenoiserHandler`, `VAEHandler` in `sglang/request_handlers/disagg_diffusion/`.
-3.  Add logic to conditionally load model components based on stage.
-
-#### Phase 5: Frontend / Router Orchestration
-1.  Update `Frontend` to detect if the backend is disaggregated diffusion.
-2.  Implement the multi-step orchestration logic (`Encoder → Denoiser → VAE`)
-    in `Frontend` or a specialized `DiffusionOrchestrator` component.
-3.  Support configurable stage DAGs (e.g., skip VAE for latent-only output).
-
-#### Phase 6: Optimization
-1.  **Reference Passing**: Replace base64 tensor payloads with shared-memory
-    handles or object-store URLs (e.g., `media_output_fs_url`).
-2.  **Pipelining**: Overlap encoding of request N+1 with denoising of request N.
-3.  **Encoder Caching**: LRU cache for repeated prompts at the Encoder stage.
-4.  **Video Extension**: Extend to video models (larger latents, more frames).
+- [ ] **NIXL tensor transfer**: Replace ZMQ pickle with RDMA/GPU-direct for
+  inter-stage latent transfer (critical for video — latents are O(100 MB))
+- [ ] **Independent stage scaling**: N:M:K ratio (e.g. 1 encoder : 4 denoisers : 1 VAE)
+  with load-balanced routing per stage pool
+- [ ] **Encoder caching**: LRU cache for repeated prompts at the encoder stage
+  (common in batch generation / prompt engineering workflows)
+- [ ] **Sequence parallelism**: Ulysses/Ring SP for denoiser to scale beyond TP
+  (especially for long videos with high temporal resolution)
+- [ ] **VAE tiling**: Enable tiled 3D VAE decoding for high-resolution / long videos
+  that exceed single-GPU VRAM
+- [ ] **Heterogeneous hardware**: Deploy encoder on cost-efficient GPUs (e.g. L4/T4),
+  denoiser on compute-optimized GPUs (H100/H200), VAE on memory-optimized nodes
+- [ ] **HunyuanVideo v1.5 support**: Requires SGLang to implement
+  `HunyuanVideo15Pipeline` (Qwen2.5-VL + ByT5 encoders, 8.3B DiT)
+- [ ] **Prefill-decode analogy**: Continuous batching within the denoiser stage
+  (batch multiple requests at different denoising steps)
