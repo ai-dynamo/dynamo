@@ -1,3 +1,0 @@
-kind,resource,container_type,container,image
-DaemonSet,snapshot,init,deploy-seccomp,busybox:latest
-DaemonSet,,main,agent,nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.0.0
