@@ -26,7 +26,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0-dev.1"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -37,15 +37,15 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "1.0.0" }
-dynamo-llm = { path = "lib/llm", version = "1.0.0" }
-dynamo-config = { path = "lib/config", version = "1.0.0" }
-dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
-dynamo-memory = { path = "lib/memory", version = "1.0.0" }
-dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics", "runtime-protocols"] }
-dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
-dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
+dynamo-runtime = { path = "lib/runtime", version = "1.1.0-dev.1" }
+dynamo-llm = { path = "lib/llm", version = "1.1.0-dev.1" }
+dynamo-config = { path = "lib/config", version = "1.1.0-dev.1" }
+dynamo-tokens = { path = "lib/tokens", version = "1.1.0-dev.1" }
+dynamo-memory = { path = "lib/memory", version = "1.1.0-dev.1" }
+dynamo-mocker = { path = "lib/mocker", version = "1.1.0-dev.1" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.1.0-dev.1", features = ["metrics", "runtime-protocols"] }
+dynamo-async-openai = { path = "lib/async-openai", version = "1.1.0-dev.1", features = ["byot"] }
+dynamo-parsers = { path = "lib/parsers", version = "1.1.0-dev.1" }
 fastokens = { version = "0.1.0" }
 
 # kvbm
