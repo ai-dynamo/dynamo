@@ -9,6 +9,7 @@ on:
     - main
     - 'release/*.*.*'
     - "pull-request/[0-9]+"
+    - 'pvijayakrish/use-pat-for-rc-tagging'
     # Note: release/* branches always build (change detection skipped)
   workflow_call:
     inputs:
@@ -71,7 +72,7 @@ jobs:
   build-epp-image:
     name: Build EPP Image
     needs: changed-files
-    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
+    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/') || github.ref_name == 'pvijayakrish/use-pat-for-rc-tagging'
     runs-on: prod-builder-v3
     outputs:
       epp_image_ref: ${{ steps.build-epp-image.outputs.epp_image_ref }}
@@ -123,7 +124,7 @@ jobs:
   build-frontend-image:
     name: Build Frontend Image
     needs: [changed-files, build-epp-image]
-    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
+    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/') || github.ref_name == 'pvijayakrish/use-pat-for-rc-tagging'
     runs-on: prod-builder-v3
     outputs:
       target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}

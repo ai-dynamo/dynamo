@@ -271,27 +271,12 @@ jobs:
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # ---- Frontend images ----
+          # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
           echo ""
-          echo "=== Frontend Images ==="
-          FRONTEND_IMAGES=()
-          for ARCH in "${ARCHITECTURES[@]}"; do
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend-${ARCH}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"
-            if copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"; then
-              FRONTEND_IMAGES+=("${TARGET}")
-            fi
-          done
-
-          if [ ${#FRONTEND_IMAGES[@]} -eq 2 ]; then
-            create_manifest \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}" \
-              "${FRONTEND_IMAGES[0]}" "${FRONTEND_IMAGES[1]}" \
-              "dynamo-frontend:${NGC_VERSION_TAG}"
-          else
-            echo "Warning: Not all frontend architectures available, skipping multi-arch manifest"
-            FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch - missing archs)")
-          fi
+          echo "=== Frontend Image ==="
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+          copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
 
           # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
           echo ""
