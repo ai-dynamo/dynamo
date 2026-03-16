@@ -666,19 +666,19 @@ impl GrpcTransportBuilder {
             (self.numa_hint, &self.interface_filter)
         {
             for ep in &endpoints {
-                if let Some(ep_numa) = ep.numa_node {
-                    if ep_numa != numa as i32 {
-                        warn!(
-                            "NIC {} is on NUMA node {} but GPU NUMA hint is {}",
-                            name, ep_numa, numa
-                        );
-                    }
+                if let Some(ep_numa) = ep.numa_node
+                    && ep_numa != numa as i32
+                {
+                    warn!(
+                        "NIC {} is on NUMA node {} but GPU NUMA hint is {}",
+                        name, ep_numa, numa
+                    );
                 }
             }
         }
 
-        let encoded = rmp_serde::to_vec(&endpoints)
-            .context("Failed to encode interface endpoints")?;
+        let encoded =
+            rmp_serde::to_vec(&endpoints).context("Failed to encode interface endpoints")?;
         let mut addr_builder = crate::address::WorkerAddressBuilder::new();
         addr_builder.add_entry(key.clone(), encoded)?;
         let local_address = addr_builder.build()?;

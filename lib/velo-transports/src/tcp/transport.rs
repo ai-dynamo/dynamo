@@ -649,13 +649,13 @@ impl TcpTransportBuilder {
             (self.numa_hint, &self.interface_filter)
         {
             for ep in &endpoints {
-                if let Some(ep_numa) = ep.numa_node {
-                    if ep_numa != numa as i32 {
-                        warn!(
-                            "NIC {} is on NUMA node {} but GPU NUMA hint is {}",
-                            name, ep_numa, numa
-                        );
-                    }
+                if let Some(ep_numa) = ep.numa_node
+                    && ep_numa != numa as i32
+                {
+                    warn!(
+                        "NIC {} is on NUMA node {} but GPU NUMA hint is {}",
+                        name, ep_numa, numa
+                    );
                 }
             }
         }

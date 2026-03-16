@@ -34,25 +34,23 @@ pub struct InterfaceEndpoint {
 impl InterfaceEndpoint {
     /// Parse the `ip` field into a `SocketAddr` with the stored port.
     pub fn socket_addr(&self) -> Option<SocketAddr> {
-        self.ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, self.port))
+        self.ip
+            .parse::<IpAddr>()
+            .ok()
+            .map(|ip| SocketAddr::new(ip, self.port))
     }
 }
 
 /// User-specified interface selection policy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum InterfaceFilter {
     /// All UP, non-loopback interfaces (default).
+    #[default]
     All,
     /// Select a specific interface by name, e.g. "eth0", "mlx5_0".
     ByName(String),
     /// Manual override with explicit endpoints (useful for testing).
     Explicit(Vec<InterfaceEndpoint>),
-}
-
-impl Default for InterfaceFilter {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 /// A raw discovered network interface (before port assignment).
@@ -94,10 +92,10 @@ fn discover_interfaces() -> Result<Vec<NetworkInterface>> {
         let prefix_len: u8;
 
         if let Some(sin) = addr.as_sockaddr_in() {
-            ip = IpAddr::V4(Ipv4Addr::from(sin.ip()));
+            ip = IpAddr::V4(sin.ip());
             prefix_len = ifaddr
                 .netmask
-                .and_then(|m| m.as_sockaddr_in().map(|s| Ipv4Addr::from(s.ip())))
+                .and_then(|m| m.as_sockaddr_in().map(|s| s.ip()))
                 .map(|mask| netmask_to_prefix_len(IpAddr::V4(mask)))
                 .unwrap_or(24);
         } else if let Some(sin6) = addr.as_sockaddr_in6() {
@@ -147,11 +145,7 @@ fn read_nic_numa_node(iface_name: &str) -> Option<i32> {
     let path = format!("/sys/class/net/{}/device/numa_node", iface_name);
     let content = std::fs::read_to_string(path).ok()?;
     let node: i32 = content.trim().parse().ok()?;
-    if node < 0 {
-        None
-    } else {
-        Some(node)
-    }
+    if node < 0 { None } else { Some(node) }
 }
 
 /// Count leading 1-bits in a netmask to get the CIDR prefix length.
@@ -341,10 +335,10 @@ pub fn select_best_endpoint(
 
     // Phase 4: First non-loopback.
     for ep in remote {
-        if let Ok(ip) = ep.ip.parse::<IpAddr>() {
-            if !ip.is_loopback() {
-                return ep.socket_addr();
-            }
+        if let Ok(ip) = ep.ip.parse::<IpAddr>()
+            && !ip.is_loopback()
+        {
+            return ep.socket_addr();
         }
     }
 
@@ -358,10 +352,10 @@ pub fn select_best_endpoint(
 /// legacy `"tcp://host:port"` or `"grpc://host:port"` string parsing.
 pub fn parse_endpoints(raw: &[u8]) -> Result<Vec<InterfaceEndpoint>> {
     // Try msgpack array first.
-    if let Ok(endpoints) = rmp_serde::from_slice::<Vec<InterfaceEndpoint>>(raw) {
-        if !endpoints.is_empty() {
-            return Ok(endpoints);
-        }
+    if let Ok(endpoints) = rmp_serde::from_slice::<Vec<InterfaceEndpoint>>(raw)
+        && !endpoints.is_empty()
+    {
+        return Ok(endpoints);
     }
 
     // Fall back to legacy string format.
@@ -378,7 +372,7 @@ pub fn parse_endpoints(raw: &[u8]) -> Result<Vec<InterfaceEndpoint>> {
             addr_str
                 .to_socket_addrs()?
                 .next()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no addresses"))
+                .ok_or_else(|| std::io::Error::other("no addresses"))
         })
         .context("failed to parse legacy endpoint")?;
 
@@ -397,10 +391,22 @@ mod tests {
 
     #[test]
     fn test_netmask_to_prefix_len_ipv4() {
-        assert_eq!(netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0))), 8);
-        assert_eq!(netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 255, 0, 0))), 16);
-        assert_eq!(netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0))), 24);
-        assert_eq!(netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))), 32);
+        assert_eq!(
+            netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0))),
+            8
+        );
+        assert_eq!(
+            netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 255, 0, 0))),
+            16
+        );
+        assert_eq!(
+            netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0))),
+            24
+        );
+        assert_eq!(
+            netmask_to_prefix_len(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))),
+            32
+        );
     }
 
     #[test]

@@ -591,8 +591,8 @@ impl ShutdownTestClient for TcpShutdownClient {
         header: &[u8],
         payload: &[u8],
     ) -> Self::Stream {
-        use velo_transports::tcp::TcpFrameCodec;
         use velo_transports::InterfaceEndpoint;
+        use velo_transports::tcp::TcpFrameCodec;
 
         let addr = {
             let wa = handle.transport.address();
