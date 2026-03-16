@@ -97,9 +97,11 @@ PREFILL_EXTRA_ARGS=""
 DECODE_EXTRA_ARGS=""
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
+    # 3 workers share one GPU. Cap context-length and max-total-tokens to keep
+    # KV cache small enough for the last worker to initialize.
     ENCODE_EXTRA_ARGS="--mem-fraction-static ${DYN_ENCODE_GPU_MEM}"
-    PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
-    DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
+    PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024"
+    DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
