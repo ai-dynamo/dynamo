@@ -1459,6 +1459,11 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
+			// Add discovery labels to pod template so the daemon can filter by them
+			if controller_common.IsK8sDiscoveryEnabled(operatorConfig.Discovery.Backend, component.Annotations) {
+				labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+				labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+			}
 			clique.Labels = labels
 			annotations, err := generateAnnotations(component)
 			if err != nil {
