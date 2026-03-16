@@ -20,7 +20,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
 > [!IMPORTANT]
-> The optional optimized path (`--enable-optimizations`) targets **NVIDIA B200/B300** GPUs (CUDA arch 10.0) with FP4 quantization and flash-attention. By default, `worker.py` runs with optimizations disabled and uses TORCH_SDPA for broader compatibility on other GPUs (H100, A100, etc.). Expect lower performance unless you opt in on supported hardware.
+> The optional optimized path (`--enable-optimizations`) targets **NVIDIA B200/B300** GPUs (CUDA arch 10.0) with FP4 quantization and flash-attention. By default, `worker.py` runs with optimizations disabled and uses TORCH_SDPA for broader compatibility on other GPUs (for example, H100). Expect lower performance unless you opt in on supported hardware.
 
 ## Docker Image Build
 

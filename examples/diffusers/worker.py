@@ -151,6 +151,7 @@ class FastVideoBackend:
 
         def _load():
             pipeline_config = PipelineConfig.from_pretrained(self.model_name)
+            optimization_kwargs = {}
             if self.enable_optimizations:
                 logger.info(
                     "Using FP4 quantization for VideoGenerator model=%s",
@@ -167,28 +168,30 @@ class FastVideoBackend:
                         "FastVideo version that includes fp4_config."
                     ) from exc
                 pipeline_config.dit_config.quant_config = FP4Config()
+                optimization_kwargs = {
+                    "ltx2_refine_enabled": True,
+                    "ltx2_refine_lora_path": "",  # disable refine lora for distilled model
+                    "ltx2_refine_num_inference_steps": 2,
+                    "ltx2_refine_guidance_scale": 1.0,
+                    "ltx2_refine_add_noise": True,
+                    "enable_torch_compile": True,
+                    "enable_torch_compile_text_encoder": True,
+                    "torch_compile_kwargs": {
+                        "backend": "inductor",
+                        "fullgraph": True,
+                        "mode": "max-autotune-no-cudagraphs",
+                    },
+                    "dit_cpu_offload": False,
+                    "vae_cpu_offload": False,
+                    "text_encoder_cpu_offload": False,
+                    "ltx2_vae_tiling": False,
+                }
 
             return VideoGenerator.from_pretrained(
                 self.model_name,
                 num_gpus=self.num_gpus,
-                ltx2_refine_enabled=True,
-                ltx2_refine_lora_path="",  # disable refine lora for distilled model
-                ltx2_refine_num_inference_steps=2,
-                ltx2_refine_guidance_scale=1.0,
-                ltx2_refine_add_noise=True,
                 pipeline_config=pipeline_config,
-                enable_torch_compile=self.enable_optimizations,
-                enable_torch_compile_text_encoder=self.enable_optimizations,
-                torch_compile_kwargs={
-                    "backend": "inductor",
-                    "fullgraph": True,
-                    "mode": "max-autotune-no-cudagraphs",
-                },
-                # Consider enabling the following offloading options to reduce GPU memory usage if you run into OOM errors.
-                dit_cpu_offload=False,
-                vae_cpu_offload=False,
-                text_encoder_cpu_offload=False,
-                ltx2_vae_tiling=False,
+                **optimization_kwargs,
             )
 
         self.generator = await loop.run_in_executor(None, _load)
