@@ -19,7 +19,7 @@ from dynamo.llm import ModelInput, ModelType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
-from dynamo.vllm.main import _handle_non_leader_node, setup_metrics_collection
+from dynamo.vllm.main import setup_metrics_collection
 
 from .args import OmniConfig, parse_omni_args
 
@@ -57,9 +57,12 @@ async def init_omni(
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    # Non-leader nodes don't serve endpoints
     if config.engine_args.data_parallel_rank:
-        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        logger.info(
+            "Non-leader DP rank %d; skipping endpoint registration",
+            config.engine_args.data_parallel_rank,
+        )
+        await shutdown_event.wait()
         return
 
     model_type = get_output_modalities(config.output_modalities, config.model)
