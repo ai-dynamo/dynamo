@@ -901,7 +901,7 @@ def test_lora_aggregated(
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.timeout(1200)
+@pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
