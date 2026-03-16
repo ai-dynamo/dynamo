@@ -242,17 +242,43 @@ fn bench_batched(
         let t2 = Instant::now();
 
         // Verify correctness per sample within the batch
-        for (j, (hf_enc, ft_enc)) in hf_results.iter().zip(ft_results.iter()).enumerate() {
-            if hf_enc.token_ids() != ft_enc.token_ids() {
-                mismatches += 1;
-                if mismatches <= 3 {
-                    let global_idx = batch_idx * batch_size + j;
-                    eprintln!(
-                        "[MISMATCH] sample {global_idx}: hf={} tokens, ft={} tokens",
-                        hf_enc.token_ids().len(),
-                        ft_enc.token_ids().len()
-                    );
+        if hf_results.len() != ft_results.len() {
+            eprintln!(
+                "[LENGTH MISMATCH] batch {batch_idx}: hf returned {} results, ft returned {} results (expected {})",
+                hf_results.len(),
+                ft_results.len(),
+                batch.len()
+            );
+        }
+        let max_len = hf_results.len().max(ft_results.len());
+        for j in 0..max_len {
+            let global_idx = batch_idx * batch_size + j;
+            match (hf_results.get(j), ft_results.get(j)) {
+                (Some(hf_enc), Some(ft_enc)) => {
+                    if hf_enc.token_ids() != ft_enc.token_ids() {
+                        mismatches += 1;
+                        if mismatches <= 3 {
+                            eprintln!(
+                                "[MISMATCH] sample {global_idx}: hf={} tokens, ft={} tokens",
+                                hf_enc.token_ids().len(),
+                                ft_enc.token_ids().len()
+                            );
+                        }
+                    }
                 }
+                (Some(_), None) => {
+                    mismatches += 1;
+                    if mismatches <= 3 {
+                        eprintln!("[MISMATCH] sample {global_idx}: hf produced result, ft missing");
+                    }
+                }
+                (None, Some(_)) => {
+                    mismatches += 1;
+                    if mismatches <= 3 {
+                        eprintln!("[MISMATCH] sample {global_idx}: ft produced result, hf missing");
+                    }
+                }
+                (None, None) => unreachable!(),
             }
         }
 

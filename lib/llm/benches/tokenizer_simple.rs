@@ -219,6 +219,24 @@ pub fn fastokens_batch_encode(c: &mut Criterion) {
     let hf_encoder = HuggingFaceTokenizer::from_file(&tokenizer_path).unwrap();
     let fast_encoder = FastTokenizer::from_file(&tokenizer_path).unwrap();
 
+    // Verify batch parity before benchmarking
+    let hf_batch = hf_encoder.encode_batch(&batch).unwrap();
+    let fast_batch = fast_encoder.encode_batch(&batch).unwrap();
+    assert_eq!(
+        hf_batch.len(),
+        fast_batch.len(),
+        "batch result count mismatch: hf={} vs ft={}",
+        hf_batch.len(),
+        fast_batch.len()
+    );
+    for (i, (hf_enc, ft_enc)) in hf_batch.iter().zip(fast_batch.iter()).enumerate() {
+        assert_eq!(
+            hf_enc.token_ids(),
+            ft_enc.token_ids(),
+            "batch item {i}: fastokens and HuggingFace must produce identical token IDs"
+        );
+    }
+
     let mut group = c.benchmark_group("fastokens-batch-encode");
     group.throughput(Throughput::Bytes(total_bytes));
 
