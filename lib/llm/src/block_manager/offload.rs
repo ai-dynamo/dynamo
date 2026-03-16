@@ -428,8 +428,25 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 }
             }
 
-            // If there is a request, process it.
-            if let Some(request) = queue.pop_first() {
+            if queue.is_empty() {
+                // Await the next request.
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return Ok(()),
+                    Some(request) = offload_rx.recv() => {
+                        queue.insert(request);
+                    }
+                }
+                continue;
+            }
+
+            // Pop up to max_transfer_batch_size requests and validate each.
+            let mut valid_sources = Vec::new();
+
+            for _ in 0..max_transfer_batch_size() {
+                let Some(request) = queue.pop_first() else {
+                    break;
+                };
+
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(ImmutableBlock::new(block)),
@@ -440,66 +457,62 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         .pop(),
                 };
 
-                // If we've found the block, offload it.
-                if let Some(block) = block {
-                    // If the block is already in the target, don't offload it.
-                    if let Ok(blocks) = target_pool
-                        .match_sequence_hashes(vec![request.sequence_hash].as_slice())
-                        .await
-                        && !blocks.is_empty()
-                    {
-                        continue;
-                    }
+                let Some(block) = block else {
+                    continue;
+                };
 
-                    if let Some(offload_filter) = offload_filter.as_ref()
-                        && !offload_filter.should_offload(request.sequence_hash)
-                    {
-                        continue;
-                    }
-
-                    let target_block = 'target_block: {
-                        if let Ok(blocks) = target_pool.allocate_blocks(1).await
-                            && let Some(block) = blocks.into_iter().next()
-                        {
-                            break 'target_block Some(block);
-                        }
-
-                        tracing::warn!(
-                            "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
-                        );
-                        None
-                    };
-
-                    if let Some(target_block) = target_block {
-                        tracing::debug!(
-                            "Offloading block with sequence hash {} to target pool.",
-                            request.sequence_hash
-                        );
-
-                        // Track the offload metric if available
-                        if let Some(ref metric) = offload_metric {
-                            metric.inc();
-                        }
-
-                        transfer_manager
-                            .enqueue_transfer(PendingTransfer::new(
-                                vec![block],
-                                vec![target_block],
-                                None,
-                                target_pool.clone(),
-                            ))
-                            .await?;
-                    }
+                // If the block is already in the target, don't offload it.
+                if let Ok(blocks) = target_pool
+                    .match_sequence_hashes(vec![request.sequence_hash].as_slice())
+                    .await
+                    && !blocks.is_empty()
+                {
+                    continue;
                 }
-            } else {
-                // Await the next request.
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => return Ok(()),
-                    Some(request) = offload_rx.recv() => {
-                        queue.insert(request);
-                    }
+
+                if let Some(offload_filter) = offload_filter.as_ref()
+                    && !offload_filter.should_offload(request.sequence_hash)
+                {
+                    continue;
                 }
+
+                valid_sources.push(block);
             }
+
+            if valid_sources.is_empty() {
+                continue;
+            }
+
+            // Allocate target blocks in bulk.
+            let target_blocks = match target_pool.allocate_blocks(valid_sources.len()).await {
+                Ok(blocks) => blocks,
+                Err(BlockPoolError::NotEnoughBlocksAvailable(_, available)) if available > 0 => {
+                    valid_sources.truncate(available);
+                    target_pool.allocate_blocks(available).await?
+                }
+                Err(_) => {
+                    tracing::warn!("Target pool full. Skipping offload batch.");
+                    continue;
+                }
+            };
+
+            tracing::debug!(
+                "Offloading batch of {} blocks to target pool.",
+                target_blocks.len()
+            );
+
+            if let Some(ref metric) = offload_metric {
+                metric.inc_by(target_blocks.len() as u64);
+            }
+
+            transfer_manager
+                .enqueue_transfer(PendingTransfer::new(
+                    valid_sources,
+                    target_blocks,
+                    None,
+                    target_pool.clone(),
+                ))
+                .await?;
         }
     }
 
@@ -1651,9 +1664,9 @@ mod tests {
     #[tokio::test]
     async fn test_transfer_batcher() -> Result<()> {
         let (offload_manager, device_pool, _, disk_pool) = build_pools(
-            2 * MAX_TRANSFER_BATCH_SIZE + 1,
+            2 * max_transfer_batch_size() + 1,
             None,
-            Some(2 * MAX_TRANSFER_BATCH_SIZE + 1),
+            Some(2 * max_transfer_batch_size() + 1),
             None,
         )?;
 
@@ -1662,7 +1675,7 @@ mod tests {
 
         let mut disk_blocks = Vec::new();
 
-        for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
+        for i in 0..2 * max_transfer_batch_size() + 1 {
             let disk_block = completed_block(disk_pool, [i as u32; 4]).await?;
             populate_block(&disk_block, i as u8)?;
             disk_blocks.push(disk_block);
@@ -1673,7 +1686,7 @@ mod tests {
         let device_blocks = offload_manager
             .onboard(immutable_disk_blocks.clone(), None)
             .await??;
-        assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
+        assert_eq!(device_blocks.len(), 2 * max_transfer_batch_size() + 1);
 
         for (i, device_block) in device_blocks.iter().enumerate() {
             let blocks = device_pool

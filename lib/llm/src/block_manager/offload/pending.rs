@@ -361,7 +361,7 @@ where
         pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
         // If it's smaller than the max batch size, just enqueue it.
-        if pending_transfer.sources.len() < self.max_transfer_batch_size {
+        if pending_transfer.sources.len() <= self.max_transfer_batch_size {
             return self
                 .transfer_manager
                 .enqueue_transfer(pending_transfer)
