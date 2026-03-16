@@ -16,12 +16,14 @@ with different resolutions and quality settings without restarting.
 One request at a time (asyncio.Lock — VideoGenerator is not re-entrant).
 
 Usage:
-  python worker.py [--model MODEL] [--num-gpus N] [--disable-optimizations]
+  python worker.py [--model MODEL] [--num-gpus N] [--enable-optimizations]
 
 Options:
   --model          HuggingFace model path
                    (default: FastVideo/LTX2-Distilled-Diffusers)
   --num-gpus       Number of GPUs (default: 1)
+  --enable-optimizations
+                   Enable FP4 quantization, torch.compile, and FLASH_ATTN
 
 Request format (sent to /v1/videos):
   prompt:   text description of the desired video
@@ -132,13 +134,13 @@ class FastVideoBackend:
     def __init__(self, args: argparse.Namespace) -> None:
         self.model_name: str = args.model
         self.num_gpus: int = args.num_gpus
-        self.disable_optimizations: bool = args.disable_optimizations
+        self.enable_optimizations: bool = args.enable_optimizations
 
         # One request at a time — VideoGenerator is not re-entrant
         self._generate_lock = asyncio.Lock()
         self.generator: VideoGenerator | None = None
 
-        attn_backend = "TORCH_SDPA" if self.disable_optimizations else "FLASH_ATTN"
+        attn_backend = "FLASH_ATTN" if self.enable_optimizations else "TORCH_SDPA"
         os.environ["FASTVIDEO_ATTENTION_BACKEND"] = attn_backend
         os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
         os.environ["FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT"] = "0"
@@ -149,7 +151,7 @@ class FastVideoBackend:
 
         def _load():
             pipeline_config = PipelineConfig.from_pretrained(self.model_name)
-            if not self.disable_optimizations:
+            if self.enable_optimizations:
                 logger.info(
                     "Using FP4 quantization for VideoGenerator model=%s",
                     self.model_name,
@@ -161,7 +163,7 @@ class FastVideoBackend:
                         "FastVideo optimizations require "
                         "fastvideo.layers.quantization.fp4_config, but this "
                         "FastVideo build does not provide it. Re-run "
-                        "worker.py with --disable-optimizations or install a "
+                        "worker.py without --enable-optimizations or install a "
                         "FastVideo version that includes fp4_config."
                     ) from exc
                 pipeline_config.dit_config.quant_config = FP4Config()
@@ -175,8 +177,8 @@ class FastVideoBackend:
                 ltx2_refine_guidance_scale=1.0,
                 ltx2_refine_add_noise=True,
                 pipeline_config=pipeline_config,
-                enable_torch_compile=not self.disable_optimizations,
-                enable_torch_compile_text_encoder=not self.disable_optimizations,
+                enable_torch_compile=self.enable_optimizations,
+                enable_torch_compile_text_encoder=self.enable_optimizations,
                 torch_compile_kwargs={
                     "backend": "inductor",
                     "fullgraph": True,
@@ -411,10 +413,10 @@ def _parse_args() -> argparse.Namespace:
         help="Number of GPUs (default: 1)",
     )
     parser.add_argument(
-        "--disable-optimizations",
+        "--enable-optimizations",
         action="store_true",
-        dest="disable_optimizations",
-        help="Disable FP4 quantization, torch.compile, and use TORCH_SDPA attention",
+        dest="enable_optimizations",
+        help="Enable FP4 quantization, torch.compile, and use FLASH_ATTN attention",
     )
     return parser.parse_args()
 

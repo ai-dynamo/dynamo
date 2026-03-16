@@ -15,12 +15,12 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 - **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
 - **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
-- **Optimized inference:** FP4 quantization and `torch.compile` are enabled by default for maximum throughput.
+- **Optimized inference:** FP4 quantization and `torch.compile` are available via `--enable-optimizations` for maximum throughput on supported GPUs.
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
 > [!IMPORTANT]
-> This example is optimized for **NVIDIA B200/B300** GPUs (CUDA arch 10.0) with FP4 quantization and flash-attention. It can run on other GPUs (H100, A100, etc.) by passing `--disable-optimizations` to `worker.py`, which disables FP4 quantization, `torch.compile`, and switches the attention backend from FLASH_ATTN to TORCH_SDPA. Expect lower performance but broader compatibility.
+> The optional optimized path (`--enable-optimizations`) targets **NVIDIA B200/B300** GPUs (CUDA arch 10.0) with FP4 quantization and flash-attention. By default, `worker.py` runs with optimizations disabled and uses TORCH_SDPA for broader compatibility on other GPUs (H100, A100, etc.). Expect lower performance unless you opt in on supported hardware.
 
 ## Docker Image Build
 
@@ -36,7 +36,7 @@ The local Docker workflow builds a runtime image from the [`Dockerfile`](https:/
 
 ## Warmup Time
 
-On first start, workers download model weights and run compile/warmup steps. Expect roughly **10–20 minutes** before the first request is ready (hardware-dependent). After the first successful response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
+On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
 > [!TIP]
 > When using Kubernetes, mount a shared Hugging Face cache PVC (see [Kubernetes Deployment](#kubernetes-deployment)) so model weights are downloaded once and reused across pod restarts.
@@ -82,7 +82,7 @@ Environment variables:
 | `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (e.g., `--disable-optimizations`) |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (e.g., `--enable-optimizations`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
@@ -91,12 +91,12 @@ Example:
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
 NUM_GPUS=1 \
 HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--disable-optimizations" \
+WORKER_EXTRA_ARGS="--enable-optimizations" \
 ./run_local.sh
 ```
 
 > [!NOTE]
-> `--disable-optimizations` is a `worker.py` flag (not a `dynamo.frontend` flag), so pass it through `WORKER_EXTRA_ARGS`.
+> `--enable-optimizations` is a `worker.py` flag (not a `dynamo.frontend` flag), so pass it through `WORKER_EXTRA_ARGS` when you want the B200/B300-optimized path.
 
 The script writes logs to:
 
@@ -214,7 +214,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `--model` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
-| `--disable-optimizations` | off | Disables FP4 quantization, `torch.compile`, and switches attention from FLASH_ATTN to TORCH_SDPA |
+| `--enable-optimizations` | off | Enables FP4 quantization, `torch.compile`, and switches attention from TORCH_SDPA to FLASH_ATTN |
 
 ### Request Parameters (`nvext`)
 
@@ -233,7 +233,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `FASTVIDEO_VIDEO_CODEC` | `libx264` | Video codec for MP4 encoding |
 | `FASTVIDEO_X264_PRESET` | `ultrafast` | x264 encoding speed preset |
-| `FASTVIDEO_ATTENTION_BACKEND` | `FLASH_ATTN` | Attention backend (`FLASH_ATTN` or `TORCH_SDPA`) |
+| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend (`FLASH_ATTN` or `TORCH_SDPA`); `worker.py` switches to `FLASH_ATTN` when `--enable-optimizations` is set |
 | `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
 | `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
 
@@ -242,9 +242,10 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | Symptom | Cause | Fix |
 |---|---|---|
 | OOM during Docker build | `flash-attention` compilation uses too much RAM | Lower `MAX_JOBS` in the Dockerfile |
-| 10–20 min wait on first start | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
+| 10–20 min wait on first start with optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Poor performance on non-B200/B300 GPUs | FP4 and flash-attention optimizations require CUDA arch 10.0 | Pass `--disable-optimizations` to `worker.py` |
+| Lower throughput than expected on B200/B300 | Optimizations are opt-in | Pass `--enable-optimizations` to `worker.py` |
+| Startup or import failure after enabling optimizations | FP4 and flash-attention optimizations require CUDA arch 10.0 | Re-run `worker.py` without `--enable-optimizations` |
 
 ## Source Code
 
