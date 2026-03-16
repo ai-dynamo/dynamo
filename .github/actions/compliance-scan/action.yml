@@ -52,27 +52,59 @@ runs:
         python-version: '3.12'
         pip-install: pyyaml
 
+    - name: Resolve base image
+      id: resolve-base
+      shell: bash
+      run: |
+        BASE_IMAGE=""
+        if [ -n "${{ inputs.base_image }}" ]; then
+          BASE_IMAGE="${{ inputs.base_image }}"
+        elif [ -n "${{ inputs.framework }}" ]; then
+          RESOLVE_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }}"
+          if [ -n "${{ inputs.cuda_version }}" ]; then
+            RESOLVE_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+          fi
+          BASE_IMAGE=$(python3 container/compliance/resolve_base_image.py ${RESOLVE_ARGS})
+        fi
+        echo "base_image=${BASE_IMAGE}" >> $GITHUB_OUTPUT
+
+    - name: Extract target image packages
+      shell: bash
+      run: |
+        mkdir -p /tmp/compliance-target
+        docker buildx build \
+          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --platform linux/${{ inputs.arch }} \
+          --build-arg TARGET_IMAGE="${{ inputs.image }}" \
+          --output "type=local,dest=/tmp/compliance-target" \
+          --pull \
+          --progress=plain \
+          -f container/compliance/Dockerfile.extract \
+          container/compliance/
+
+    - name: Extract base image packages
+      if: steps.resolve-base.outputs.base_image != ''
+      shell: bash
+      run: |
+        mkdir -p /tmp/compliance-base
+        docker buildx build \
+          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --platform linux/${{ inputs.arch }} \
+          --build-arg TARGET_IMAGE="${{ steps.resolve-base.outputs.base_image }}" \
+          --output "type=local,dest=/tmp/compliance-base" \
+          --pull \
+          --progress=plain \
+          -f container/compliance/Dockerfile.extract \
+          container/compliance/
+
     - name: Generate attribution CSVs
       shell: bash
       run: |
-        ARGS=""
-        if [ -n "${{ inputs.base_image }}" ]; then
-          ARGS+=" --base-image ${{ inputs.base_image }}"
-        elif [ -n "${{ inputs.framework }}" ]; then
-          ARGS+=" --framework ${{ inputs.framework }}"
-          ARGS+=" --target ${{ inputs.target }}"
-          if [ -n "${{ inputs.cuda_version }}" ]; then
-            ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
-          fi
+        ARGS="--target-dir /tmp/compliance-target --output ${{ inputs.artifact_name }}.csv"
+        if [ -n "${{ steps.resolve-base.outputs.base_image }}" ]; then
+          ARGS+=" --base-dir /tmp/compliance-base"
         fi
-
-        python container/compliance/generate_attributions.py \
-          "${{ inputs.image }}" \
-          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
-          --platform linux/${{ inputs.arch }} \
-          --output "${{ inputs.artifact_name }}.csv" \
-          --verbose \
-          ${ARGS}
+        python3 container/compliance/process_results.py ${ARGS}
 
     - name: Upload attribution artifacts
       if: always()
