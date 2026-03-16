@@ -17,6 +17,7 @@ from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -95,6 +96,21 @@ class VllmProcessor:
         self.block_size = block_size
         self.mm_image_token_id = mm_image_token_id
 
+    def _get_eos_token_ids(self) -> list[int]:
+        """Return EOS token ids using tokenizer metadata.
+
+        vLLM 0.17.0 removed EngineCoreRequest.eos_token_id, so Dynamo can no
+        longer read EOS ids from the preprocessed request object.
+        """
+        eos_token_ids = getattr(self.tokenizer, "eos_token_ids", None)
+        if eos_token_ids is not None and not isinstance(eos_token_ids, int):
+            return list(eos_token_ids)
+
+        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if eos_token_id is None:
+            return []
+        return [eos_token_id]
+
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
     # request: dynamo.NVCreateChatCompletionRequest
@@ -151,7 +167,11 @@ class VllmProcessor:
             max_tokens=max_tokens,
         )
         # generation_config.json
+        # Skip eos_token_id: vLLM 0.17.0 made SamplingParams.eos_token_id a
+        # read-only property; eos tokens are handled via eos_token_ids below.
         for k, v in self.input_processor.generation_config_fields.items():
+            if k == "eos_token_id":
+                continue
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
 
@@ -195,15 +215,13 @@ class VllmProcessor:
             request_id,
             prompt_inputs,
             sampling_params,
-            # arrival_time: float | None = None,
-            # lora_request: LoRARequest | None = None,
-            # tokenization_kwargs: dict[str, Any] | None = None,
-            # trace_headers: Mapping[str, str] | None = None,
-            # priority: int = 0,
-            # data_parallel_rank: int | None = None,
+            GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
         )
 
         InputProcessor.assign_request_id(vllm_preproc)
+
+        # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
+        # tokenizer metadata for EOS ids when constructing the router payload.
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
@@ -248,11 +266,7 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": (
-                [vllm_preproc.eos_token_id]
-                if vllm_preproc.eos_token_id is not None
-                else []
-            ),
+            "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
         }
 

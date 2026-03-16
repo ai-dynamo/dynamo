@@ -4,20 +4,75 @@
 """
 ForwardPassMetrics schema for per-iteration scheduler telemetry.
 
-Published over ZMQ PUB by InstrumentedScheduler, consumed by the
-planner or any ZMQ SUB listener.
+Uses msgspec.Struct for zero-copy serialization (same approach as KV cache events).
+We do not use prometheus for forward pass metrics because:
+    1. Metric scrapper for pull based prometheus metrics is async with engine.
+       Metrics can be easily lost/repeated.
+    2. Push based prometheus uses HTTP and might not scale as well as ZMQ.
+    3. Existing KV event infra can be reused for forward pass metrics.
 
-Uses msgspec.Struct for zero-copy serialization (same approach as
-vLLM's KV cache events).
+Data flow (two-layer relay, same architecture as KV events)::
 
-TODO: hook to our rust infra for discovery
-TODO: add metrics for Trtllm/SGLang
+    EngineCore child process:
+        InstrumentedScheduler -> _FpmPublisherThread -> ZMQ PUB (localhost)
+
+    Dynamo parent process:
+        FpmEventRelay (ZMQ SUB) -> EventPublisher -> Event Plane (NATS/ZMQ)
+
+    Consumer (planner, etc.):
+        FpmEventSubscriber (auto-discovered) -> decode() -> ForwardPassMetrics
+
+The raw ZMQ hop is needed because the scheduler runs in a forked child
+process without access to the Dynamo runtime.  The FpmEventRelay bridge
+in the parent process handles event plane transport and discovery
+registration automatically.
+
+See ``dynamo.common.recv_forward_pass_metrics`` for a standalone
+consumer example.
+
+TODO: add metrics for TrtLLM/SGLang
 TODO: planner consuming these metrics instead of frontend/router metrics
 """
 
 from __future__ import annotations
 
 import msgspec
+
+
+class WelfordAccumulator:
+    """Welford's online algorithm for count / sum / population-variance.
+
+    Numerically stable single-pass computation -- avoids catastrophic
+    cancellation that sum-of-squares can suffer with large values.
+
+    Usage::
+
+        acc = WelfordAccumulator()
+        for v in values:
+            acc.add(v)
+        print(acc.n, acc.s, acc.variance())
+    """
+
+    __slots__ = ("n", "s", "_mean", "_m2")
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.s = 0
+        self._mean = 0.0
+        self._m2 = 0.0
+
+    def add(self, v: int) -> None:
+        self.n += 1
+        self.s += v
+        delta = v - self._mean
+        self._mean += delta / self.n
+        delta2 = v - self._mean
+        self._m2 += delta * delta2
+
+    def variance(self) -> float:
+        if self.n == 0:
+            return 0.0
+        return self._m2 / self.n
 
 
 class ScheduledRequestMetrics(

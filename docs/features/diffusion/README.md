@@ -16,12 +16,9 @@ Dynamo supports serving diffusion models across multiple backends, enabling gene
 | Text-to-Text | ✅ | ✅ | ❌ |
 | Text-to-Image | ✅ | ✅ | ❌ |
 | Text-to-Video | ✅ | ✅ | ✅ |
-| Image-to-Video | ❌ | ❌ | ❌ |
+| Image-to-Video | ✅ | ❌ | ❌ |
 
 **Status:** ✅ Supported | ❌ Not supported
-
-> [!NOTE]
-> Image-to-video support is planned and coming soon across all backends.
 
 ## Backend Documentation
 
