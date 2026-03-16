@@ -17,7 +17,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
-          imagePullPolicy: Always
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -82,10 +81,6 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -137,10 +132,6 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
