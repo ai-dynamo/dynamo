@@ -102,15 +102,25 @@ async def main(runtime: DistributedRuntime, args):
     await scale_endpoint.serve_endpoint(handler.scale_request)
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
 
-    # Serve health check endpoint
+    # Serve health check endpoint (includes DGD watch health)
     async def health_check(request: HealthCheckRequest):
         """Health check endpoint for monitoring"""
-        yield {
+        payload = {
             "status": "healthy",
             "component": "GlobalPlanner",
             "namespace": namespace,
             "managed_namespaces": args.managed_namespaces or "all",
         }
+        dgd_watch_status = handler.get_dgd_watch_health_status()
+        payload["dgd_watch"] = dgd_watch_status
+        if dgd_watch_status.get("dgd_watch_enabled") and not dgd_watch_status.get(
+            "dgd_watch_alive", True
+        ):
+            payload["status"] = "degraded"
+            payload[
+                "message"
+            ] = "DGD watch thread not running; GPU budget cache may be stale"
+        yield payload
 
     health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
     await health_endpoint.serve_endpoint(health_check)
@@ -119,6 +129,24 @@ async def main(runtime: DistributedRuntime, args):
     logger.info("=" * 60)
     logger.info("GlobalPlanner is ready and waiting for scale requests")
     logger.info("=" * 60)
+
+    # Periodic liveness check for DGD watch thread (list+watch always runs)
+    DGD_WATCH_LIVENESS_INTERVAL_SEC = 60
+
+    async def watch_liveness_loop():
+        while True:
+            await asyncio.sleep(DGD_WATCH_LIVENESS_INTERVAL_SEC)
+            if not handler.is_dgd_watch_healthy():
+                logger.critical(
+                    "DGD watch thread is not running; DGD cache may be stale. "
+                    "Scaling decisions may use outdated data."
+                )
+
+    asyncio.create_task(watch_liveness_loop())
+    logger.info(
+        "DGD watch liveness check started (interval %ds)",
+        DGD_WATCH_LIVENESS_INTERVAL_SEC,
+    )
 
     # Keep running forever (process scale requests as they come)
     await asyncio.Event().wait()

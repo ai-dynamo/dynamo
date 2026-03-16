@@ -7,6 +7,7 @@ import asyncio
 import logging
 import threading
 import time
+from typing import Optional
 
 from dynamo.planner import KubernetesConnector
 from dynamo.planner.config.defaults import SubComponentType
@@ -67,6 +68,10 @@ class ScaleRequestHandler:
         # Serializes budget-check + scale-execution so concurrent requests from
         # different pools cannot both pass against the same pre-scale state.
         self._scale_lock = asyncio.Lock()
+        # DGD watch thread (when GPU budget enabled); health checked by main loop.
+        self._dgd_watch_thread: Optional[threading.Thread] = None
+        # Set when _run_dgd_watch exits unexpectedly; GPU budget cache may be stale.
+        self._dgd_watch_exited_unexpectedly: bool = False
 
         if self.managed_namespaces:
             logger.info(
@@ -81,16 +86,19 @@ class ScaleRequestHandler:
                 "scale requests will be logged but not executed"
             )
 
+        # Always run list+watch to reduce API server pressure (single stream vs many get/list).
+        # The cache is also used for GPU budget checks (multi-replica safe).
+        self._populate_k8s_connectors()
+        self._dgd_watch_thread = threading.Thread(
+            target=self._run_dgd_watch, daemon=True, name="global-planner-dgd-watch"
+        )
+        self._dgd_watch_thread.start()
+        logger.info("DGD list+watch started (reduces API server load)")
+
         if self.max_total_gpus >= 0:
             logger.info(
                 f"GPU budget enforcement ENABLED: max {self.max_total_gpus} total GPUs"
             )
-            self._populate_k8s_connectors()
-            _watch_thread = threading.Thread(
-                target=self._run_dgd_watch, daemon=True, name="global-planner-dgd-watch"
-            )
-            _watch_thread.start()
-            logger.info("DGD list+watch started for GPU budget (multi-replica safe)")
         else:
             logger.info("GPU budget enforcement DISABLED (unlimited)")
 
@@ -154,28 +162,59 @@ class ScaleRequestHandler:
 
     def _run_dgd_watch(self) -> None:
         """Background thread: list+watch DGDs and keep connectors[].dgd updated."""
-        kube_api = KubernetesAPI(self.k8s_namespace)
-        managed_names = self._managed_dgd_names()
-        while True:
-            try:
-                for event_type, dgd in kube_api.watch_graph_deployments():
-                    name = dgd.get("metadata", {}).get("name", "")
-                    if not name:
-                        continue
-                    if managed_names is not None and name not in managed_names:
-                        continue
-                    key = f"{self.k8s_namespace}/{name}"
-                    with self._connectors_lock:
-                        if event_type == "DELETED":
-                            self.connectors.pop(key, None)
-                        else:
-                            if key not in self.connectors:
-                                self.connectors[key] = {"dgd": dgd, "connector": None}
+        try:
+            kube_api = KubernetesAPI(self.k8s_namespace)
+            managed_names = self._managed_dgd_names()
+            while True:
+                try:
+                    for event_type, dgd in kube_api.watch_graph_deployments():
+                        name = dgd.get("metadata", {}).get("name", "")
+                        if not name:
+                            continue
+                        if managed_names is not None and name not in managed_names:
+                            continue
+                        key = f"{self.k8s_namespace}/{name}"
+                        with self._connectors_lock:
+                            if event_type == "DELETED":
+                                self.connectors.pop(key, None)
                             else:
-                                self.connectors[key]["dgd"] = dgd
-            except Exception as e:
-                logger.warning(f"DGD watch error (will restart): {e}")
-                time.sleep(5)
+                                if key not in self.connectors:
+                                    self.connectors[key] = {
+                                        "dgd": dgd,
+                                        "connector": None,
+                                    }
+                                else:
+                                    self.connectors[key]["dgd"] = dgd
+                except Exception as e:
+                    logger.warning(f"DGD watch error (will restart): {e}")
+                    time.sleep(5)
+        except BaseException:
+            self._dgd_watch_exited_unexpectedly = True
+            logger.critical(
+                "DGD watch thread exited unexpectedly. GPU budget cache is stale; "
+                "scaling decisions may use outdated data.",
+                exc_info=True,
+            )
+            raise
+
+    def is_dgd_watch_healthy(self) -> bool:
+        """Return True if the DGD watch thread is running. List+watch is always started."""
+        if self._dgd_watch_thread is None:
+            return False
+        if self._dgd_watch_exited_unexpectedly:
+            return False
+        return self._dgd_watch_thread.is_alive()
+
+    def get_dgd_watch_health_status(self) -> dict:
+        """Return health status for the DGD watch thread (for health endpoint).
+        List+watch is always enabled to reduce API server load.
+        """
+        return {
+            "dgd_watch_enabled": True,
+            "dgd_watch_alive": self.is_dgd_watch_healthy(),
+            "dgd_watch_exited_unexpectedly": self._dgd_watch_exited_unexpectedly,
+            "gpu_budget_enabled": self.max_total_gpus >= 0,
+        }
 
     def _update_cache_after_scale(
         self, connector_key: str, target_replicas: list
@@ -217,7 +256,9 @@ class ScaleRequestHandler:
         if self.max_total_gpus >= 0:
             with self._connectors_lock:
                 deployments = [
-                    (k, e.get("dgd")) for k, e in self.connectors.items() if e.get("dgd")
+                    (k, e.get("dgd"))
+                    for k, e in self.connectors.items()
+                    if e.get("dgd")
                 ]
                 need_get = requesting_key not in self.connectors or not self.connectors[
                     requesting_key
@@ -230,11 +271,16 @@ class ScaleRequestHandler:
                     )
                     with self._connectors_lock:
                         if requesting_key not in self.connectors:
-                            self.connectors[requesting_key] = {"dgd": None, "connector": None}
+                            self.connectors[requesting_key] = {
+                                "dgd": None,
+                                "connector": None,
+                            }
                         self.connectors[requesting_key]["dgd"] = deployment
                     deployments.append((requesting_key, deployment))
                 except Exception as e:
-                    logger.warning(f"Failed to read requesting DGD for {requesting_key}: {e}")
+                    logger.warning(
+                        f"Failed to read requesting DGD for {requesting_key}: {e}"
+                    )
         for key, deployment in deployments:
             if not deployment:
                 continue
@@ -324,7 +370,10 @@ class ScaleRequestHandler:
                 )
                 with self._connectors_lock:
                     if connector_key not in self.connectors:
-                        self.connectors[connector_key] = {"dgd": None, "connector": connector}
+                        self.connectors[connector_key] = {
+                            "dgd": None,
+                            "connector": connector,
+                        }
                     else:
                         self.connectors[connector_key]["connector"] = connector
                 logger.debug(f"Created new connector for {connector_key}")
@@ -370,15 +419,18 @@ class ScaleRequestHandler:
                 connector.parent_dgd_name
             )
             current_replicas = {}
-            for service_name, service_spec in deployment.get("spec", {}).get(
-                "services", {}
-            ).items():
+            for service_name, service_spec in (
+                deployment.get("spec", {}).get("services", {}).items()
+            ):
                 sub_type = service_spec.get("subComponentType", "")
                 if sub_type:
                     current_replicas[sub_type] = service_spec.get("replicas", 0)
             with self._connectors_lock:
                 if connector_key not in self.connectors:
-                    self.connectors[connector_key] = {"dgd": None, "connector": connector}
+                    self.connectors[connector_key] = {
+                        "dgd": None,
+                        "connector": connector,
+                    }
                 self.connectors[connector_key]["dgd"] = deployment
 
             logger.info(
