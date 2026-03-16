@@ -74,6 +74,18 @@ pub mod name_prefix {
 
     /// Prefix for tokio runtime metrics
     pub const TOKIO: &str = "dynamo_tokio";
+
+    /// Prefix for standalone KV indexer metrics
+    pub const KVINDEXER: &str = "dynamo_kvindexer";
+
+    /// Prefix for request-plane metrics at AddressedPushRouter
+    pub const REQUEST_PLANE: &str = "dynamo_request_plane";
+
+    /// Prefix for transport-layer metrics (TCP / NATS)
+    pub const TRANSPORT: &str = "dynamo_transport";
+
+    /// Prefix for work-handler transport breakdown metrics (backend side)
+    pub const WORK_HANDLER: &str = "dynamo_work_handler";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -519,10 +531,61 @@ pub mod tokio_perf {
     pub const ALIVE_TASKS: &str = "alive_tasks";
 }
 
-// KvRouter (including KvInexer) Prometheus metric names
+/// Standalone KV indexer HTTP service metrics
+pub mod kvindexer {
+    /// HTTP request latency
+    pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
+
+    /// Total HTTP requests
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+
+    /// HTTP error responses (4xx/5xx)
+    pub const ERRORS_TOTAL: &str = "errors_total";
+
+    /// Number of active model+tenant indexers
+    pub const MODELS: &str = "models";
+
+    /// Number of registered worker instances
+    pub const WORKERS: &str = "workers";
+}
+
+/// Request plane metrics at AddressedPushRouter
+pub mod request_plane {
+    /// Time from generate() entry to send_request() (serialization + encoding)
+    pub const QUEUE_SECONDS: &str = "queue_seconds";
+    /// Time for send_request() to complete (frontend view: network + queue + ack)
+    pub const SEND_SECONDS: &str = "send_seconds";
+    /// Time from send_request() to first response item (transport roundtrip TTFT)
+    pub const ROUNDTRIP_TTFT_SECONDS: &str = "roundtrip_ttft_seconds";
+    /// Currently in-flight requests (gauge)
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+}
+
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const POOL_ACTIVE: &str = "tcp_pool_active";
+        pub const POOL_IDLE: &str = "tcp_pool_idle";
+        pub const BYTES_SENT_TOTAL: &str = "tcp_bytes_sent_total";
+        pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+        pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
+    }
+    pub mod nats {
+        pub const ERRORS_TOTAL: &str = "nats_errors_total";
+    }
+}
+
+// KvRouter (including KvIndexer) Prometheus metric names
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
+/// KV Publisher metrics
+pub mod kv_publisher {
+    /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
+    pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.

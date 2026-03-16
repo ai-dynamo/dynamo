@@ -165,6 +165,10 @@ async def async_main():
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
+    if config.tokenizer_backend == "fastokens":
+        os.environ["DYN_TOKENIZER"] = "fastokens"
+    else:
+        os.environ.pop("DYN_TOKENIZER", None)
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit})"
@@ -263,6 +267,16 @@ async def async_main():
         os.environ["DYN_STRIP_ANTHROPIC_PREAMBLE"] = "1"
     else:
         os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
+
+    if config.enable_streaming_tool_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_TOOL_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_TOOL_DISPATCH", None)
+
+    if config.enable_streaming_reasoning_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_REASONING_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
 
     if config.chat_processor == "vllm":
         assert (

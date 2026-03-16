@@ -18,7 +18,7 @@ RUN apt remove -y python3-apt python3-blinker && \
 
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
-ARG ARCH_ALT
+ARG TARGETARCH
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -68,13 +68,12 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src
 
 # NIXL environment and native libraries
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Copy UCX and NIXL native libraries to system directories
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo:0 --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 

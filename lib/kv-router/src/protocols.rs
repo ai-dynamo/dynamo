@@ -6,6 +6,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
+/// The event subject that workers publish KV cache events on.
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
+
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
@@ -140,7 +143,12 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     MarkPrefill,
-    MarkFree,
+    MarkFree {
+        // once request is cancelled, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 impl Default for RouterRequest {
@@ -869,5 +877,36 @@ mod tests {
         assert_eq!(deserialized.block_hashes.len(), 2);
         assert_eq!(deserialized.block_hashes[0].0, 4);
         assert_eq!(deserialized.block_hashes[1].0, 5);
+    }
+
+    #[test]
+    fn test_router_request_mark_free_backwards_compatible_deserialization() {
+        let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
+
+        assert!(matches!(
+            request,
+            RouterRequest::MarkFree { request_id: None }
+        ));
+    }
+
+    #[test]
+    fn test_router_request_mark_free_serialization_with_request_id() {
+        let request = RouterRequest::MarkFree {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_free","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkFree {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
     }
 }

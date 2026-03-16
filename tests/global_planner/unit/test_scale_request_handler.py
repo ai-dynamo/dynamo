@@ -202,6 +202,103 @@ async def test_handler_error_handling(mock_runtime):
         assert "Scaling failed" in response["message"]
 
 
+def test_managed_dgd_names_explicit(mock_runtime):
+    """Test _managed_dgd_names derives DGD names from Dynamo namespaces."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["my-ns-model-a", "my-ns-model-b"],
+        k8s_namespace="my-ns",
+    )
+    names = handler._managed_dgd_names()
+    assert names == {"model-a", "model-b"}
+
+
+def test_managed_dgd_names_implicit(mock_runtime):
+    """Test _managed_dgd_names returns None when no managed namespaces set."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=None,
+        k8s_namespace="my-ns",
+    )
+    assert handler._managed_dgd_names() is None
+
+
+def test_managed_dgd_names_mismatched_prefix(mock_runtime):
+    """Test _managed_dgd_names warns for namespaces that don't match the k8s prefix."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["other-ns-model-a", "my-ns-model-b"],
+        k8s_namespace="my-ns",
+    )
+    names = handler._managed_dgd_names()
+    # Only the matching namespace is included
+    assert names == {"model-b"}
+
+
+@pytest.mark.asyncio
+async def test_populate_connectors_explicit_mode(mock_runtime):
+    """Test _populate_k8s_connectors only creates connectors for managed DGDs."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-model-a"],
+        k8s_namespace="default",
+        max_total_gpus=-1,  # Don't trigger discovery in __init__
+    )
+
+    with patch(
+        "dynamo.global_planner.scale_handler.KubernetesAPI"
+    ) as mock_kube_cls, patch(
+        "dynamo.global_planner.scale_handler.KubernetesConnector"
+    ) as mock_connector_cls:
+        mock_kube = MagicMock()
+        mock_kube_cls.return_value = mock_kube
+        mock_kube.list_graph_deployments.return_value = [
+            {"metadata": {"name": "model-a"}},
+            {"metadata": {"name": "model-b"}},  # Not in managed set
+            {"metadata": {"name": "gp-ctrl"}},  # Not in managed set
+        ]
+        mock_connector_cls.return_value = MagicMock()
+
+        handler._populate_k8s_connectors()
+
+        # Only model-a should be discovered
+        assert "default/model-a" in handler.connectors
+        assert "default/model-b" not in handler.connectors
+        assert "default/gp-ctrl" not in handler.connectors
+        assert mock_connector_cls.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_populate_connectors_implicit_mode(mock_runtime):
+    """Test _populate_k8s_connectors creates connectors for all DGDs in implicit mode."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=None,
+        k8s_namespace="default",
+        max_total_gpus=-1,  # Don't trigger discovery in __init__
+    )
+
+    with patch(
+        "dynamo.global_planner.scale_handler.KubernetesAPI"
+    ) as mock_kube_cls, patch(
+        "dynamo.global_planner.scale_handler.KubernetesConnector"
+    ) as mock_connector_cls:
+        mock_kube = MagicMock()
+        mock_kube_cls.return_value = mock_kube
+        mock_kube.list_graph_deployments.return_value = [
+            {"metadata": {"name": "model-a"}},
+            {"metadata": {"name": "model-b"}},
+        ]
+        mock_connector_cls.return_value = MagicMock()
+
+        handler._populate_k8s_connectors()
+
+        # All DGDs should be discovered
+        assert "default/model-a" in handler.connectors
+        assert "default/model-b" in handler.connectors
+        assert mock_connector_cls.call_count == 2
+
+
 @pytest.mark.asyncio
 async def test_handler_blocking_mode(mock_runtime):
     """Test handler respects blocking mode."""

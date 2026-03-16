@@ -23,13 +23,14 @@ jobs:
     with:
       framework: vllm
       target: runtime
+      no_cache: true
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 180
       cpu_only_test_markers: 'nightly and vllm and gpu_0'
       single_gpu_test_markers: 'nightly and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
@@ -45,13 +46,14 @@ jobs:
     with:
       framework: sglang
       target: runtime
+      no_cache: true
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 180
       cpu_only_test_markers: 'nightly and sglang and gpu_0'
       single_gpu_test_markers: 'nightly and sglang and gpu_1'
       multi_gpu_test_markers: 'nightly and sglang and (gpu_2 or gpu_4)'
@@ -66,13 +68,14 @@ jobs:
     with:
       framework: trtllm
       target: runtime
+      no_cache: true
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 180
       cpu_only_test_markers: 'nightly and trtllm and gpu_0'
       single_gpu_test_markers: 'nightly and trtllm and gpu_1'
       multi_gpu_test_markers: 'nightly and trtllm and (gpu_2 or gpu_4)'

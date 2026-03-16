@@ -71,6 +71,10 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
+Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
+This file demonstrates the values needed for the vLLM aggregated setup in [agg.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml)
+Take a note of the model's block size provided in the model card.
+
 ### 4. Build EPP image (Optional)
 
 You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.

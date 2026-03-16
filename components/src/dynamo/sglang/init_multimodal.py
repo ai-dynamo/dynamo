@@ -13,6 +13,7 @@ from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -160,7 +161,10 @@ async def init_multimodal_worker(
 
     await handler.async_init()
 
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         await generate_endpoint.serve_endpoint(

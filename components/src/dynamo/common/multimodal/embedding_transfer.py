@@ -765,46 +765,15 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.ring_buffer.release_buffer(buffer_id)
 
 
-class PersistentConnector(nixl_connect.Connector):
-    """A persistent NIXL connector that can be shared across multiple send/receive operations."""
-
-    def __init__(self):
-        super().__init__()
-        self._connection = None
-
-    async def _create_connection(self) -> nixl_connect.Connection:
-        """
-        Private method to create a new connection.
-        """
-        if self._connection is None:
-            self._connection = nixl_connect.Connection(self, 1)
-            await self._connection.initialize()
-        return self._connection
-
-
-# Overwrite the remote release method to prevent deregistering the remote agent on each release,
-# with persistent connection, all operations will be initiated on the same agent-pair, if not
-# avoiding the deregisteration, the inflight operations will be teminated.
-def remote_release_overwrite(self) -> None:
-    pass
-
-
-nixl_connect.Remote._release = remote_release_overwrite  # type: ignore[method-assign]
-
-
 class NixlReadEmbeddingSender(AbstractEmbeddingSender):
-    """
-    Initial implementation of NIXL READ based transfer. This implementation uses
-    a monkey-patched version of 'nixl_connect' wrapper library to persist
-    connection (agent registration) and descriptors across multiple send operations
-    to avoid the overhead of repeated connection setup and teardown.
-    NOTE This implementation or the use of 'nixl_connect' needs to be revisited as
-    the benchmarking result is unexpectedly slow. Keeping it now for completeness,
-    i.e. provide NIXL WRITE based and READ based transfer classes.
+    """NIXL READ based embedding transfer sender.
+
+    Uses nixl_connect.Connector which now natively provides a shared singleton
+    Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
     def __init__(self):
-        self.connector = PersistentConnector()
+        self.connector = nixl_connect.Connector()
 
     @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
@@ -838,16 +807,10 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
 
 
 class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
-    """
-    Counter part of 'NixlReadEmbeddingSender', see 'NixlReadEmbeddingSender' for details.
-    Initial implementation of another usage of NIXL connect library that persists
-    connection (agent registration) and descriptors (memory registration) across multiple send operations
-    to avoid the overhead of repeated connection setup and teardown.
-    [gluo FIXME] This implementation requires more memory allocation and somewhat rigid, should move away
-    from connect library so we can have single descriptor and chunk for transfer on demand, similarly to
-    KV cache transfer. We may worry less on memory fragmentation as the memory can be released for next
-    transfer as soon as the embedding has passed to the framework (NEED TO VERIFY: framework will copy) and
-    can simply loop around the large buffer.
+    """NIXL READ based embedding transfer receiver.
+
+    Uses nixl_connect.Connector which now natively provides a shared singleton
+    Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
     def __init__(
@@ -857,7 +820,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         max_items: int = 1024,
     ) -> None:
         super().__init__()
-        self.connector = PersistentConnector()
+        self.connector = nixl_connect.Connector()
         self.tensor_id_counter = 0
         self.aggregated_op_create_time = 0
         self.aggregated_op_wait_time = 0
