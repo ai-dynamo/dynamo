@@ -57,7 +57,7 @@ These recipes demonstrate functional deployments with Dynamo features, but have 
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/disagg/)** | SGLang | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, nixl KV transfer, 1.0+ |
-| **[Kimi-K2.5 (Baseten)](kimi-k2.5/trtllm/agg/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling |
+| **[Kimi-K2.5 (Baseten)](kimi-k2.5/trtllm/agg/baseten/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling |
 
 ### Experimental Recipes
 

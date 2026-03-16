@@ -35,6 +35,9 @@ The baseten variant uses a text-only backend built on the underlying DeepSeek-V3
 
 ### Quick Start
 
+The baseten deploy manifest ships with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`.
+Update the `image:` fields in [`trtllm/agg/baseten/deploy.yaml`](trtllm/agg/baseten/deploy.yaml) to your actual Dynamo release tag before deploying.
+
 ```bash
 # Set namespace
 export NAMESPACE=dynamo-demo
@@ -48,6 +51,8 @@ kubectl create secret generic hf-token-secret \
 # Download model (update storageClassName in model-cache/model-cache.yaml first!)
 kubectl apply -f model-cache/baseten/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+# Update the image tag in deploy.yaml to your Dynamo release tag
 
 # Deploy
 kubectl apply -f trtllm/agg/baseten/deploy.yaml -n ${NAMESPACE}
