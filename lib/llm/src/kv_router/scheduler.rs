@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
 };
@@ -100,12 +101,20 @@ impl KvScheduler {
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
 
+        let policy =
+            RouterSchedulingPolicy::new(kv_router_config.router_queue_policy, block_size as usize);
+        tracing::info!(
+            "Router queue policy: {}",
+            kv_router_config.router_queue_policy
+        );
+
         let queue = Arc::new(SchedulerQueue::new(
             slots.clone(),
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,
             block_size,
             selector,
+            policy,
         ));
         let queue_clone = queue.clone();
 

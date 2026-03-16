@@ -76,6 +76,9 @@ class FrontendConfig(KvRouterConfigBase):
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
     preprocess_workers: int
+    tokenizer_backend: str
+
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -88,6 +91,11 @@ class FrontendConfig(KvRouterConfigBase):
             )
         if self.router_enable_cache_control and self.router_mode != "kv":
             raise ValueError("--enable-cache-control requires --router-mode=kv")
+        if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
+            raise ValueError(
+                f"--tokenizer: invalid value '{self.tokenizer_backend}' "
+                f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
 
 
 @register_encoder(FrontendConfig)
@@ -423,4 +431,18 @@ class FrontendArgGroup(ArgGroup):
                 "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tokenizer",
+            env_var="DYN_TOKENIZER",
+            default="default",
+            dest="tokenizer_backend",
+            help=(
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
+                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
+                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+            ),
+            choices=["default", "fastokens"],
         )

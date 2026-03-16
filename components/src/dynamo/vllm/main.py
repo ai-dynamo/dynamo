@@ -13,7 +13,6 @@ import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.entrypoints.cli.serve import run_headless
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -91,6 +90,10 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
+    # Keep the upstream CLI import local so tests that only exercise
+    # build_headless_namespace() do not pull in vLLM's full CLI import graph.
+    from vllm.entrypoints.cli.serve import run_headless
+
     args = build_headless_namespace(config)
     run_headless(args)
 

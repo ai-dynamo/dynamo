@@ -194,7 +194,7 @@ vllm_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -217,7 +217,7 @@ vllm_configs = {
         script_name="agg_router_approx.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -250,7 +250,7 @@ vllm_configs = {
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
@@ -668,7 +668,7 @@ vllm_configs = {
         script_name="multi_node_tp_headless.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.timeout(300),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -902,7 +902,7 @@ def test_lora_aggregated(
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 @pytest.mark.skip(reason="DYN-2265")
 def test_lora_aggregated_router(
