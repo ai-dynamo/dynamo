@@ -14,6 +14,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values differ by device:
 if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
     MODEL_NAME="Qwen/Qwen3-VL-8B-Instruct"
@@ -58,30 +61,7 @@ BLOCK_SIZE_ARG=()
 [[ -n "$BLOCK_SIZE" ]] && BLOCK_SIZE_ARG=(--block-size "$BLOCK_SIZE")
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Aggregated Multimodal Serving"
-echo "=========================================="
-echo "Model:       $MODEL_NAME"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL_NAME}\","
-echo "      \"messages\": [{"
-echo "        \"role\": \"user\","
-echo "        \"content\": ["
-echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
-echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
-echo "        ]"
-echo "      }],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT"
 
 # Use TCP transport (instead of default NATS)
 # TCP is preferred for multimodal workloads because it overcomes:
@@ -121,7 +101,5 @@ env "$DYN_VISIBLE_DEVICES" python -m dynamo.vllm \
     $MODEL_SPECIFIC_ARGS \
     "${EXTRA_ARGS[@]}"
 
-# Wait for all background processes to complete
-wait
-
-
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

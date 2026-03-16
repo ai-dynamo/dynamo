@@ -20,6 +20,7 @@ import base64
 import ctypes
 import logging
 import socket
+import threading
 import uuid
 import zlib
 from abc import ABC, abstractmethod
@@ -562,6 +563,9 @@ class Connection:
         self._name = f"{connector.name}-{number}"
         self._nixl = nixl_api.nixl_agent(self._name)
 
+        self._remote_refs: dict[str, int] = {}  # ref-count remote agents
+        self._remote_refs_lock = threading.Lock()
+
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
         )
@@ -597,6 +601,22 @@ class Connection:
         Get the name of the connection.
         """
         return self._name
+
+    def acquire_remote_ref(self, name: str) -> None:
+        with self._remote_refs_lock:
+            self._remote_refs[name] = self._remote_refs.get(name, 0) + 1
+
+    def release_remote_ref(self, name: str) -> bool:
+        """Returns True when the last reference is released."""
+        with self._remote_refs_lock:
+            ref_count = self._remote_refs.get(name)
+            if ref_count is None:
+                return False
+            if ref_count == 1:
+                self._remote_refs.pop(name, None)
+                return True
+            self._remote_refs[name] = ref_count - 1
+            return False
 
     async def initialize(self) -> None:
         # Only initialize the connection once.
@@ -642,6 +662,9 @@ class Connector:
         self._connection_count: int = 0
         self._worker_id = worker_id
         self._hostname = socket.gethostname()
+
+        self._shared_connection: Optional[Connection] = None
+        self._shared_connection_lock = asyncio.Lock()
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -820,13 +843,18 @@ class Connector:
         )
 
     async def _create_connection(self) -> Connection:
-        """
-        Private method to create a new connection.
-        """
-        self._connection_count += 1
-        conn = Connection(self, self._connection_count)
-        await conn.initialize()
-        return conn
+        """Create and return a single shared Connection (NIXL agent)."""
+        async with self._shared_connection_lock:
+            if self._shared_connection is not None:
+                return self._shared_connection
+            self._connection_count += 1
+            conn = Connection(self, self._connection_count)
+            await conn.initialize()
+            self._shared_connection = conn
+            logger.info(
+                f"dynamo.nixl_connect.Connector: Created shared connection '{conn.name}'."
+            )
+            return conn
 
 
 class Descriptor:
@@ -1698,6 +1726,9 @@ class Remote:
         if isinstance(self._name, bytes):
             self._name = self._name.decode("utf-8")
 
+        connection.acquire_remote_ref(self._name)
+        self._released = False
+
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
         )
@@ -1724,15 +1755,11 @@ class Remote:
         return self._name
 
     def _release(self) -> None:
-        """
-        Private method for releasing NIXL resources. Not intended for public use.
-        """
-        # We have to deregister the remote agent from NIXL because we cannot know if the remote worker has updated its descriptors or not, and
-        # NIXL will return an error if we attempt to register a remote agent with the same name but different descriptors (aka conn_info).
-        self._connection._nixl.remove_remote_agent(self._name)
-        logger.debug(
-            f'dynamo.nixl_connect.{self.__class__.__name__}: Deregistered NIXL remote {{ name: "{self._name}" }}.'
-        )
+        if self._released:
+            return
+        self._released = True
+        if self._connection.release_remote_ref(self._name):
+            self._connection._nixl.remove_remote_agent(self._name)
 
     @property
     def connection(self) -> Connection:

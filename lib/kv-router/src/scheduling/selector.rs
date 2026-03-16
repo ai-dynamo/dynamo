@@ -79,15 +79,17 @@ fn softmax_sample(
 }
 
 /// Default implementation matching the Python _cost_function.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
+    pub worker_type: &'static str,
 }
 
 impl DefaultWorkerSelector {
-    pub fn new(kv_router_config: Option<KvRouterConfig>) -> Self {
+    pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
+            worker_type,
         }
     }
 }
@@ -187,6 +189,21 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let best_logit = worker_logits[&best_worker];
 
+        if self.worker_type == "decode" {
+            tracing::info!(
+                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}",
+                self.worker_type,
+                best_worker.worker_id,
+                best_worker.dp_rank,
+                best_logit,
+            );
+            return Ok(WorkerSelectionResult {
+                worker: best_worker,
+                required_blocks: request_blocks as u64,
+                overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+            });
+        }
+
         let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
 
         let total_blocks_info = workers
@@ -203,7 +220,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(0);
 
         tracing::info!(
-            "Selected worker: worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
+            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
+            self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,
             best_logit,

@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+
 export AWS_ENDPOINT=http://localhost:9000
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
@@ -36,12 +39,7 @@ fi
 SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-8081}"
 SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Aggregated + LoRA + KV Routing (2 GPUs)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
+print_launch_banner --no-curl "Launching Aggregated + LoRA + KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 echo ""
 echo "Once running, test with:"
 echo ""
@@ -93,11 +91,11 @@ env "$DYN_VISIBLE_DEVICES_W1" python3 -m dynamo.vllm \
     --enforce-eager \
     --enable-lora \
     --max-lora-rank 64 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 
 # Sample output after running LoRA inference curl request twice.
- # usage.prompt_tokens_details.cached_tokens is the number of tokens that were cached from the previous request.
- : <<'SAMPLE_OUTPUT'
+# usage.prompt_tokens_details.cached_tokens is the number of tokens that were cached from the previous request.
+: <<'SAMPLE_OUTPUT'
 {
   "id": "chatcmpl-0cf880c2-fe98-45c4-9c76-84c3ad1a56cc",
   "choices": [
@@ -131,3 +129,6 @@ env "$DYN_VISIBLE_DEVICES_W1" python3 -m dynamo.vllm \
   }
 }
 SAMPLE_OUTPUT
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

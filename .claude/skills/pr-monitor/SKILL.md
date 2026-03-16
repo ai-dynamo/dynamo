@@ -123,6 +123,42 @@ For each failure, report:
 
 If there are no failures, say so and move on.
 
+## Step 3b: Main Branch Cross-Reference
+
+For each failed job identified in Step 3, check if the same job also fails on main. This distinguishes PR-caused regressions from pre-existing flakes.
+
+**First, check how far behind the PR is from main:**
+
+```bash
+gh api "repos/ai-dynamo/dynamo/compare/main...$HEAD_SHA" --jq '{behind_by: .behind_by, ahead_by: .ahead_by, status: .status}'
+```
+
+If the PR is significantly behind main (>20 commits), note this in the report — some failures may already be fixed on main, and some apparent "regressions" may just be the PR missing recent fixes.
+
+**Then, check recent main branch CI results:**
+
+```bash
+# Get last 3 completed PR workflow runs on main
+MAIN_RUNS=$(gh api "repos/ai-dynamo/dynamo/actions/workflows/pr.yaml/runs?branch=main&per_page=3&status=completed" --jq '[.workflow_runs[].id] | join(" ")')
+
+# For each failed job name from Step 3, check if it also failed on main
+for RUN_ID in $MAIN_RUNS; do
+  gh api "repos/ai-dynamo/dynamo/actions/runs/$RUN_ID/jobs?per_page=100&filter=latest" \
+    --jq ".jobs[] | select(.name == \"$FAILED_JOB_NAME\") | {run: $RUN_ID, conclusion: .conclusion}"
+done
+```
+
+**Classification:**
+- **`[PR-CAUSED]`** — Fails on this PR but passes on all recent main runs → Likely a regression introduced by this PR. Needs attention.
+- **`[PRE-EXISTING]`** — Also fails on recent main runs → Pre-existing flake, not caused by this PR. Suggest rerun.
+- **`[UNCLEAR]`** — Mixed results on main (sometimes passes, sometimes fails) → Flaky test. Note flakiness and suggest rerun.
+- **`[NEW JOB]`** — Job doesn't exist on main runs → New CI job added by this PR, can't compare.
+
+**Important caveats to include in the report:**
+- If the PR is behind main by many commits, a `[PR-CAUSED]` classification may be a false positive — the failure could already be fixed on main. Suggest: "Consider rebasing on main before investigating."
+- If the PR is ahead of main (includes main's latest), the classification is reliable.
+- Only compare job names, not test-level results. A job passing on main doesn't guarantee the same tests pass — just that the overall job succeeds.
+
 ## Step 4: Skip & Discrepancy Analysis
 
 This step is **exception-based only**. Do NOT enumerate expected skips — that's noise.
@@ -158,12 +194,16 @@ Synthesize into a concise report:
 - "Draft PR — some checks may not run until marked ready for review."
 - Note which lightweight checks passed/failed.
 
-**Blocking issues** — failures that must be fixed before merge:
+**Blocking issues (PR-caused)** — failures that pass on main but fail here:
 - One-line root cause + suggested fix for each
 - Note if `backend-status-check` or `dynamo-status-check` gate is failing
 
+**Pre-existing failures** — also failing on main, not caused by this PR:
+- One-line description + rerun command for each
+- If PR is significantly behind main: "Consider rebasing — this may already be fixed on main."
+
 **Non-blocking issues** (if any):
-- Flaky tests, infra timeouts, unexpected skips
+- Flaky tests (`[UNCLEAR]` from Step 3b), infra timeouts, unexpected skips
 
 **Critical path status** — the checks most relevant to this PR's changes:
 - List them with current status (passed/failed/pending/not triggered)

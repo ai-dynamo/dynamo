@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 set -ex
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 HEAD_NODE=0
 MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
@@ -48,34 +51,11 @@ done
 trap 'echo Cleaning up...; kill 0' EXIT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Disaggregated Multimodal Llama 4 (Multi-Node)"
-echo "=========================================="
-echo "Model:       $MODEL_NAME"
 if [[ $HEAD_NODE -eq 1 ]]; then
-echo "Frontend:    http://localhost:$HTTP_PORT"
+    print_launch_banner --multimodal "Launching Disaggregated Multimodal Llama 4 (Multi-Node)" "$MODEL_NAME" "$HTTP_PORT"
+else
+    print_launch_banner --no-curl "Launching Disaggregated Multimodal Llama 4 (Multi-Node)" "$MODEL_NAME" "$HTTP_PORT"
 fi
-echo "=========================================="
-if [[ $HEAD_NODE -eq 1 ]]; then
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL_NAME}\","
-echo "      \"messages\": [{"
-echo "        \"role\": \"user\","
-echo "        \"content\": ["
-echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
-echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
-echo "        ]"
-echo "      }],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-fi
-echo "=========================================="
 
 # Use TCP transport to avoid NATS payload limits for multimodal
 export DYN_REQUEST_PLANE=tcp
@@ -121,5 +101,5 @@ else
         "${EXTRA_ARGS[@]}" &
 fi
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

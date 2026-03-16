@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+
 export AWS_ENDPOINT=http://localhost:9000
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
@@ -25,12 +28,7 @@ else
 fi
 SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Aggregated Serving + LoRA (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
+print_launch_banner --no-curl "Launching Aggregated Serving + LoRA (1 GPU)" "$MODEL" "$HTTP_PORT"
 echo ""
 echo "Once running, test with:"
 echo ""
@@ -73,4 +71,7 @@ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
     "${BLOCK_SIZE_ARG[@]}" \
     --enforce-eager \
     --enable-lora \
-    --max-lora-rank 64
+    --max-lora-rank 64 &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

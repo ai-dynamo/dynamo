@@ -24,6 +24,7 @@
 use super::*;
 
 pub mod entrypoint;
+pub mod fpm;
 pub mod kv;
 pub mod local_model;
 pub mod lora;

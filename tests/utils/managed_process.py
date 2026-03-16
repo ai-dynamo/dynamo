@@ -68,7 +68,15 @@ def terminate_process_tree(
         return
 
     # 1. Snapshot children before signaling parent
-    children = parent.children(recursive=True)
+    try:
+        children = parent.children(recursive=True)
+    except (PermissionError, psutil.AccessDenied) as exc:
+        logger.warning(
+            "Unable to enumerate child processes for PID %s; falling back to parent-only termination: %s",
+            pid,
+            exc,
+        )
+        children = []
 
     # 2. Terminate parent first (graceful)
     terminate_process(parent, logger, immediate_kill=immediate_kill)
@@ -94,6 +102,33 @@ def terminate_process_tree(
     psutil.wait_procs(alive, timeout=timeout)
 
 
+class ManagedProcessStopError(RuntimeError):
+    """Raised when a ManagedProcess subprocess cannot be stopped cleanly."""
+
+    def __init__(self, attr_name: str, pid: int, detail: str):
+        super().__init__(
+            f"Failed to stop managed process '{attr_name}' (pid={pid}): {detail}"
+        )
+        self.attr_name = attr_name
+        self.pid = pid
+        self.detail = detail
+
+
+class ManagedProcessStopTimeoutError(ManagedProcessStopError):
+    """Raised when a subprocess remains alive after forceful shutdown."""
+
+    def __init__(self, attr_name: str, pid: int, wait_timeout: float):
+        super().__init__(
+            attr_name,
+            pid,
+            (
+                "process did not exit after forceful shutdown "
+                f"within {wait_timeout:.1f}s"
+            ),
+        )
+        self.wait_timeout = wait_timeout
+
+
 @dataclass
 class ManagedProcess:
     """Manages a subprocess with health checks and automatic cleanup.
@@ -111,7 +146,7 @@ class ManagedProcess:
 
         # ✅ SAFE for parallel tests (only kills what we launch):
         ManagedProcess(
-            command=["vllm", "serve", "--port", "8000"],
+            command=["vllm", "serve", "--port", str(dynamically_allocated_port)],
             terminate_all_matching_process_names=False,  # Don't kill other processes
         )
 
@@ -210,7 +245,16 @@ class ManagedProcess:
             raise
 
     def _cleanup_stragglers(self):
-        """Clean up straggler processes - called during exit and signal handling"""
+        """Clean up straggler processes - called during exit and signal handling.
+
+        WARNING: NOT pytest-xdist safe! This does a system-wide sweep matching by
+        process name (self.stragglers) and command-line substring (self.straggler_commands),
+        similar to _terminate_all_matching_process_names. Skipped when
+        terminate_all_matching_process_names=False (i.e. xdist-safe mode) to avoid
+        killing other workers' processes.
+        """
+        if not self.terminate_all_matching_process_names:
+            return
         try:
             if self.stragglers or self.straggler_commands:
                 self._logger.info(
@@ -226,7 +270,9 @@ class ManagedProcess:
                         self._logger.info(
                             "Terminating Straggler %s %s", process_name, ps_process.pid
                         )
-                        terminate_process_tree(ps_process.pid, self._logger)
+                        terminate_process_tree(
+                            ps_process.pid, self._logger, immediate_kill=True
+                        )
 
                     # Check command line arguments
                     cmdline = ps_process.cmdline()
@@ -239,7 +285,9 @@ class ManagedProcess:
                                 ps_process.pid,
                                 straggler_cmd,
                             )
-                            terminate_process_tree(ps_process.pid, self._logger)
+                            terminate_process_tree(
+                                ps_process.pid, self._logger, immediate_kill=True
+                            )
                             break  # Avoid terminating the same process multiple times
                 except (
                     psutil.NoSuchProcess,
@@ -258,47 +306,129 @@ class ManagedProcess:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Cleanup: Terminate launched processes.
 
-        Termination Strategy (Graceful → Escalate to Force):
-        =====================================================
-        1. Send SIGTERM to process group immediately (no delay before SIGTERM)
-        2. Wait up to 2s (poll every 0.1s) for processes to exit
-        3. If still alive after 2s: Send SIGKILL (force kill)
-        4. Terminate individual processes (self.proc, tee, sed):
-           - Send SIGTERM immediately (no delay)
-           - Wait up to 10s for exit
-           - If still alive after 10s: Send SIGKILL (force kill)
-        5. Clean up straggler processes (if configured)
-
-        Signal Details:
-        - SIGTERM (15): Graceful - allows cleanup handlers to run
-        - SIGKILL (9): Force kill - immediate, cannot be caught
-
-        Timeout Parameter:
-        - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
-        - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
-
-        This ALWAYS runs regardless of terminate_all_matching_process_names setting.
+        Termination Strategy:
+        =====================
+        1. _stop_started_processes: calls _terminate_process_group (SIGTERM →
+           poll → SIGKILL all snapshotted pgids), closes pipes, waits/escalates
+           per-process.
+        2. Clean up data directory if configured.
+        3. Run name-based straggler cleanup (only when not in xdist-safe mode).
         """
         try:
-            self._terminate_process_group()
+            self._stop_started_processes()
 
-            process_list = [self.proc, self._tee_proc, self._sed_proc]
-            for process in process_list:
-                if process:
-                    try:
-                        if process.stdout:
-                            process.stdout.close()
-                        if process.stdin:
-                            process.stdin.close()
-                        terminate_process_tree(process.pid, self._logger)
-                        process.wait()
-                    except Exception as e:
-                        self._logger.warning("Error terminating process: %s", e)
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
-            # Always run straggler cleanup, even if interrupted
             self._cleanup_stragglers()
+
+    def _stop_started_processes(self, wait_timeout: float = 10.0):
+        """Terminate launched subprocesses and close any open pipe handles.
+
+        This is used both during normal teardown and when a managed service
+        needs to stop and restart in-place without releasing higher-level
+        resources such as ports.
+        """
+        self._terminate_process_group()
+
+        process_entries = [
+            ("proc", self.proc),
+            ("_tee_proc", self._tee_proc),
+            ("_sed_proc", self._sed_proc),
+        ]
+        for attr_name, process in process_entries:
+            if process is None:
+                continue
+
+            try:
+                for stream_name in ("stdout", "stdin", "stderr"):
+                    stream = getattr(process, stream_name, None)
+                    if stream is not None:
+                        stream.close()
+            except OSError as e:
+                self._logger.warning("Error closing process streams: %s", e)
+
+            try:
+                terminate_process_tree(process.pid, self._logger)
+                process.wait(timeout=wait_timeout)
+            except (psutil.TimeoutExpired, subprocess.TimeoutExpired) as e:
+                self._logger.warning(
+                    "Process '%s' (pid=%s) timed out during shutdown: %s. "
+                    "Retrying with forceful termination.",
+                    attr_name,
+                    process.pid,
+                    e,
+                )
+                self._force_stop_process(process, attr_name, wait_timeout)
+            except OSError as e:
+                if process.poll() is None:
+                    self._logger.warning(
+                        "Process '%s' (pid=%s) hit an OS error during shutdown: %s. "
+                        "Retrying with forceful termination.",
+                        attr_name,
+                        process.pid,
+                        e,
+                    )
+                    self._force_stop_process(process, attr_name, wait_timeout)
+
+            if process.poll() is None:
+                raise ManagedProcessStopTimeoutError(
+                    attr_name, process.pid, wait_timeout
+                )
+
+            setattr(self, attr_name, None)
+
+        self._pgid = None
+
+    def _force_stop_process(
+        self,
+        process: subprocess.Popen,
+        attr_name: str,
+        wait_timeout: float,
+    ) -> None:
+        """Forcefully stop a process tree and confirm the launched child exits."""
+        try:
+            terminate_process_tree(
+                process.pid,
+                self._logger,
+                immediate_kill=True,
+                timeout=0,
+            )
+        except (psutil.TimeoutExpired, OSError) as e:
+            self._logger.warning(
+                "Forceful tree termination failed for process '%s' (pid=%s): %s. "
+                "Falling back to process.kill().",
+                attr_name,
+                process.pid,
+                e,
+            )
+            try:
+                process.kill()
+            except OSError as kill_err:
+                if process.poll() is None:
+                    raise ManagedProcessStopError(
+                        attr_name,
+                        process.pid,
+                        f"forceful shutdown failed: {kill_err}",
+                    ) from kill_err
+
+        try:
+            process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired as e:
+            if process.poll() is None:
+                raise ManagedProcessStopTimeoutError(
+                    attr_name, process.pid, wait_timeout
+                ) from e
+        except OSError as e:
+            if process.poll() is None:
+                raise ManagedProcessStopError(
+                    attr_name,
+                    process.pid,
+                    f"error waiting for exit after forceful shutdown: {e}",
+                ) from e
+
+        if process.poll() is None:
+            raise ManagedProcessStopTimeoutError(attr_name, process.pid, wait_timeout)
 
     def _start_process(self):
         assert self._command_name
@@ -365,61 +495,120 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
-    def _terminate_process_group(self, timeout: float = 2.0):
+    def _terminate_process_group(self, timeout: float = 8.0):
         """Terminate the entire process group/session started for the child.
 
         Kill Sequence:
         ==============
-        1. Send SIGTERM to entire process group IMMEDIATELY (no delay)
-        2. Wait up to `timeout` seconds (default 2s), polling every 0.1s
-        3. If still alive after timeout: Send SIGKILL (force kill, immediate)
+        1. Snapshot all child process groups (the main pgid plus any distinct
+           child pgids) before sending any signals.
+        2. Send SIGTERM to ALL snapshotted process groups (no delay).
+           os.killpg delivers the signal atomically to every group member.
+        3. Wait up to `timeout` seconds (default 8s), polling every 0.1s.
+           8s usually gives engines (e.g. vLLM EngineCore) enough time to flush
+           in-flight work and release resources before we escalate.
+        4. SIGKILL ALL snapshotted process groups (those that ignored SIGTERM
+           or timed out).
 
-        Timeout Parameter:
-        - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
-        - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+        Limitation: if a child calls setsid()/setpgid() AFTER our snapshot,
+        its new group won't be in our set. This is rare -- Python
+        multiprocessing and vLLM engine core inherit the parent's group.
 
-        Process groups catch cases where the launcher shell exits and its
-        children are reparented, leaving no parent PID to traverse, but they
-        remain in the same process group.
+        Post-SIGKILL resource cleanup notes:
+        - GPU memory: vLLM Engine releases VRAM on process death (driver-level
+          reclaim). No manual GPU cleanup needed after SIGKILL.
+        - Distributed state: NATS subscriptions, etcd leases, and KV cache
+          index entries are NOT cleaned up by SIGKILL. These persist until
+          TTL expiry or explicit purge.
+        - Shared memory: POSIX shm segments (/dev/shm/) survive process
+          death and must be unlinked separately if used.
+        - Network ports: TCP sockets enter TIME_WAIT (~60s); rebinding the
+          same port immediately may fail. Prefer allocate_port() from
+          tests.utils.port_utils to avoid collisions.
         """
         if self._pgid is None:
             return
-        try:
-            self._logger.info("Terminating process group: %s", self._pgid)
-            os.killpg(self._pgid, signal.SIGTERM)  # Step 1: Graceful SIGTERM
-        except ProcessLookupError:
-            return
-        except Exception as e:
-            self._logger.warning(
-                "Error sending SIGTERM to process group %s: %s", self._pgid, e
-            )
-            return
 
-        # Step 2: Poll for process exit instead of fixed sleep to minimize teardown time
+        # Step 1: Snapshot all process groups before signaling.  Only self.proc runs
+        # in self._pgid (start_new_session=True); _tee_proc/_sed_proc are pipe
+        # helpers in pytest's group with no children.
+        all_pgids: set[int] = {self._pgid}
+        if self.proc and self.proc.poll() is None:
+            try:
+                for child in psutil.Process(self.proc.pid).children(recursive=True):
+                    try:
+                        all_pgids.add(os.getpgid(child.pid))
+                    except (ProcessLookupError, OSError):
+                        pass
+            except (PermissionError, psutil.AccessDenied) as exc:
+                self._logger.warning(
+                    "Unable to enumerate child processes for PID %s; falling back to the main process group only: %s",
+                    self.proc.pid,
+                    exc,
+                )
+            except psutil.NoSuchProcess:
+                pass
+
+        # Step 2: SIGTERM all snapshotted process groups (graceful shutdown).
+        # Delivers the signal to every group so children that called
+        # setpgid()/setsid() also get a chance to shut down gracefully.
+        sigtermed_pgids: set[int] = set()
+        for pgid in all_pgids:
+            try:
+                self._logger.info("Sending SIGTERM to process group: %s", pgid)
+                os.killpg(pgid, signal.SIGTERM)
+                sigtermed_pgids.add(pgid)
+            except ProcessLookupError:
+                pass  # Already gone
+            except Exception as e:
+                self._logger.warning(
+                    "Error sending SIGTERM to process group %s: %s", pgid, e
+                )
+
+        if not sigtermed_pgids:
+            return  # All groups already gone
+
+        # Step 3: poll for all process groups to exit.
+        # self.proc.poll() reaps the zombie so os.killpg(pgid, 0) can
+        # detect an empty group; without this the zombie keeps the group
+        # "alive" and the loop burns the full timeout.
         poll_interval = 0.1
         elapsed = 0.0
         while elapsed < timeout:
-            try:
-                # Check if any process in the group is still alive
-                os.killpg(self._pgid, 0)  # Signal 0 = check existence (no kill)
-            except ProcessLookupError:
-                # Process group no longer exists - done
-                return
-            except Exception:
-                # Other errors (e.g., permission) - assume done
-                return
+            if self.proc is not None:
+                self.proc.poll()
+            # Check if any signaled group is still alive
+            still_alive = False
+            for pgid in sigtermed_pgids:
+                try:
+                    os.killpg(pgid, 0)  # signal 0 = check existence
+                    still_alive = True
+                    break  # At least one alive, keep waiting
+                except (ProcessLookupError, OSError):
+                    pass
+            if not still_alive:
+                break
             time.sleep(poll_interval)
             elapsed += poll_interval
 
-        # Step 3: Force kill if anything remains after timeout
-        try:
-            os.killpg(self._pgid, signal.SIGKILL)  # SIGKILL (kill -9) - immediate
-        except ProcessLookupError:
-            pass
-        except Exception as e:
-            self._logger.warning(
-                "Error sending SIGKILL to process group %s: %s", self._pgid, e
-            )
+        # Step 4: SIGKILL all snapshotted process groups to ensure nothing
+        # survives (e.g. processes that ignored SIGTERM or timed out).
+        # _stop_started_processes handles per-process wait/escalation afterward.
+        for pgid in all_pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                self._logger.warning(
+                    "Permission denied sending SIGKILL to process group %s "
+                    "(should not happen for our own children)",
+                    pgid,
+                )
+            except Exception as e:
+                self._logger.warning(
+                    "Error sending SIGKILL to process group %s: %s", pgid, e
+                )
 
     def _remove_directory(self, path: str) -> None:
         """Remove a directory."""
@@ -701,6 +890,13 @@ class ManagedProcess:
         try:
             parent = psutil.Process(self.proc.pid)
             return parent.children(recursive=True)
+        except (PermissionError, psutil.AccessDenied) as exc:
+            self._logger.warning(
+                "Unable to enumerate child processes for PID %s: %s",
+                self.proc.pid,
+                exc,
+            )
+            return []
         except psutil.NoSuchProcess:
             return []
 

@@ -200,6 +200,33 @@ class ChatPayloadWithLogprobs(ChatPayload):
                         logprob_val <= 0
                     ), f"logprob should be <= 0, got {logprob_val}"
 
+                    # Validate bytes field is populated for the selected token
+                    assert "bytes" in item, "Missing 'bytes' in logprobs content item"
+                    token_str = item["token"]
+                    if token_str:
+                        assert (
+                            item["bytes"] is not None
+                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
+                        assert isinstance(
+                            item["bytes"], list
+                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
+
+                    # Validate top_logprobs entries have token, logprob, and bytes
+                    for top_lp in item["top_logprobs"]:
+                        assert (
+                            "token" in top_lp
+                        ), "Missing 'token' in top_logprobs entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), "Missing 'logprob' in top_logprobs entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), "Missing 'bytes' in top_logprobs entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
                 )
@@ -481,6 +508,26 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                         assert (
                             logprob_val <= 0
                         ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+
+                # Validate top_logprobs entries have token, logprob, and bytes when present
+                top_logprobs_list = logprobs_data.get("top_logprobs", [])
+                for i, token_top_lps in enumerate(top_logprobs_list):
+                    if not token_top_lps:
+                        continue
+                    for top_lp in token_top_lps:
+                        assert (
+                            "token" in top_lp
+                        ), f"Missing 'token' in top_logprobs[{i}] entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), f"Missing 'logprob' in top_logprobs[{i}] entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), f"Missing 'bytes' in top_logprobs[{i}] entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"

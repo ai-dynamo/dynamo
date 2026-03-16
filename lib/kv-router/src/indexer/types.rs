@@ -4,10 +4,6 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-#[cfg(feature = "metrics")]
-use dynamo_runtime::error::DynamoError;
-#[cfg(feature = "metrics")]
-pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -16,7 +12,6 @@ use dynamo_tokens::SequenceHash;
 
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
-#[cfg(not(feature = "metrics"))]
 pub trait MaybeError {
     /// Construct an instance from an error.
     fn from_err(err: impl std::error::Error + 'static) -> Self;
@@ -75,15 +70,117 @@ pub enum WorkerKvQueryResponse {
     Error(String),
 }
 
-#[cfg(feature = "metrics")]
 impl MaybeError for WorkerKvQueryResponse {
     fn from_err(err: impl std::error::Error + 'static) -> Self {
         WorkerKvQueryResponse::Error(err.to_string())
     }
 
-    fn err(&self) -> Option<DynamoError> {
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            WorkerKvQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
+            WorkerKvQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::protocols::maybe_error::MaybeError for WorkerKvQueryResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        WorkerKvQueryResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            WorkerKvQueryResponse::Error(msg) => {
+                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+// -------
+// Standalone indexer query types (request plane)
+// -------
+
+/// Endpoint name for the standalone KV indexer query service.
+pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
+
+/// Request to query the standalone KV indexer for overlap scores.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IndexerQueryRequest {
+    /// Model name to query the indexer for.
+    pub model_name: String,
+    /// Dynamo namespace (used as tenant_id for indexer lookup).
+    pub namespace: String,
+    /// Block hashes to find matches for in the radix tree.
+    pub block_hashes: Vec<LocalBlockHash>,
+}
+
+/// Wire-friendly overlap scores for JSON serialization.
+/// `OverlapScores` uses `FxHashMap<WorkerWithDpRank, _>` which can't be
+/// serialized as JSON (struct keys aren't valid JSON map keys), so we flatten
+/// to vecs of tuples for the wire protocol.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WireOverlapScores {
+    pub scores: Vec<(WorkerWithDpRank, u32)>,
+    pub frequencies: Vec<usize>,
+    pub tree_sizes: Vec<(WorkerWithDpRank, usize)>,
+}
+
+impl From<OverlapScores> for WireOverlapScores {
+    fn from(s: OverlapScores) -> Self {
+        Self {
+            scores: s.scores.into_iter().collect(),
+            frequencies: s.frequencies,
+            tree_sizes: s.tree_sizes.into_iter().collect(),
+        }
+    }
+}
+
+impl From<WireOverlapScores> for OverlapScores {
+    fn from(w: WireOverlapScores) -> Self {
+        Self {
+            scores: w.scores.into_iter().collect(),
+            frequencies: w.frequencies,
+            tree_sizes: w.tree_sizes.into_iter().collect(),
+        }
+    }
+}
+
+/// Response from the standalone KV indexer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum IndexerQueryResponse {
+    /// Overlap scores per worker.
+    Scores(WireOverlapScores),
+    /// An error occurred processing the query.
+    Error(String),
+}
+
+impl MaybeError for IndexerQueryResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerQueryResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            IndexerQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerQueryResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerQueryResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            IndexerQueryResponse::Error(msg) => {
+                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
+            }
             _ => None,
         }
     }
