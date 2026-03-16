@@ -31,7 +31,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
@@ -209,6 +209,12 @@ pub struct LocalTransferManager<
 > {
     futures_tx: mpsc::Sender<TransferFuture<Source, Target, Locality, Metadata>>,
     transfer_ctx: Arc<TransferContext>,
+    /// Optional shared semaphore for cross-worker bandwidth limiting (e.g. G2→G3 vs G3→G1).
+    /// When set, a permit is acquired before each transfer and held until completion.
+    shared_semaphore: Option<Arc<Semaphore>>,
+    /// Minimum number of permits that must remain free before this worker acquires one.
+    /// Set to 0 for high-priority (onboard) workers; set to N for low-priority (offload) workers.
+    min_free_permits: usize,
 }
 
 impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
@@ -219,6 +225,24 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         max_concurrent_transfers: usize,
         runtime: &Handle,
         cancellation_token: CancellationToken,
+    ) -> Result<Self> {
+        Self::new_with_semaphore(
+            transfer_ctx,
+            max_concurrent_transfers,
+            runtime,
+            cancellation_token,
+            None,
+            0,
+        )
+    }
+
+    pub fn new_with_semaphore(
+        transfer_ctx: Arc<TransferContext>,
+        max_concurrent_transfers: usize,
+        runtime: &Handle,
+        cancellation_token: CancellationToken,
+        shared_semaphore: Option<Arc<Semaphore>>,
+        min_free_permits: usize,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
@@ -261,6 +285,8 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         Ok(Self {
             futures_tx,
             transfer_ctx,
+            shared_semaphore,
+            min_free_permits,
         })
     }
 }
@@ -287,12 +313,38 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
+        // Acquire shared disk bandwidth semaphore if configured.
+        // Onboard workers (min_free_permits == 0) always acquire immediately.
+        // Offload workers (min_free_permits > 0) wait until enough permits are free
+        // so that onboards can always preempt disk bandwidth.
+        let permit: Option<OwnedSemaphorePermit> = if let Some(sem) = &self.shared_semaphore {
+            if self.min_free_permits == 0 {
+                // High-priority path (onboard): always acquire.
+                Some(Arc::clone(sem).acquire_owned().await?)
+            } else {
+                // Low-priority path (offload): only proceed if enough permits remain for onboards.
+                loop {
+                    if sem.available_permits() > self.min_free_permits {
+                        match Arc::clone(sem).try_acquire_owned() {
+                            Ok(p) => break Some(p),
+                            Err(_) => {}
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
+        } else {
+            None
+        };
+
         let notify = pending_transfer
             .sources
             .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;
 
         let completion_future = async move {
             let _ = notify.await;
+            // Drop permit after I/O completes, freeing bandwidth for other transfers.
+            drop(permit);
             pending_transfer
         };
 

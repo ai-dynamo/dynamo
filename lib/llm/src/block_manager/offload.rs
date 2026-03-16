@@ -47,6 +47,7 @@ use std::sync::{
 };
 use tokio::runtime::Handle;
 use tokio::sync::{
+    Semaphore,
     mpsc::{self, error::TryRecvError},
     oneshot,
 };
@@ -71,6 +72,12 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
 pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+
+/// Total number of concurrent disk I/O slots shared between host→disk offload and disk→device onboard.
+pub const MAX_DISK_TRANSFER_SLOTS: usize = 8;
+/// Minimum permits that must remain free before a host→disk offload transfer can proceed.
+/// This reserves bandwidth for higher-priority disk→device onboard transfers.
+pub const OFFLOAD_MIN_FREE_PERMITS: usize = 4;
 
 /// Configuration for creating an OffloadManager
 pub struct OffloadManagerConfig {
@@ -217,17 +224,25 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             })?,
         );
 
+        // Shared semaphore for disk bandwidth: limits total concurrent disk I/Os across
+        // host→disk (offload) and disk→device (onboard) to MAX_DISK_TRANSFER_SLOTS.
+        // Onboard (G3→G1) has priority: min_free_permits=0 (always proceeds).
+        // Offload (G2→G3) is throttled: min_free_permits=OFFLOAD_MIN_FREE_PERMITS.
+        let disk_semaphore = Arc::new(Semaphore::new(MAX_DISK_TRANSFER_SLOTS));
+
         // Host -> Disk offload
         let host_to_disk_task = OffloadManager::offload_worker(
             this.host.clone(),
             this.disk.clone(),
             host_offload_rx,
             Arc::new(TransferBatcher::new(
-                LocalTransferManager::new(
+                LocalTransferManager::new_with_semaphore(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    MAX_DISK_TRANSFER_SLOTS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
+                    Some(Arc::clone(&disk_semaphore)),
+                    OFFLOAD_MIN_FREE_PERMITS,
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
@@ -280,11 +295,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.device.clone(),
             disk_onboard_rx,
             Arc::new(TransferBatcher::new(
-                LocalTransferManager::new(
+                LocalTransferManager::new_with_semaphore(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    MAX_DISK_TRANSFER_SLOTS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
+                    Some(Arc::clone(&disk_semaphore)),
+                    0, // onboard always proceeds (no minimum free requirement)
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
