@@ -37,6 +37,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 MODEL="Qwen/Qwen3-0.6B"
+# --block-size 64 is required for XPU; on CUDA vLLM uses its default
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    BLOCK_SIZE_ARG=(--block-size "${DYN_BLOCK_SIZE:-64}")
+else
+    BLOCK_SIZE_ARG=()
+fi
 
 # Set the request plane mode
 export DYN_REQUEST_PLANE=$REQUEST_PLANE
@@ -68,4 +74,4 @@ python -m dynamo.frontend &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 DYN_HEALTH_CHECK_ENABLED=true \
-    python -m dynamo.vllm --model "$MODEL" --enforce-eager
+    python -m dynamo.vllm --model "$MODEL" "${BLOCK_SIZE_ARG[@]}" --enforce-eager

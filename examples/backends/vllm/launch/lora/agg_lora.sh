@@ -17,6 +17,12 @@ export DYN_LORA_PATH=/tmp/dynamo_loras_minio
 mkdir -p $DYN_LORA_PATH
 
 MODEL="Qwen/Qwen3-0.6B"
+# --block-size 64 is required for XPU; on CUDA vLLM uses its default
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    BLOCK_SIZE_ARG=(--block-size "${DYN_BLOCK_SIZE:-64}")
+else
+    BLOCK_SIZE_ARG=()
+fi
 SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
@@ -63,6 +69,8 @@ python -m dynamo.frontend &
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
-    python -m dynamo.vllm --model "$MODEL" --enforce-eager \
+    python -m dynamo.vllm --model "$MODEL" \
+    "${BLOCK_SIZE_ARG[@]}" \
+    --enforce-eager \
     --enable-lora \
     --max-lora-rank 64

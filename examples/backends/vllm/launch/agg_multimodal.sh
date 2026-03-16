@@ -14,8 +14,14 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
-# Default values
-MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+# Default values differ by device:
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    MODEL_NAME="Qwen/Qwen3-VL-8B-Instruct"
+    BLOCK_SIZE=${DYN_BLOCK_SIZE:-64}
+else
+    MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+    BLOCK_SIZE=${DYN_BLOCK_SIZE:-}
+fi
 
 # Parse command line arguments
 # Extra arguments are passed through to the vLLM worker
@@ -26,10 +32,15 @@ while [[ $# -gt 0 ]]; do
             MODEL_NAME=$2
             shift 2
             ;;
+        --block-size)
+            BLOCK_SIZE=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS] [-- EXTRA_VLLM_ARGS]"
             echo "Options:"
             echo "  --model <model_name>   Specify the VLM model to use (default: $MODEL_NAME)"
+            echo "  --block-size <block_size>   Specify the block size (default: $BLOCK_SIZE)"
             echo "  -h, --help             Show this help message"
             echo ""
             echo "Any additional arguments are passed through to the vLLM worker."
@@ -42,6 +53,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+# --block-size: use value from --block-size CLI arg or XPU default; omit on CUDA (vLLM default)
+BLOCK_SIZE_ARG=()
+[[ -n "$BLOCK_SIZE" ]] && BLOCK_SIZE_ARG=(--block-size "$BLOCK_SIZE")
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
@@ -92,9 +106,20 @@ fi
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
 # Extra args from command line come last to allow overrides
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
+# Device selection: supports CUDA (CUDA_VISIBLE_DEVICES) and XPU (ZE_AFFINITY_MASK)
+# Set DYN_DEVICE=xpu to use Intel XPU device selection
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    DYN_VISIBLE_DEVICES="ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0}"
+else
+    DYN_VISIBLE_DEVICES="CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}"
+fi
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+env "$DYN_VISIBLE_DEVICES" python -m dynamo.vllm \
+    --enable-multimodal \
+    --model $MODEL_NAME \
+    "${BLOCK_SIZE_ARG[@]}" \
+    $MODEL_SPECIFIC_ARGS \
+    "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait

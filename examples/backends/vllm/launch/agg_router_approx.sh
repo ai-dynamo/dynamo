@@ -7,6 +7,17 @@ trap 'echo Cleaning up...; kill 0' EXIT
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
+
+# Device selection: supports CUDA (CUDA_VISIBLE_DEVICES) and XPU (ZE_AFFINITY_MASK)
+# Set DYN_DEVICE=xpu to use Intel XPU device selection
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    DYN_VISIBLE_DEVICES_W0="ZE_AFFINITY_MASK=0"
+    DYN_VISIBLE_DEVICES_W1="ZE_AFFINITY_MASK=1"
+else
+    DYN_VISIBLE_DEVICES_W0="CUDA_VISIBLE_DEVICES=0"
+    DYN_VISIBLE_DEVICES_W1="CUDA_VISIBLE_DEVICES=1"
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
 echo "Launching Aggregated + Approximate KV Routing (2 GPUs)"
@@ -39,14 +50,14 @@ python -m dynamo.frontend \
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+env "$DYN_VISIBLE_DEVICES_W0" python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+env "$DYN_VISIBLE_DEVICES_W1" python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}'

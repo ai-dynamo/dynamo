@@ -23,6 +23,16 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
+# Device selection: supports CUDA (CUDA_VISIBLE_DEVICES) and XPU (ZE_AFFINITY_MASK)
+# Set DYN_DEVICE=xpu to use Intel XPU device selection
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    DYN_VISIBLE_DEVICES_W0="ZE_AFFINITY_MASK=0"
+    DYN_VISIBLE_DEVICES_W1="ZE_AFFINITY_MASK=1"
+else
+    DYN_VISIBLE_DEVICES_W0="CUDA_VISIBLE_DEVICES=0"
+    DYN_VISIBLE_DEVICES_W1="CUDA_VISIBLE_DEVICES=1"
+fi
+
 SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-8081}"
 SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -67,7 +77,7 @@ python -m dynamo.frontend \
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+env "$DYN_VISIBLE_DEVICES_W0" python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
@@ -77,7 +87,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+env "$DYN_VISIBLE_DEVICES_W1" python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \

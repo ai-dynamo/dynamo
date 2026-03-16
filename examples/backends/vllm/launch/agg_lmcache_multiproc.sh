@@ -18,6 +18,14 @@ cleanup() {
 trap cleanup EXIT
 
 MODEL="Qwen/Qwen3-0.6B"
+# --block-size 64 is required for XPU; on CUDA vLLM uses its default
+if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    BLOCK_SIZE_ARG=(--block-size "${DYN_BLOCK_SIZE:-64}")
+else
+    BLOCK_SIZE_ARG=()
+fi
+# KV buffer device: set DYN_DEVICE=xpu for Intel XPU hardware (default: cuda)
+KV_BUFFER_DEVICE="${DYN_DEVICE:-cuda}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
 echo "Launching Aggregated + LMCache + Multiproc (1 GPU)"
@@ -45,5 +53,7 @@ python -m dynamo.frontend &
 # run worker with LMCache enabled and PROMETHEUS_MULTIPROC_DIR explicitly set
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   PROMETHEUS_MULTIPROC_DIR="$PROMETHEUS_MULTIPROC_DIR" \
-  python -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+  python -m dynamo.vllm --model "$MODEL" \
+    "${BLOCK_SIZE_ARG[@]}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
 

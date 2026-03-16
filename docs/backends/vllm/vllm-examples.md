@@ -49,7 +49,7 @@ bash launch/agg.sh
 
 Two workers behind a [KV-aware router](../../components/router/README.md) that maximizes cache reuse. Requires 2 GPUs.
 
-Run on cuda devices:
+Run on CUDA devices:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
@@ -58,7 +58,7 @@ bash launch/agg_router.sh
 Run on XPUs:
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_router_xpu.sh
+DYN_DEVICE=xpu bash launch/agg_router.sh
 ```
 
 
