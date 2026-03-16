@@ -22,16 +22,20 @@ title: NVIDIA Dynamo Documentation
 products:
   - display-name: Dynamo
     slug: /
-    path: ./versions/v1.0.0.yml
+    path: ./versions/v1.0.1.yml
     versions:
-      - display-name: Latest (v1.0.0)
-        path: ./versions/v1.0.0.yml
+      - display-name: Latest (v1.0.1)
+        path: ./versions/v1.0.1.yml
         slug: latest
         availability: stable
       - display-name: dev
         path: ./versions/dev.yml
         slug: dev
         availability: beta
+      - display-name: v1.0.1
+        path: ./versions/v1.0.1.yml
+        slug: v1.0.1
+        availability: stable
       - display-name: v1.0.0
         path: ./versions/v1.0.0.yml
         slug: v1.0.0
