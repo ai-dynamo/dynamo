@@ -10,10 +10,7 @@ import sglang as sgl
 
 from dynamo.common.utils.snapshot import EngineSnapshotController, get_checkpoint_config
 
-from .request_handlers.handler_base import (
-    DEFAULT_MEMORY_OCCUPATION_TAGS,
-    SGLangEngineQuiesceController,
-)
+from .request_handlers.handler_base import SGLangEngineQuiesceController
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +52,7 @@ async def prepare_snapshot_engine(
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        quiesce_controller=SGLangEngineQuiesceController(
-            engine,
-            DEFAULT_MEMORY_OCCUPATION_TAGS,
-        ),
+        quiesce_controller=SGLangEngineQuiesceController(engine),
         checkpoint_config=checkpoint_cfg,
     )
     if not await snapshot_controller.wait_for_restore():

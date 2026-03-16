@@ -74,11 +74,14 @@ class VllmEngineQuiesceController:
         self._is_quiesced = True
         return True
 
-    async def resume(self) -> bool:
+    async def resume(self, tags: list[str] | None = None) -> bool:
         if not self._is_quiesced:
             return False
 
-        await self._engine_client.wake_up()
+        if tags is None:
+            await self._engine_client.wake_up()
+        else:
+            await self._engine_client.wake_up(tags)
         await self._engine_client.resume_generation()
         return True
 
@@ -426,19 +429,21 @@ class BaseWorkerHandler(ABC):
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
-            body: Unused. Wake always restores all sleep-managed memory.
+            body: Optional dict with "tags" to request a partial wake.
 
         Order of operations:
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
+        body = body or {}
+        tags = body.get("tags")
         async with self._quiesce_lock:
             if not self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._quiesce_controller.resume()
+                await self._quiesce_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(

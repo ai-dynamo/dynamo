@@ -19,22 +19,18 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
-# Keep default tags minimal and safe for general use.
-# "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
-DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
-
 
 class SGLangEngineQuiesceController:
-    def __init__(self, engine: sgl.Engine, tags):
+    def __init__(self, engine: sgl.Engine):
         self._engine = engine
-        self._tags = list(tags)
+        self._quiesced_tags: Optional[list[str]] = None
         self._is_quiesced = False
 
     @property
     def is_quiesced(self) -> bool:
         return self._is_quiesced
 
-    async def quiesce(self, *args: object) -> bool:
+    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
         if self._is_quiesced:
             return False
 
@@ -45,13 +41,14 @@ class SGLangEngineQuiesceController:
 
         await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
         await self._engine.tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(tags=list(self._tags)),
+            ReleaseMemoryOccupationReqInput(tags=tags),
             None,
         )
+        self._quiesced_tags = None if tags is None else list(tags)
         self._is_quiesced = True
         return True
 
-    async def resume(self) -> bool:
+    async def resume(self, tags: Optional[list[str]] = None) -> bool:
         if not self._is_quiesced:
             return False
 
@@ -60,8 +57,9 @@ class SGLangEngineQuiesceController:
             ResumeMemoryOccupationReqInput,
         )
 
+        request_tags = self._quiesced_tags if tags is None else list(tags)
         await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=list(self._tags)),
+            ResumeMemoryOccupationReqInput(tags=request_tags),
             None,
         )
         await self._engine.tokenizer_manager.continue_generation(
@@ -70,6 +68,7 @@ class SGLangEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
+        self._quiesced_tags = None
         self._is_quiesced = False
 
 
@@ -198,9 +197,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
         self._quiesce_controller = (
-            SGLangEngineQuiesceController(engine, DEFAULT_MEMORY_OCCUPATION_TAGS)
-            if engine is not None
-            else None
+            SGLangEngineQuiesceController(engine) if engine is not None else None
         )
         self._quiesce_lock = asyncio.Lock()
 
@@ -213,7 +210,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Release GPU memory occupation and unregister from discovery.
 
         Args:
-            body: Unused. Release always targets default tags.
+            body: Optional dict with "tags" to target specific memory regions.
 
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
@@ -226,6 +223,8 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 "message": "memory control not supported on this worker",
             }
 
+        body = body or {}
+        tags = body.get("tags")
         async with self._quiesce_lock:
             if self._quiesce_controller.is_quiesced:
                 return {
@@ -238,11 +237,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
 
-                await self._quiesce_controller.quiesce()
+                await self._quiesce_controller.quiesce(tags)
 
                 return {
                     "status": "ok",
-                    "message": f"Memory released for tags: {DEFAULT_MEMORY_OCCUPATION_TAGS}",
+                    "message": (
+                        f"Memory released for tags: {tags}"
+                        if tags is not None
+                        else "Memory released"
+                    ),
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
@@ -252,7 +255,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Resume GPU memory occupation and re-register to discovery.
 
         Args:
-            body: Unused. Resume always targets default tags.
+            body: Optional dict with "tags" to target specific memory regions.
 
         Order of operations:
         1. Resume memory - restore GPU allocations
@@ -265,6 +268,8 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 "message": "memory control not supported on this worker",
             }
 
+        body = body or {}
+        tags = body.get("tags")
         async with self._quiesce_lock:
             if not self._quiesce_controller.is_quiesced:
                 return {
@@ -273,7 +278,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 }
 
             try:
-                await self._quiesce_controller.resume()
+                await self._quiesce_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
@@ -281,7 +286,11 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
                 return {
                     "status": "ok",
-                    "message": f"Memory resumed for tags: {DEFAULT_MEMORY_OCCUPATION_TAGS}",
+                    "message": (
+                        f"Memory resumed for tags: {tags}"
+                        if tags is not None
+                        else "Memory resumed"
+                    ),
                 }
             except Exception as e:
                 logging.error(f"Failed to resume memory occupation: {e}")
