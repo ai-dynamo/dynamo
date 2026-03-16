@@ -48,6 +48,7 @@ bash launch/agg.sh
 For XPU deployments, use a larger block size and set it to at least `64` (`>= 64`):
 
 ```bash
+# XeTLA ChunkPrefill FP8KV: only support block_size >= 64
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh --block-size 64
 ```
