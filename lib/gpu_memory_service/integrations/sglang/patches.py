@@ -167,24 +167,31 @@ def patch_model_runner() -> None:
     original_init_memory_pool = ModelRunner.init_memory_pool
 
     def patched_init_memory_pool(self, *args, **kwargs):
-        """Patched init_memory_pool that uses device total for overhead calculation."""
+        """Patch init_memory_pool to use device total for overhead calculation.
+
+        SGLang's KV cache formula uses total_gpu_memory as the baseline:
+        rest_memory = available - total*(1-mem_fraction).
+        When weights are pre-loaded by GMS, total_gpu_memory was captured before
+        model load and reflects a partially-occupied device, making the overhead
+        term too small and over-allocating KV cache. Fix: replace total_gpu_memory
+        with the physical device capacity so the overhead term is correctly sized.
+        """
         from gpu_memory_service.integrations.sglang.memory_saver import (
             get_gms_memory_saver_impl,
         )
 
         impl = get_gms_memory_saver_impl()
-        if impl is not None and impl.get_imported_weights_bytes() > 0:
-            total_memory = torch.cuda.get_device_properties(
+        if impl is not None and impl.get_imported_weights_bytes() > 0 and args:
+            total_memory_gib = torch.cuda.get_device_properties(
                 torch.cuda.current_device()
-            ).total_memory
-            if hasattr(self, "min_per_gpu_memory"):
-                old_value = self.min_per_gpu_memory
-                self.min_per_gpu_memory = total_memory
-                logger.info(
-                    "[GMS] Adjusted min_per_gpu_memory: %.2f GiB -> %.2f GiB",
-                    old_value / (1 << 30),
-                    total_memory / (1 << 30),
-                )
+            ).total_memory / (1 << 30)
+            old_value = args[0]
+            args = (total_memory_gib,) + args[1:]
+            logger.info(
+                "[GMS] Adjusted total_gpu_memory: %.2f GiB -> %.2f GiB",
+                old_value,
+                total_memory_gib,
+            )
 
         return original_init_memory_pool(self, *args, **kwargs)
 
