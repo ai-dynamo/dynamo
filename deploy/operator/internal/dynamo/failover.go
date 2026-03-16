@@ -72,6 +72,8 @@ func buildFailoverPod(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	parentName string,
 	serviceName string,
+	numberOfNodes int32,
+	role Role,
 ) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
@@ -108,6 +110,14 @@ func buildFailoverPod(
 		Name:                      failoverDRAClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
 	})
+
+	// Inject NNODES for multinode failover so engines know the group size
+	if numberOfNodes > 1 {
+		nnodesEnv := corev1.EnvVar{Name: "NNODES", Value: strconv.Itoa(int(numberOfNodes))}
+		for i := range podSpec.Containers {
+			podSpec.Containers[i].Env = append(podSpec.Containers[i].Env, nnodesEnv)
+		}
+	}
 
 	return nil
 }
