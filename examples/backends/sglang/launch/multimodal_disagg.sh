@@ -70,38 +70,31 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
-# GPU assignments and memory defaults (override via environment variables)
+# GPU assignments (override via environment variables)
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
     DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
-
-    # mem-fraction-static tells SGLang what fraction of measured free memory
-    # (at worker init) is available for model weights + KV cache.  When 3
-    # workers share a GPU the later workers see much less free memory, so
-    # the fraction must be high to keep the profiled KV token count > 0.
-    # Actual KV cache size is capped by --max-total-tokens below.
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.05}
-    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.85}
-    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.85}
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
     DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
-
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
-    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 fi
+
+# GPU memory fractions for workers (used with --mem-fraction-static)
+DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
+DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
+DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
 ENCODE_EXTRA_ARGS=""
 PREFILL_EXTRA_ARGS=""
 DECODE_EXTRA_ARGS=""
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # 3 workers share one GPU. Cap context-length and max-total-tokens to keep
-    # KV cache small enough for the last worker to initialize.
-    ENCODE_EXTRA_ARGS="--mem-fraction-static ${DYN_ENCODE_GPU_MEM}"
+    # 3 workers share one GPU. --max-total-tokens caps the KV cache to a small
+    # functional-test size so the last worker can initialize without OOM.
+    # --context-length keeps the per-request token pool allocation small.
+    ENCODE_EXTRA_ARGS=""
     PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024"
     DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024"
 fi
