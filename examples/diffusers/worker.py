@@ -184,6 +184,7 @@ class FastVideoBackend:
                     "fullgraph": True,
                     "mode": "max-autotune-no-cudagraphs",
                 },
+                # Consider enabling the following offloading options to reduce GPU memory usage if you run into OOM errors.
                 dit_cpu_offload=False,
                 vae_cpu_offload=False,
                 text_encoder_cpu_offload=False,
