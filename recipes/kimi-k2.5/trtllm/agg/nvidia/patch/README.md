@@ -23,5 +23,5 @@ The patch is applied via `patch -p1 --fuzz=0`:
 
 | File | Description |
 |------|-------------|
-| `Dockerfile` | Multi-stage build that applies the patch to a base Dynamo image |
+| `Dockerfile` | Single-stage build that applies the patch to a base Dynamo image |
 | `kimi.patch` | Unified diff from [upstream PR #11816](https://github.com/NVIDIA/TensorRT-LLM/pull/11816) — adds `KimiK25ForConditionalGeneration` to `modeling_deepseekv3.py` |

@@ -20,7 +20,7 @@ RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'
     cd "$SITE_PKGS" && \
     if patch -p1 --forward --fuzz=0 --dry-run < /tmp/kimi.patch > /dev/null 2>&1; then \
         patch -p1 --forward --fuzz=0 < /tmp/kimi.patch; \
-    elif grep -q 'class KimiK25ForConditionalGeneration' "$TARGET"; then \
+    elif patch -p1 --reverse --fuzz=0 --dry-run < /tmp/kimi.patch > /dev/null 2>&1; then \
         echo "Patch already applied, skipping."; \
     else \
         echo "ERROR: Patch failed — the target file may have changed upstream." >&2; \
@@ -31,8 +31,8 @@ RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'
 
 # Smoke test
 RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))") && \
-    grep -q 'class KimiK25ForConditionalGeneration' \
+    grep -q '@register_auto_model("KimiK25ForConditionalGeneration")' \
         "$SITE_PKGS/tensorrt_llm/_torch/models/modeling_deepseekv3.py" || \
-    { echo "ERROR: KimiK25ForConditionalGeneration not found after patching" >&2; exit 1; }
+    { echo "ERROR: KimiK25ForConditionalGeneration not registered after patching" >&2; exit 1; }
 
 USER dynamo

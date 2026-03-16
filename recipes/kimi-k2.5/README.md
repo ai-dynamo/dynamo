@@ -96,10 +96,10 @@ The nvidia variant supports text inference with reasoning parsing (`--dyn-reason
 The nvidia deploy manifests (`deploy.yaml`, `deploy-kvbm.yaml`) ship with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`.
 Before deploying, you must:
 
-1. Run the [patch script](trtllm/agg/nvidia/patch/) to build a patched image (appends `-patched` to the tag).
+1. Build a patched image via `docker build` with the `trtllm/agg/nvidia/patch/` context and `BASE_IMAGE` build-arg (see command below).
 2. Update the `image:` fields in the deploy YAML to reference the patched image.
 
-See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for full details on what the patch does.
+See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for details on what the patch does.
 
 ```bash
 # Set namespace
