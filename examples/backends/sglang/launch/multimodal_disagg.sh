@@ -76,12 +76,14 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
     DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
 
-    # Lower fractions for 3-worker single-GPU: encode (vision only) needs
-    # minimal KV, prefill/decode each load full model weights so keep
-    # fractions small to avoid OOM on CI GPUs (tested on 24 GB+).
+    # mem-fraction-static tells SGLang what fraction of measured free memory
+    # (at worker init) is available for model weights + KV cache.  When 3
+    # workers share a GPU the later workers see much less free memory, so
+    # the fraction must be high to keep the profiled KV token count > 0.
+    # Actual KV cache size is capped by --max-total-tokens below.
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.05}
-    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.20}
-    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.20}
+    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.85}
+    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.85}
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
