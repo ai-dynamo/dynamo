@@ -121,7 +121,14 @@ class HandlerBase(BaseGenerativeHandler):
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         # Server-level default for enable_thinking (reasoning + guided decoding)
-        self.enable_thinking_default = config.enable_thinking_default
+        # Coerce to bool — argparse returns bool but pydantic/config may stringify it
+        _etd = config.enable_thinking_default
+        if isinstance(_etd, str):
+            self.enable_thinking_default = _etd.lower() in ("true", "1", "yes")
+        elif _etd is None:
+            self.enable_thinking_default = None
+        else:
+            self.enable_thinking_default = bool(_etd)
 
     def check_error(self, result: dict) -> bool:
         """
@@ -1018,9 +1025,9 @@ class HandlerBase(BaseGenerativeHandler):
             xgrammar content dict, or None if no guided decoding is specified.
         """
         if json_schema is not None:
-            return {"type": "json_schema", "json_schema": json_schema}
+            return {"type": "json_schema", "json_schema": {"name": "guided_json", "schema": json_schema}}
         elif json_object:
-            return {"type": "json_schema", "json_schema": {"type": "object"}}
+            return {"type": "json_schema", "json_schema": {"name": "json_object", "schema": {"type": "object"}}}
         elif regex is not None:
             return {"type": "regex", "pattern": regex}
         elif grammar is not None:
