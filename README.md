@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-![Dynamo banner](./docs/assets/img/frontpage-banner.png)
+![Dynamo banner](./docs/assets/img/dynamo-frontpage-banner.png)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
@@ -71,7 +71,7 @@ If you're running a single model on a single GPU, your inference engine alone is
 Most inference engines optimize a single GPU or a single node. Dynamo is the **orchestration layer above them** — it turns a cluster of GPUs into a coordinated inference system.
 
 <p align="center">
-  <img src="./docs/assets/dynamo-readme-overview.svg" alt="Dynamo architecture overview" width="600" />
+  <img src="./docs/assets/img/dynamo-readme-overview.svg" alt="Dynamo architecture overview" width="600" />
 </p>
 
 **[Architecture Deep Dive →](https://docs.nvidia.com/dynamo/design-docs/overall-architecture)**
