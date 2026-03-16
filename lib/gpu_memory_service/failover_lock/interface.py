@@ -24,11 +24,12 @@ class FailoverLockError(Exception):
 
 class FailoverLock(ABC):
     @abstractmethod
-    async def acquire(self, engine_id: str) -> None:
+    async def acquire(self, engine_id: str, timeout: float | None = None) -> None:
         """Block until this engine is granted the active role.
 
         Args:
             engine_id: Identity of the engine claiming the lock.
+            timeout: Maximum seconds to wait. None = wait forever.
         """
         ...
 

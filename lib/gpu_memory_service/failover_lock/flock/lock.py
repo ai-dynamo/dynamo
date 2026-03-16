@@ -5,6 +5,7 @@ import asyncio
 import fcntl
 import logging
 import os
+import time
 
 from gpu_memory_service.failover_lock.interface import FailoverLock, FailoverLockError
 
@@ -21,7 +22,8 @@ class FlockFailoverLock(FailoverLock):
     descriptors.
 
     Cross-container operation: containers sharing an emptyDir volume
-    can contend for the same lock file.
+    can contend for the same lock file. Acquiring twice from the same
+    process is harmless — flock succeeds immediately if already held.
     """
 
     def __init__(self, lock_path: str):
@@ -29,7 +31,12 @@ class FlockFailoverLock(FailoverLock):
         self._fd: int | None = None
         self._engine_id: str | None = None
 
-    async def acquire(self, engine_id: str, poll_interval: float = 0.1) -> None:
+    async def acquire(
+        self,
+        engine_id: str,
+        poll_interval: float = 0.1,
+        timeout: float | None = None,
+    ) -> None:
         """Acquire the exclusive flock via non-blocking poll loop.
 
         Uses LOCK_NB to avoid blocking the asyncio event loop. Polls
@@ -40,6 +47,7 @@ class FlockFailoverLock(FailoverLock):
         # O_RDWR:  open for reading and writing (flock requires a valid fd,
         #          and we write our engine_id into the file after acquiring)
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
+        start = time.monotonic()
         try:
             while True:
                 try:
@@ -50,6 +58,13 @@ class FlockFailoverLock(FailoverLock):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
+                    if timeout is not None:
+                        elapsed = time.monotonic() - start
+                        if elapsed >= timeout:
+                            raise FailoverLockError(
+                                f"Timed out acquiring flock at {self._lock_path} "
+                                f"for engine {engine_id} after {elapsed:.1f}s"
+                            )
                     await asyncio.sleep(poll_interval)
         except Exception as e:
             os.close(fd)
