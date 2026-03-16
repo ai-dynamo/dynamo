@@ -255,8 +255,8 @@
 
   <!-- KV Cache pills (lines drawn earlier, before NIXL) -->
   <rect x="136" y="384" width="60" height="16" rx="8" class="pill-green"/>
-  <text x="166" y="395" class="conn-label label-green">KV Cache</text>
+  <text x="166" y="395" class="conn-label label-green">KV Transfer</text>
   <rect x="344" y="384" width="60" height="16" rx="8" class="pill-green"/>
-  <text x="374" y="395" class="conn-label label-green">KV Cache</text>
+  <text x="374" y="395" class="conn-label label-green">KV Transfer</text>
 
 </svg>
