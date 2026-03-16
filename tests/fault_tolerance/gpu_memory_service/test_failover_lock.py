@@ -16,6 +16,13 @@ import time
 import pytest
 from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.fault_tolerance,
+]
+
 
 @pytest.fixture
 def lock_path(tmp_path):
