@@ -900,11 +900,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                     ..Default::default()
                 })
             },
-            // When the Anthropic request has thinking enabled, pass
-            // enable_thinking=true to the chat template so reasoning models
-            // (e.g., Nemotron-3-Super) emit <think>...</think> tags.
-            // Without this, the model generates plain text and the reasoning
-            // parser cannot detect thinking boundaries.
+            // chat_template_args may be augmented by the Anthropic handler
+            // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
+            // when a reasoning parser is configured. The conversion layer only
+            // forwards the client's explicit thinking preference here; the handler
+            // has access to parsing_options and makes the final decision.
             chat_template_args: if req
                 .thinking
                 .as_ref()

@@ -18,8 +18,19 @@ class InputParamManager:
                 raise ValueError("Tokenizer is not available")
 
             if "messages" in request:
+                # Forward chat_template_args / chat_template_kwargs to the
+                # template so model-specific variables (e.g. enable_thinking)
+                # are available during rendering.
+                extra_kwargs = {}
+                if "chat_template_kwargs" in request:
+                    extra_kwargs.update(request["chat_template_kwargs"])
+                if "chat_template_args" in request:
+                    extra_kwargs.update(request["chat_template_args"])
                 return self.tokenizer.apply_chat_template(
-                    request["messages"], tokenize=False, add_generation_prompt=True
+                    request["messages"],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **extra_kwargs,
                 )
             elif "prompt" in request:
                 return self.tokenizer.encode(request["prompt"])
