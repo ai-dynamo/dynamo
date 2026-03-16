@@ -17,13 +17,16 @@ One request at a time (asyncio.Lock — VideoGenerator is not re-entrant).
 
 Usage:
   python worker.py [--model MODEL] [--num-gpus N] [--enable-optimizations]
+                   [--attention-backend ATTENTION_BACKEND]
 
 Options:
   --model          HuggingFace model path
                    (default: FastVideo/LTX2-Distilled-Diffusers)
   --num-gpus       Number of GPUs (default: 1)
   --enable-optimizations
-                   Enable FP4 quantization, torch.compile, and FLASH_ATTN
+                   Enable FP4 quantization and torch.compile
+  --attention-backend
+                   Attention backend (default: TORCH_SDPA)
 
 Request format (sent to /v1/videos):
   prompt:   text description of the desired video
@@ -59,6 +62,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "FastVideo/LTX2-Distilled-Diffusers"
+DEFAULT_ATTENTION_BACKEND = "TORCH_SDPA"
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
@@ -135,13 +139,13 @@ class FastVideoBackend:
         self.model_name: str = args.model
         self.num_gpus: int = args.num_gpus
         self.enable_optimizations: bool = args.enable_optimizations
+        self.attention_backend: str = args.attention_backend
 
         # One request at a time — VideoGenerator is not re-entrant
         self._generate_lock = asyncio.Lock()
         self.generator: VideoGenerator | None = None
 
-        attn_backend = "FLASH_ATTN" if self.enable_optimizations else "TORCH_SDPA"
-        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = attn_backend
+        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = self.attention_backend
         os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
         os.environ["FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT"] = "0"
 
@@ -420,7 +424,13 @@ def _parse_args() -> argparse.Namespace:
         "--enable-optimizations",
         action="store_true",
         dest="enable_optimizations",
-        help="Enable FP4 quantization, torch.compile, and use FLASH_ATTN attention",
+        help="Enable FP4 quantization and torch.compile",
+    )
+    parser.add_argument(
+        "--attention-backend",
+        default=DEFAULT_ATTENTION_BACKEND,
+        dest="attention_backend",
+        help=f"Attention backend to set via FASTVIDEO_ATTENTION_BACKEND (default: {DEFAULT_ATTENTION_BACKEND})",
     )
     return parser.parse_args()
 

@@ -15,12 +15,12 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 - **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
 - **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
-- **Optimized inference:** FP4 quantization and `torch.compile` are available via `--enable-optimizations` for maximum throughput on supported GPUs.
+- **Optimized inference:** FP4 quantization and `torch.compile` are available via `--enable-optimizations`; attention backend selection is controlled separately via `--attention-backend`.
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
 > [!IMPORTANT]
-> The optional optimized path (`--enable-optimizations`) targets **NVIDIA B200/B300** GPUs (CUDA arch 10.0) with FP4 quantization and flash-attention. By default, `worker.py` runs with optimizations disabled and uses TORCH_SDPA for broader compatibility on other GPUs (for example, H100). Expect lower performance unless you opt in on supported hardware.
+> `worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
 
 ## Docker Image Build
 
@@ -82,7 +82,7 @@ Environment variables:
 | `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (e.g., `--enable-optimizations`) |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--enable-optimizations --attention-backend FLASH_ATTN`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
@@ -91,12 +91,12 @@ Example:
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
 NUM_GPUS=1 \
 HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--enable-optimizations" \
+WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
 > [!NOTE]
-> `--enable-optimizations` is a `worker.py` flag (not a `dynamo.frontend` flag), so pass it through `WORKER_EXTRA_ARGS` when you want the B200/B300-optimized path.
+> `--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
 
 The script writes logs to:
 
@@ -214,7 +214,8 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `--model` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
-| `--enable-optimizations` | off | Enables FP4 quantization, `torch.compile`, and switches attention from TORCH_SDPA to FLASH_ATTN |
+| `--enable-optimizations` | off | Enables FP4 quantization and `torch.compile` |
+| `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; defaults to `TORCH_SDPA` |
 
 ### Request Parameters (`nvext`)
 
@@ -233,7 +234,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `FASTVIDEO_VIDEO_CODEC` | `libx264` | Video codec for MP4 encoding |
 | `FASTVIDEO_X264_PRESET` | `ultrafast` | x264 encoding speed preset |
-| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend (`FLASH_ATTN` or `TORCH_SDPA`); `worker.py` switches to `FLASH_ATTN` when `--enable-optimizations` is set |
+| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `worker.py` sets this from `--attention-backend` |
 | `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
 | `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
 
@@ -244,8 +245,8 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | OOM during Docker build | `flash-attention` compilation uses too much RAM | Lower `MAX_JOBS` in the Dockerfile |
 | 10–20 min wait on first start with optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Lower throughput than expected on B200/B300 | Optimizations are opt-in | Pass `--enable-optimizations` to `worker.py` |
-| Startup or import failure after enabling optimizations | FP4 and flash-attention optimizations require CUDA arch 10.0 | Re-run `worker.py` without `--enable-optimizations` |
+| Lower throughput than expected on B200/B300 | FP4/compile and flash-attention are configured separately | Pass `--enable-optimizations` and, if desired, `--attention-backend FLASH_ATTN` |
+| Startup or import failure after enabling optimizations or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--enable-optimizations`, or use `--attention-backend TORCH_SDPA` |
 
 ## Source Code
 
