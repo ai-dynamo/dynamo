@@ -781,7 +781,7 @@ impl WorkerRegistry {
     ) -> Result<()> {
         if self.workers.contains_key(&instance_id) {
             bail!(
-                "instance {instance_id} is already registered via ZMQ; \
+                "instance {instance_id} is already manually registered; \
                  cannot add via discovery"
             );
         }

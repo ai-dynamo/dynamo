@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import string
+import sys
 from typing import Any, Optional
 
 import aiohttp
@@ -29,6 +30,11 @@ def _nats_server() -> str:
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
+
+
+def get_kv_indexer_command() -> list[str]:
+    """Return the preferred standalone indexer command for the current Python env."""
+    return [sys.executable, "-m", "dynamo.indexer"]
 
 
 def assert_event_dumps_equal(
@@ -301,6 +307,75 @@ async def wait_for_workers_ready(
 
     logger.info(f"All {len(instance_ids)} workers are ready")
     return sorted(instance_ids)
+
+
+async def wait_for_indexer_workers_active(
+    indexer_url: str,
+    expected_workers: dict[int, dict[int, str]],
+    timeout_s: float = 30.0,
+) -> None:
+    """Wait until the standalone indexer reports all ZMQ listeners as active."""
+    if not expected_workers:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    workers_url = f"{indexer_url}/workers"
+
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < deadline:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+
+            try:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(workers_url, timeout=request_timeout) as resp:
+                    if resp.status != 200:
+                        await asyncio.sleep(0.5)
+                        continue
+                    workers = await resp.json()
+            except aiohttp.ClientError:
+                await asyncio.sleep(0.5)
+                continue
+
+            workers_by_id = {
+                worker["instance_id"]: worker
+                for worker in workers
+                if worker.get("source") == "zmq"
+            }
+
+            all_active = True
+            for worker_id, endpoints in expected_workers.items():
+                worker = workers_by_id.get(worker_id)
+                if worker is None:
+                    all_active = False
+                    break
+
+                listeners = worker.get("listeners", {})
+                for dp_rank, endpoint in endpoints.items():
+                    listener = listeners.get(str(dp_rank))
+                    if listener is None:
+                        all_active = False
+                        break
+                    if listener.get("endpoint") != endpoint:
+                        all_active = False
+                        break
+                    if listener.get("status") != "active":
+                        all_active = False
+                        break
+
+                if not all_active:
+                    break
+
+            if all_active:
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timed out waiting for indexer listeners to become active at {workers_url}"
+    )
 
 
 async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8):

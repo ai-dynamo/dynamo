@@ -165,6 +165,10 @@ async def async_main():
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
+    if config.tokenizer_backend == "fastokens":
+        os.environ["DYN_TOKENIZER"] = "fastokens"
+    else:
+        os.environ.pop("DYN_TOKENIZER", None)
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit})"
