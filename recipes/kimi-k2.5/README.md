@@ -115,11 +115,10 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/nvidia/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
-# Patch the container image (required — upstream support not yet available)
-# This produces: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
-cd trtllm/agg/nvidia/patch
-./patch-container.sh nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
-cd -
+# Patch the container image (required for nvidia weights)
+docker build --build-arg BASE_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag \
+  -t nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched \
+  trtllm/agg/nvidia/patch/
 
 # Update the image in the deploy manifest to use the patched tag
 
