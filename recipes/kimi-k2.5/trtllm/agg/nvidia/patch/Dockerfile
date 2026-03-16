@@ -31,4 +31,4 @@ RUN SITE_PKGS=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'
     grep -q 'class KimiK25ForConditionalGeneration' \
         "$SITE_PKGS/tensorrt_llm/_torch/models/modeling_deepseekv3.py"
 
-USER 1000
+USER dynamo
