@@ -39,18 +39,33 @@ produces a clean, linear history where every commit is the PR author's.
 git merge main
 
 # GOOD -- clean diff showing only your work
+# Use "origin" if you cloned ai-dynamo/dynamo directly
 git fetch origin && git rebase origin/main
+
+# Use "upstream" if you cloned your fork (origin = your fork)
+git fetch upstream && git rebase upstream/main
 ```
 
 ### Guidance
 
+> **Fork contributors:** The examples below use `origin` to mean
+> `ai-dynamo/dynamo`. If you cloned your fork, replace `origin` with
+> `upstream` in fetch/rebase commands. See the
+> [Contribution Guide](https://docs.nvidia.com/dynamo/latest/contribution-guide.html)
+> for fork setup (`git remote add upstream`).
+
 - **Rebase when you are more than ~25 commits behind main.**
 - **Prefer `rebase` over `merge`** for linear history. Force-push after
-  rebasing (`git push --force-with-lease`).
+  rebasing (`git push --force-with-lease origin your-branch`).
 - **Before requesting review**, check your distance from main:
   ```bash
+  # Direct clone:
   git fetch origin
   git rev-list --count HEAD..origin/main
+
+  # Fork:
+  git fetch upstream
+  git rev-list --count HEAD..upstream/main
   ```
   More than 25? Rebase first.
 - **If CI is slow**, check your base commit age before debugging other causes.
