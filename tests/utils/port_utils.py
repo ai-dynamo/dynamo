@@ -258,7 +258,7 @@ def allocate_contiguous_ports(
 
             current_port = start_port + random.randint(0, 100)
             if current_port + block_size - 1 > _PORT_MAX:
-                current_port = _PORT_MIN + (current_port - _PORT_MAX - 1)
+                current_port = _PORT_MIN
 
             max_retries = 500
             attempts = 0
