@@ -48,6 +48,7 @@ required-features = ["kv-router-stress"]
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics"] }
+dynamo-config = { workspace = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 

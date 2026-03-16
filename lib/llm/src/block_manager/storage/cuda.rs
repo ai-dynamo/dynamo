@@ -67,39 +67,6 @@
 //! - Memory alignment requirements
 //! - Error handling for CUDA operations
 
-/// Whether to use write-combined pinned allocations.
-///
-/// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
-/// is set, or if a test allocation reveals the hardware does not support it
-/// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
-/// a CUDA context has been bound to the current thread.
-static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    if std::env::var("DYN_KVBM_DISABLE_WRITE_COMBINED").is_ok() {
-        tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
-        return false;
-    }
-    // Probe hardware support with a 1-byte test allocation.
-    // SAFETY: called from an allocation path that has already bound a CUDA context.
-    unsafe {
-        match cudarc::driver::result::malloc_host(
-            1,
-            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-        ) {
-            Ok(ptr) => {
-                let _ = cudarc::driver::result::free_host(ptr);
-                true
-            }
-            Err(_) => {
-                tracing::debug!(
-                    "Write-combined memory not supported on this system; \
-                     will use regular pinned memory"
-                );
-                false
-            }
-        }
-    }
-});
-
 use super::*;
 
 use std::{
@@ -108,53 +75,7 @@ use std::{
 };
 
 use cudarc::driver::CudaContext;
-
-use crate::block_manager::numa_allocator;
-
-/// Allocates pinned host memory, using write-combined if [`USE_WRITE_COMBINED`]
-/// allows it, otherwise falling back to [`malloc_host_devicemap`].
-///
-/// Write-combined (WC) memory is optimal for PCIe DMA transfers but degrades
-/// performance on cache-coherent CPU-GPU interconnects (e.g., Grace
-/// Hopper/Blackwell with NVLink-C2C). [`USE_WRITE_COMBINED`] is probed once and
-/// cached so this function pays no per-call detection cost.
-///
-/// # Safety
-///
-/// Caller must ensure a valid CUDA context is bound to the current thread.
-unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, StorageError> {
-    if *USE_WRITE_COMBINED {
-        // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
-        unsafe {
-            cudarc::driver::result::malloc_host(
-                size,
-                cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-            )
-        }
-        .map(|ptr| ptr as *mut u8)
-        .map_err(StorageError::Cuda)
-    } else {
-        // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
-        unsafe { malloc_host_devicemap(size) }
-    }
-}
-
-/// Allocates pinned host memory with `CU_MEMHOSTALLOC_DEVICEMAP`.
-///
-/// This flag maps the allocation into the device address space, enabling
-/// direct GPU access without write-combined semantics (better for CPU reads).
-///
-/// # Safety
-///
-/// Caller must ensure a valid CUDA context is bound to the current thread.
-unsafe fn malloc_host_devicemap(size: usize) -> Result<*mut u8, StorageError> {
-    // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
-    unsafe {
-        cudarc::driver::result::malloc_host(size, cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP)
-    }
-    .map(|ptr| ptr as *mut u8)
-    .map_err(StorageError::Cuda)
-}
+use dynamo_memory::MemoryDescriptor as _;
 
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}
@@ -237,13 +158,12 @@ impl Cuda {
     }
 }
 
-/// Pinned host memory storage using CUDA page-locked memory
+/// Pinned host memory storage using CUDA page-locked memory.
+/// Wraps [`dynamo_memory::PinnedStorage`] and adds registration handle support.
 #[derive(Debug)]
 pub struct PinnedStorage {
-    ptr: u64,
-    size: usize,
+    inner: dynamo_memory::PinnedStorage,
     handles: RegistrationHandles,
-    ctx: Arc<CudaContext>,
 }
 
 impl Local for PinnedStorage {}
@@ -259,55 +179,18 @@ impl PinnedStorage {
     /// TODO(KVBM-336): remove PinnedStorage::new in the future
     #[deprecated(since = "1.0.0", note = "Use PinnedStorage::new_for_device instead")]
     pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        unsafe {
-            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-
-            // Try NUMA-aware allocation if enabled, otherwise use direct allocation.
-            #[allow(deprecated)]
-            let ptr = if numa_allocator::is_numa_enabled() {
-                let device_id = ctx.cu_device() as u32;
-                match numa_allocator::worker_pool::NumaWorkerPool::global()
-                    .allocate_pinned_for_gpu(size, device_id)
-                {
-                    Ok(Some(ptr)) => ptr,
-                    Ok(None) => {
-                        tracing::debug!(
-                            "NUMA node unknown for GPU {}, using direct allocation",
-                            device_id
-                        );
-                        malloc_host_prefer_writecombined(size)?
-                    }
-                    Err(e) => {
-                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                        malloc_host_prefer_writecombined(size)?
-                    }
-                }
-            } else {
-                malloc_host_prefer_writecombined(size)?
-            };
-
-            assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-            assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-            assert!(size < isize::MAX as usize);
-
-            let ptr = ptr as u64;
-            Ok(Self {
-                ptr,
-                size,
-                handles: RegistrationHandles::new(),
-                ctx: ctx.clone(),
-            })
-        }
+        let inner =
+            dynamo_memory::PinnedStorage::new_for_device(size, Some(ctx.cu_device() as u32))?;
+        Ok(Self {
+            inner,
+            handles: RegistrationHandles::new(),
+        })
     }
 
     /// Create a new pinned storage, optionally NUMA-aware for a specific GPU.
     ///
-    /// Creates a [`CudaContext`] internally. When `device_id` is `Some`, tries
-    /// NUMA-aware allocation on the GPU's NUMA node unless the global kill
-    /// switch `DYN_MEMORY_DISABLE_NUMA` is set. Uses
-    /// [`malloc_host_prefer_writecombined`] for the fallback/direct path, which
-    /// selects write-combined or regular pinned memory based on hardware support
-    /// and `DYN_KVBM_DISABLE_WRITE_COMBINED`.
+    /// Delegates NUMA-aware allocation and write-combined selection to
+    /// [`dynamo_memory::PinnedStorage::new_for_device`].
     ///
     /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
     pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
@@ -321,71 +204,18 @@ impl PinnedStorage {
                 );
             });
         }
-
-        let gpu_id = device_id.unwrap_or(0) as usize;
-        let ctx = Cuda::device_or_create(gpu_id)?;
-
-        unsafe {
-            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-
-            // Try NUMA-aware allocation when a device_id is provided and NUMA
-            // is not globally disabled.
-            let ptr = if let Some(gpu_id) = device_id {
-                if !numa_allocator::is_numa_disabled() {
-                    match numa_allocator::worker_pool::NumaWorkerPool::global()
-                        .allocate_pinned_for_gpu(size, gpu_id)
-                    {
-                        Ok(Some(ptr)) => ptr,
-                        Ok(None) => {
-                            tracing::debug!(
-                                "NUMA node unknown for GPU {}, using direct allocation",
-                                gpu_id
-                            );
-                            malloc_host_prefer_writecombined(size)?
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "NUMA allocation failed: {}, using direct allocation",
-                                e
-                            );
-                            malloc_host_prefer_writecombined(size)?
-                        }
-                    }
-                } else {
-                    malloc_host_prefer_writecombined(size)?
-                }
-            } else {
-                malloc_host_prefer_writecombined(size)?
-            };
-
-            assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-            assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-            assert!(size < isize::MAX as usize);
-
-            let ptr = ptr as u64;
-            Ok(Self {
-                ptr,
-                size,
-                handles: RegistrationHandles::new(),
-                ctx,
-            })
-        }
+        let inner = dynamo_memory::PinnedStorage::new_for_device(size, device_id)?;
+        Ok(Self {
+            inner,
+            handles: RegistrationHandles::new(),
+        })
     }
 }
 
 impl Drop for PinnedStorage {
     fn drop(&mut self) {
         self.handles.release();
-        unsafe {
-            if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
-                tracing::error!(
-                    "Failed to free pinned storage at 0x{:x} (size={}): {}",
-                    self.ptr,
-                    self.size,
-                    e
-                );
-            }
-        }
+        // inner Drop handles free_host
     }
 }
 
@@ -395,25 +225,25 @@ impl Storage for PinnedStorage {
     }
 
     fn addr(&self) -> u64 {
-        self.ptr
+        self.inner.addr() as u64
     }
 
     fn size(&self) -> usize {
-        self.size
+        self.inner.size()
     }
 
     unsafe fn as_ptr(&self) -> *const u8 {
-        self.ptr as *const u8
+        unsafe { self.inner.as_ptr() }
     }
 
     unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr as *mut u8
+        unsafe { self.inner.as_mut_ptr() }
     }
 }
 
 impl CudaContextProivder for PinnedStorage {
     fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.ctx
+        self.inner.ctx()
     }
 }
 
@@ -437,13 +267,13 @@ impl RegisterableStorage for PinnedStorage {
 
 impl StorageMemset for PinnedStorage {
     fn memset(&mut self, value: u8, offset: usize, size: usize) -> Result<(), StorageError> {
-        if offset + size > self.size {
+        if offset + size > self.inner.size() {
             return Err(StorageError::OperationFailed(
                 "memset: offset + size > storage size".into(),
             ));
         }
         unsafe {
-            let ptr = (self.ptr as *mut u8).add(offset);
+            let ptr = self.inner.as_mut_ptr().add(offset);
             std::ptr::write_bytes(ptr, value, size);
         }
         Ok(())
@@ -742,44 +572,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_malloc_host_prefer_writecombined_allocates_memory() {
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-        let size = 4096; // One page
-
-        unsafe {
-            ctx.bind_to_thread().expect("Failed to bind CUDA context");
-
-            // Test allocation succeeds (either write-combined or fallback)
-            let ptr = malloc_host_prefer_writecombined(size)
-                .expect("malloc_host_prefer_writecombined should succeed");
-
-            // Verify pointer is valid and non-null
-            assert!(!ptr.is_null(), "Allocated pointer should not be null");
-
-            // Verify memory is accessible by writing and reading
-            std::ptr::write_volatile(ptr, 0xAB);
-            let val = std::ptr::read_volatile(ptr);
-            assert_eq!(val, 0xAB, "Should be able to write and read pinned memory");
-
-            // Clean up
-            cudarc::driver::result::free_host(ptr as _).expect("Failed to free pinned memory");
-        }
-    }
-
-    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path).
+    /// Test PinnedStorage::new (deprecated) allocates usable pinned memory.
+    #[allow(deprecated)]
     #[test]
     fn test_pinned_storage_new_without_numa() {
-        // Verify NUMA is actually disabled for this test
-        assert!(
-            !numa_allocator::is_numa_enabled(),
-            "NUMA should be disabled for this test"
-        );
-
         let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
         let size = 8192;
 
-        // Create PinnedStorage - this should take the non-NUMA path
         let mut storage =
             PinnedStorage::new(&ctx, size).expect("PinnedStorage::new should succeed");
 
