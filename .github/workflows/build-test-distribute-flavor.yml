@@ -147,11 +147,6 @@ on:
         required: false
       HF_TOKEN:
         required: false
-    outputs:
-      image_tag:
-        description: 'Image tag in ACR'
-        value: ${{ jobs.build.outputs.target_tag_plain }}-${{ inputs.platform }}
-
 jobs:
   # ============================================================================
   # BUILD

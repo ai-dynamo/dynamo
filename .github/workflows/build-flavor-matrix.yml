@@ -56,6 +56,11 @@ on:
         required: false
         type: string
         default: ''
+      build_only:
+        description: 'Build and push only — enables branch-tagged images'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -114,4 +119,5 @@ jobs:
           make_efa: ${{ inputs.make_efa }}
           extra_tags: ${{ inputs.extra_tags }}
           sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
+          build_only: ${{ inputs.build_only }}
           show_summary: ${{ inputs.push_image }}

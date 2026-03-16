@@ -147,10 +147,14 @@ runs:
           done <<< "$EXTRA_TAGS"
         fi
         if [ "${{ inputs.build_only }}" == "true" ]; then
-          BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
-          RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
-          RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
-          RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+          if [ -z "${{ inputs.sanitized_ref_name }}" ]; then
+            echo "::warning::sanitized_ref_name is empty but build_only is true; skipping branch tags"
+          else
+            BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
+            RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+          fi
         fi
         if [ -n "$RESULT" ]; then
           echo "tags<<EOF" >> $GITHUB_OUTPUT
@@ -172,6 +176,7 @@ runs:
         echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
         echo "push_image: ${{ inputs.push_image }}"
         echo "no_load: ${{ inputs.no_load }}"
+        echo "build_timeout_minutes: ${{ inputs.build_timeout_minutes }}"
     - name: Generate Dockerfile
       shell: bash
       run: |
