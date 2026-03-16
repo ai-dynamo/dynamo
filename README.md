@@ -26,13 +26,13 @@ limitations under the License.
 
 | **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Blog](https://developer.nvidia.com/blog/nvidia-dynamo-1-production-ready/)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
 
-# NVIDIA Dynamo
+# Dynamo
 
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
 Built in Rust for performance, Python for extensibility.
 
-### When to use Dynamo
+## When to use Dynamo
 
 - You're serving LLMs across **multiple GPUs or nodes** and need to coordinate them
 - You want **KV-aware routing** to avoid redundant prefill computation
@@ -44,16 +44,16 @@ If you're running a single model on a single GPU, your inference engine alone is
 
 **Feature support at a glance:**
 
-| | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) | [vLLM](docs/backends/vllm/README.md) |
+| | [SGLang](https://docs.nvidia.com/dynamo/backends/sg-lang) | [TensorRT-LLM](https://docs.nvidia.com/dynamo/backends/tensor-rt-llm) | [vLLM](https://docs.nvidia.com/dynamo/backends/v-llm) |
 |---|:----:|:----------:|:--:|
-| [**Disaggregated Serving**](docs/design-docs/disagg-serving.md) | ✅ | ✅ | ✅ |
-| [**KV-Aware Routing**](docs/components/router/README.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](docs/components/planner/planner-guide.md) | ✅ | ✅ | ✅ |
-| [**KVBM**](docs/components/kvbm/README.md) | 🚧 | ✅ | ✅ |
-| [**Multimodal**](docs/features/multimodal/README.md) | ✅ | ✅ | ✅ |
-| [**Tool Calling**](docs/agents/tool-calling.md) | ✅ | ✅ | ✅ |
+| [**Disaggregated Serving**](https://docs.nvidia.com/dynamo/design-docs/disaggregated-serving) | ✅ | ✅ | ✅ |
+| [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
+| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
+| [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
+| [**Tool Calling**](https://docs.nvidia.com/dynamo/user-guides/tool-calling) | ✅ | ✅ | ✅ |
 
-> **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — LoRA, request migration, speculative decoding, and feature interactions.
+> **[Full Feature Matrix →](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — LoRA, request migration, speculative decoding, and feature interactions.
 
 ## Key Results
 
@@ -74,24 +74,24 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
   <img src="./docs/assets/img/frontpage-architecture.png" alt="Dynamo architecture" width="550" />
 </p>
 
-**[Architecture Deep Dive →](docs/design-docs/architecture.md)**
+**[Architecture Deep Dive →](https://docs.nvidia.com/dynamo/design-docs/overall-architecture)**
 
 ### Core Capabilities
 
 | Capability | What it does | Why it matters |
 |------------|-------------|----------------|
-| [**Disaggregated Prefill/Decode**](docs/design-docs/disagg-serving.md) | Separates prefill and decode into independently scalable GPU pools | Maximizes GPU utilization; each phase runs on hardware tuned for its workload |
-| [**KV-Aware Routing**](docs/components/router/README.md) | Routes requests based on worker load and KV cache overlap | Eliminates redundant prefill computation — 2x faster TTFT |
-| [**KV Block Manager (KVBM)**](docs/components/kvbm/README.md) | Offloads KV cache across GPU → CPU → SSD → remote storage | Extends effective context length beyond GPU memory |
-| [**ModelExpress**](docs/features/model-express/README.md) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
-| [**Planner**](docs/components/planner/planner-guide.md) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
-| [**Grove**](https://developer.nvidia.com/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
-| [**AIConfigurator**](docs/components/aiconfigurator/README.md) | Simulates 10K+ deployment configs in seconds | Finds optimal serving config without burning GPU-hours |
-| [**Fault Tolerance**](docs/fault-tolerance/request-migration.md) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
+| [**Disaggregated Prefill/Decode**](https://docs.nvidia.com/dynamo/design-docs/disaggregated-serving) | Separates prefill and decode into independently scalable GPU pools | Maximizes GPU utilization; each phase runs on hardware tuned for its workload |
+| [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | Routes requests based on worker load and KV cache overlap | Eliminates redundant prefill computation — 2x faster TTFT |
+| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | Offloads KV cache across GPU → CPU → SSD → remote storage | Extends effective context length beyond GPU memory |
+| [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
+| [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
+| [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
+| [**AIConfigurator**](https://github.com/ai-dynamo/aiconfigurator) | Simulates 10K+ deployment configs in seconds | Finds optimal serving config without burning GPU-hours |
+| [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](docs/kubernetes/dgdr.md))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/deploying-your-first-model))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
 - **Agentic inference:** Per-request hints for latency priority, expected output length, and cache pinning TTL. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
@@ -118,7 +118,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.0.0`](docs/reference/release-artifacts.md#container-images) and [`vllm-runtime:1.0.0`](docs/reference/release-artifacts.md#container-images).
+Also available: [`tensorrtllm-runtime:1.0.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -126,11 +126,11 @@ Also available: [`tensorrtllm-runtime:1.0.0`](docs/reference/release-artifacts.m
 pip install "ai-dynamo[sglang]"   # or [vllm] or [trtllm]
 ```
 
-Then start the frontend and a worker as shown above. See the [full installation guide](docs/getting-started/installation.md) for system dependencies and backend-specific notes.
+Then start the frontend and a worker as shown above. See the [full installation guide](https://docs.nvidia.com/dynamo/getting-started/quickstart) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 
-For production multi-node clusters, install the [Dynamo Platform](docs/kubernetes/README.md) and deploy with a single manifest:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide) and deploy with a single manifest:
 
 ```yaml
 # Zero-config deploy: specify model + SLA, Dynamo handles the rest
@@ -159,7 +159,7 @@ See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS
 
 ## Building from Source
 
-For contributors who want to build and develop locally. See the [full build guide](docs/getting-started/build-from-source.md) for details.
+For contributors who want to build and develop locally. See the [full build guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide#building-from-source) for details.
 
 ```bash
 # Install system deps (Ubuntu 24.04)
@@ -182,7 +182,7 @@ uv pip install -e .
 
 Dynamo is built in the open with an OSS-first development model. We welcome contributions of all kinds.
 
-- **[Contribution Guide](docs/contribution-guide.md)** — How to contribute code, docs, and recipes
+- **[Contribution Guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide)** — How to contribute code, docs, and recipes
 - **[Design Proposals](https://github.com/ai-dynamo/enhancements)** — RFCs for major features
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — Biweekly community calls
 - **[Discord](https://discord.gg/D92uqZRjCZ)** — Chat with the team and community
@@ -209,12 +209,11 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 
 ## Reference
 
-- **[Support Matrix](docs/reference/support-matrix.md)** — Hardware, OS, CUDA, and backend versions
-- **[Feature Matrix](docs/reference/feature-matrix.md)** — Detailed backend compatibility
-- **[Release Artifacts](docs/reference/release-artifacts.md)** — Containers, wheels, Helm charts
-- **[OpenAPI Spec](docs/reference/api/)** — Frontend API specification (`cargo run -p dynamo-llm --bin generate-frontend-openapi`)
-- **[Service Discovery](docs/kubernetes/service-discovery.md)** — K8s-native vs etcd vs file-based discovery
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** — Compare deployment topologies with AIPerf
+- **[Support Matrix](https://docs.nvidia.com/dynamo/resources/support-matrix)** — Hardware, OS, CUDA, and backend versions
+- **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
+- **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
+- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
+- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/dynamo-benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design-docs/disagg-serving.md
