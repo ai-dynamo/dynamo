@@ -1,25 +1,17 @@
 # Kimi-K2.5 Recipes
 
-> 🚧 **Work-in-Progress — Experimental Recipe**
->
-> The TensorRT-LLM Python package used for Dynamo's TRT-LLM integration does not yet include
-> native Kimi K2.5 support. This recipe is an **experimental** effort to bring
-> Kimi K2.5 to Dynamo ahead of upstream availability. It needs to patch the container image on top of released dynamo image.
-
-Deployment recipe for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
+Deployment recipes for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
 
 ## Available Configurations
 
 There are two model weight variants, each with its own model download and deploy manifests:
 
-| Variant | Model | Deploy Configs | Notes |
-|---------|-------|---------------|-------|
-| **nvidia** 🚧 | `nvidia/Kimi-K2.5-NVFP4` | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/) |
-| **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image |
+| Variant | Model | Status | Modality | Deploy Configs | Notes |
+|---------|-------|--------|----------|---------------|-------|
+| **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
+| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/). Vision input is not yet functional — the patch loads the text backbone only. |
 
 All configurations use TP8, EP8, aggregated mode with KV-aware routing.
-
-The **nvidia** variant also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
 
 ## Prerequisites
 
@@ -27,7 +19,87 @@ The **nvidia** variant also has a KVBM (KV Block Manager) deploy that enables CP
 2. **GPU cluster** with B200 GPUs (8x per worker)
 3. **HuggingFace token** with access to the model
 
-## Quick Start (nvidia variant)
+## Hardware Requirements
+
+| Configuration | GPUs |
+|--------------|------|
+| Aggregated | 8x B200 |
+
+---
+
+## baseten-admin/Kimi-2.5-text-nvfp4-v3
+
+**Status:** Functional (not yet performance-optimized) | **Modality:** Text only
+
+The baseten variant uses a text-only backend built on the underlying DeepSeek-V3 architecture, which means it works out of the box with the stock TensorRT-LLM container image -- no patching or custom builds required. This recipe is functional for text-based inference with reasoning and tool calling, but has not yet been performance-tuned or benchmarked.
+
+### Quick Start
+
+The baseten deploy manifest ships with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`.
+Update the `image:` fields in [`trtllm/agg/baseten/deploy.yaml`](trtllm/agg/baseten/deploy.yaml) to your actual Dynamo release tag before deploying.
+
+```bash
+# Set namespace
+export NAMESPACE=dynamo-demo
+kubectl create namespace ${NAMESPACE}
+
+# Create HuggingFace token secret
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token-here" \
+  -n ${NAMESPACE}
+
+# Download model (update storageClassName in model-cache/model-cache.yaml first!)
+kubectl apply -f model-cache/baseten/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+# Update the image tag in trtllm/agg/baseten/deploy.yaml to your Dynamo release tag
+
+# Deploy
+kubectl apply -f trtllm/agg/baseten/deploy.yaml -n ${NAMESPACE}
+```
+
+### Test the Deployment
+
+```bash
+# Port-forward the frontend
+kubectl port-forward svc/kimi-k25-agg-frontend 8000:8000 -n ${NAMESPACE}
+
+# Send a test request
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "baseten-admin/Kimi-2.5-text-nvfp4-v3",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 100
+  }'
+```
+
+---
+
+## nvidia/Kimi-K2.5-NVFP4
+
+**Status:** Experimental | **Modality:** Text only upstream support
+
+> **Experimental:** Upstream TensorRT-LLM does not yet include native support for Kimi K2.5.
+> This recipe works around that limitation by directly patching the container image with an
+> append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path.
+> See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for the patch script and full instructions.
+
+> **Text only:** The patch loads the DeepSeek-V3 text backbone from the Kimi K2.5 config
+> (`text_config`). The vision encoder is not loaded, so image inputs are not processed.
+> Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
+
+The nvidia variant supports text inference with reasoning parsing (`--dyn-reasoning-parser kimi_k25`) and tool calling (`--dyn-tool-call-parser kimi_k2`). It also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
+
+### Quick Start
+
+The nvidia deploy manifests (`deploy.yaml`, `deploy-kvbm.yaml`) ship with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`.
+Before deploying, you must:
+
+1. Run the [patch script](trtllm/agg/nvidia/patch/) to build a patched image (appends `-patched` to the tag).
+2. Update the `image:` fields in the deploy YAML to reference the patched image.
+
+See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for full details on what the patch does.
 
 ```bash
 # Set namespace
@@ -43,18 +115,19 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/nvidia/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
-# Patch the container image (required for nvidia weights)
+# Patch the container image (required — upstream support not yet available)
+# This produces: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
 cd trtllm/agg/nvidia/patch
 ./patch-container.sh nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
 cd -
+
+# Update the image in the deploy manifest to use the patched tag
 
 # Deploy
 kubectl apply -f trtllm/agg/nvidia/deploy.yaml -n ${NAMESPACE}
 ```
 
-For baseten weights, use `model-cache/baseten/` and `trtllm/agg/baseten/deploy.yaml` instead — no image patch needed.
-
-## Test the Deployment
+### Test the Deployment
 
 ```bash
 # Port-forward the frontend
@@ -70,19 +143,14 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+---
+
 ## Model Details
 
-- **Model**: `nvidia/Kimi-K2.5-NVFP4` (NV FP4 quantized, text-only)
 - **Architecture**: MoE (Mixture-of-Experts), based on DeepSeek-V3 architecture
 - **Backend**: TensorRT-LLM (PyTorch backend)
 - **Parallelism**: TP8, EP8 (Expert Parallel)
-
-
-## Hardware Requirements
-
-| Configuration | GPUs |
-|--------------|------|
-| Aggregated | 8x B200 |
+- **Quantization**: NV FP4
 
 ## Verifying Reasoning
 
@@ -185,4 +253,4 @@ If `tool_calls` is missing with raw `<|tool_calls_section_begin|>` tokens in `co
 ## Notes
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
-- The nvidia variant requires a [patched TensorRT-LLM image](trtllm/agg/nvidia/patch/) until Kimi K2.5 support lands upstream
+- The nvidia variant requires a [patched TensorRT-LLM image](trtllm/agg/nvidia/patch/) until Kimi K2.5 support lands upstream in TensorRT-LLM
