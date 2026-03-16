@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -22,10 +23,31 @@ const (
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
+var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+// extractGPUUUIDFromCDIDevices returns the first valid GPU UUID found among
+// the given CDI device names. CDI names follow "vendor.com/class=device-name";
+// the NVIDIA DRA driver sets device-name to the canonical GPU UUID.
+func extractGPUUUIDFromCDIDevices(cdiDevices []*podresourcesv1.CDIDevice) string {
+	for _, cdi := range cdiDevices {
+		parts := strings.SplitN(cdi.GetName(), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		candidate := parts[1]
+		if gpuUUIDPattern.MatchString(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
 // It first checks device-plugin-allocated GPUs (nvidia.com/gpu entries in GetDevices()).
-// If none are found, it falls back to DRA-allocated GPUs (gpu.nvidia.com entries in
-// GetDynamicResources()), where the device name is the GPU UUID.
+// If none are found, it checks DRA-allocated GPUs (gpu.nvidia.com entries in
+// GetDynamicResources()), extracting the UUID from CDI device names rather than
+// the opaque device name. DRA entries whose CDI names lack a valid GPU UUID are
+// skipped so the caller can fall back to nvidia-smi discovery.
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -63,10 +85,16 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 			if len(uuids) == 0 {
 				for _, dr := range container.GetDynamicResources() {
 					for _, cr := range dr.GetClaimResources() {
-						if cr.GetDriverName() == nvidiaGPUDRADriver {
-							fmt.Println("GetPodGPUUUIDs: found DRA GPU", "uuid", cr.GetDeviceName())
-							uuids = append(uuids, cr.GetDeviceName())
+						if cr.GetDriverName() != nvidiaGPUDRADriver {
+							continue
 						}
+						uuid := extractGPUUUIDFromCDIDevices(cr.GetCdiDevices())
+						if uuid == "" {
+							fmt.Println("GetPodGPUUUIDs: DRA device has no valid GPU UUID in CDI names, skipping", "device", cr.GetDeviceName())
+							continue
+						}
+						fmt.Println("GetPodGPUUUIDs: found DRA GPU", "uuid", uuid)
+						uuids = append(uuids, uuid)
 					}
 				}
 			}
