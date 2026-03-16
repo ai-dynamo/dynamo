@@ -75,7 +75,7 @@ sglang_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -126,7 +126,7 @@ sglang_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-0.6B",

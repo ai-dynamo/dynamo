@@ -9,7 +9,7 @@ subtitle: Run the KV cache indexer as an independent HTTP service for querying b
 
 The standalone KV indexer (`python -m dynamo.indexer`) is a lightweight service that maintains a radix tree of cached blocks and exposes HTTP endpoints for querying and managing workers. It supports two operational modes:
 
-- **Standalone mode** (default): subscribes to ZMQ KV event streams directly from workers. No Dynamo runtime dependencies required.
+- **Standalone mode** (default): subscribes to ZMQ KV event streams directly from workers. No Dynamo runtime discovery, registration, or event-plane integration required.
 - **Dynamo runtime mode** (`--dynamo-runtime`): integrates with the Dynamo runtime for automatic worker discovery via MDC, KV event ingestion via the event plane (NATS or ZMQ), and overlap queries over the request plane for remote frontends.
 
 This is distinct from the [Standalone Router](../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
@@ -44,11 +44,11 @@ Multiple indexer replicas can subscribe to the same ZMQ worker endpoints for fau
 
 ### How It Works
 
-1. Workers are registered via `--workers` CLI, which connects ZMQ SUB sockets immediately.
-2. A 1-second delay ensures the peer's tree state has advanced past the ZMQ connection point, so the dump covers any events that would otherwise be lost to the slow-joiner window.
+1. Workers are registered via `--workers` or `/register`. Each ZMQ listener enters `pending` state and begins its initial subscribe/connect attempt in the background.
+2. A 1-second delay biases peer recovery past the slow-joiner window, so the dump covers events that may have occurred before a fresh listener can safely start draining.
 3. The indexer fetches a `/dump` from the first reachable peer in `--peers`.
 4. Dump events are applied to populate the radix tree.
-5. ZMQ listeners are unblocked and begin draining any events that buffered during recovery.
+5. After recovery completes, the ready gate opens. Any listener whose initial ZMQ connect has already succeeded transitions to `active` and begins draining buffered events; listeners for workers that are still down remain `pending` until they connect.
 
 If no peers are reachable, the indexer starts with an empty state.
 
@@ -81,11 +81,11 @@ Peers can be registered at startup via `--peers` or dynamically via the HTTP API
 
 ## Building
 
-The service is exposed through the Python package after building the bindings with maturin. Feature flags control which capabilities are compiled in:
+The service is exposed through the Python bindings package and launched with `python -m dynamo.indexer` after building the bindings with maturin. Feature flags control which capabilities are compiled in:
 
 | Feature | Description |
 |---------|-------------|
-| `kv-indexer` | Core standalone indexer binary (HTTP API, ZMQ listeners, P2P recovery) |
+| `kv-indexer` | Core standalone indexer service path (`python -m dynamo.indexer`: HTTP API, ZMQ listeners, P2P recovery) |
 | `kv-indexer-metrics` | Optional `/metrics` endpoint |
 | `kv-indexer-runtime` | Dynamo runtime integration (`--dynamo-runtime`, discovery, event plane, request plane) |
 
@@ -155,7 +155,7 @@ curl http://localhost:8090/health
 
 ### `GET /metrics` — Prometheus metrics
 
-Returns metrics in Prometheus text exposition format. Available when the binary is built with the `kv-indexer-metrics` or `kv-indexer-runtime` feature.
+Returns metrics in Prometheus text exposition format. Available when the Python bindings are built with the `kv-indexer-metrics` or `kv-indexer-runtime` feature.
 
 ```bash
 curl http://localhost:8090/metrics
