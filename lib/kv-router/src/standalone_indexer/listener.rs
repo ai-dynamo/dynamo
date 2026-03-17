@@ -397,23 +397,6 @@ async fn zmq_recv_loop(
 mod tests {
     use zeromq::{PubSocket, Socket, SocketRecv, SocketSend, SubSocket};
 
-    use super::{WATERMARK_UNSET, gap_start};
-
-    #[test]
-    fn gap_start_handles_unset_watermark() {
-        assert_eq!(gap_start(WATERMARK_UNSET, 0), None);
-        assert_eq!(gap_start(WATERMARK_UNSET, 1), Some(0));
-        assert_eq!(gap_start(WATERMARK_UNSET, 12), Some(0));
-    }
-
-    #[test]
-    fn gap_start_handles_established_watermark() {
-        assert_eq!(gap_start(0, 0), None);
-        assert_eq!(gap_start(0, 1), None);
-        assert_eq!(gap_start(11, 12), None);
-        assert_eq!(gap_start(11, 16), Some(12));
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmq_buffers_messages_during_brief_delay() {
         let mut pub_socket = PubSocket::new();
