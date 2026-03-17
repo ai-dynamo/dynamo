@@ -477,7 +477,7 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          test_file: tests/deploy/test_gaie_deploy.py
+          test_file: tests/deploy/test_deploy.py::test_gaie_deployment
           test_name: gaie
           extra_pytest_args: >-
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend

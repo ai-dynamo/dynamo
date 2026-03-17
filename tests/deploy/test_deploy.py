@@ -9,6 +9,8 @@ to chat completion requests correctly.
 """
 
 import logging
+import os
+import subprocess
 from typing import Any, Dict
 
 import pytest
@@ -16,7 +18,11 @@ import requests
 
 from tests.deploy.conftest import DeploymentTarget
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.managed_deployment import (
+    DeploymentSpec,
+    ManagedDeployment,
+    _get_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,4 +218,137 @@ async def test_deployment(
         logger.info(
             f"Deployment test PASSED for {deployment_target.test_id} "
             f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
+        )
+
+
+# ============================================================================
+# GAIE (Gateway API Inference Extension) deployment test
+# ============================================================================
+
+GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+
+@pytest.mark.k8s
+@pytest.mark.deploy
+@pytest.mark.post_merge
+@pytest.mark.e2e
+@pytest.mark.timeout(900)
+async def test_gaie_deployment(
+    namespace: str,
+    skip_service_restart: bool,
+    request,
+) -> None:
+    """Test GAIE disaggregated deployment with vLLM workers.
+
+    Applies the GAIE DynamoGraphDeployment (with CI-built images) and the
+    companion HTTPRoute, then verifies inference works end-to-end.
+    """
+    frontend_image = request.config.getoption("--frontend-image")
+    vllm_image = request.config.getoption("--vllm-image")
+
+    assert frontend_image, "--frontend-image is required for GAIE deploy test"
+    assert vllm_image, "--vllm-image is required for GAIE deploy test"
+    assert namespace, "--namespace is required for GAIE deploy test"
+
+    workspace = _get_workspace_dir()
+    gaie_dir = os.path.join(workspace, "examples", "backends", "vllm", "deploy", "gaie")
+    disagg_path = os.path.join(gaie_dir, "disagg.yaml")
+    httproute_path = os.path.join(gaie_dir, "http-route.yaml")
+
+    assert os.path.exists(disagg_path), f"disagg.yaml not found: {disagg_path}"
+    assert os.path.exists(
+        httproute_path
+    ), f"http-route.yaml not found: {httproute_path}"
+
+    # Build deployment spec with CI images
+    deployment_spec = DeploymentSpec(disagg_path)
+    deployment_spec.namespace = namespace
+
+    logger.info(f"Frontend image: {frontend_image}")
+    logger.info(f"vLLM image: {vllm_image}")
+
+    deployment_spec.set_image(frontend_image, service_name="Epp")
+    for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
+        deployment_spec.set_image(vllm_image, service_name=worker)
+        deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
+
+    # Apply HTTPRoute before the DGD so routing is ready when pods come up
+    logger.info("Applying GAIE HTTPRoute...")
+    result = subprocess.run(
+        ["kubectl", "apply", "-n", namespace, "-f", httproute_path],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
+
+    try:
+        async with ManagedDeployment(
+            log_dir=request.node.name,
+            deployment_spec=deployment_spec,
+            namespace=namespace,
+            skip_service_restart=skip_service_restart,
+            frontend_service_name="Epp",
+        ) as deployment:
+            epp_pods = deployment.get_pods(["Epp"])
+            epp_pod_list = epp_pods.get("Epp", [])
+            assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
+
+            epp_pod = epp_pod_list[0]
+            logger.info(f"Found EPP pod: {epp_pod.name}")
+
+            port = deployment_spec.port
+            port_forward = deployment.port_forward(epp_pod, port)
+            assert (
+                port_forward is not None
+            ), f"Failed to establish port forward to {epp_pod.name}:{port}"
+
+            base_url = f"http://localhost:{port_forward.local_port}"
+            logger.info(f"Port forwarding established: {base_url}")
+
+            endpoint = deployment_spec.endpoint
+            model_ready = wait_for_model_availability(
+                url=base_url,
+                endpoint=endpoint,
+                model=GAIE_MODEL_NAME,
+                logger=logger,
+                max_attempts=30,
+            )
+            assert model_ready, (
+                f"Model '{GAIE_MODEL_NAME}' did not become available "
+                f"within the timeout period"
+            )
+
+            url = f"{base_url}{endpoint}"
+            payload = {
+                "model": GAIE_MODEL_NAME,
+                "messages": [{"role": "user", "content": TEST_PROMPT}],
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "temperature": DEFAULT_TEMPERATURE,
+                "stream": False,
+            }
+            response = send_request(
+                url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
+            )
+
+            validate_chat_response(
+                response=response,
+                expected_model=GAIE_MODEL_NAME,
+                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+            )
+
+            logger.info("GAIE deployment test PASSED")
+    finally:
+        logger.info("Cleaning up HTTPRoute...")
+        subprocess.run(
+            [
+                "kubectl",
+                "delete",
+                "-n",
+                namespace,
+                "-f",
+                httproute_path,
+                "--ignore-not-found",
+            ],
+            capture_output=True,
+            text=True,
         )
