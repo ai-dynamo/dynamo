@@ -456,13 +456,13 @@ jobs:
           docker run --rm -w /workspace \
             --network host \
             "${{ steps.calculate-target-tag.outputs.test_image }}" \
-            bash -ec "MYPYPATH=components/src python3 -m mypy --explicit-package-bases ${COMPONENT_TARGETS[*]}"
+            bash -ec "MYPYPATH=components/src python3 -m mypy --config-file pyproject.toml --explicit-package-bases ${COMPONENT_TARGETS[*]}"
 
           echo "Running mypy for python bindings package: dynamo"
           docker run --rm -w /workspace \
             --network host \
             "${{ steps.calculate-target-tag.outputs.test_image }}" \
-            bash -ec "MYPYPATH=lib/bindings/python/src python3 -m mypy -p dynamo"
+            bash -ec "MYPYPATH=lib/bindings/python/src python3 -m mypy --config-file pyproject.toml -p dynamo"
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
