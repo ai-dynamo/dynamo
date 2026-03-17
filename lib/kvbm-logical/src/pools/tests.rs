@@ -5,6 +5,7 @@
 
 use super::super::{
     blocks::{state::*, *},
+    manager::BlockManager,
     pools::*,
     testing::{self, TestMeta},
 };
