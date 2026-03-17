@@ -76,7 +76,6 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -127,7 +126,6 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -137,7 +135,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
+                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
