@@ -318,10 +318,7 @@ async fn run_benchmark(
                         }
                         WorkerTraceEntry::Event(event) => {
                             indexer
-                                .apply_event(RouterEvent {
-                                    worker_id: worker_id as u64,
-                                    event,
-                                })
+                                .apply_event(RouterEvent::new(worker_id as u64, event))
                                 .await;
                             Ok(None)
                         }
