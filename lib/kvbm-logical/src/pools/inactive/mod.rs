@@ -81,6 +81,33 @@ pub enum AllocatedBlocks<T: BlockMetadata> {
     Reset(Vec<Block<T, Reset>>),
 }
 
+impl<T: BlockMetadata> AllocatedBlocks<T> {
+    /// Returns the number of allocated blocks regardless of variant.
+    pub fn len(&self) -> usize {
+        match self {
+            AllocatedBlocks::Registered(v) => v.len(),
+            AllocatedBlocks::Reset(v) => v.len(),
+        }
+    }
+
+    /// Returns `true` if no blocks were allocated.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Unwrap as `Registered` blocks, panicking if this is the `Reset` variant.
+    ///
+    /// For use in tests and code that is known to call a `Registered`-only backend.
+    pub fn into_registered(self) -> Vec<Block<T, Registered>> {
+        match self {
+            AllocatedBlocks::Registered(v) => v,
+            AllocatedBlocks::Reset(_) => {
+                panic!("Expected AllocatedBlocks::Registered, got Reset")
+            }
+        }
+    }
+}
+
 use crate::blocks::{RegisteredReturnFn, ResetReturnFn};
 
 /// Pool for managing registered (immutable) blocks

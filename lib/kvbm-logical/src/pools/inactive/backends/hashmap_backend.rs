@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use super::{Block, BlockMetadata, InactiveBlock, Registered, SequenceHash};
 
-use super::super::InactivePoolBackend;
+use super::super::{AllocatedBlocks, InactivePoolBackend};
 use super::ReusePolicy;
 
 pub struct HashMapBackend<T: BlockMetadata> {
@@ -58,7 +58,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
         matches
     }
 
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
+    fn allocate(&mut self, count: usize) -> AllocatedBlocks<T> {
         let mut allocated = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -77,7 +77,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
             }
         }
 
-        allocated
+        AllocatedBlocks::Registered(allocated)
     }
 
     fn insert(&mut self, block: Block<T, Registered>) -> bool {
@@ -98,10 +98,10 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
         self.blocks.contains_key(&seq_hash)
     }
 
-    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+    fn allocate_all(&mut self) -> AllocatedBlocks<T> {
         // Drain reuse policy by consuming all entries
         while self.reuse_policy.next_free().is_some() {}
         // Drain and return all blocks
-        self.blocks.drain().map(|(_, block)| block).collect()
+        AllocatedBlocks::Registered(self.blocks.drain().map(|(_, block)| block).collect())
     }
 }

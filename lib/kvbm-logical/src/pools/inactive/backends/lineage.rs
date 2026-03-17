@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use dynamo_tokens::PositionalLineageHash;
 
-use super::super::{Block, BlockMetadata, InactivePoolBackend, Registered};
+use super::super::{AllocatedBlocks, Block, BlockMetadata, InactivePoolBackend, Registered};
 
 /// The data stored in a lineage node - either a real block or a ghost placeholder.
 enum LineageNodeData<T: BlockMetadata> {
@@ -369,9 +369,9 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LineageBackend<T> {
         matches
     }
 
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
+    fn allocate(&mut self, count: usize) -> AllocatedBlocks<T> {
         // Delegate to the inherent method
-        LineageBackend::allocate(self, count)
+        AllocatedBlocks::Registered(LineageBackend::allocate(self, count))
     }
 
     fn insert(&mut self, block: Block<T, Registered>) -> bool {

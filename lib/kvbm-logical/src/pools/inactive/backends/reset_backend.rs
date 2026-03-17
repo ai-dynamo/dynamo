@@ -8,7 +8,7 @@
 //! the inactive pool. All storage methods are unreachable or return empty
 //! results because no block can ever be inserted.
 
-use super::super::{Block, BlockMetadata, InactivePoolBackend, Registered, SequenceHash};
+use super::super::{AllocatedBlocks, Block, BlockMetadata, InactivePoolBackend, Registered, SequenceHash};
 
 /// A no-op [`InactivePoolBackend`] that resets every block on return.
 ///
@@ -49,8 +49,8 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for ResetInactiveBlocksBackend {
         Vec::new()
     }
 
-    fn allocate(&mut self, _count: usize) -> Vec<Block<T, Registered>> {
-        Vec::new()
+    fn allocate(&mut self, _count: usize) -> AllocatedBlocks<T> {
+        AllocatedBlocks::Registered(vec![])
     }
 
     fn insert(&mut self, _block: Block<T, Registered>) -> bool {

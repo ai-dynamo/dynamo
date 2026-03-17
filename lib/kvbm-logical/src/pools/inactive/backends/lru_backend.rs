@@ -7,7 +7,7 @@ use lru::LruCache;
 
 use super::{Block, BlockMetadata, Registered, SequenceHash};
 
-use super::super::InactivePoolBackend;
+use super::super::{AllocatedBlocks, InactivePoolBackend};
 
 pub struct LruBackend<T: BlockMetadata> {
     cache: LruCache<SequenceHash, Block<T, Registered>>,
@@ -53,7 +53,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
         matches
     }
 
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
+    fn allocate(&mut self, count: usize) -> AllocatedBlocks<T> {
         let mut allocated = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -64,7 +64,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
             }
         }
 
-        allocated
+        AllocatedBlocks::Registered(allocated)
     }
 
     fn insert(&mut self, block: Block<T, Registered>) -> bool {
@@ -91,12 +91,12 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
         self.cache.peek(&seq_hash).is_some()
     }
 
-    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+    fn allocate_all(&mut self) -> AllocatedBlocks<T> {
         let mut allocated = Vec::with_capacity(self.cache.len());
         while let Some((_seq_hash, block)) = self.cache.pop_lru() {
             allocated.push(block);
         }
-        allocated
+        AllocatedBlocks::Registered(allocated)
     }
 }
 
@@ -119,7 +119,7 @@ mod tests {
 
         assert_eq!(backend.len(), 3);
 
-        let allocated = backend.allocate(1);
+        let allocated = backend.allocate(1).into_registered();
         assert_eq!(allocated.len(), 1);
         assert_eq!(allocated[0].block_id(), 1);
 
@@ -145,7 +145,7 @@ mod tests {
 
         // Allocate blocks - should still follow insertion order (block1 first, then block2)
         // despite the peek at block1
-        let allocated = backend.allocate(2);
+        let allocated = backend.allocate(2).into_registered();
         assert_eq!(allocated.len(), 2);
         assert_eq!(allocated[0].block_id(), 1); // block1 allocated first (oldest)
         assert_eq!(allocated[1].block_id(), 2); // block2 allocated second

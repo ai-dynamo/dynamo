@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use lru::LruCache;
 
-use super::super::InactivePoolBackend;
+use super::super::{AllocatedBlocks, InactivePoolBackend};
 use super::{Block, BlockMetadata, Registered, SequenceHash};
 use crate::tinylfu::FrequencyTracker;
 
@@ -125,7 +125,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
         matches
     }
 
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
+    fn allocate(&mut self, count: usize) -> AllocatedBlocks<T> {
         let mut allocated = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -144,7 +144,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
             }
         }
 
-        allocated
+        AllocatedBlocks::Registered(allocated)
     }
 
     fn insert(&mut self, block: Block<T, Registered>) -> bool {
@@ -175,7 +175,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
             .any(|pool| pool.peek(&seq_hash).is_some())
     }
 
-    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+    fn allocate_all(&mut self) -> AllocatedBlocks<T> {
         let total_len: usize = self.priority_pools.iter().map(|p| p.len()).sum();
         let mut allocated = Vec::with_capacity(total_len);
         for pool in &mut self.priority_pools {
@@ -183,7 +183,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
                 allocated.push(block);
             }
         }
-        allocated
+        AllocatedBlocks::Registered(allocated)
     }
 }
 
@@ -264,7 +264,7 @@ mod tests {
         backend.insert(block2);
         backend.insert(block3);
 
-        let allocated = backend.allocate(2);
+        let allocated = backend.allocate(2).into_registered();
         assert_eq!(allocated.len(), 2);
         assert_eq!(allocated[0].block_id(), 1);
         assert_eq!(allocated[1].block_id(), 2);
@@ -353,7 +353,7 @@ mod tests {
         assert!(backend.has_block(hash4));
 
         // Test that we can allocate from all levels
-        let allocated = backend.allocate(4);
+        let allocated = backend.allocate(4).into_registered();
         assert_eq!(allocated.len(), 4);
         assert_eq!(backend.len(), 0);
     }
