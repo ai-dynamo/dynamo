@@ -151,32 +151,33 @@ impl OffloadEngine {
         self.enqueue_to_object_pipeline(pipeline, blocks.into())
     }
 
+    /// Create transfer state, store it, and return the components needed for enqueueing.
+    fn create_transfer<T: BlockMetadata>(
+        &self,
+        source: &SourceBlocks<T>,
+    ) -> (
+        TransferId,
+        Arc<std::sync::Mutex<TransferState>>,
+        TransferHandle,
+    ) {
+        let input_block_ids = self.extract_block_ids(source);
+        let transfer_id = TransferId::new();
+        let (state, handle) = TransferState::new(transfer_id, input_block_ids);
+        let state = Arc::new(std::sync::Mutex::new(state));
+        self.transfers.insert(transfer_id, state.clone());
+        (transfer_id, state, handle)
+    }
+
     /// Internal: enqueue to a specific pipeline.
     fn enqueue_to_pipeline<Src: BlockMetadata, Dst: BlockMetadata>(
         &self,
         pipeline: &Pipeline<Src, Dst>,
         source: SourceBlocks<Src>,
     ) -> Result<TransferHandle> {
-        // Extract block IDs for state tracking (External/Strong only, Weak has None)
-        let input_block_ids = self.extract_block_ids(&source);
-
-        // Create transfer state and handle
-        let transfer_id = TransferId::new();
-        let (state, handle) = TransferState::new(transfer_id, input_block_ids);
-        let state = Arc::new(std::sync::Mutex::new(state));
-
-        // Store transfer state
-        self.transfers.insert(transfer_id, state.clone());
-
-        // Enqueue source blocks directly to pipeline
-        // PolicyEvaluator handles different source types
-        // TransferExecutor does upgrade stage just before transfer
-        let queued = pipeline.enqueue(transfer_id, source, state);
-        if !queued {
-            // Transfer was already cancelled before enqueueing
+        let (transfer_id, state, handle) = self.create_transfer(&source);
+        if !pipeline.enqueue(transfer_id, source, state) {
             tracing::warn!("Transfer {} was cancelled before enqueueing", transfer_id);
         }
-
         Ok(handle)
     }
 
@@ -187,31 +188,11 @@ impl OffloadEngine {
         source: SourceBlocks<Src>,
         precondition: Option<velo::EventHandle>,
     ) -> Result<TransferHandle> {
-        // Extract block IDs for state tracking (External/Strong only, Weak has None)
-        let input_block_ids = self.extract_block_ids(&source);
-
-        // Create transfer state and handle
-        let transfer_id = TransferId::new();
-        let (mut state, handle) = TransferState::new(transfer_id, input_block_ids);
-
-        // Set precondition on the transfer state
-        state.precondition = precondition;
-
-        let state = Arc::new(std::sync::Mutex::new(state));
-
-        // Store transfer state
-        self.transfers.insert(transfer_id, state.clone());
-
-        // Enqueue source blocks directly to pipeline
-        // PolicyEvaluator handles different source types
-        // BatchCollector will extract precondition and attach to batches
-        // PreconditionAwaiter will await the event before processing
-        let queued = pipeline.enqueue(transfer_id, source, state);
-        if !queued {
-            // Transfer was already cancelled before enqueueing
+        let (transfer_id, state, handle) = self.create_transfer(&source);
+        state.lock().unwrap().precondition = precondition;
+        if !pipeline.enqueue(transfer_id, source, state) {
             tracing::warn!("Transfer {} was cancelled before enqueueing", transfer_id);
         }
-
         Ok(handle)
     }
 
@@ -221,19 +202,10 @@ impl OffloadEngine {
         pipeline: &ObjectPipeline<G2>,
         source: SourceBlocks<G2>,
     ) -> Result<TransferHandle> {
-        let input_block_ids = self.extract_block_ids(&source);
-
-        let transfer_id = TransferId::new();
-        let (state, handle) = TransferState::new(transfer_id, input_block_ids);
-        let state = Arc::new(std::sync::Mutex::new(state));
-
-        self.transfers.insert(transfer_id, state.clone());
-
-        let queued = pipeline.enqueue(transfer_id, source, state);
-        if !queued {
+        let (transfer_id, state, handle) = self.create_transfer(&source);
+        if !pipeline.enqueue(transfer_id, source, state) {
             tracing::warn!("Transfer {} was cancelled before enqueueing", transfer_id);
         }
-
         Ok(handle)
     }
 

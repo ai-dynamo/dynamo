@@ -56,18 +56,6 @@ use super::queue::CancellableQueue;
 use super::source::{SourceBlock, SourceBlocks};
 use crate::object::ObjectLockManager;
 
-/// Helper macro to create an NVTX range when the nvtx feature is enabled.
-/// The range automatically ends when the returned guard is dropped.
-macro_rules! nvtx_range {
-    ($name:expr) => {{
-        #[cfg(feature = "nvtx")]
-        let _range = nvtx::range!($name);
-        #[cfg(not(feature = "nvtx"))]
-        let _range = ();
-        _range
-    }};
-}
-
 /// Configuration for a pipeline.
 #[derive(Clone)]
 pub struct PipelineConfig<Src: BlockMetadata, Dst: BlockMetadata> {
@@ -346,13 +334,12 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
         let batch_config = config.batch_config.clone();
         let collector_cancel_rx = cancel_rx.clone();
         let batch_handle = runtime.spawn(async move {
-            let collector = BatchCollector::new_with_queue(
+            let collector = BatchCollector::new(
                 batch_config,
                 collector_input_queue,
                 batch_tx,
                 collector_cancel_rx,
             );
-            // BatchCollector::new_with_queue returns BatchCollectorQueue
             collector.run().await;
         });
 
@@ -705,7 +692,7 @@ impl<Src: BlockMetadata> ObjectPipeline<Src> {
         let batch_config = config.batch_config.clone();
         let collector_cancel_rx = cancel_rx.clone();
         let batch_handle = runtime.spawn(async move {
-            let collector = BatchCollector::new_with_queue(
+            let collector = BatchCollector::new(
                 batch_config,
                 collector_input_queue,
                 batch_tx,
@@ -1560,203 +1547,6 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             let mut state_guard = state.lock().unwrap();
             state_guard.mark_completed(block_ids);
 
-            let total = state_guard.passed_blocks.len() + state_guard.filtered_out.len();
-            let done = state_guard.completed.len() + state_guard.filtered_out.len();
-            tracing::debug!(
-                %transfer_id,
-                total,
-                done,
-                passed = state_guard.passed_blocks.len(),
-                filtered = state_guard.filtered_out.len(),
-                completed = state_guard.completed.len(),
-                "Transfer batch progress"
-            );
-            if done >= total && total > 0 {
-                state_guard.set_complete();
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Legacy execute_batch method - kept for backwards compatibility
-    /// This uses the sequential execution model.
-    #[allow(dead_code)]
-    async fn execute_batch(&self, batch: TransferBatch<Src>) -> anyhow::Result<()> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        // === UPGRADE STAGE ===
-        // Resolve all source blocks - upgrade weak blocks, keep strong/external as-is
-        // Blocks that fail upgrade (weak evicted) are counted as filtered
-        let mut resolved: Vec<ResolvedBlock<Src>> = Vec::with_capacity(batch.len());
-        let mut evicted_sequence_hashes: Vec<SequenceHash> = Vec::new();
-
-        for queued in batch.blocks {
-            match queued.source {
-                SourceBlock::Strong(block) => {
-                    // Strong: already have guard, ready for transfer
-                    resolved.push(ResolvedBlock {
-                        transfer_id: queued.transfer_id,
-                        block_id: block.block_id(),
-                        sequence_hash: queued.sequence_hash,
-                        guard: Some(block),
-                        state: queued.state,
-                    });
-                }
-                SourceBlock::External(ext) => {
-                    // External: caller holds reference, we just pass metadata through
-                    // Guard is None - transfer uses block_id directly
-                    resolved.push(ResolvedBlock {
-                        transfer_id: queued.transfer_id,
-                        block_id: ext.block_id,
-                        sequence_hash: ext.sequence_hash,
-                        guard: None,
-                        state: queued.state,
-                    });
-                }
-                SourceBlock::Weak(weak) => {
-                    // Weak: upgrade at last moment
-                    match weak.upgrade() {
-                        Some(block) => {
-                            resolved.push(ResolvedBlock {
-                                transfer_id: queued.transfer_id,
-                                block_id: block.block_id(),
-                                sequence_hash: queued.sequence_hash,
-                                guard: Some(block),
-                                state: queued.state,
-                            });
-                        }
-                        None => {
-                            // Block was evicted - count as filtered
-                            tracing::debug!(
-                                sequence_hash = ?queued.sequence_hash,
-                                "Weak block evicted before transfer"
-                            );
-                            evicted_sequence_hashes.push(queued.sequence_hash);
-                        }
-                    }
-                }
-            }
-        }
-
-        // If all blocks were evicted, nothing to transfer
-        if resolved.is_empty() {
-            tracing::debug!(
-                evicted = evicted_sequence_hashes.len(),
-                "All weak blocks evicted, skipping transfer"
-            );
-            return Ok(());
-        }
-
-        // Collect block_ids and sequence_hashes from resolved blocks
-        let src_block_ids: Vec<BlockId> = resolved.iter().map(|b| b.block_id).collect();
-        let sequence_hashes: Vec<SequenceHash> = resolved.iter().map(|b| b.sequence_hash).collect();
-
-        // Collect states for completion tracking (group by transfer_id)
-        let mut transfer_states: std::collections::HashMap<
-            TransferId,
-            (Arc<std::sync::Mutex<TransferState>>, Vec<BlockId>),
-        > = std::collections::HashMap::new();
-        for block in &resolved {
-            transfer_states
-                .entry(block.transfer_id)
-                .or_insert_with(|| (block.state.clone(), Vec::new()))
-                .1
-                .push(block.block_id);
-        }
-
-        // Skip actual transfers when in test mode
-        if !self.skip_transfers {
-            // Allocate destination blocks
-            let dst_blocks = self
-                .dst_manager
-                .allocate_blocks(resolved.len())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to allocate {} destination blocks", resolved.len())
-                })?;
-
-            let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
-
-            // Execute transfer via leader
-            let notification = self.leader.execute_local_transfer(
-                self.src_layout,
-                self.dst_layout,
-                src_block_ids.clone(),
-                dst_block_ids.clone(),
-                TransferOptions::default(),
-            )?;
-
-            // Wait for transfer completion
-            notification.await?;
-
-            // Register each transferred block in the destination tier
-            // This converts MutableBlock -> ImmutableBlock using the sequence hash
-            let registered_blocks: Vec<ImmutableBlock<Dst>> = dst_blocks
-                .into_iter()
-                .zip(sequence_hashes.iter())
-                .map(|(dst_block, seq_hash)| {
-                    let complete = dst_block
-                        .stage(*seq_hash, self.dst_manager.block_size())
-                        .expect("block size mismatch");
-                    self.dst_manager.register_block(complete)
-                })
-                .collect();
-
-            tracing::debug!(
-                num_registered = registered_blocks.len(),
-                "Registered transferred blocks in destination tier"
-            );
-
-            // Send registered blocks to downstream pipeline if chaining is enabled
-            if let Some(chain_tx) = &self.chain_tx {
-                // Group registered blocks by transfer_id for proper state tracking
-                // We need to match registered blocks back to their original transfer contexts
-                #[allow(clippy::type_complexity)]
-                let mut chain_outputs: std::collections::HashMap<
-                    TransferId,
-                    (
-                        Arc<std::sync::Mutex<TransferState>>,
-                        Vec<ImmutableBlock<Dst>>,
-                    ),
-                > = std::collections::HashMap::new();
-
-                // Match registered blocks with their transfer states
-                // resolved and registered_blocks are in the same order
-                for (registered, resolved_block) in
-                    registered_blocks.into_iter().zip(resolved.iter())
-                {
-                    chain_outputs
-                        .entry(resolved_block.transfer_id)
-                        .or_insert_with(|| (resolved_block.state.clone(), Vec::new()))
-                        .1
-                        .push(registered);
-                }
-
-                // Send chain outputs for each transfer
-                for (transfer_id, (state, blocks)) in chain_outputs {
-                    let output = ChainOutput {
-                        transfer_id,
-                        blocks,
-                        state,
-                    };
-                    if chain_tx.send(output).await.is_err() {
-                        tracing::warn!(%transfer_id, "Chain channel closed, downstream pipeline unavailable");
-                    } else {
-                        tracing::debug!(%transfer_id, "Sent blocks to chain output for downstream processing");
-                    }
-                }
-            }
-        }
-
-        // Mark blocks as completed in each transfer state
-        for (transfer_id, (state, block_ids)) in transfer_states {
-            let mut state_guard = state.lock().unwrap();
-            state_guard.mark_completed(block_ids);
-
-            // Check if transfer is complete (all passed blocks transferred)
-            // passed_blocks.len() == filtered_out.len() + completed.len() means we're done
             let total = state_guard.passed_blocks.len() + state_guard.filtered_out.len();
             let done = state_guard.completed.len() + state_guard.filtered_out.len();
             tracing::debug!(

@@ -34,7 +34,7 @@ use kvbm_config::{PolicyType, TierOffloadConfig};
 use crate::{BlockId, SequenceHash};
 use kvbm_logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
 
-use super::pending::PendingTracker;
+use super::pending::{PendingCheck, PendingTracker};
 use crate::object::{ObjectBlockOps, ObjectLockManager};
 
 /// Boxed future type for async policy evaluation.
@@ -322,11 +322,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
         }
 
         // 2. Check if currently in-flight (pending transfer)
-        if self
-            .pending_tracker
-            .as_ref()
-            .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash))
-        {
+        if self.pending_tracker.is_hash_pending(&ctx.sequence_hash) {
             return sync_result(Ok(false)); // Already being transferred
         }
 
@@ -346,21 +342,13 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
         let results: Vec<bool> = presence
             .into_iter()
             .map(|(hash, present)| {
-                // Filter out if already in registry
                 if present {
                     return false;
                 }
-
-                // Filter out if currently pending
-                if self
-                    .pending_tracker
-                    .as_ref()
-                    .is_some_and(|tracker| tracker.is_pending(&hash))
-                {
+                if self.pending_tracker.is_hash_pending(&hash) {
                     return false;
                 }
-
-                true // Not present, not pending - pass
+                true
             })
             .collect();
 
@@ -438,11 +426,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
         }
 
         // 2. Skip if currently pending transfer
-        if self
-            .pending_tracker
-            .as_ref()
-            .is_some_and(|pending| pending.is_pending(&ctx.sequence_hash))
-        {
+        if self.pending_tracker.is_hash_pending(&ctx.sequence_hash) {
             return sync_result(Ok(false));
         }
 
@@ -480,11 +464,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
                 }
 
                 // Skip if currently pending
-                if self
-                    .pending_tracker
-                    .as_ref()
-                    .is_some_and(|pending| pending.is_pending(&hash))
-                {
+                if self.pending_tracker.is_hash_pending(&hash) {
                     return false;
                 }
 
@@ -567,11 +547,7 @@ impl<Src: BlockMetadata> OffloadPolicy<Src> for ObjectPresenceFilter<Src> {
 
     fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
         // 1. Synchronous check: skip if currently pending
-        if self
-            .pending_tracker
-            .as_ref()
-            .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash))
-        {
+        if self.pending_tracker.is_hash_pending(&ctx.sequence_hash) {
             return sync_result(Ok(false)); // Already being transferred
         }
 
@@ -602,12 +578,7 @@ impl<Src: BlockMetadata> OffloadPolicy<Src> for ObjectPresenceFilter<Src> {
         let mut hash_indices: Vec<usize> = Vec::new();
 
         for (i, ctx) in contexts.iter().enumerate() {
-            let is_pending = self
-                .pending_tracker
-                .as_ref()
-                .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash));
-
-            if is_pending {
+            if self.pending_tracker.is_hash_pending(&ctx.sequence_hash) {
                 pending_status.push(true); // Mark as pending (will be filtered)
             } else {
                 pending_status.push(false);
@@ -718,11 +689,7 @@ impl<Src: BlockMetadata> OffloadPolicy<Src> for ObjectLockPresenceFilter<Src> {
 
     fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
         // 1. Synchronous check: skip if currently pending
-        if self
-            .pending_tracker
-            .as_ref()
-            .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash))
-        {
+        if self.pending_tracker.is_hash_pending(&ctx.sequence_hash) {
             return sync_result(Ok(false)); // Already being transferred
         }
 
@@ -774,12 +741,7 @@ impl<Src: BlockMetadata> OffloadPolicy<Src> for ObjectLockPresenceFilter<Src> {
         let mut to_check: Vec<(usize, SequenceHash)> = Vec::new();
 
         for (i, ctx) in contexts.iter().enumerate() {
-            let is_pending = self
-                .pending_tracker
-                .as_ref()
-                .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash));
-
-            if is_pending {
+            if self.pending_tracker.is_hash_pending(&ctx.sequence_hash) {
                 pending_mask.push(true);
             } else {
                 pending_mask.push(false);

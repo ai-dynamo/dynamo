@@ -96,6 +96,20 @@ impl PendingTracker {
     }
 }
 
+/// Extension trait for `Option<Arc<PendingTracker>>` to simplify pending checks.
+///
+/// Reduces the common pattern `self.pending_tracker.as_ref().is_some_and(|t| t.is_pending(&hash))`
+/// to a single method call.
+pub(crate) trait PendingCheck {
+    fn is_hash_pending(&self, hash: &SequenceHash) -> bool;
+}
+
+impl PendingCheck for Option<Arc<PendingTracker>> {
+    fn is_hash_pending(&self, hash: &SequenceHash) -> bool {
+        self.as_ref().is_some_and(|t| t.is_pending(hash))
+    }
+}
+
 /// RAII guard that removes a sequence hash from the pending set on drop.
 ///
 /// This guard travels with the block through all pipeline stages and ensures
