@@ -33,7 +33,6 @@ spec:
   # Capture configuration for checkpoint creation
   capture:
     activeDeadlineSeconds: 3600
-    backoffLimit: 3
     ttlSecondsAfterFinished: 300
     podTemplateSpec:
       spec:

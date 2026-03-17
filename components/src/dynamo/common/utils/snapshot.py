@@ -29,10 +29,8 @@ EngineT = TypeVar("EngineT")
 class CheckpointConfig:
     """Parsed checkpoint configuration plus the watcher-driven lifecycle."""
 
-    def __init__(self, ready_file: str, storage_type: str, location: str):
+    def __init__(self, ready_file: str):
         self.ready_file = ready_file
-        self.storage_type = storage_type
-        self.location = location
         self._checkpoint_done = asyncio.Event()
         self._restore_done = asyncio.Event()
 
@@ -43,36 +41,7 @@ class CheckpointConfig:
             return None
 
         configure_checkpoint_transport_env()
-
-        location = os.environ.get("DYN_CHECKPOINT_LOCATION", "")
-        if not location:
-            checkpoint_path = os.environ.get("DYN_CHECKPOINT_PATH", "").rstrip("/")
-            checkpoint_hash = os.environ.get("DYN_CHECKPOINT_HASH", "")
-            if not checkpoint_path or not checkpoint_hash:
-                raise EnvironmentError(
-                    "Checkpoint mode requires either DYN_CHECKPOINT_LOCATION or both "
-                    "DYN_CHECKPOINT_PATH and DYN_CHECKPOINT_HASH"
-                )
-            location = f"{checkpoint_path}/{checkpoint_hash}"
-
-        return cls(
-            ready_file=ready_file,
-            storage_type=os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE", "pvc"),
-            location=location,
-        )
-
-    def checkpoint_exists(self) -> bool:
-        if self.storage_type != "pvc":
-            return False
-
-        # The snapshot agent stages PVC checkpoints under <base>/tmp/<hash> and
-        # only publishes self.location after a successful finalize/rename.
-        if os.path.isdir(self.location):
-            logger.info("Existing checkpoint found at %s, skipping", self.location)
-            return True
-
-        logger.info("No checkpoint at %s, creating new one", self.location)
-        return False
+        return cls(ready_file=ready_file)
 
     async def run_lifecycle(
         self,
@@ -193,21 +162,6 @@ def configure_checkpoint_transport_env() -> None:
             nccl_ib_disable,
         )
     os.environ["NCCL_IB_DISABLE"] = "1"
-
-
-def get_checkpoint_config() -> tuple[bool, CheckpointConfig | None]:
-    """Resolve checkpoint mode for checkpoint-job pods."""
-
-    cfg = CheckpointConfig.from_env()
-    if cfg is None:
-        return False, None
-
-    checkpoint_exists = cfg.checkpoint_exists()
-    if checkpoint_exists:
-        return True, None
-
-    return False, cfg
-
 
 @dataclass
 class EngineSnapshotController(Generic[EngineT]):

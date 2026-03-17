@@ -146,32 +146,11 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --disable-custom-all-reduce
           env:
-            - name: GLOO_SOCKET_IFNAME
-              value: lo
-            - name: NCCL_SOCKET_IFNAME
-              value: lo
-            - name: NCCL_DEBUG
-              value: ERROR
             - name: TORCH_CPP_LOG_LEVEL
               value: ERROR
             - name: TORCH_DISTRIBUTED_DEBUG
               value: "OFF"
-            - name: CUDA_ERROR_LEVEL
-              value: "10"
-            - name: NCCL_CUMEM_ENABLE
-              value: "0"
-            - name: NCCL_CUMEM_HOST_ENABLE
-              value: "0"
-            - name: NCCL_NVLS_ENABLE
-              value: "0"
-            - name: NCCL_P2P_DISABLE
-              value: "0"
-            - name: NCCL_SHM_DISABLE
-              value: "1"
-            - name: NCCL_IB_DISABLE
-              value: "1"
             - name: TORCH_NCCL_ENABLE_MONITORING
               value: "0"
 ```
@@ -309,6 +288,7 @@ The `DynamoCheckpoint` (shortname: `dckpt`) is a Kubernetes Custom Resource that
 - **Explicit control:** Manage checkpoint lifecycle independently from DGDs
 
 The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set the checkpoint environment variables manually; the operator injects them for checkpoint jobs and restored pods.
+`spec.job.backoffLimit` is deprecated and ignored. Checkpoint Jobs are always single-attempt.
 
 **Create a checkpoint:**
 
@@ -327,7 +307,6 @@ spec:
 
   job:
     activeDeadlineSeconds: 3600
-    backoffLimit: 3
     ttlSecondsAfterFinished: 300
     podTemplateSpec:
       spec:
@@ -342,12 +321,15 @@ spec:
             args:
               - --model
               - Qwen/Qwen3-0.6B
-              - --disable-custom-all-reduce
             env:
-              - name: GLOO_SOCKET_IFNAME
-                value: lo
-              - name: NCCL_SOCKET_IFNAME
-                value: lo
+              - name: NCCL_DEBUG
+                value: ERROR
+              - name: TORCH_CPP_LOG_LEVEL
+                value: ERROR
+              - name: TORCH_DISTRIBUTED_DEBUG
+                value: "OFF"
+              - name: TORCH_NCCL_ENABLE_MONITORING
+                value: "0"
             resources:
               limits:
                 nvidia.com/gpu: "1"

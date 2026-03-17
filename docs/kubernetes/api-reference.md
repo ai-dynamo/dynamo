@@ -263,7 +263,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed |  | Required: \{\} <br /> |
 | `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 0 <br />Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | BackoffLimit specifies the number of retries before marking the Job failed | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | Deprecated: ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Minimum: 0 <br />Optional: \{\} <br /> |
 
 

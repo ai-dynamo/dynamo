@@ -15,6 +15,8 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -42,6 +44,7 @@ type Watcher struct {
 	clientset  kubernetes.Interface
 	containerd *containerd.Client
 	log        logr.Logger
+	holderID   string
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -70,6 +73,7 @@ func NewWatcher(
 		clientset:  clientset,
 		containerd: containerd,
 		log:        log,
+		holderID:   "snapshot-agent/" + uuid.NewString(),
 		inFlight:   make(map[string]struct{}),
 		stopCh:     make(chan struct{}),
 	}, nil
@@ -193,8 +197,14 @@ func (w *Watcher) handleCheckpointPodEvent(ctx context.Context, pod *corev1.Pod)
 		return
 	}
 
-	annotationStatus := pod.Annotations[kubeAnnotationCheckpointStatus]
-	if annotationStatus == "completed" || annotationStatus == "in_progress" {
+	job, err := getCheckpointJob(ctx, w.clientset, pod)
+	if err != nil {
+		w.log.Error(err, "Failed to resolve checkpoint job", "pod", podKey)
+		return
+	}
+
+	jobStatus := job.Annotations[kubeAnnotationCheckpointStatus]
+	if jobStatus == "completed" || jobStatus == "failed" {
 		return
 	}
 
@@ -202,11 +212,22 @@ func (w *Watcher) handleCheckpointPodEvent(ctx context.Context, pod *corev1.Pod)
 		return
 	}
 
+	acquiredLease, err := acquireCheckpointLease(ctx, w.clientset, w.log, job, w.holderID)
+	if err != nil {
+		w.release(podKey)
+		w.log.Error(err, "Failed to acquire checkpoint lease", "pod", podKey, "checkpoint_hash", checkpointHash)
+		return
+	}
+	if !acquiredLease {
+		w.release(podKey)
+		return
+	}
+
 	w.log.Info("Pod ready, triggering checkpoint", "pod", podKey, "checkpoint_hash", checkpointHash)
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointHash))
 
 	go func() {
-		if err := w.doCheckpoint(ctx, pod, checkpointHash, podKey); err != nil {
+		if err := w.doCheckpoint(ctx, pod, job, checkpointHash, podKey); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
 			opLog.Error(err, "Checkpoint worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointWorkerFailed", err.Error())
@@ -270,42 +291,45 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 }
 
 // doCheckpoint runs the full checkpoint workflow for a pod:
-//  1. Mark pod as in_progress
+//  1. Hold and renew the checkpoint lease
 //  2. Resolve the container ID and host PID
 //  3. Call orchestrate.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
 //  4. SIGUSR1 the process on success (notify workload), SIGKILL on failure (terminate immediately)
-//  5. Mark pod as completed or failed
-func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointHash, podKey string) error {
-	releaseOnExit := true
+//  5. Mark job as completed or failed
+func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointHash, podKey string) error {
+	releasePodOnExit := true
 	defer func() {
-		if releaseOnExit {
+		if releasePodOnExit {
 			w.release(podKey)
 		}
 	}()
 	log := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
+	leaseCtx, stopLease := context.WithCancelCause(ctx)
+	defer stopLease(nil)
+
+	releaseLeaseOnExit := true
+	defer func() {
+		if !releaseLeaseOnExit {
+			return
+		}
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := releaseCheckpointLease(releaseCtx, w.clientset, log, job, w.holderID); err != nil {
+			log.Error(err, "Failed to release checkpoint lease")
+		}
+	}()
+
+	go w.renewCheckpointLease(leaseCtx, log, job, stopLease)
+
 	setCheckpointStatus := func(value string) error {
-		annotations := map[string]string{
+		if err := annotateJob(ctx, w.clientset, log, job, map[string]string{
 			kubeAnnotationCheckpointStatus: value,
-		}
-
-		if value == "failed" || value == "completed" {
-			if err := annotatePodRetry(ctx, w.clientset, log, pod, annotations); err != nil {
-				releaseOnExit = false
-				return fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
-			}
-			return nil
-		}
-
-		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
-			return fmt.Errorf("failed to update checkpoint status %q: %w", value, err)
+		}); err != nil {
+			releasePodOnExit = false
+			releaseLeaseOnExit = false
+			return fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
 		}
 		return nil
-	}
-
-	if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
-		kubeAnnotationCheckpointStatus: "in_progress",
-	}); err != nil {
-		return fmt.Errorf("failed to annotate pod with checkpoint in_progress: %w", err)
 	}
 
 	// Resolve the target container
@@ -355,12 +379,34 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 		PodName:        pod.Name,
 		PodNamespace:   pod.Namespace,
 	}
-	if err := orchestrate.Checkpoint(ctx, w.containerd, log, req, w.config); err != nil {
+	if err := orchestrate.Checkpoint(leaseCtx, w.containerd, log, req, w.config); err != nil {
+		if cause := context.Cause(leaseCtx); cause != nil && cause != context.Canceled {
+			err = fmt.Errorf("checkpoint lease lost: %w", cause)
+		}
 		log.Error(err, "Checkpoint failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
 		// SIGKILL on failure: process is unrecoverable (CUDA locked), terminate immediately
 		if signalErr := common.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint failed"); signalErr != nil {
 			log.Error(signalErr, "Failed to signal checkpoint failure to runtime process")
+		}
+		if statusErr := setCheckpointStatus("failed"); statusErr != nil {
+			return statusErr
+		}
+		return nil
+	}
+
+	publishedCheckpointDir := filepath.Join(w.config.BasePath, checkpointHash)
+	info, err := os.Stat(publishedCheckpointDir)
+	if err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("published checkpoint path %s is not a directory", publishedCheckpointDir)
+		} else {
+			err = fmt.Errorf("published checkpoint path %s is missing: %w", publishedCheckpointDir, err)
+		}
+		log.Error(err, "Checkpoint failed verification")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
+		if signalErr := common.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint verification failed"); signalErr != nil {
+			log.Error(signalErr, "Failed to signal checkpoint verification failure to runtime process")
 		}
 		if statusErr := setCheckpointStatus("failed"); statusErr != nil {
 			return statusErr
@@ -405,7 +451,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 		}
 
 		if value == "failed" || value == "completed" {
-			if err := annotatePodRetry(ctx, w.clientset, log, pod, annotations); err != nil {
+			if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 				releaseOnExit = false
 				return fmt.Errorf("failed to persist terminal restore status %q: %w", value, err)
 			}

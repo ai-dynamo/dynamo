@@ -121,12 +121,10 @@ async def worker() -> None:
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
-    should_exit, snapshot_controller = await prepare_snapshot_engine(
+    snapshot_controller = await prepare_snapshot_engine(
         config,
         setup_vllm_engine,
     )
-    if should_exit:
-        return
 
     snapshot_engine = None
     if snapshot_controller is not None:

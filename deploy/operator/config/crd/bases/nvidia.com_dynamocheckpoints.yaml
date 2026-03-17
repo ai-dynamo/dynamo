@@ -127,8 +127,7 @@ spec:
                       minimum: 0
                       type: integer
                     backoffLimit:
-                      default: 3
-                      description: BackoffLimit specifies the number of retries before marking the Job failed
+                      description: 'Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.'
                       format: int32
                       minimum: 0
                       type: integer

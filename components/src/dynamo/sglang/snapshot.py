@@ -8,7 +8,7 @@ import time
 
 import sglang as sgl
 
-from dynamo.common.utils.snapshot import EngineSnapshotController, get_checkpoint_config
+from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .request_handlers.handler_base import SGLangEngineQuiesceController
 
@@ -16,27 +16,24 @@ logger = logging.getLogger(__name__)
 
 
 async def prepare_snapshot_engine(
-    server_args, dynamo_args
-) -> tuple[bool, EngineSnapshotController[sgl.Engine] | None]:
+    server_args,
+) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
     Must be called BEFORE runtime creation so the engine can be checkpointed
     without active NATS/etcd connections.
 
     Returns:
-        (should_exit, snapshot_controller) where:
-        - (True, None): caller should return immediately (checkpoint already
-          exists, or checkpoint completed successfully).
-        - (False, None): not in checkpoint mode — cold-start normally.
-        - (False, snapshot_controller): restore completed — caller should use
-          snapshot_controller.engine.
-    """
-    should_exit, checkpoint_cfg = get_checkpoint_config()
-    if should_exit:
-        return True, None
+        None when not in checkpoint mode.
+        A snapshot controller when restore completed and the caller should use
+        the restored engine.
 
+        If checkpointing completed successfully, this function exits the
+        process with status 0.
+    """
+    checkpoint_cfg = CheckpointConfig.from_env()
     if checkpoint_cfg is None:
-        return False, None
+        return None
 
     logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
@@ -57,6 +54,6 @@ async def prepare_snapshot_engine(
         checkpoint_config=checkpoint_cfg,
     )
     if not await snapshot_controller.wait_for_restore():
-        return True, None
+        raise SystemExit(0)
 
-    return False, snapshot_controller
+    return snapshot_controller

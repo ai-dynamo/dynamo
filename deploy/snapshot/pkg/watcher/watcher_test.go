@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/testr"
+	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,17 +25,35 @@ const testNodeName = "test-node"
 // makeTestWatcher creates a Watcher with a fake k8s client and nil orchestrators.
 // The fake clientset is empty so any goroutine launched by doCheckpoint/doRestore
 // will fail on the first annotatePod call and exit cleanly.
-func makeTestWatcher(t *testing.T) *Watcher {
+func makeTestWatcher(t *testing.T, objs ...runtime.Object) *Watcher {
 	t.Helper()
 	return &Watcher{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 			BasePath: t.TempDir(),
 		},
-		clientset: fake.NewClientset(),
+		clientset: fake.NewClientset(objs...),
 		log:       testr.New(t),
+		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
+	}
+}
+
+func makeLease(namespace, name, holder string, renewTime time.Time) *coordinationv1.Lease {
+	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
+	renewMicroTime := metav1.NewMicroTime(renewTime)
+	return &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &holder,
+			LeaseDurationSeconds: &leaseDurationSeconds,
+			AcquireTime:          &renewMicroTime,
+			RenewTime:            &renewMicroTime,
+		},
 	}
 }
 
@@ -73,6 +93,7 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 		ready      bool
 		hash       string
 		annotation string
+		lease      *coordinationv1.Lease
 		preSeed    bool // pre-populate inFlight to test deduplication
 		want       bool // true = pod passes filtering and triggers checkpoint
 	}{
@@ -126,13 +147,31 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "already in progress",
+			name:       "already failed",
 			nodeName:   testNodeName,
 			phase:      corev1.PodRunning,
 			ready:      true,
 			hash:       "abc123",
-			annotation: "in_progress",
+			annotation: "failed",
 			want:       false,
+		},
+		{
+			name:     "active lease held elsewhere",
+			nodeName: testNodeName,
+			phase:    corev1.PodRunning,
+			ready:    true,
+			hash:     "abc123",
+			lease:    makeLease("default", "checkpoint-job", "other-holder", time.Now()),
+			want:     false,
+		},
+		{
+			name:     "expired lease can be reclaimed",
+			nodeName: testNodeName,
+			phase:    corev1.PodRunning,
+			ready:    true,
+			hash:     "abc123",
+			lease:    makeLease("default", "checkpoint-job", "other-holder", time.Now().Add(-checkpointLeaseDuration-time.Second)),
+			want:     true,
 		},
 		{
 			name:     "duplicate in-flight",
@@ -148,21 +187,32 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			labels := map[string]string{
-				kubeLabelIsCheckpointSource: "true",
+				kubeLabelIsCheckpointSource:    "true",
+				"batch.kubernetes.io/job-name": "checkpoint-job",
 			}
 			if tc.hash != "" {
 				labels[kubeLabelCheckpointHash] = tc.hash
 			}
 
-			var annotations map[string]string
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "checkpoint-job",
+					Namespace: "default",
+				},
+			}
 			if tc.annotation != "" {
-				annotations = map[string]string{
+				job.Annotations = map[string]string{
 					kubeAnnotationCheckpointStatus: tc.annotation,
 				}
 			}
 
-			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
-			w := makeTestWatcher(t)
+			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, nil)
+			objs := []runtime.Object{job}
+			if tc.lease != nil {
+				objs = append(objs, tc.lease)
+			}
+
+			w := makeTestWatcher(t, objs...)
 			ctx := context.Background()
 
 			if tc.preSeed {
@@ -358,21 +408,28 @@ func TestHandleRestorePodEvent(t *testing.T) {
 	}
 }
 
-func TestDoCheckpointKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
+func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
 			Namespace: "default",
+			Labels: map[string]string{
+				"batch.kubernetes.io/job-name": "checkpoint-job",
+			},
 		},
 	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-job",
+			Namespace: "default",
+		},
+	}
+	lease := makeLease("default", "checkpoint-job", "test-holder", time.Now())
 
-	clientset := fake.NewClientset(pod.DeepCopy())
+	clientset := fake.NewClientset(pod.DeepCopy(), job, lease)
 	patchCalls := 0
-	clientset.PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+	clientset.PrependReactor("patch", "jobs", func(clientgotesting.Action) (bool, runtime.Object, error) {
 		patchCalls++
-		if patchCalls == 1 {
-			return false, nil, nil
-		}
 		return true, nil, errors.New("terminal patch failed")
 	})
 
@@ -383,21 +440,30 @@ func TestDoCheckpointKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 		},
 		clientset: clientset,
 		log:       testr.New(t),
+		holderID:  "test-holder",
 		inFlight: map[string]struct{}{
 			"default/test-pod": {},
 		},
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.doCheckpoint(context.Background(), pod, "abc123", "default/test-pod")
+	err := w.doCheckpoint(context.Background(), pod, job, "abc123", "default/test-pod")
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}
 	if _, ok := w.inFlight["default/test-pod"]; !ok {
 		t.Fatal("checkpoint terminal status failure should keep pod in-flight")
 	}
-	if patchCalls != 1+terminalStatusPatchRetryAttempts {
-		t.Fatalf("patchCalls = %d, want %d", patchCalls, 1+terminalStatusPatchRetryAttempts)
+	if patchCalls != 1 {
+		t.Fatalf("patchCalls = %d, want %d", patchCalls, 1)
+	}
+
+	remainingLease, err := clientset.CoordinationV1().Leases("default").Get(context.Background(), "checkpoint-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected checkpoint lease to remain after terminal status patch failure: %v", err)
+	}
+	if remainingLease.Spec.HolderIdentity == nil || *remainingLease.Spec.HolderIdentity != "test-holder" {
+		t.Fatalf("unexpected remaining lease holder: %#v", remainingLease.Spec.HolderIdentity)
 	}
 }
 
@@ -429,6 +495,7 @@ func TestDoRestoreKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 		},
 		clientset: clientset,
 		log:       testr.New(t),
+		holderID:  "test-holder",
 		inFlight: map[string]struct{}{
 			"default/test-pod": {},
 		},
@@ -442,7 +509,7 @@ func TestDoRestoreKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 	if _, ok := w.inFlight["default/test-pod"]; !ok {
 		t.Fatal("restore terminal status failure should keep pod in-flight")
 	}
-	if patchCalls != 1+terminalStatusPatchRetryAttempts {
-		t.Fatalf("patchCalls = %d, want %d", patchCalls, 1+terminalStatusPatchRetryAttempts)
+	if patchCalls != 2 {
+		t.Fatalf("patchCalls = %d, want %d", patchCalls, 2)
 	}
 }

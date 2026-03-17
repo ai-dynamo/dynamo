@@ -4,7 +4,7 @@
 import logging
 from collections.abc import Callable
 
-from dynamo.common.utils.snapshot import EngineSnapshotController, get_checkpoint_config
+from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .args import Config
 from .handlers import VllmEngineQuiesceController
@@ -16,13 +16,10 @@ logger = logging.getLogger(__name__)
 async def prepare_snapshot_engine(
     config: Config,
     setup_vllm_engine: Callable[[Config], EngineSetupResult],
-) -> tuple[bool, EngineSnapshotController[EngineSetupResult] | None]:
-    should_exit, checkpoint_config = get_checkpoint_config()
-    if should_exit:
-        return True, None
-
+) -> EngineSnapshotController[EngineSetupResult] | None:
+    checkpoint_config = CheckpointConfig.from_env()
     if checkpoint_config is None:
-        return False, None
+        return None
 
     if config.headless:
         raise ValueError(
@@ -42,6 +39,6 @@ async def prepare_snapshot_engine(
         quiesce_args=(None,),
     )
     if not await snapshot_controller.wait_for_restore():
-        return True, None
+        raise SystemExit(0)
 
-    return False, snapshot_controller
+    return snapshot_controller

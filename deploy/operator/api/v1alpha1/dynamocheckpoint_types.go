@@ -99,10 +99,9 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:default=3600
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 
-	// BackoffLimit specifies the number of retries before marking the Job failed
+	// Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=3
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
 	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
