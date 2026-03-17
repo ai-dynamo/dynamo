@@ -1941,7 +1941,7 @@ async fn test_local_indexer_slice_within_range() {
     let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
         match resp {
             WorkerKvQueryResponse::Events(e) => e,
-            WorkerKvQueryResponse::TreeDump(e) => e,
+            WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             _ => panic!("Unexpected response type"),
         }
     };
@@ -1962,7 +1962,7 @@ async fn test_local_indexer_slice_within_range() {
 
     // start_id=0 is before buffer (first is 1), so should trigger tree dump
     let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
     let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
     let ids = get_ids(extract_events(result));
@@ -2016,7 +2016,7 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
     let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
         match resp {
             WorkerKvQueryResponse::Events(e) => e,
-            WorkerKvQueryResponse::TreeDump(e) => e,
+            WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             _ => panic!("Unexpected response type: {:?}", resp),
         }
     };
@@ -2038,11 +2038,11 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     // Tree dump path tests
     let result = indexer.get_events_in_id_range(None, None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(&result, WorkerKvQueryResponse::TreeDump { .. }));
     assert_eq!(extract_events(result).len(), 10);
 
     let result = indexer.get_events_in_id_range(Some(7), None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
     // Edge cases
     let result = indexer.get_events_in_id_range(Some(15), Some(10)).await;
@@ -2050,6 +2050,98 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     let result = indexer.get_events_in_id_range(Some(100), Some(200)).await;
     assert!(matches!(result, WorkerKvQueryResponse::TooNew { .. }));
+}
+
+#[tokio::test]
+async fn test_tree_dump_includes_last_event_id() {
+    // Create indexer with small buffer (5 events max)
+    let indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let make_event = |id: u64| {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id: id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(id * 100),
+                        tokens_hash: LocalBlockHash(id * 200),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+    };
+
+    // Add 10 events (IDs 5-14), buffer keeps last 5: events 10-14
+    for id in 5..15 {
+        indexer
+            .apply_event_with_buffer(make_event(id))
+            .await
+            .unwrap();
+    }
+    indexer.flush().await;
+
+    // Request with start_id=None -> tree dump should include last_event_id=14
+    let result = indexer.get_events_in_id_range(None, None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 14,
+                "last_event_id should be the buffer's newest event ID"
+            );
+            assert!(!events.is_empty(), "tree dump should contain events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+
+    // Request with start_id older than buffer -> tree dump should include last_event_id=14
+    let result = indexer.get_events_in_id_range(Some(7), None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 14,
+                "last_event_id should be the buffer's newest event ID"
+            );
+            assert!(!events.is_empty(), "tree dump should contain events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+
+    // Empty buffer case: create a fresh indexer with no events
+    let empty_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+    let result = empty_indexer.get_events_in_id_range(None, None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 0,
+                "empty buffer should return last_event_id=0"
+            );
+            assert!(events.is_empty(), "empty indexer should have no events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2097,6 +2189,51 @@ async fn test_local_indexer_buffer_and_serialization() {
     };
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn test_local_indexer_does_not_buffer_failed_send() {
+    let local_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let test_event = RouterEvent::new(
+        7,
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        },
+    );
+
+    let event_tx = local_indexer.event_sender();
+    local_indexer.shutdown();
+    event_tx.closed().await;
+
+    let result = local_indexer.apply_event_with_buffer(test_event).await;
+    assert!(matches!(result, Err(KvRouterError::IndexerOffline)));
+    assert_eq!(local_indexer.buffer_len(), 0);
+
+    match local_indexer.get_events_in_id_range(None, None).await {
+        WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+        } => {
+            assert!(events.is_empty());
+            assert_eq!(last_event_id, 0);
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
 }
 
 #[tokio::test]

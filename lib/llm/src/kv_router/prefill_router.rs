@@ -499,6 +499,13 @@ impl PrefillRouter {
     ///
     /// This is the shared worker selection logic used by both `resolve_prefill_worker`
     /// and `query_route`.
+    /// Register externally-provided workers in the prefill router's slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
+            r.chooser.register_workers(worker_ids);
+        }
+    }
+
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
@@ -606,6 +613,13 @@ impl
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
+
+        if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
+            return Err(anyhow::anyhow!(
+                "Prefill worker ID required in Direct routing mode but none found in request. \
+                 Expected prefill_worker_id to be set via x-prefill-instance-id header by external router (e.g., EPP)."
+            ));
+        }
 
         let prefill_result = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
