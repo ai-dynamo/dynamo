@@ -11,6 +11,7 @@ to chat completion requests correctly.
 import logging
 import os
 import subprocess
+import time
 from typing import Any, Dict
 
 import pytest
@@ -44,6 +45,7 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
+GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def validate_chat_response(
@@ -221,13 +223,6 @@ async def test_deployment(
         )
 
 
-# ============================================================================
-# GAIE (Gateway API Inference Extension) deployment test
-# ============================================================================
-
-GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
-
-
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
@@ -292,51 +287,71 @@ async def test_gaie_deployment(
             epp_pods = deployment.get_pods(["Epp"])
             epp_pod_list = epp_pods.get("Epp", [])
             assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
+            logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
 
-            epp_pod = epp_pod_list[0]
-            logger.info(f"Found EPP pod: {epp_pod.name}")
-
-            port = deployment_spec.port
-            port_forward = deployment.port_forward(epp_pod, port)
-            assert (
-                port_forward is not None
-            ), f"Failed to establish port forward to {epp_pod.name}:{port}"
-
-            base_url = f"http://localhost:{port_forward.local_port}"
-            logger.info(f"Port forwarding established: {base_url}")
-
-            endpoint = deployment_spec.endpoint
-            model_ready = wait_for_model_availability(
-                url=base_url,
-                endpoint=endpoint,
-                model=GAIE_MODEL_NAME,
-                logger=logger,
-                max_attempts=30,
-            )
-            assert model_ready, (
-                f"Model '{GAIE_MODEL_NAME}' did not become available "
-                f"within the timeout period"
+            # Port-forward to the inference gateway so requests flow through
+            # the full GAIE path: Gateway → HTTPRoute → InferencePool → EPP → workers
+            gateway_pf = subprocess.Popen(
+                [
+                    "kubectl",
+                    "port-forward",
+                    "svc/inference-gateway",
+                    "8000:80",
+                    "-n",
+                    "kgateway-system",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
 
-            url = f"{base_url}{endpoint}"
-            payload = {
-                "model": GAIE_MODEL_NAME,
-                "messages": [{"role": "user", "content": TEST_PROMPT}],
-                "max_tokens": DEFAULT_MAX_TOKENS,
-                "temperature": DEFAULT_TEMPERATURE,
-                "stream": False,
-            }
-            response = send_request(
-                url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
-            )
+            try:
+                time.sleep(3)
+                assert gateway_pf.poll() is None, (
+                    "Gateway port-forward exited unexpectedly: "
+                    f"{gateway_pf.stderr.read().decode() if gateway_pf.stderr else ''}"
+                )
 
-            validate_chat_response(
-                response=response,
-                expected_model=GAIE_MODEL_NAME,
-                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-            )
+                gateway_url = "http://localhost:8000"
+                logger.info(f"Gateway port-forward established: {gateway_url}")
 
-            logger.info("GAIE deployment test PASSED")
+                endpoint = deployment_spec.endpoint
+                model_ready = wait_for_model_availability(
+                    url=gateway_url,
+                    endpoint=endpoint,
+                    model=GAIE_MODEL_NAME,
+                    logger=logger,
+                    max_attempts=30,
+                )
+                assert model_ready, (
+                    f"Model '{GAIE_MODEL_NAME}' did not become available "
+                    f"within the timeout period"
+                )
+
+                url = f"{gateway_url}{endpoint}"
+                payload = {
+                    "model": GAIE_MODEL_NAME,
+                    "messages": [{"role": "user", "content": TEST_PROMPT}],
+                    "max_tokens": DEFAULT_MAX_TOKENS,
+                    "temperature": DEFAULT_TEMPERATURE,
+                    "stream": False,
+                }
+                response = send_request(
+                    url,
+                    payload,
+                    timeout=float(DEFAULT_REQUEST_TIMEOUT),
+                    method="POST",
+                )
+
+                validate_chat_response(
+                    response=response,
+                    expected_model=GAIE_MODEL_NAME,
+                    min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+                )
+
+                logger.info("GAIE deployment test PASSED")
+            finally:
+                gateway_pf.terminate()
+                gateway_pf.wait(timeout=5)
     finally:
         logger.info("Cleaning up HTTPRoute...")
         subprocess.run(
