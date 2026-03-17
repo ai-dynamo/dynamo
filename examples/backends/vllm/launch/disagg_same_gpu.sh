@@ -26,17 +26,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" vllm
-
-# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction vllm)
-fi
+build_gpu_mem_args vllm "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 

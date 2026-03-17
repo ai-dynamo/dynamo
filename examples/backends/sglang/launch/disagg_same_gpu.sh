@@ -26,17 +26,7 @@ MODEL="Qwen/Qwen3-0.6B"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$CONTEXT_LENGTH" "$MAX_RUNNING_REQUESTS" sglang
-
-# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction sglang)
-fi
+build_gpu_mem_args sglang "$MODEL" "$CONTEXT_LENGTH" "$MAX_RUNNING_REQUESTS" --workers-per-gpu 2
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 

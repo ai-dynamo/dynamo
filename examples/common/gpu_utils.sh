@@ -10,6 +10,7 @@
 #   source "$SCRIPT_DIR/../common/gpu_utils.sh"
 #
 # Functions:
+#   build_gpu_mem_args <engine> <model> ...   Main entry point — sets GPU_MEM_ARGS + GPU_MEM_FRACTION
 #   get_model_params <model>           Set _MP_* vars for a known model's architecture
 #   estimate_worker_vram <model> ...   Set _EW_* vars with per-worker VRAM estimate
 #   gpu_worker_fraction <engine>       Convert _EW_* estimate → engine-appropriate fraction
@@ -17,6 +18,118 @@
 #                                      Convert profiled peak GiB → engine fraction (subtracts overhead)
 #   gpu_gb_to_total_fraction <gib>     Convert absolute GiB → fraction of TOTAL VRAM (vLLM/sglang)
 #   gpu_gb_to_free_fraction <gib>      Convert absolute GiB → fraction of FREE VRAM (TensorRT-LLM)
+
+# build_gpu_mem_args <engine> <model> [max_model_len] [max_concurrent_seqs] [options...]
+#
+# One-liner replacement for the GPU_MEM_ARGS boilerplate in launch scripts.
+# Determines the right memory fraction and builds engine-specific CLI args.
+#
+# Sets (in caller scope):
+#   GPU_MEM_ARGS=()      Engine-specific CLI args array.  Empty when:
+#                         - no fraction determined, or
+#                         - engine doesn't use CLI flags (trtllm), or
+#                         - user already passed the engine flag (caller handles it).
+#   GPU_MEM_FRACTION=""   Raw fraction string.  Always set when a fraction is determined.
+#
+# Priority:
+#   1. _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE  (profiler binary search)
+#   2. Engine flag passed to this function  (user already chose a value)
+#   3. estimate_worker_vram + gpu_worker_fraction  (model architecture)
+#   4. Empty  (let engine use its own default)
+#   --default-frac acts as a floor: if the estimator produces a lower value,
+#   the default wins.  This prevents under-allocation for calibrated scripts.
+#
+# Options (must come after positional args):
+#   --gpu-memory-utilization F   User already chose this value.  Skipped when empty.
+#                                When non-empty, GPU_MEM_ARGS stays empty (no dup flag).
+#   --mem-fraction-static F      Same, for sglang.
+#   --workers-per-gpu N          Divide the fraction by N (for shared-GPU disagg).
+#                                Only divides profiler/user/estimator, not --default-frac.
+#   --default-frac F             Minimum fraction floor (also used when estimator
+#                                doesn't know the model).  Per-worker value, not divided.
+#
+# Engine flag mapping (output):
+#   vllm    → --gpu-memory-utilization
+#   sglang  → --mem-fraction-static
+#   trtllm  → (no CLI flag; use GPU_MEM_FRACTION in your JSON override)
+#
+# Usage:
+#   # Simple single-worker (agg.sh)
+#   build_gpu_mem_args vllm "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS"
+#   python -m dynamo.vllm --model "$MODEL" "${GPU_MEM_ARGS[@]}" &
+#
+#   # Two workers sharing one GPU (disagg_same_gpu.sh)
+#   build_gpu_mem_args vllm "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2
+#   python -m dynamo.vllm ... --gpu-memory-utilization "${GPU_MEM_FRACTION}" &
+#
+#   # Script with a known default (agg_spec_decoding.sh)
+#   build_gpu_mem_args vllm "$MODEL" --default-frac 0.8
+#
+#   # Script with user-facing env var (mm_router_worker/launch.sh)
+#   build_gpu_mem_args vllm "$MODEL" "$MAX_MODEL_LEN" \
+#       --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-}" --default-frac 0.85
+#
+#   # trtllm (fraction goes into JSON, not CLI)
+#   build_gpu_mem_args trtllm "$MODEL" "$MAX_SEQ_LEN" "$MAX_SEQS" --workers-per-gpu 2
+#   OVERRIDE_ARGS=(--override-engine-args "{\"kv_cache_config\":{\"free_gpu_memory_fraction\":${GPU_MEM_FRACTION}}}")
+build_gpu_mem_args() {
+    local engine="${1:?usage: build_gpu_mem_args <engine> <model> [max_model_len] [max_concurrent_seqs] [options...]}"
+    local model="${2:?usage: build_gpu_mem_args <engine> <model> ...}"
+    shift 2
+
+    local max_model_len="4096"
+    local max_seqs="2"
+    local workers_per_gpu=1
+    local user_frac=""
+    local default_frac=""
+
+    # Parse remaining: positional args first, then --options
+    if [[ $# -gt 0 && "$1" != --* ]]; then max_model_len="$1"; shift; fi
+    if [[ $# -gt 0 && "$1" != --* ]]; then max_seqs="$1"; shift; fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu-memory-utilization|--mem-fraction-static)
+                                user_frac="$2";       shift 2 ;;
+            --workers-per-gpu)  workers_per_gpu="$2"; shift 2 ;;
+            --default-frac)     default_frac="$2";    shift 2 ;;
+            *) echo "build_gpu_mem_args: unknown option '$1'" >&2; return 1 ;;
+        esac
+    done
+
+    local frac=""
+    local from_estimator=false
+    if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
+        frac="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE"
+    elif [[ -n "$user_frac" ]]; then
+        frac="$user_frac"
+    elif estimate_worker_vram "$model" "$max_model_len" "$max_seqs" "$engine" 2>/dev/null; then
+        frac=$(gpu_worker_fraction "$engine")
+        from_estimator=true
+    fi
+
+    # --workers-per-gpu divides profiler/user/estimator results only
+    if [[ -n "$frac" && "$workers_per_gpu" -gt 1 ]]; then
+        frac=$(awk -v f="$frac" -v n="$workers_per_gpu" 'BEGIN { printf "%.2f", f / n }')
+    fi
+
+    # --default-frac is a floor for estimator results (prevents under-allocation)
+    # and a fallback for unknown models.  Profiler/user values are never clamped.
+    if [[ -n "$default_frac" ]]; then
+        if [[ -z "$frac" ]] || { [[ "$from_estimator" == true ]] && awk -v f="$frac" -v d="$default_frac" 'BEGIN { exit !(f < d) }'; }; then
+            frac="$default_frac"
+        fi
+    fi
+
+    GPU_MEM_FRACTION="$frac"
+    GPU_MEM_ARGS=()
+    if [[ -n "$frac" && -z "$user_frac" ]]; then
+        case "$engine" in
+            vllm)   GPU_MEM_ARGS=("--gpu-memory-utilization" "$frac") ;;
+            sglang) GPU_MEM_ARGS=("--mem-fraction-static" "$frac") ;;
+            trtllm) ;;
+        esac
+    fi
+}
 
 # get_model_params <model_name>
 #

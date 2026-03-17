@@ -5,6 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="meta-llama/Meta-Llama-3.1-8B-Instruct"
@@ -21,7 +22,7 @@ python -m dynamo.frontend --http-port="$HTTP_PORT" &
 # 2. Speculative Main Worker
 # ---------------------------
 # This runs the main model with EAGLE as the draft model for speculative decoding
-GPU_MEM_ARGS=("--gpu-memory-utilization" "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-0.8}")
+build_gpu_mem_args vllm "$MODEL" --default-frac 0.8
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \

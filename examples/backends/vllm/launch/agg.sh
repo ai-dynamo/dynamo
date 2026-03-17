@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated serving on a single GPU.
-#
-# GPU memory control (highest priority wins):
-#   1. _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE  – raw fraction (profiler binary search)
-#   2. estimate_worker_vram              – computed from model architecture
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -37,14 +33,7 @@ done
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-# ---- GPU memory fraction ----
-GPU_MEM_ARGS=()
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-    GPU_MEM_ARGS=("--gpu-memory-utilization" "$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")
-elif estimate_worker_vram "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" vllm 2>/dev/null; then
-    GPU_MEM_FRACTION=$(gpu_worker_fraction vllm)
-    GPU_MEM_ARGS=("--gpu-memory-utilization" "$GPU_MEM_FRACTION")
-fi
+build_gpu_mem_args vllm "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving (1 GPU)" "$MODEL" "$HTTP_PORT"

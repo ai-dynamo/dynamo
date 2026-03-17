@@ -8,6 +8,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL="Qwen/Qwen3-0.6B"
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -18,10 +19,7 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_P
 python -m dynamo.frontend &
 
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-GPU_MEM_ARGS=()
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-    GPU_MEM_ARGS=("--gpu-memory-utilization" "$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")
-fi
+build_gpu_mem_args vllm "$MODEL"
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \

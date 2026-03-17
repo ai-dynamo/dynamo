@@ -83,32 +83,19 @@ EXTRA_ARGS=""
 export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
-# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE is the only external override honored here.
-# In single-GPU mode, the override is split evenly between the two workers.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-        HALF_FRAC=$(awk -v f="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-        DYN_ENCODE_GPU_MEM=$HALF_FRAC
-        DYN_PD_GPU_MEM=$HALF_FRAC
-    else
-        # Default 0.4 is calibrated for two workers sharing one GPU
-        # with small VL models (2B-8B).
-        DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
-        DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
-    fi
+    build_gpu_mem_args vllm "$MODEL_NAME" --workers-per-gpu 2 --default-frac 0.4
+    DYN_ENCODE_GPU_MEM="${GPU_MEM_FRACTION}"
+    DYN_PD_GPU_MEM="${GPU_MEM_FRACTION}"
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
-    if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-        DYN_ENCODE_GPU_MEM=$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE
-        DYN_PD_GPU_MEM=$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE
-    else
-        DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-        DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
-    fi
+    build_gpu_mem_args vllm "$MODEL_NAME" --default-frac 0.9
+    DYN_ENCODE_GPU_MEM="${GPU_MEM_FRACTION}"
+    DYN_PD_GPU_MEM="${GPU_MEM_FRACTION}"
 fi
 
 # Start encode worker

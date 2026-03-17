@@ -69,14 +69,7 @@ case "$MODEL_NAME" in
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
-# ---- GPU memory fraction ----
-GPU_MEM_ARGS=()
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-    GPU_MEM_ARGS=("--gpu-memory-utilization" "$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")
-elif estimate_worker_vram "$MODEL_NAME" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" vllm 2>/dev/null; then
-    GPU_MEM_FRACTION=$(gpu_worker_fraction vllm)
-    GPU_MEM_ARGS=("--gpu-memory-utilization" "$GPU_MEM_FRACTION")
-fi
+build_gpu_mem_args vllm "$MODEL_NAME" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS"
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)
