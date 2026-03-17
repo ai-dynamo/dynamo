@@ -882,7 +882,10 @@ fn test_all_duplicates_noop() {
     assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
 
-    // Re-extend with same — should be a no-op
+    // Re-extend with same IDs — should be a no-op (all known, skipped)
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
+
+    // No new unassigned means assign_pending produces an empty range
     let range = assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(range, 3..3); // Empty range, no new assignments
     assert_eq!(assignments.assigned_count(), 3);
@@ -1111,25 +1114,13 @@ fn test_clear_preserves_offset() {
 // =========================================================================
 
 #[test]
-fn test_position_mismatch_wrong_offset() {
-    // Create a sequence with blocks at positions 0, 1, 2
+fn test_assign_with_nonzero_offset() {
+    // Create a sequence with blocks at positions 0, 1, 2.
+    // Use offset=1 so assignments start at sequence_blocks[1].
+    // Verifies that the position validation passes for valid data
+    // and offset-based indexing works correctly.
     let seq = create_test_sequence(3, 0);
 
-    // Use an offset that will cause mismatch:
-    // Assignments at offset=1 will try to read sequence_blocks[1] expecting position=1,
-    // which should actually be fine since blocks are at positions 0, 1, 2.
-    // Let's use offset=0 but give sequence blocks that are offset...
-    // Actually, the position in the hash is inherent to the block. Block at index 0 has position 0.
-    // So if we set offset=5, we'll try to read sequence_blocks[5], which doesn't exist (only 3 blocks).
-    // That won't trigger PositionMismatch, it just won't assign anything.
-
-    // To actually trigger PositionMismatch, we need an offset where the block exists but
-    // position doesn't match. If offset=1, we look at sequence_blocks[1] which has position=1,
-    // expected=1. That matches. We'd need blocks where the embedded position doesn't match
-    // the index. But TokenBlockSequence always creates blocks with matching positions.
-
-    // Since in normal usage positions always match, let's just verify the offset behavior
-    // works correctly and the validation passes for valid data.
     let mut assignments = ExternalBlockAssignments::new(1);
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();

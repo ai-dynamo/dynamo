@@ -295,9 +295,7 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
     /// Schedule a prefill chunk of `num_tokens` tokens.
     ///
     /// Allocates the blocks needed to cover `prefill_position + num_tokens`
-    /// tokens, minus already-assigned/staged/unassigned blocks. If this is
-    /// the final prefill chunk and `max_output_tokens > 0`, an extra
-    /// generation block is allocated.
+    /// tokens, minus already-assigned/staged/unassigned blocks.
     pub fn schedule_prefill(
         &mut self,
         num_tokens: usize,
@@ -321,7 +319,7 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
 
         // How many total blocks are needed to cover tokens up to new_position?
         let bs = self.inner.block_size();
-        let total_blocks_needed = new_position / bs;
+        let total_blocks_needed = new_position.div_ceil(bs);
 
         // How many do we already have?
         let already_have = self.inner.assigned_blocks()
@@ -586,9 +584,7 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
 
         self.kv_position += accepted.len();
 
-        // LIFO-drop excess unassigned blocks
-        let blocks_actually_needed = self.blocks_needed_for_tokens(0); // 0 more beyond what was appended
-        // We just need to see how many unassigned remain vs needed.
+        // LIFO-drop excess unassigned blocks.
         // After appending accepted tokens, the generation block (if any) is the
         // remaining unassigned. If we over-allocated for the draft, drop excess.
         let excess = self.lifo_drop_excess_unassigned();
@@ -599,8 +595,6 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
             scheduled: scheduled_tokens,
             blocks_released: excess,
         });
-
-        let _ = blocks_actually_needed; // used only for the LIFO drop calculation above
 
         let is_complete = self.inner.is_complete();
         Ok(match (block_completed, is_complete) {
@@ -825,23 +819,6 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
             });
         }
         Ok(())
-    }
-
-    /// Given `additional_tokens` more tokens to append, how many **new** blocks
-    /// are needed (not counting already-unassigned blocks)?
-    fn blocks_needed_for_tokens(&self, additional_tokens: usize) -> usize {
-        if additional_tokens == 0 {
-            return 0;
-        }
-        let bs = self.inner.block_size();
-        if bs == 0 {
-            return 0;
-        }
-        let total_tokens = self.inner.total_tokens();
-        let current_blocks_used = total_tokens.div_ceil(bs);
-        let future_total = total_tokens + additional_tokens;
-        let future_blocks_needed = future_total.div_ceil(bs);
-        future_blocks_needed.saturating_sub(current_blocks_used)
     }
 
     /// LIFO-pop up to `count` unassigned blocks. Returns the actual count dropped.
@@ -1615,7 +1592,7 @@ mod tests {
 
         assert!(seq.is_prefill_complete());
         assert_eq!(seq.assigned_blocks(), 1);
-        assert_eq!(seq.unassigned_blocks(), 0);
+        assert_eq!(seq.unassigned_blocks(), 1); // partial-tail block from div_ceil
 
         // Decode 6 tokens
         for i in 0..6u32 {
@@ -1928,7 +1905,7 @@ mod tests {
 
         // After prefill: token 1000 completed block 1 (4,5,6,1000) but NOT registered
         assert_eq!(seq.assigned_blocks(), 1); // only block 0
-        assert_eq!(seq.unassigned_blocks(), 0);
+        assert_eq!(seq.unassigned_blocks(), 1); // partial-tail block from div_ceil
         assert_eq!(seq.kv_position(), 7);
         assert_eq!(seq.tail_tokens(), 1); // token 1000
 
@@ -1937,9 +1914,9 @@ mod tests {
         assert_eq!(
             seq.state(),
             SequenceState::DecodeScheduled {
-                blocks_allocated: 2
+                blocks_allocated: 1
             }
-        ); // 1 pending + 1 gen
+        ); // 1 pending + 1 gen, but already had 1 unassigned
 
         // apply_decode stages the pending block
         let outcome = seq.apply_decode(100, &manager).unwrap();

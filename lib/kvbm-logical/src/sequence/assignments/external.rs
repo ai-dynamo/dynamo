@@ -193,6 +193,7 @@ impl ExternalBlockAssignments {
     ) -> Result<(), BlockSequenceError> {
         // Phase 1: Validate & collect
         let mut new_ids = Vec::new();
+        let mut new_id_set = indexmap::IndexSet::new();
         let mut first_new_index: Option<usize> = None;
 
         for (i, id) in block_ids.into_iter().enumerate() {
@@ -208,7 +209,10 @@ impl ExternalBlockAssignments {
                 }
                 // Skip — already known
             } else {
-                // Unknown ID — collect
+                // Unknown ID — collect, rejecting internal duplicates
+                if !new_id_set.insert(id) {
+                    return Err(BlockSequenceError::DuplicateBlockId { block_id: id });
+                }
                 if first_new_index.is_none() {
                     first_new_index = Some(i);
                 }
@@ -278,23 +282,27 @@ impl ExternalBlockAssignments {
         // How many can we stage? Min of available blocks and unassigned count.
         let to_stage = available_blocks.min(self.store.unassigned_count());
 
+        // Phase 1: Validate all positions before mutating
         for i in 0..to_stage {
             let seq_pos = start_pos + i;
             let block = &sequence_blocks[seq_pos];
             let hash = block.kvbm_sequence_hash();
 
-            // Validate position
             let actual_pos = hash.position();
             if actual_pos != seq_pos as u64 {
-                let block_id = self.store.get_unassigned(0).map(|(&id, _)| id).unwrap();
+                let block_id = self.store.get_unassigned(i).map(|(&id, _)| id).unwrap();
                 return Err(BlockSequenceError::PositionMismatch {
                     expected: seq_pos,
                     actual: actual_pos,
                     block_id,
                 });
             }
+        }
 
-            // Pop front of unassigned (FIFO) and insert into staged
+        // Phase 2: Commit — no errors from here on
+        for i in 0..to_stage {
+            let seq_pos = start_pos + i;
+            let hash = sequence_blocks[seq_pos].kvbm_sequence_hash();
             let (block_id, _) = self.store.shift_unassigned().unwrap();
             self.store.insert_staged(block_id, hash);
         }

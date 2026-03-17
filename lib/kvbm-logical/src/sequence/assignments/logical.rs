@@ -899,7 +899,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extend_assigned_duplicate_in_staged() {
+    fn test_extend_assigned_disjoint_from_staged() {
+        // Verifies that extend_assigned succeeds when the new block_ids
+        // are disjoint from those already in staged (no collision).
         let manager = create_test_manager::<TestMeta>(10);
         let blocks = manager.allocate_blocks(3).unwrap();
         let ids: Vec<BlockId> = blocks.iter().map(|b| b.block_id()).collect();
@@ -910,8 +912,6 @@ mod tests {
         la.stage(seq.blocks()).unwrap();
         // 3 blocks now in staged
 
-        // Get immutables whose block_ids collide with staged
-        // Use match_blocks after populating the manager separately
         let other_blocks = manager.allocate_blocks(3).unwrap();
         let immutables: Vec<ImmutableBlock<TestMeta>> = other_blocks
             .into_iter()
@@ -919,12 +919,7 @@ mod tests {
             .map(|(m, tb)| manager.register_block(m.complete(tb).unwrap()))
             .collect();
 
-        // These have different block_ids (from the pool), so they won't collide
-        // with staged. To force collision, clone an existing ImmutableBlock and
-        // use the staged block_id. We can't do that directly, but we can verify
-        // that `contains` correctly prevents the collision path.
-        //
-        // Instead, verify the non-collision case works:
+        // Different block_ids from the pool — no collision with staged
         let other_ids: Vec<BlockId> = immutables.iter().map(|b| b.block_id()).collect();
         assert!(ids.iter().all(|id| !other_ids.contains(id)));
         la.extend_assigned(immutables).unwrap();
@@ -933,7 +928,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extend_assigned_duplicate_in_unassigned() {
+    fn test_extend_assigned_disjoint_from_unassigned() {
+        // Verifies that extend_assigned succeeds when the new block_ids
+        // are disjoint from those already in unassigned (no collision).
         let manager = create_test_manager::<TestMeta>(10);
         let seq = create_sequence(3);
 
@@ -951,7 +948,7 @@ mod tests {
             .map(|(m, tb)| manager.register_block(m.complete(tb).unwrap()))
             .collect();
 
-        // Different block_ids from the pool, so no collision — just verify
+        // Different block_ids from the pool — no collision with unassigned
         let imm_ids: Vec<BlockId> = immutables.iter().map(|b| b.block_id()).collect();
         assert!(unassigned_ids.iter().all(|id| !imm_ids.contains(id)));
         la.extend_assigned(immutables).unwrap();
