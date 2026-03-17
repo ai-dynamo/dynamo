@@ -131,18 +131,6 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
-                    sharedMemory:
-                      description: SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod. When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
-                      properties:
-                        disabled:
-                          type: boolean
-                        size:
-                          anyOf:
-                            - type: integer
-                            - type: string
-                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                          x-kubernetes-int-or-string: true
-                      type: object
                     podTemplateSpec:
                       description: |-
                         PodTemplateSpec allows customizing the checkpoint Job pod
@@ -8166,6 +8154,20 @@ spec:
                           required:
                             - containers
                           type: object
+                      type: object
+                    sharedMemory:
+                      description: |-
+                        SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
+                        When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
+                      properties:
+                        disabled:
+                          type: boolean
+                        size:
+                          anyOf:
+                            - type: integer
+                            - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
                       type: object
                     ttlSecondsAfterFinished:
                       default: 300

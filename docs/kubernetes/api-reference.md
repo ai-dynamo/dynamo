@@ -264,7 +264,7 @@ _Appears in:_
 | `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed |  | Required: \{\} <br /> |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
 | `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 0 <br />Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | Deprecated: ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
@@ -1209,6 +1209,7 @@ _Appears in:_
 
 
 _Appears in:_
+- [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
