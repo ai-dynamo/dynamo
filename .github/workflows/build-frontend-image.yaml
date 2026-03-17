@@ -106,7 +106,7 @@ jobs:
         timeout-minutes: 20
         run: |
           set -x
-          EPP_REPOSITORY="${{ env.IMAGE_REGISTRY }}/dynamo-epp"
+          EPP_REPOSITORY="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
           EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
           EPP_IMAGE_TAG="${{ github.sha }}"
           EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
