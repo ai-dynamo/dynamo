@@ -765,11 +765,10 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
 mod tests {
     use super::*;
     use crate::kv_router::Indexer;
-    use crate::kv_router::RouterEvent;
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use std::collections::VecDeque;

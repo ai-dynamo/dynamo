@@ -1452,8 +1452,8 @@ mod test_event_processing {
 mod tests_startup_helpers {
     use super::*;
     use crate::kv_router::KvIndexer;
-    use crate::kv_router::indexer::KvIndexerInterface;
     use bytes::Bytes;
+    use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexerInterface};
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
     use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
@@ -1608,7 +1608,7 @@ mod tests_startup_helpers {
             // Try up to 20 times (200ms total)
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
-                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .send(GetWorkersRequest { resp: resp_tx })
                 .await
                 .unwrap();
             let workers: Vec<u64> = resp_rx.await.unwrap();
@@ -2014,7 +2014,7 @@ mod tests_startup_helpers {
         for _ in 0..20 {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
-                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .send(GetWorkersRequest { resp: resp_tx })
                 .await
                 .unwrap();
             let workers: Vec<u64> = resp_rx.await.unwrap();
