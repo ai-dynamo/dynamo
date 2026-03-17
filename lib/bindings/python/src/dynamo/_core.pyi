@@ -31,12 +31,8 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-class JsonLike:
-    """
-    Any PyObject which can be serialized to JSON
-    """
-
-    ...
+# Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
+JsonLike = Any
 
 RequestHandler = Callable[[JsonLike], AsyncGenerator[JsonLike, None]]
 

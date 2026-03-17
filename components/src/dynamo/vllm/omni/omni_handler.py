@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from diffusers.utils import export_to_video
@@ -121,8 +121,12 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request, request_type = parse_request_type(
+        parsed_request_raw, request_type = parse_request_type(
             request, self.config.output_modalities
+        )
+        parsed_request = cast(
+            Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
+            parsed_request_raw,
         )
 
         # Pre-load input image for I2V requests (async I/O before sync build)
@@ -227,10 +231,13 @@ class OmniHandler(BaseOmniHandler):
             EngineInputs ready for engine_client.generate().
         """
         if request_type == RequestType.CHAT_COMPLETION:
+            assert isinstance(parsed_request, dict)
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
+            assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
+            assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
 
         elif request_type == RequestType.AUDIO_GENERATION:

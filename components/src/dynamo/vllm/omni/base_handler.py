@@ -132,7 +132,7 @@ class BaseOmniHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Omni Request ID: {request_id}")
 
-        async for chunk in self._generate_openai_mode(request, context, request_id):  # type: ignore
+        async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
@@ -146,6 +146,8 @@ class BaseOmniHandler(BaseWorkerHandler):
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement _generate_openai_mode"
         )
+        # Make this a proper async generator so the return type is correct.
+        yield  # pragma: no cover
 
     def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
         """Extract text prompt from OpenAI messages format.

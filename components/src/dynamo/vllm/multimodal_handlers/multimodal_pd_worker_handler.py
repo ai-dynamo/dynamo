@@ -16,6 +16,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.embedding_transfer import (
+    AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
@@ -96,6 +97,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self._connector: connect.Connector | None = (
             None  # Will be initialized in async_init
         )
+        self.embedding_receiver: AbstractEmbeddingReceiver
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_receiver = LocalEmbeddingReceiver()
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
@@ -379,9 +381,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ) as decode_timer,
         ):
             num_output_tokens_so_far = 0
-            async for (
-                decode_response
-            ) in await self.decode_worker_client.round_robin(  # type: ignore
+            async for (decode_response) in await self.decode_worker_client.round_robin(
                 request.model_dump_json()
             ):
                 output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore

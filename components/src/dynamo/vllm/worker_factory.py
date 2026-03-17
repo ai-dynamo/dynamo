@@ -158,6 +158,7 @@ class WorkerFactory:
             logger.info("Connected to decode worker for disaggregated mode")
 
         # Choose handler based on worker type
+        handler: MultimodalDecodeWorkerHandler | MultimodalPDWorkerHandler
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
                 runtime,
@@ -185,7 +186,7 @@ class WorkerFactory:
             config, generate_endpoint, vllm_config
         )
         if kv_publisher:
-            handler.kv_publisher = kv_publisher
+            handler.kv_publisher = kv_publisher  # type: ignore[attr-defined]
 
         if not config.multimodal_decode_worker:
             model_type = parse_endpoint_types(config.endpoint_types)

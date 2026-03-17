@@ -299,6 +299,11 @@ explicit_package_bases = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
+# Skip type checking for test files.
+module = ["dynamo.*.tests.*", "dynamo.*.tests"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
 # Skip mypy analysis on backend framework internals.
 # ignore_missing_imports silences import-not-found only when the backend
 # is not installed (e.g. sglang/trtllm missing in the vllm container).
