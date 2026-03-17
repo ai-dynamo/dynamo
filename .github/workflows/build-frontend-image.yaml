@@ -106,15 +106,16 @@ jobs:
         timeout-minutes: 20
         run: |
           set -x
-          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
+          EPP_REPOSITORY="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
+          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
           EPP_IMAGE_TAG="${{ github.sha }}"
-          EPP_IMAGE_REF="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${EPP_IMAGE_TAG}"
+          EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
           echo "epp_image_ref=${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
           CACHE_ARGS=""
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache,mode=max "
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
           fi
 
           make -C deploy/inference-gateway/epp image-multiarch-push \

@@ -34,8 +34,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
-use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};

@@ -45,11 +45,11 @@ required-features = ["kv-router-stress"]
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true }
-dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
+dynamo-runtime = { workspace = true }
+dynamo-tokens = { workspace = true }
 
 # workspace
 aho-corasick = "1.1"

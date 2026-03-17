@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -21,7 +22,6 @@ use crate::{
         CacheControlClient, KvRouter,
         cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
-        protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
