@@ -120,6 +120,9 @@ def main():
         # conda / virtualenv layouts common in ML containers (e.g. /opt/conda)
         search_paths += glob.glob(f"{root}/opt/*/lib/python*/site-packages")
         search_paths += glob.glob(f"{root}/opt/*/lib/python*/dist-packages")
+        # virtualenv one level deeper (e.g. /opt/dynamo/venv/lib/python*/site-packages)
+        search_paths += glob.glob(f"{root}/opt/*/*/lib/python*/site-packages")
+        search_paths += glob.glob(f"{root}/opt/*/*/lib/python*/dist-packages")
         dists = importlib.metadata.distributions(path=search_paths)
     else:
         # Local mode: enumerate distributions in the running Python environment
