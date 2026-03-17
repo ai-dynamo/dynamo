@@ -31,6 +31,14 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
 
 const WATERMARK_UNSET: u64 = u64::MAX;
 
+fn gap_start(prev: u64, seq: u64) -> Option<u64> {
+    if prev == WATERMARK_UNSET {
+        return (seq > 0).then_some(0);
+    }
+
+    (seq > prev + 1).then_some(prev + 1)
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn replay_gap(
     replay_socket: &mut DealerSocket,
@@ -323,8 +331,7 @@ async fn zmq_recv_loop(
                 let seq = u64::from_be_bytes(seq_bytes[..8].try_into().expect("length checked above"));
 
                 let prev = watermark.load(Ordering::Acquire);
-                if prev != WATERMARK_UNSET && seq > prev + 1 {
-                    let gap_start = prev + 1;
+                if let Some(gap_start) = gap_start(prev, seq) {
                     tracing::warn!(
                         worker_id,
                         dp_rank,
