@@ -31,6 +31,29 @@ The local Docker workflow builds a runtime image from the [`Dockerfile`](https:/
 - Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
 - Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
 
+The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture:
+
+```bash
+# Blackwell (default)
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a"
+
+# Hopper
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
+```
+
+`MAX_JOBS` (default: `4`) controls parallel compilation jobs for flash-attention. Lower it if the build runs out of memory:
+
+```bash
+docker build examples/diffusers/ --build-arg MAX_JOBS=2
+```
+
+When using Docker Compose, set these as environment variables before running `docker compose up --build`:
+
+```bash
+# Hopper on a memory-constrained builder
+TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
+```
+
 > [!WARNING]
 > The first Docker image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS` in the Dockerfile to reduce parallel compile memory usage. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
 
@@ -242,7 +265,8 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| OOM during Docker build | `flash-attention` compilation uses too much RAM | Lower `MAX_JOBS` in the Dockerfile |
+| OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
+| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
 | 10–20 min wait on first start with optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
 | Lower throughput than expected on B200/B300 | FP4/compile and flash-attention are configured separately | Pass `--enable-optimizations` and, if desired, `--attention-backend FLASH_ATTN` |
