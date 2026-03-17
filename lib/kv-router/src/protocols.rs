@@ -133,9 +133,10 @@ impl WorkerWithDpRank {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageTier {
+    #[default]
     Device,
     HostPinned,
     Disk,
@@ -212,10 +213,11 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        if !self.placement.tier.is_gpu() {
-            return None;
-        }
-        Some(RouterEvent::new(worker.worker_id, self.event))
+        Some(RouterEvent::with_storage_tier(
+            worker.worker_id,
+            self.event,
+            self.placement.tier,
+        ))
     }
 }
 
@@ -598,6 +600,9 @@ pub enum KvCacheEventError {
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     pub worker_id: WorkerId,
+    /// The storage tier associated with the event.
+    #[serde(default)]
+    pub storage_tier: StorageTier,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
 }
@@ -614,7 +619,19 @@ impl RouterEvent {
     ///
     /// A new `RouterEvent`.
     pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
-        Self { worker_id, event }
+        Self::with_storage_tier(worker_id, event, StorageTier::Device)
+    }
+
+    pub fn with_storage_tier(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Self {
+        Self {
+            worker_id,
+            storage_tier,
+            event,
+        }
     }
 }
 

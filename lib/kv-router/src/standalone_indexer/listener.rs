@@ -110,7 +110,12 @@ async fn replay_gap(
                 WorkerWithDpRank::new(worker_id, effective_dp_rank),
                 warning_count,
             );
-            let router_event = RouterEvent::new(worker_id, placement_event.event);
+            if !placement_event.placement.is_local_gpu() {
+                continue;
+            }
+            let router_event = placement_event
+                .into_router_event()
+                .expect("local worker placement must convert to router event");
             indexer.apply_event(router_event).await;
         }
         watermark.store(seq, Ordering::Release);
@@ -386,7 +391,12 @@ async fn zmq_recv_loop(
                         WorkerWithDpRank::new(worker_id, effective_dp_rank),
                         &warning_count,
                     );
-                    let router_event = RouterEvent::new(worker_id, placement_event.event);
+                    if !placement_event.placement.is_local_gpu() {
+                        continue;
+                    }
+                    let router_event = placement_event
+                        .into_router_event()
+                        .expect("local worker placement must convert to router event");
                     indexer.apply_event(router_event).await;
                     messages_processed += 1;
                 }
