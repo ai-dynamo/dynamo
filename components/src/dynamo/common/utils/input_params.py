@@ -26,6 +26,10 @@ class InputParamManager:
                     extra_kwargs.update(request["chat_template_kwargs"])
                 if "chat_template_args" in request:
                     extra_kwargs.update(request["chat_template_args"])
+                # Strip keys that are already set explicitly to avoid
+                # TypeError: got multiple values for keyword argument.
+                for reserved in ("tokenize", "add_generation_prompt"):
+                    extra_kwargs.pop(reserved, None)
                 return self.tokenizer.apply_chat_template(
                     request["messages"],
                     tokenize=False,
