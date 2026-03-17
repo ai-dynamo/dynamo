@@ -24,7 +24,7 @@ Options:
                    (default: FastVideo/LTX2-Distilled-Diffusers)
   --num-gpus       Number of GPUs (default: 1)
   --enable-optimizations
-                   Enable FP4 quantization and torch.compile
+                   Enable FP4 quantization (if available) and torch.compile
   --attention-backend
                    Attention backend (default: TORCH_SDPA)
 
@@ -51,6 +51,7 @@ import tempfile
 import time
 import uuid
 
+import torch
 import uvloop
 from fastvideo import VideoGenerator
 from fastvideo.configs.pipelines.base import PipelineConfig
@@ -157,21 +158,30 @@ class FastVideoBackend:
             pipeline_config = PipelineConfig.from_pretrained(self.model_name)
             optimization_kwargs = {}
             if self.enable_optimizations:
-                logger.info(
-                    "Using FP4 quantization for VideoGenerator model=%s",
-                    self.model_name,
-                )
-                try:
-                    from fastvideo.layers.quantization.fp4_config import FP4Config
-                except ImportError as exc:
-                    raise RuntimeError(
-                        "FastVideo optimizations require "
-                        "fastvideo.layers.quantization.fp4_config, but this "
-                        "FastVideo build does not provide it. Re-run "
-                        "worker.py without --enable-optimizations or install a "
-                        "FastVideo version that includes fp4_config."
-                    ) from exc
-                pipeline_config.dit_config.quant_config = FP4Config()
+                major, minor = torch.cuda.get_device_capability()
+                if major < 10:
+                    logger.warning(
+                        "FP4 quantization is only supported on NVIDIA Blackwell GPUs (compute capability 10.0+). Detected compute capability: %d.%d. Continuing without FP4 optimizations.",
+                        major,
+                        minor,
+                    )
+                else:
+                    logger.info(
+                        "Using FP4 quantization for VideoGenerator model=%s",
+                        self.model_name,
+                    )
+                    try:
+                        from fastvideo.layers.quantization.fp4_config import FP4Config
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "FastVideo optimizations require "
+                            "fastvideo.layers.quantization.fp4_config, but this "
+                            "FastVideo build does not provide it. Re-run "
+                            "worker.py without --enable-optimizations or install a "
+                            "FastVideo version that includes fp4_config."
+                        ) from exc
+                    pipeline_config.dit_config.quant_config = FP4Config()
+
                 optimization_kwargs = {
                     "ltx2_refine_enabled": True,
                     "ltx2_refine_lora_path": "",  # disable refine lora for distilled model
@@ -424,7 +434,7 @@ def _parse_args() -> argparse.Namespace:
         "--enable-optimizations",
         action="store_true",
         dest="enable_optimizations",
-        help="Enable FP4 quantization and torch.compile",
+        help="Enable FP4 quantization (if available) and torch.compile",
     )
     parser.add_argument(
         "--attention-backend",
