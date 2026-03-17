@@ -15,12 +15,18 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
 };
+
+// How often we force expire stale requests across all workers. See the comment
+// in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
+// more details.
+const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -103,11 +109,11 @@ struct WorkerTable {
 }
 
 impl WorkerTable {
-    fn new(block_size: usize, dp_sizes: &HashMap<u64, u32>) -> Self {
+    fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
         let mut slots = Vec::new();
         let mut index = HashMap::new();
-        for (&worker_id, &dp_size) in dp_sizes {
-            for dp_rank in 0..dp_size {
+        for (&worker_id, &(dp_start, dp_size)) in dp_range {
+            for dp_rank in dp_start..dp_start + dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let idx = slots.len();
                 slots.push((worker, RwLock::new(ActiveSequences::new(block_size))));
@@ -149,7 +155,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn new(
         publisher: P,
         block_size: usize,
-        dp_sizes: HashMap<u64, u32>,
+        dp_range: HashMap<u64, (u32, u32)>,
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
@@ -157,7 +163,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(block_size > 1, "block_size must be greater than 1");
 
         Self {
-            workers: RwLock::new(WorkerTable::new(block_size, &dp_sizes)),
+            workers: RwLock::new(WorkerTable::new(block_size, &dp_range)),
             request_to_worker: DashMap::new(),
             request_to_lora: DashMap::new(),
             block_size,
@@ -274,15 +280,42 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
+    /// Register externally-provided workers (e.g. from EPP) in the slot tracker,
+    /// adding any that are missing.
+    ///
+    /// Unlike [`update_workers`], this does not remove workers absent from the
+    /// input — it only adds new ones.  This is intentional: the EPP may send
+    /// different subsets of workers on different requests, and one routing call
+    /// must not evict workers registered by another.
+    ///
+    /// Worker removal in External mode will be handled separately via GAIE
+    /// lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
+    pub fn register_external_workers(&self, dp_range: &HashMap<u64, (u32, u32)>) {
+        let mut table = self.workers.write();
+        for (&worker_id, &(dp_start, dp_size)) in dp_range {
+            for dp_rank in dp_start..(dp_start + dp_size) {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                if !table.index.contains_key(&worker) {
+                    tracing::debug!("Lazily registering external worker {:?}", worker);
+                    let idx = table.slots.len();
+                    table
+                        .slots
+                        .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
+                    table.index.insert(worker, idx);
+                }
+            }
+        }
+    }
+
     /// Update the set of workers, adding and removing as needed.
     ///
-    /// `new_dp_sizes` maps worker IDs to their data-parallel size.
-    pub fn update_workers(&self, new_dp_sizes: &HashMap<u64, u32>) {
+    /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
+    pub fn update_workers(&self, new_dp_range: &HashMap<u64, (u32, u32)>) {
         let mut table = self.workers.write();
 
         let mut target_workers: HashSet<WorkerWithDpRank> = HashSet::new();
-        for (&worker_id, &dp_size) in new_dp_sizes {
-            for dp_rank in 0..dp_size {
+        for (&worker_id, &(dp_start, dp_size)) in new_dp_range {
+            for dp_rank in dp_start..(dp_start + dp_size) {
                 target_workers.insert(WorkerWithDpRank::new(worker_id, dp_rank));
             }
         }
@@ -663,5 +696,63 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             *counts.entry(lora_name).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// Force expire stale requests across all workers (one-shot).
+    ///
+    /// This is necessary because worker expiration otherwise only runs as a side-effect
+    /// of `add_request`. If a worker has many expired active sequences and no new
+    /// requests are added, expiration never runs. This method forces it on all workers.
+    ///
+    /// To run this periodically, use start_periodic_force_expiry_across_all_workers.
+    pub fn force_expire_requests_across_all_workers(&self) {
+        let now = Instant::now();
+        let table = self.workers.read();
+        let mut removed_request_count = 0;
+        for (worker, lock) in &table.slots {
+            let removed_requests = lock.write().force_expiry();
+            if !removed_requests.is_empty() {
+                for expired_id in &removed_requests {
+                    self.request_to_worker.remove(expired_id);
+                    self.request_to_lora.remove(expired_id);
+                    removed_request_count += 1;
+                }
+                self.publish_active_load_for_worker(*worker);
+            }
+        }
+        let duration = now.elapsed();
+        tracing::debug!(
+            duration = duration.as_secs_f64(),
+            removed_request_count,
+            "Force expired stale requests across all workers"
+        );
+    }
+
+    /// Spawn a background task that calls `force_expire_requests_across_all_workers`
+    /// at the given interval until `cancel_token` is cancelled.
+    ///
+    /// **Concurrency note:** This type is always used as `Arc<ActiveSequencesMultiWorker>`. All
+    /// mutation is via interior mutability (`RwLock<WorkerTable>`, `DashMap`), so the periodic
+    /// task only needs `&self` and does not block other callers.
+    pub fn start_periodic_force_expiry_across_all_workers(
+        self: &Arc<Self>,
+        cancel_token: CancellationToken,
+    ) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut expiry_interval =
+                tokio::time::interval(FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL);
+            expiry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = expiry_interval.tick() => {
+                        this.force_expire_requests_across_all_workers();
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                }
+            }
+        });
     }
 }

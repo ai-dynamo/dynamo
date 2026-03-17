@@ -47,6 +47,8 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
+    get_profiling_job_tolerations,
+    inject_tolerations_into_dgd,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 
@@ -350,6 +352,24 @@ async def run_thorough(
             )
         logger.info(
             "Applied DGD overrides to %d prefill + %d decode candidates.",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
+
+    # Propagate profiling-job tolerations to candidate DGDs
+    job_tolerations = get_profiling_job_tolerations(dgdr)
+    if job_tolerations:
+        for candidate in prefill_candidates:
+            candidate.dgd_config = inject_tolerations_into_dgd(
+                candidate.dgd_config, job_tolerations
+            )
+        for candidate in decode_candidates:
+            candidate.dgd_config = inject_tolerations_into_dgd(
+                candidate.dgd_config, job_tolerations
+            )
+        logger.debug(
+            "Propagated %d profiling-job toleration(s) to %d prefill + %d decode candidates.",
+            len(job_tolerations),
             len(prefill_candidates),
             len(decode_candidates),
         )

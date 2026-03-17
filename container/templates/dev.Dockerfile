@@ -13,8 +13,8 @@
 #   pull those binaries/configs in via COPY.
 FROM runtime AS dynamo_tools
 
-ARG ARCH
-ARG ARCH_ALT
+ARG TARGETARCH
+ARG DEVICE
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/bin:${PATH}
@@ -28,6 +28,7 @@ SHELL ["/bin/bash", "-c"]
 # This stage only installs generic developer tools that are available from Ubuntu repos, so CUDA repos are unnecessary.
 #
 # We also add a small retry/backoff to make transient apt metadata issues less disruptive.
+# Estimated layer size: ~800MB–1.0GB (build-essential+clang ~500MB, the rest ~300MB)
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     set -eux; \
@@ -113,7 +114,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
 
-# Install awk separately with fault tolerance.
+# Install awk separately with fault tolerance (~2MB).
 # awk is a virtual package with multiple implementations (gawk, mawk, original-awk).
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -126,18 +127,35 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
 
 # Add NVIDIA devtools repository and install development tools (nsight-systems).
+# Estimated layer size: ~500MB–1.5GB (nsight-systems is a full profiling suite)
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" \
+    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" \
+    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH} /" \
         | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends nsight-systems-2025.5.1 && \
     rm -rf /var/lib/apt/lists/*
 
+# TODO: Add GitHub CLI (gh) for development. Estimated layer size: ~50MB
+
 # ======================================================================
 # TARGET: dev (root-based development)
+# ======================================================================
+#
+# USAGE: This dev image ships /workspace EMPTY. You MUST:
+#
+#   1) Bind-mount your Dynamo repo checkout into the container:
+#        docker run --gpus all -v /path/to/dynamo:/workspace ...
+#
+#   2) Build from source inside the container:
+#        cargo build --features dynamo-llm/block-manager
+#        cd /workspace/lib/bindings/python && maturin develop --uv
+#        uv pip install --no-deps -e /workspace
+#
+# The pre-built ai-dynamo / ai-dynamo-runtime wheels from the runtime
+# stage are uninstalled below to avoid conflicts with the source build.
 # ======================================================================
 FROM runtime AS dev
 
@@ -174,7 +192,7 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 # wheels, but dev stage needs it for maturin develop and cargo build from source.
 # - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
 # - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
-ARG ARCH_ALT
+ARG TARGETARCH
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
@@ -185,20 +203,21 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
             cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
             echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
-            # SGLang expects ARCH-qualified lib paths; mirror lib64 into lib/${ARCH_ALT}-linux-gnu for parity.
-            if [ -d /opt/nvidia/nvda_nixl/lib64 ]; then \
-                mkdir -p /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu; \
-                cp -r /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/; \
-            fi; \
         fi; \
     fi
 
-# All frameworks use the same path pattern: /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu
-# For vllm/trtllm/none: This resets the same values already set in runtime (no harm)
-# For sglang: This sets them for the first time (required)
+{% if device == "xpu" %}
+ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
+    NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
+    NIXL_PREFIX=/opt/intel/intel_nixl
+{% else %}
+# NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
+# All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
+# For vllm/trtllm/none: This resets the same values already set in runtime (no harm).
+# For sglang: This sets them for the first time (required).
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
@@ -213,6 +232,7 @@ ENV CUDA_HOME=/usr/local/cuda \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     TRITON_CUDART_PATH=/usr/local/cuda/include \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 
 # Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
@@ -260,7 +280,7 @@ ARG WORKSPACE_DIR=/workspace
 # Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
+    RUSTUP_HOME=/home/dynamo/.rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/workspace/target \
     VIRTUAL_ENV=/opt/dynamo/venv \
@@ -269,44 +289,37 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
 # Copy Rust/Cargo/Maturin from the concatenated framework stages.
 # - Rust/Cargo: from `wheel_builder` (already installed there)
 # - maturin: from `wheel_builder` venv (installed there via uv pip)
-COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/rustup /home/dynamo/.rustup
 COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/local/cargo
 COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/maturin /usr/local/bin/maturin
 
-# Provide an `uv` binary for SGLang venv creation below.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /tmp/uv-binary
-
-# Create venv for SGLang (vLLM/TensorRT-LLM/framework=none already have /opt/dynamo/venv from runtime)
-# - SGLang: Use --system-site-packages to inherit runtime packages, then copy user site-packages
-# - framework=none: Runtime already has venv with dynamo packages installed
-# Note: umask 002 from login shell ensures files are group-writable
-RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
-        mkdir -p /opt/dynamo/venv && \
-        python3 -m venv --system-site-packages /opt/dynamo/venv && \
-        # Copy all packages from runtime stage system site-packages into venv
-        # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
-        # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
-        cp -r --no-preserve=mode /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
-              /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/; \
-        # Ensure `uv` is available on PATH for subsequent `uv pip ...` steps.
-        cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
-        chmod +x /opt/dynamo/venv/bin/uv && \
-        # Install maturin into the base interpreter so we can build/repair wheels when needed.
-        pip install --ignore-installed maturin[patchelf]; \
-    elif [ "${FRAMEWORK}" = "none" ] && [ ! -d /opt/dynamo/venv ]; then \
+{% if framework == "sglang" %}
+# SGLang: Create venv with --system-site-packages to inherit runtime packages
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+RUN mkdir -p /opt/dynamo/venv && \
+    python3 -m venv --system-site-packages /opt/dynamo/venv && \
+    cp -r --no-preserve=mode /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
+          /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
+    cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
+    chmod +x /opt/dynamo/venv/bin/uv && \
+    pip install --ignore-installed maturin[patchelf]
+{% elif framework == "dynamo" %}
+# framework=none: Create venv if runtime stage didn't already provide one
+RUN if [ ! -d /opt/dynamo/venv ]; then \
         mkdir -p /opt/dynamo && \
         python3 -m venv /opt/dynamo/venv; \
     fi
+{% endif %}
 
 # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
 RUN git lfs install
 
-# Install common and test dependencies (matches main Dockerfile dev stage)
-# This installs pytest-benchmark and other test dependencies required for CI
-# TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
+# Install only the ADDITIONAL dev/test dependencies.
+# Runtime deps (common, framework, planner, benchmark) are already installed
+# in the parent runtime image — re-resolving them here would risk version drift.
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
@@ -314,7 +327,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.dev.txt \
         --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
@@ -323,42 +336,42 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 # Copy entire workspace (old design - simpler for CI)
 # .dockerignore filters out unwanted files (.git, build artifacts, etc.)
 WORKDIR ${WORKSPACE_DIR}
-COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
+# We don't actually need /workspace because for development, this must be mounted as a volume.
+#COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 
-RUN chmod g+w ${WORKSPACE_DIR}
+RUN mkdir -p ${WORKSPACE_DIR} && chmod g+w ${WORKSPACE_DIR}
 
-# Install benchmarks package (includes prefix_data_generator, tabulate, etc.)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    cd ${WORKSPACE_DIR}/benchmarks && \
-    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install .
+# Remove pre-built dynamo packages inherited from the runtime stage.
+# The dev image builds from source, so these would conflict with the editable installs.
+# NOTE: This does NOT reclaim disk space in the image (files still exist in lower layers).
+# Space is only recovered if the image is later squashed / compacted (e.g. docker-squash,
+# `docker build --squash`, or export/import).
+RUN uv pip uninstall ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
 
-# Install maturin and create editable install entry points.
-#
-# Why the `uv` check:
-# - This dev stage uses `uv` earlier (requirements + benchmarks). For SGLang, we also install an `uv` binary into
-#   /opt/dynamo/venv/bin and put that venv on PATH, so `uv` is expected to be available here in normal builds.
-# - The `command -v uv` guard is defensive: on SGLang, `uv` needs to "disappear" from PATH and we fall back to
-#   `python3 -m pip` so the editable install can still proceed (instead of failing mid-layer with a confusing error).
-# Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 PIP_CACHE_DIR=/root/.cache/pip && \
-    if [ -f pyproject.toml ]; then \
-        if command -v uv >/dev/null 2>&1; then \
-            uv pip install maturin[patchelf] && uv pip install --no-deps -e . ; \
-        else \
-            python3 -m pip install maturin[patchelf] && python3 -m pip install --no-deps -e . ; \
-        fi; \
+# Install maturin only (no editable install of the dynamo package).
+# /workspace is empty at build time — the repo is bind-mounted at container start, not COPYed.
+# `uv pip install -e .` would fail here because there is no pyproject.toml in /workspace yet.
+# The editable install must be done at runtime after the volume mount (e.g. `maturin develop`).
+RUN if command -v uv >/dev/null 2>&1; then \
+        uv pip install maturin[patchelf] ; \
     else \
-        echo "ERROR: pyproject.toml not found in ${WORKSPACE_DIR}; expected to build from the Dynamo repo root." >&2; \
-        exit 1; \
-    fi && \
-    chmod -R g+w /root/.cache /home/dynamo/.cache 2>/dev/null || true
+        python3 -m pip install maturin[patchelf] ; \
+    fi
 
 # Set commit SHA for tests (passed via docker build as --build-arg)
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
+# Setup dev launch banner (displayed on interactive shell entry)
+RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
+    chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+{% if device == "xpu" %}
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}

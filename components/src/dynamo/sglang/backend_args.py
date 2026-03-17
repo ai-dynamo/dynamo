@@ -3,6 +3,7 @@
 
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
+import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -17,7 +18,7 @@ class DynamoSGLangArgGroup(ArgGroup):
 
     name = "dynamo-sglang"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo SGLang arguments to parser."""
 
         parser.add_argument(
@@ -33,7 +34,10 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--use-sglang-tokenizer",
             env_var="DYN_SGL_USE_TOKENIZER",
             default=False,
-            help="Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
+            help="[Deprecated] Use SGLang's tokenizer for pre and post processing. "
+            "This option will be removed in a future release. Use "
+            "'--dyn-chat-processor sglang' on the frontend instead, which provides "
+            "the same SGLang-native pre/post processing with KV router support.",
         )
 
         add_negatable_bool_argument(

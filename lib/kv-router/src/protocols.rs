@@ -6,6 +6,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
+/// The event subject that workers publish KV cache events on.
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
+
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
@@ -96,6 +99,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
 pub trait WorkerConfigLike {
+    fn data_parallel_start_rank(&self) -> u32;
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
@@ -129,6 +133,94 @@ impl WorkerWithDpRank {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageTier {
+    #[default]
+    Device,
+    HostPinned,
+    Disk,
+    External,
+}
+
+impl StorageTier {
+    pub fn from_kv_medium(medium: &str) -> Option<Self> {
+        match medium {
+            "GPU" | "DEVICE" => Some(Self::Device),
+            "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
+            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
+            _ => None,
+        }
+    }
+
+    pub fn from_kv_medium_or_default(medium: Option<&str>) -> Self {
+        medium
+            .and_then(Self::from_kv_medium)
+            .unwrap_or(Self::Device)
+    }
+
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Self::Device)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PlacementOwner {
+    LocalWorker(WorkerWithDpRank),
+    Shared,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Placement {
+    pub owner: PlacementOwner,
+    pub tier: StorageTier,
+}
+
+impl Placement {
+    pub fn local_worker(worker_id: WorkerId, dp_rank: DpRank, tier: StorageTier) -> Self {
+        Self {
+            owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
+            tier,
+        }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, dp_rank: DpRank) -> Self {
+        Self::local_worker(worker_id, dp_rank, StorageTier::Device)
+    }
+
+    pub fn is_local_gpu(&self) -> bool {
+        matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_gpu()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlacementEvent {
+    pub placement: Placement,
+    pub event: KvCacheEvent,
+}
+
+impl PlacementEvent {
+    pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
+        Self { placement, event }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
+        Self::new(Placement::local_gpu(worker_id, event.dp_rank), event)
+    }
+
+    pub fn into_router_event(self) -> Option<RouterEvent> {
+        let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
+            return None;
+        };
+        Some(RouterEvent::with_storage_tier(
+            worker.worker_id,
+            self.event,
+            self.placement.tier,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterRequest {
@@ -139,7 +231,12 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     MarkPrefill,
-    MarkFree,
+    MarkFree {
+        // once request is cancelled, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 impl Default for RouterRequest {
@@ -503,6 +600,9 @@ pub enum KvCacheEventError {
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     pub worker_id: WorkerId,
+    /// The storage tier associated with the event.
+    #[serde(default)]
+    pub storage_tier: StorageTier,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
 }
@@ -519,7 +619,19 @@ impl RouterEvent {
     ///
     /// A new `RouterEvent`.
     pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
-        Self { worker_id, event }
+        Self::with_storage_tier(worker_id, event, StorageTier::Device)
+    }
+
+    pub fn with_storage_tier(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Self {
+        Self {
+            worker_id,
+            storage_tier,
+            event,
+        }
     }
 }
 
@@ -868,5 +980,36 @@ mod tests {
         assert_eq!(deserialized.block_hashes.len(), 2);
         assert_eq!(deserialized.block_hashes[0].0, 4);
         assert_eq!(deserialized.block_hashes[1].0, 5);
+    }
+
+    #[test]
+    fn test_router_request_mark_free_backwards_compatible_deserialization() {
+        let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
+
+        assert!(matches!(
+            request,
+            RouterRequest::MarkFree { request_id: None }
+        ));
+    }
+
+    #[test]
+    fn test_router_request_mark_free_serialization_with_request_id() {
+        let request = RouterRequest::MarkFree {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_free","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkFree {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
     }
 }

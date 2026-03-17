@@ -49,6 +49,13 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
+
+    /// Return the effective cache control for this request.
+    /// Default: delegates to `nvext.cache_control`. Implementations may override
+    /// to also check a top-level `cache_control` field (see `NvCreateChatCompletionRequest`).
+    fn effective_cache_control(&self) -> Option<&CacheControl> {
+        self.nvext().and_then(|ext| ext.cache_control.as_ref())
+    }
 }
 
 /// Worker ID information for disaggregated serving

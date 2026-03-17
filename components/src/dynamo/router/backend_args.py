@@ -3,6 +3,7 @@
 
 """Dynamo standalone router configuration ArgGroup."""
 
+import argparse
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -51,7 +52,7 @@ class DynamoRouterArgGroup(ArgGroup):
 
     name = "dynamo-router"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add router-owned arguments to parser."""
         g = parser.add_argument_group("Dynamo Router Options")
 

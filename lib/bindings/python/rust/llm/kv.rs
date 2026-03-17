@@ -3,6 +3,7 @@
 
 use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
@@ -10,13 +11,20 @@ use tokio_stream::StreamExt;
 
 use super::*;
 use crate::Endpoint;
-use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
+#[cfg(feature = "kv-indexer")]
+use clap::Parser;
+use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+use dynamo_kv_router::protocols::compute_block_hash_for_seq;
+use dynamo_kv_router::protocols::*;
+#[cfg(feature = "kv-indexer-runtime")]
+use dynamo_kv_router::standalone_indexer::RuntimeConfig;
+#[cfg(feature = "kv-indexer")]
+use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
-use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -26,24 +34,130 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
     depythonize(obj).map_err(to_pyerr)
 }
 
-#[pyfunction]
-#[pyo3(name = "start_kv_block_indexer", signature = (endpoint, block_size, kv_router_config))]
-pub fn start_kv_block_indexer_py<'p>(
-    py: Python<'p>,
-    endpoint: &Endpoint,
-    block_size: u32,
-    kv_router_config: &super::entrypoint::KvRouterConfig,
-) -> PyResult<Bound<'p, PyAny>> {
-    let component = endpoint.inner.component().clone();
-    let config = kv_router_config.inner();
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        llm_rs::kv_router::indexer_standalone::start_kv_block_indexer(
-            &component, &config, block_size,
+#[cfg(feature = "kv-indexer")]
+#[derive(Parser)]
+#[command(
+    name = "python -m dynamo.indexer",
+    about = "Standalone KV cache indexer"
+)]
+struct KvIndexerCli {
+    /// KV cache block size for initial workers registered via --workers
+    #[arg(long)]
+    block_size: Option<u32>,
+
+    /// HTTP server port
+    #[arg(long, default_value_t = 8090)]
+    port: u16,
+
+    /// Number of indexer threads (1 = single-threaded KvIndexer, >1 = ThreadPoolIndexer)
+    #[arg(long, default_value_t = 4)]
+    threads: usize,
+
+    /// Initial workers as "worker_id[:dp_rank]=zmq_address,..." (e.g. "1=tcp://host:5557,1:1=tcp://host:5558")
+    #[arg(long)]
+    workers: Option<String>,
+
+    /// Model name for initial workers registered via --workers
+    #[arg(long, default_value = "default")]
+    model_name: String,
+
+    /// Tenant ID for initial workers registered via --workers
+    #[arg(long, default_value = "default")]
+    tenant_id: String,
+
+    /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
+    #[arg(long)]
+    peers: Option<String>,
+
+    /// Enable Dynamo runtime integration (discovery, event plane, request plane).
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long)]
+    dynamo_runtime: bool,
+
+    /// Dynamo namespace to register the indexer component under.
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long, default_value = "default")]
+    namespace: String,
+
+    /// Component name for this indexer in the Dynamo runtime.
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long, default_value = "kv-indexer")]
+    component_name: String,
+
+    /// Component name that workers register under.
+    #[cfg(feature = "kv-indexer-runtime")]
+    #[arg(long, default_value = "backend")]
+    worker_component: String,
+}
+
+pub fn run_kv_indexer_cli<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    #[cfg(feature = "kv-indexer")]
+    {
+        let cli = KvIndexerCli::try_parse_from(
+            std::iter::once(OsString::from("python -m dynamo.indexer"))
+                .chain(args.into_iter().map(Into::into)),
+        )?;
+
+        #[cfg(feature = "kv-indexer-runtime")]
+        if cli.dynamo_runtime {
+            dynamo_runtime::logging::init();
+            let worker = dynamo_runtime::Worker::from_settings()?;
+            return worker.execute(move |runtime| {
+                standalone_indexer::run_with_runtime(
+                    runtime,
+                    IndexerConfig {
+                        block_size: cli.block_size,
+                        port: cli.port,
+                        threads: cli.threads,
+                        workers: cli.workers,
+                        model_name: cli.model_name,
+                        tenant_id: cli.tenant_id,
+                        peers: cli.peers,
+                    },
+                    RuntimeConfig {
+                        namespace: cli.namespace,
+                        component_name: cli.component_name,
+                        worker_component: cli.worker_component,
+                    },
+                )
+            });
+        }
+
+        init_standalone_logging();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(standalone_indexer::run_server(IndexerConfig {
+            block_size: cli.block_size,
+            port: cli.port,
+            threads: cli.threads,
+            workers: cli.workers,
+            model_name: cli.model_name,
+            tenant_id: cli.tenant_id,
+            peers: cli.peers,
+        }))
+    }
+
+    #[cfg(not(feature = "kv-indexer"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "dynamo.indexer is not available in this build; reinstall with --features kv-indexer"
         )
-        .await
-        .map_err(to_pyerr)?;
-        Ok(())
-    })
+    }
+}
+
+#[cfg(feature = "kv-indexer")]
+fn init_standalone_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
 }
 
 #[pyfunction]
@@ -144,12 +258,14 @@ impl KvEventPublisher {
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
     ///     zmq_topic: ZMQ topic filter (default "").
-    ///     batching_timeout_us: Maximum time (in **microseconds**) to accumulate
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
     ///         events into a single batch before flushing.
-    ///         ``None`` uses the default window of 10000 µs (10 ms).
-    ///         ``0`` disables batching: every event is published immediately.
+    ///         ``None`` disables batching: every event is published immediately.
+    ///         ``50`` to enable batching with a 50 ms window.
+    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_us=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -159,7 +275,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
-        batching_timeout_us: Option<u64>,
+        batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
         let _ = worker_id;
 
@@ -181,7 +297,7 @@ impl KvEventPublisher {
             source_config,
             enable_local_indexer,
             dp_rank,
-            batching_timeout_us,
+            batching_timeout_ms,
         )
         .map_err(to_pyerr)?;
 
@@ -274,7 +390,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: llm_rs::kv_router::protocols::OverlapScores,
+    inner: dynamo_kv_router::protocols::OverlapScores,
 }
 
 #[pymethods]
@@ -298,9 +414,9 @@ impl OverlapScores {
 #[derive(Debug)]
 enum RadixTreeRequest {
     FindMatches {
-        local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash>,
+        local_block_hashes: Vec<LocalBlockHash>,
         early_exit: bool,
-        response_tx: mpsc::SyncSender<llm_rs::kv_router::protocols::OverlapScores>,
+        response_tx: mpsc::SyncSender<dynamo_kv_router::protocols::OverlapScores>,
     },
     ApplyEvent {
         worker_id: WorkerId,
@@ -316,7 +432,7 @@ enum RadixTreeRequest {
         response_tx: mpsc::SyncSender<()>,
     },
     DumpTreeAsEvents {
-        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::protocols::RouterEvent>>,
+        response_tx: mpsc::SyncSender<Vec<RouterEvent>>,
     },
     Shutdown,
 }
@@ -339,7 +455,7 @@ impl RadixTree {
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
             let mut radix_tree =
-                llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+                dynamo_kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
 
             loop {
                 match request_rx.recv() {
@@ -370,12 +486,8 @@ impl RadixTree {
     ) -> PyResult<OverlapScores> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let local_block_hashes = py.allow_threads(|| {
-            sequence
-                .into_iter()
-                .map(llm_rs::kv_router::protocols::LocalBlockHash)
-                .collect()
-        });
+        let local_block_hashes =
+            py.allow_threads(|| sequence.into_iter().map(LocalBlockHash).collect());
 
         let request = RadixTreeRequest::FindMatches {
             local_block_hashes,
@@ -508,7 +620,7 @@ impl RadixTree {
 
 impl RadixTree {
     fn handle_request(
-        radix_tree: &mut llm_rs::kv_router::indexer::RadixTree,
+        radix_tree: &mut dynamo_kv_router::indexer::RadixTree,
         request: RadixTreeRequest,
     ) {
         match request {
@@ -525,15 +637,9 @@ impl RadixTree {
                 kv_cache_event_bytes,
                 response_tx,
             } => {
-                let result = match serde_json::from_slice::<
-                    llm_rs::kv_router::protocols::KvCacheEvent,
-                >(&kv_cache_event_bytes)
-                {
+                let result = match serde_json::from_slice::<KvCacheEvent>(&kv_cache_event_bytes) {
                     Ok(kv_cache_event) => {
-                        let router_event = llm_rs::kv_router::protocols::RouterEvent::new(
-                            worker_id,
-                            kv_cache_event,
-                        );
+                        let router_event = RouterEvent::new(worker_id, kv_cache_event);
                         match radix_tree.apply_event(router_event) {
                             Ok(_) => Ok(()),
                             Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -590,7 +696,7 @@ impl Drop for RadixTree {
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
-    kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
+    kv_router_config: Option<KvRouterConfig>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
@@ -609,12 +715,51 @@ async fn create_kv_router_from_endpoint(
     } else {
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
+
+    // Only query discovery for model_name when a remote indexer is configured,
+    // since model_name is only needed for the RemoteIndexer path.
+    let needs_model_name = kv_router_config
+        .as_ref()
+        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .unwrap_or(false);
+
+    let model_name = if needs_model_name {
+        let discovery = endpoint.inner.component().drt().discovery();
+        let instances = discovery
+            .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+            })
+            .await
+            .map_err(to_pyerr)?;
+
+        Some(
+            instances
+                .into_iter()
+                .find_map(|inst| {
+                    inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                        .ok()
+                        .map(|card| card.display_name)
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "no model card found in discovery for endpoint {}/{}/{}",
+                        endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+
     let kv_router = model_manager
         .kv_chooser_for(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
             worker_type,
+            model_name,
         )
         .await
         .map_err(to_pyerr)?;
@@ -810,7 +955,7 @@ impl KvRouter {
             OutputOptions::default()
         };
 
-        let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+        let router_config_override: Option<RouterConfigOverride> =
             if let Some(obj) = router_config_override {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
             } else {
@@ -914,7 +1059,7 @@ impl KvRouter {
         lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
-            let override_config: llm_rs::kv_router::RouterConfigOverride =
+            let override_config: RouterConfigOverride =
                 depythonize(obj.bind(py)).map_err(to_pyerr)?;
             Some(override_config)
         } else {
@@ -938,6 +1083,7 @@ impl KvRouter {
                     update_states,
                     lora_name,
                     0.0,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )
                 .await

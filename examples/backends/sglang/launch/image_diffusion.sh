@@ -6,15 +6,10 @@
 # GPUs: 1
 
 set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $FRONTEND_PID 2>/dev/null || true
-    wait $FRONTEND_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Defaults
 MODEL_PATH="black-forest-labs/FLUX.1-dev"
@@ -71,30 +66,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=========================================="
-echo "Launching Image Diffusion Worker"
-echo "=========================================="
-echo "Model:       $MODEL_PATH"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "FS URL:      $FS_URL"
-[ -n "$HTTP_URL" ] && echo "HTTP URL:    $HTTP_URL"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/images/generations \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"prompt\": \"A curious raccoon exploring a garden\","
-echo "      \"model\": \"${MODEL_PATH}\","
-echo "      \"size\": \"1024x1024\","
-echo "      \"response_format\": \"url\","
-echo "      \"nvext\": {"
-echo "        \"num_inference_steps\": 15"
-echo "      }"
-echo "    }'"
-echo ""
-echo "=========================================="
+EXTRA_INFO=("FS URL:      $FS_URL")
+[ -n "$HTTP_URL" ] && EXTRA_INFO+=("HTTP URL:    $HTTP_URL")
+print_launch_banner --no-curl "Launching Image Diffusion Worker" "$MODEL_PATH" "$HTTP_PORT" \
+    "${EXTRA_INFO[@]}"
+
+print_curl_footer <<CURL
+  curl http://localhost:${HTTP_PORT}/v1/images/generations \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "prompt": "${EXAMPLE_PROMPT_VISUAL}",
+      "model": "${MODEL_PATH}",
+      "size": "1024x1024",
+      "response_format": "url",
+      "nvext": {
+        "num_inference_steps": 15
+      }
+    }'
+CURL
 
 # Build optional HTTP URL arg
 HTTP_URL_ARGS=()
@@ -106,7 +95,6 @@ fi
 echo "Starting Dynamo Frontend on port $HTTP_PORT..."
 python3 -m dynamo.frontend \
     --http-port "$HTTP_PORT" &
-FRONTEND_PID=$!
 
 sleep 2
 
@@ -121,4 +109,7 @@ python3 -m dynamo.sglang \
     --trust-remote-code \
     --skip-tokenizer-init \
     --enable-metrics \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

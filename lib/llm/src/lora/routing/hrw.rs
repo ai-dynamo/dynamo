@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::LoraAllocator;
-use crate::kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 /// Rendezvous (HRW) hashing implementation for LoRA allocation
 pub struct RendezvousHasher;

@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::time::Instant;
 
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
+use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::selector::WorkerSelector;
 use super::types::{SchedulingRequest, SchedulingResponse};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -17,29 +19,27 @@ use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRe
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
-/// Entry in the priority queue, ordered by effective arrival time (lower = higher priority).
-/// Effective arrival = elapsed time since queue start minus `priority_jump`.
-struct QueueEntry {
-    effective_offset: Duration,
+/// Entry in the priority queue, ordered by key (higher key = higher priority).
+struct QueueEntry<K: Ord + Eq> {
+    key: K,
     request: SchedulingRequest,
 }
 
-impl Eq for QueueEntry {}
+impl<K: Ord + Eq> Eq for QueueEntry<K> {}
 
-impl PartialEq for QueueEntry {
+impl<K: Ord + Eq> PartialEq for QueueEntry<K> {
     fn eq(&self, other: &Self) -> bool {
-        self.effective_offset == other.effective_offset
+        self.key == other.key
     }
 }
 
-impl Ord for QueueEntry {
+impl<K: Ord + Eq> Ord for QueueEntry<K> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap; reverse so lower effective_offset = higher priority
-        other.effective_offset.cmp(&self.effective_offset)
+        self.key.cmp(&other.key)
     }
 }
 
-impl PartialOrd for QueueEntry {
+impl<K: Ord + Eq> PartialOrd for QueueEntry<K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -49,8 +49,15 @@ impl PartialOrd for QueueEntry {
 /// When all workers exceed `threshold_frac` utilisation the request is parked in `pending`.
 /// When capacity frees up (`update()`), pending requests are scheduled in priority order.
 /// If queueing is disabled (threshold_frac is None), requests are scheduled immediately.
-pub struct SchedulerQueue<P: SequencePublisher, C: WorkerConfigLike> {
-    pending: Mutex<BinaryHeap<QueueEntry>>,
+pub struct SchedulerQueue<
+    P: SequencePublisher,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy = FcfsPolicy,
+> {
+    pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
+    /// Number of requests currently parked in the pending queue.
+    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
+    pending_count: AtomicUsize,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
@@ -59,54 +66,83 @@ pub struct SchedulerQueue<P: SequencePublisher, C: WorkerConfigLike> {
     start_time: Instant,
     block_size: u32,
     selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+    policy: S,
 }
 
-impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
+impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
+    SchedulerQueue<P, C, S>
+{
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
         block_size: u32,
         selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+        policy: S,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
+            pending_count: AtomicUsize::new(0),
             slots,
             workers_with_configs,
             threshold_frac,
             start_time: Instant::now(),
             block_size,
             selector,
+            policy,
         }
     }
 
-    /// Build a QueueEntry for a request, computing its effective arrival offset.
-    fn make_entry(&self, request: SchedulingRequest) -> QueueEntry {
-        let arrival_offset = self.start_time.elapsed();
-        let jump = Duration::from_secs_f64(request.priority_jump.max(0.0));
-        let effective_offset = arrival_offset.saturating_sub(jump);
-        QueueEntry {
-            effective_offset,
-            request,
-        }
+    /// Register externally-provided workers in the slot tracker.
+    ///
+    /// Looks up DP rank/size from the discovery watch channel; defaults to
+    /// `(0, 1)` for workers not yet known to discovery.
+    pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
+        let discovery_workers = self.workers_with_configs.borrow();
+        let dp_range: std::collections::HashMap<u64, (u32, u32)> = worker_ids
+            .iter()
+            .map(|&id| {
+                let (dp_start, dp_size) = discovery_workers
+                    .get(&id)
+                    .map(|runtime_config| {
+                        (
+                            runtime_config.data_parallel_start_rank(),
+                            runtime_config.data_parallel_size(),
+                        )
+                    })
+                    .unwrap_or((0, 1));
+                (id, (dp_start, dp_size))
+            })
+            .collect();
+        self.slots.register_external_workers(&dp_range);
     }
 
     /// Enqueue a new request.
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
+    ///
+    /// When `allowed_worker_ids` is set on the request (external routing), the
+    /// capacity check is skipped.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request).await;
             return;
         };
 
-        if self.all_workers_busy(threshold) {
+        if request.allowed_worker_ids.is_some() {
+            self.schedule(request).await;
+            return;
+        }
+
+        if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref()) {
             tracing::debug!("all workers busy, queueing request");
-            let entry = self.make_entry(request);
-            self.pending.lock().await.push(entry);
+            let arrival_offset = self.start_time.elapsed();
+            let key = self.policy.enqueue_key(arrival_offset, &request);
+            self.pending.lock().await.push(QueueEntry { key, request });
+            self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         } else {
             self.schedule(request).await;
         }
@@ -120,13 +156,28 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
             return;
         };
 
+        if S::DYNAMIC {
+            let now = self.start_time.elapsed();
+            let mut heap = self.pending.lock().await;
+            let rekeyed: Vec<_> = std::mem::take(&mut *heap)
+                .into_vec()
+                .into_iter()
+                .map(|e| QueueEntry {
+                    key: self.policy.rekey(now, &e.key, &e.request),
+                    request: e.request,
+                })
+                .collect();
+            *heap = BinaryHeap::from(rekeyed);
+        }
+
         loop {
-            if self.all_workers_busy(threshold) {
+            if self.all_workers_busy(threshold, None) {
                 break;
             }
             let Some(entry) = self.pending.lock().await.pop() else {
                 break;
             };
+            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
             self.schedule(entry.request).await;
         }
@@ -179,7 +230,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
-                expected_output_tokens: None,
+                expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             })
@@ -189,19 +240,35 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
         }
     }
 
-    /// Check if all workers are busy based on threshold.
-    /// Returns true only if ALL workers exceed the threshold (no worker has capacity).
-    fn all_workers_busy(&self, threshold: f64) -> bool {
+    /// Number of requests currently parked in the pending queue (lock-free).
+    pub fn pending_count(&self) -> usize {
+        self.pending_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Check if all eligible workers are busy based on threshold.
+    /// When `allowed` is `Some`, only those worker IDs are considered;
+    /// otherwise all registered workers are checked.
+    /// Returns false when no eligible workers exist so the request falls
+    /// through to `schedule`, which returns a proper `NoEndpoints` error.
+    fn all_workers_busy(&self, threshold: f64, allowed: Option<&HashSet<WorkerId>>) -> bool {
         let active_tokens = self.slots.active_tokens();
         let configs = self.workers_with_configs.borrow();
 
+        let mut checked_any = false;
         for (&worker_id, config) in configs.iter() {
+            if let Some(ids) = allowed
+                && !ids.contains(&worker_id)
+            {
+                continue;
+            }
             let dp_size = config.data_parallel_size();
+            let dp_start_rank = config.data_parallel_start_rank();
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
 
-            for dp_rank in 0..dp_size {
+            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
+                checked_any = true;
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
                 if (tokens as f64) <= threshold * (max_batched as f64) {
@@ -209,7 +276,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
                 }
             }
         }
-        true
+        checked_any
     }
 }
 
@@ -235,11 +302,12 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let dp_sizes: HashMap<u64, u32> = (0..num_workers as u64).map(|id| (id, 1)).collect();
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             block_size as usize,
-            dp_sizes,
+            dp_range,
             false,
             0,
             "test",
@@ -258,13 +326,14 @@ mod tests {
         let (cfg_tx, cfg_rx) = watch::channel(configs);
         std::mem::forget(cfg_tx);
 
-        let selector = Box::new(DefaultWorkerSelector::default());
+        let selector = Box::new(DefaultWorkerSelector::new(None, "test"));
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
             block_size,
             selector,
+            FcfsPolicy,
         ));
 
         (queue, slots)
@@ -291,6 +360,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            expected_output_tokens: None,
             allowed_worker_ids: None,
             resp_tx: Some(tx),
         };
@@ -376,6 +446,57 @@ mod tests {
             }
         }
         assert_eq!(ok_count, num_requests, "not all requests were scheduled");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pending_count() {
+        let block_size = 16;
+        let isl = 512;
+        let num_workers = 1;
+
+        // threshold_frac=0.0 means any active tokens trigger queueing
+        let (queue, slots) = make_queue(num_workers, block_size, isl, Some(0.0));
+        assert_eq!(queue.pending_count(), 0);
+
+        // First request goes through (worker is idle)
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0); // scheduled immediately
+
+        // Second and third requests should be queued (worker is now busy)
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        let (req3, _rx3) = make_request("req-3", isl);
+        queue.enqueue(req3).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        // Free the first request and update — should drain one from pending
+        slots
+            .mark_prefill_completed(&"req-1".to_string())
+            .await
+            .unwrap();
+        slots.free(&"req-1".to_string()).await.unwrap();
+        queue.update().await;
+
+        // After update, one pending request should have been scheduled
+        assert!(
+            queue.pending_count() < 2,
+            "pending_count should decrease after free+update, got {}",
+            queue.pending_count()
+        );
+
+        // Free req-2 and update to drain remaining
+        let _ = slots.mark_prefill_completed(&"req-2".to_string()).await;
+        let _ = slots.free(&"req-2".to_string()).await;
+        queue.update().await;
+        let _ = slots.mark_prefill_completed(&"req-3".to_string()).await;
+        let _ = slots.free(&"req-3".to_string()).await;
+        queue.update().await;
+
+        assert_eq!(queue.pending_count(), 0, "all requests should be drained");
     }
 
     #[tokio::test]

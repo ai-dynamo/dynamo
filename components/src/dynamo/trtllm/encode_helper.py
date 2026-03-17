@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import threading
+from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
 
@@ -377,13 +378,13 @@ class EncodeHelper:
     @staticmethod
     async def process_encode_request(
         request: Dict[str, Any],
-        multimodal_processor,
+        multimodal_processor: Any,
         connector: Optional[nixl_connect.Connector],
-        tokenizer=None,
-        model_dir=None,
-        model_type=None,
-        engine=None,
-    ):
+        tokenizer: Any = None,
+        model_dir: Optional[str] = None,
+        model_type: Optional[str] = None,
+        engine: Any = None,
+    ) -> AsyncGenerator[dict, None]:
         """
         Process an ENCODE-mode request. Dispatches to the appropriate flow.
 
@@ -432,15 +433,22 @@ class EncodeHelper:
                     "error": "model_dir and model_type are required for full EPD encode"
                 }
                 return
-            if engine is None:
-                yield {"error": "No engine configured on encode worker for full EPD"}
+            if engine is None or not engine.encoder_available:
+                yield {
+                    "error": (
+                        "MultimodalEncoder is not available on this encode worker. "
+                        "The model architecture may not support standalone encoder "
+                        "in TRT-LLM. Use the embedding-path flow or run without "
+                        "disaggregated encode mode."
+                    )
+                }
                 return
             # Use token_ids from request (Rust preprocessor already applied
             # chat template and tokenized; token_ids then include image placeholder tokens
             # if the model's tokenizer_config chat template emits them).
             token_ids = request.get("token_ids")
             async for response in EncodeHelper._process_full_epd_flow(
-                token_ids,
+                token_ids,  # type: ignore
                 image_urls,
                 tokenizer,
                 model_dir,

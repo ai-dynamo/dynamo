@@ -100,12 +100,12 @@ where
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    tracing::debug!("TypedPrefixWatcher for prefix '{}' cancelled", prefix_str);
+                    tracing::debug!("TypedPrefixWatcher for prefix '{prefix_str}' cancelled");
                     break;
                 }
                 event = events_rx.recv() => {
                     let Some(event) = event else {
-                        tracing::debug!("TypedPrefixWatcher watch stream closed for prefix '{}'", prefix_str);
+                        tracing::debug!("TypedPrefixWatcher watch stream closed for prefix '{prefix_str}'");
                         break;
                     };
 
@@ -163,7 +163,7 @@ where
             }
         }
 
-        tracing::debug!("TypedPrefixWatcher for prefix '{}' stopped", prefix_str);
+        tracing::debug!("TypedPrefixWatcher for prefix '{prefix_str}' stopped");
     });
 
     Ok(TypedPrefixWatcher { rx: watch_rx })

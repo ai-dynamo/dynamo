@@ -71,6 +71,21 @@ pub mod name_prefix {
 
     /// Prefix for KV router metrics (used with router_id label)
     pub const ROUTER: &str = "dynamo_router";
+
+    /// Prefix for tokio runtime metrics
+    pub const TOKIO: &str = "dynamo_tokio";
+
+    /// Prefix for standalone KV indexer metrics
+    pub const KVINDEXER: &str = "dynamo_kvindexer";
+
+    /// Prefix for request-plane metrics at AddressedPushRouter
+    pub const REQUEST_PLANE: &str = "dynamo_request_plane";
+
+    /// Prefix for transport-layer metrics (TCP / NATS)
+    pub const TRANSPORT: &str = "dynamo_transport";
+
+    /// Prefix for work-handler transport breakdown metrics (backend side)
+    pub const WORK_HANDLER: &str = "dynamo_work_handler";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -229,6 +244,9 @@ pub mod frontend_service {
     pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
         "worker_last_inter_token_latency_seconds";
 
+    /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
+    pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -316,6 +334,12 @@ pub mod work_handler {
 
     /// Total number of errors in work handler processing
     pub const ERRORS_TOTAL: &str = "errors_total";
+
+    /// Network transit: frontend send to backend receive (wall-clock, cross-process)
+    pub const NETWORK_TRANSIT_SECONDS: &str = "network_transit_seconds";
+
+    /// Backend processing: handle_payload entry to first response sent
+    pub const TIME_TO_FIRST_RESPONSE_SECONDS: &str = "time_to_first_response_seconds";
 
     /// Label name for error type classification
     pub const ERROR_TYPE_LABEL: &str = "error_type";
@@ -475,10 +499,123 @@ pub mod router {
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
 }
 
-// KvRouter (including KvInexer) Prometheus metric names
+/// Frontend pipeline stage and event-loop metrics
+pub mod frontend_perf {
+    /// Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
+    pub const STAGE_DURATION_SECONDS: &str = "stage_duration_seconds";
+    /// Tokenization time in preprocessor
+    pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
+    /// Template application time in preprocessor
+    pub const TEMPLATE_SECONDS: &str = "template_seconds";
+    /// Per-token detokenization cost (microseconds)
+    pub const DETOKENIZE_PER_TOKEN_US: &str = "detokenize_per_token_us";
+    /// Event loop delay canary (sleep 10ms, measure drift)
+    pub const EVENT_LOOP_DELAY_SECONDS: &str = "event_loop_delay_seconds";
+    /// Count of event loop stalls (delay > 5ms)
+    pub const EVENT_LOOP_STALL_TOTAL: &str = "event_loop_stall_total";
+}
+
+/// Tokio runtime metrics
+pub mod tokio_perf {
+    pub const WORKER_MEAN_POLL_TIME_NS: &str = "worker_mean_poll_time_ns";
+    pub const GLOBAL_QUEUE_DEPTH: &str = "global_queue_depth";
+    pub const BUDGET_FORCED_YIELD_TOTAL: &str = "budget_forced_yield_total";
+    pub const WORKER_BUSY_RATIO: &str = "worker_busy_ratio";
+    pub const WORKER_PARK_COUNT_TOTAL: &str = "worker_park_count_total";
+    pub const WORKER_LOCAL_QUEUE_DEPTH: &str = "worker_local_queue_depth";
+    pub const WORKER_STEAL_COUNT_TOTAL: &str = "worker_steal_count_total";
+    pub const WORKER_OVERFLOW_COUNT_TOTAL: &str = "worker_overflow_count_total";
+    pub const BLOCKING_THREADS: &str = "blocking_threads";
+    pub const BLOCKING_IDLE_THREADS: &str = "blocking_idle_threads";
+    pub const BLOCKING_QUEUE_DEPTH: &str = "blocking_queue_depth";
+    pub const ALIVE_TASKS: &str = "alive_tasks";
+}
+
+/// Standalone KV indexer HTTP service metrics
+pub mod kvindexer {
+    /// HTTP request latency
+    pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
+
+    /// Total HTTP requests
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+
+    /// HTTP error responses (4xx/5xx)
+    pub const ERRORS_TOTAL: &str = "errors_total";
+
+    /// Number of active model+tenant indexers
+    pub const MODELS: &str = "models";
+
+    /// Number of registered worker instances
+    pub const WORKERS: &str = "workers";
+}
+
+/// Request plane metrics at AddressedPushRouter
+pub mod request_plane {
+    /// Time from generate() entry to send_request() (serialization + encoding)
+    pub const QUEUE_SECONDS: &str = "queue_seconds";
+    /// Time for send_request() to complete (frontend view: network + queue + ack)
+    pub const SEND_SECONDS: &str = "send_seconds";
+    /// Time from send_request() to first response item (transport roundtrip TTFT)
+    pub const ROUNDTRIP_TTFT_SECONDS: &str = "roundtrip_ttft_seconds";
+    /// Currently in-flight requests (gauge)
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+}
+
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const POOL_ACTIVE: &str = "tcp_pool_active";
+        pub const POOL_IDLE: &str = "tcp_pool_idle";
+        pub const BYTES_SENT_TOTAL: &str = "tcp_bytes_sent_total";
+        pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+        pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
+    }
+    pub mod nats {
+        pub const ERRORS_TOTAL: &str = "nats_errors_total";
+    }
+}
+
+// KvRouter (including KvIndexer) Prometheus metric names
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
+/// KV Publisher metrics
+pub mod kv_publisher {
+    /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
+    pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
+}
+
+/// Additional TRT-LLM worker metrics beyond what the engine natively provides.
+///
+/// These metrics are Python-only (registered via `prometheus_client`) and share the
+/// `trtllm_` prefix so they are captured by the same prefix filter as engine metrics.
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
+pub mod trtllm_additional {
+    /// Total number of aborted/cancelled requests
+    pub const NUM_ABORTED_REQUESTS_TOTAL: &str = "trtllm_num_aborted_requests_total";
+
+    /// Total number of requests containing image content
+    pub const REQUEST_TYPE_IMAGE_TOTAL: &str = "trtllm_request_type_image_total";
+
+    /// Total number of requests using guided/structured decoding
+    pub const REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL: &str =
+        "trtllm_request_type_structured_output_total";
+
+    /// Total number of successful KV cache transfers
+    pub const KV_TRANSFER_SUCCESS_TOTAL: &str = "trtllm_kv_transfer_success_total";
+
+    /// KV cache transfer latency per request in seconds
+    pub const KV_TRANSFER_LATENCY_SECONDS: &str = "trtllm_kv_transfer_latency_seconds";
+
+    /// KV cache transfer size per request in bytes
+    pub const KV_TRANSFER_BYTES: &str = "trtllm_kv_transfer_bytes";
+
+    /// KV cache transfer speed per request in GB/s
+    pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
 }
 
 // KV cache statistics metrics

@@ -86,7 +86,7 @@ impl DiscoveryDaemon {
                         notify_ep.notify_one();
                     }
                     Err(e) => {
-                        tracing::warn!("EndpointSlice reflector error: {}", e);
+                        tracing::warn!("EndpointSlice reflector error: {e}");
                         notify_ep.notify_one();
                     }
                 }
@@ -124,7 +124,7 @@ impl DiscoveryDaemon {
                         notify_cr.notify_one();
                     }
                     Err(e) => {
-                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {}", e);
+                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
                         notify_cr.notify_one();
                     }
                 }
@@ -164,7 +164,7 @@ impl DiscoveryDaemon {
                             sequence += 1;
                         }
                         Err(e) => {
-                            tracing::error!("Failed to aggregate snapshot: {}", e);
+                            tracing::error!("Failed to aggregate snapshot: {e}");
                             // Continue on errors - don't crash daemon
                         }
                     }
@@ -220,7 +220,7 @@ impl DiscoveryDaemon {
             // Deserialize the data field to DiscoveryMetadata
             match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
                 Ok(metadata) => {
-                    tracing::trace!("Loaded metadata from CR '{}'", cr_name);
+                    tracing::trace!("Loaded metadata from CR '{cr_name}'");
                     cr_map.insert(cr_name.clone(), (Arc::new(metadata), generation));
                 }
                 Err(e) => {

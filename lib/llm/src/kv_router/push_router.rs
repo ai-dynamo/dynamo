@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -21,7 +22,6 @@ use crate::{
         CacheControlClient, KvRouter,
         cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
-        protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -252,6 +252,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
+                    expected_output_tokens,
                     allowed_worker_ids,
                 )
                 .await?;
@@ -412,6 +413,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
+            tracker.record_router_queue_depth(self.chooser.pending_count());
             if let Some(hit_rate) = tracker.kv_hit_rate() {
                 request_metrics.kv_hit_rate.observe(hit_rate);
             }

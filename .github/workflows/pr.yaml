@@ -6,7 +6,6 @@ name: PR
 on:
   push:
     branches:
-      - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
@@ -18,12 +17,9 @@ on:
         default: false
 
 concurrency:
-    # The group name is a ternary operation. If the ref_name is 'main',
-    # then the group name uses the run_id to ensure a unique group for
-    # 'main' pushes. Otherwise, the group name is the ref_name, so that
-    # workflows on the same PR/branch have the same group name for cancelling.
-    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
+  group: docker-build-test-${{ github.ref_name }}
+  cancel-in-progress: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -156,13 +152,6 @@ jobs:
             "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
           )
 
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
-              "${ACR_IMAGE_BASE}:main-operator"
-            )
-          fi
-
           echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
@@ -191,72 +180,137 @@ jobs:
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
+    name: vllm
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
+      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
+      multi_gpu_test_markers: 'pre_merge and vllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
   # ============================================================================
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
+    name: sglang
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
+      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
+      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
   # ============================================================================
   # TRTLLM PIPELINE
   # ============================================================================
   trtllm-pipeline:
+    name: trtllm
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
+      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
+      multi_gpu_test_markers: 'pre_merge and trtllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # ============================================================================
+  # DEV PIPELINES
+  # ============================================================================
+  vllm-dev-pipeline:
+    name: vllm-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: false # Only push dev images on main
+      copy_to_acr: false
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  sglang-dev-pipeline:
+    name: sglang-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: false # Only push dev images on main
+      copy_to_acr: false
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  trtllm-dev-pipeline:
+    name: trtllm-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: false # Only push dev images on main
+      copy_to_acr: false
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+    secrets: inherit
 
    # ============================================================================
    # DEPLOYMENT JOBS
@@ -265,11 +319,10 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-small-v2
-    # Run when any deploy test will run: if core, any framework, or deploy files changed
+    # Run when any deploy test will run: if any framework or deploy files changed
     if: |
-      always() &&
-      (needs.changed-files.outputs.core == 'true' ||
-       needs.changed-files.outputs.vllm == 'true' ||
+      !cancelled() &&
+      (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
@@ -316,8 +369,13 @@ jobs:
    # End-to-end tests for each framework with various deployment profiles
    # ============================================================================
   deploy-test-vllm:
-    # Run if core, vllm, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # !cancelled() && !failure() is required because reusable workflows with skipped
+    # internal jobs (e.g. multi-gpu tests) propagate non-success through `needs`,
+    # auto-skipping dependents. See: https://github.com/orgs/community/discussions/189172
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.vllm-pipeline.result == 'success')
     runs-on: prod-default-small-v2
     needs: [changed-files, deploy-operator, vllm-pipeline]
     timeout-minutes: 25
@@ -349,13 +407,15 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
           platform_arch: amd64
 
   deploy-test-sglang:
     runs-on: prod-default-small-v2
-    # Run if core, sglang, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.sglang-pipeline.result == 'success')
     needs: [changed-files, deploy-operator, sglang-pipeline]
     timeout-minutes: 25
     permissions:
@@ -384,13 +444,15 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
           platform_arch: amd64
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
-    # Run if core, trtllm, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.trtllm-pipeline.result == 'success')
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     timeout-minutes: 25
     permissions:
@@ -423,7 +485,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
           platform_arch: amd64
 
   # ============================================================================

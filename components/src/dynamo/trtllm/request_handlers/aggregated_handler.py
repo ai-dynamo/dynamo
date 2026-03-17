@@ -4,6 +4,7 @@
 """Handler for aggregated (prefill + decode) mode with optional encoder disaggregation."""
 
 import logging
+from collections.abc import AsyncGenerator
 from typing import Optional
 
 from dynamo._core import Context
@@ -33,7 +34,9 @@ class AggregatedHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
         """Generate response, optionally using remote encoder for multimodal."""
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 

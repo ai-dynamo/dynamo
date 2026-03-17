@@ -21,6 +21,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -78,7 +79,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// GPUs/devices, and any runtime-specific resources.
 	Resources *Resources `json:"resources,omitempty"`
 	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-	// with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md
+	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
 	// for migration guidance. This field will be removed in a future API version.
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
@@ -130,6 +131,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Only applicable when ComponentType is "epp".
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
+
+	// FrontendSidecar configures an auto-generated frontend sidecar container.
+	// When specified, the operator injects a fully configured frontend container
+	// with all standard Dynamo environment variables, health probes, and ports.
+	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
+	// +optional
+	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
 
 	// Checkpoint configures container checkpointing for this service.
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
@@ -344,7 +352,11 @@ func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName st
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
+	// The dynamo namespace is used as the first segment of endpoint paths
+	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
+	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
+	sanitized := strings.ReplaceAll(dgdName, ".", "-")
+	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
 }
 
 // ModelReference identifies a model served by this component
@@ -356,6 +368,31 @@ type ModelReference struct {
 	// Revision is the model revision/version (optional)
 	// +optional
 	Revision string `json:"revision,omitempty"`
+}
+
+// FrontendSidecarSpec configures the auto-generated frontend sidecar container.
+// The operator uses these fields together with built-in frontend defaults (command, probes, ports,
+// and Dynamo env vars) to produce a fully configured sidecar container.
+type FrontendSidecarSpec struct {
+	// Image is the container image for the frontend sidecar.
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// Args overrides the default frontend arguments. When specified, these replace
+	// the default ["-m", "dynamo.frontend"] entirely.
+	// For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
+	// environment variables in the frontend sidecar container.
+	// +optional
+	EnvFromSecret *string `json:"envFromSecret,omitempty"`
+
+	// Envs defines additional environment variables for the frontend sidecar.
+	// These are merged with (and can override) the auto-generated Dynamo env vars.
+	// +optional
+	Envs []corev1.EnvVar `json:"envs,omitempty"`
 }
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.

@@ -28,7 +28,7 @@ class LogHandler(logging.Handler):
     Custom logging handler that sends log messages to the Rust env_logger
     """
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         """
         Emit a log record
         """
@@ -78,7 +78,7 @@ class VllmColorFormatter(logging.Formatter):
     _DIM = "\033[2m"
     _RESET = "\033[0m"
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
@@ -98,7 +98,7 @@ class VllmColorFormatter(logging.Formatter):
 
 
 # Configure the Python logger to use the NimLogHandler
-def configure_logger(service_name: str | None, worker_id: int | None):
+def configure_logger(service_name: str | None, worker_id: int | None) -> None:
     """
     Called once to configure the Python logger to use the LogHandler
     """
@@ -129,7 +129,7 @@ def construct_formatter_prefix(service_name: str | None, worker_id: int | None) 
 
 def configure_dynamo_logging(
     service_name: str | None = None, worker_id: int | None = None
-):
+) -> None:
     """
     A single place to configure logging for Dynamo.
     """
@@ -181,7 +181,7 @@ def log_level_mapping(level: str) -> int:
         return logging.INFO
 
 
-def configure_sglang_logging(dyn_level: int):
+def configure_sglang_logging(dyn_level: int) -> None:
     """
     SGLang allows us to create a custom logging config file
     """
@@ -213,7 +213,7 @@ def configure_sglang_logging(dyn_level: int):
         os.environ["SGLANG_LOGGING_CONFIG_PATH"] = f.name
 
 
-def configure_vllm_logging(dyn_level: int):
+def configure_vllm_logging(dyn_level: int) -> None:
     """
     Configure vLLM logging for the main process and subprocesses.
 

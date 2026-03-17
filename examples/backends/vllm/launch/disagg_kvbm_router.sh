@@ -10,6 +10,13 @@ export PYTHONHASHSEED=0
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+print_launch_banner "Launching Disaggregated + KVBM + KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT"
+
+
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
     --router-mode kv \
@@ -52,4 +59,7 @@ CUDA_VISIBLE_DEVICES=3 DYN_KVBM_CPU_CACHE_GB=20 \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

@@ -30,16 +30,17 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 
-TRTLLM_MM_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
-TRTLLM_MM_MODEL_TYPE = "qwen2_vl"
+TRTLLM_MM_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+TRTLLM_MM_MODEL_TYPE = "qwen3_vl"
 BLOCK_SIZE = 32
 NAMESPACE = "test-mm"
-# Broad guardrails for TRT-LLM + Qwen2-VL-2B under block size 32.
+# Broad guardrails for TRT-LLM + Qwen3-VL-2B under block size 32.
 THREE_IMAGE_TOTAL_BLOCKS_RANGE = (80, 520)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (20, 260)
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.pre_merge,
     pytest.mark.trtllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
@@ -301,6 +302,13 @@ def _send_request_get_overlap(
         timeout_s=120,
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
+
+    # Allow time for KV cache events to propagate from the TRT-LLM worker
+    # through the publisher to the router's indexer and radix tree.  Without
+    # this, the next request may be routed before newly cached blocks are
+    # visible, causing spurious 0-overlap results.
+    time.sleep(2)
+
     return overlap, total, segment
 
 
@@ -452,9 +460,11 @@ def test_trtllm_mm_overlap_repeated_two_identical_images(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req3"
     )
@@ -507,10 +517,17 @@ def test_trtllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
         f"1x={overlap_1}/{total_1}, 2x={overlap_2}/{total_2}.\n"
         f"Recent router logs:\n{segment_2[-4000:]}"
     )
-    assert abs(overlap_3 - overlap_2) <= 1, (
-        "Expected first 3-image request overlap to stay near 2-image overlap "
-        "(third-image suffix is cold on first 3-image request), got "
+    assert overlap_3 > overlap_2, (
+        "Expected overlap to increase from 2 images to 3 images, got "
         f"2x={overlap_2}/{total_2}, 3x={overlap_3}/{total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+
+    delta21 = overlap_2 - overlap_1
+    delta32 = overlap_3 - overlap_2
+    assert abs(delta32 - delta21) <= 4, (
+        "Expected similar overlap increment per additional identical image, got "
+        f"step(1->2)={delta21}, step(2->3)={delta32}.\n"
         f"Recent router logs:\n{segment_3[-4000:]}"
     )
 

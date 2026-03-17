@@ -1,15 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 
-use super::KvRouterConfig;
-use super::RouterConfigOverride;
 use super::WorkerSelector;
-use super::protocols::{OverlapScores, WorkerId};
+use super::metrics::ROUTER_QUEUE_METRICS;
 use super::queue::SchedulerQueue;
 use super::sequence::{
     ActiveSequencesMulti, SequenceError, SequenceRequest, create_multi_worker_sequences,
@@ -17,6 +16,10 @@ use super::sequence::{
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::{OverlapScores, WorkerId},
+};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use std::collections::{HashMap, HashSet};
@@ -42,10 +45,12 @@ impl KvScheduler {
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(None, worker_type)));
 
         // Get initial workers from watch receiver.
-        // Caller must ensure at least one worker is present (via wait_for).
+        // When skip_initial_worker_wait is false, the caller ensures at least one
+        // worker is present (via wait_for). When true the map may be empty;
+        // workers will be lazily registered via allowed_worker_ids per-request.
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
@@ -62,42 +67,61 @@ impl KvScheduler {
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Spawn background task to sync slots when the watch value changes.
-        let slots_monitor = slots.clone();
-        let mut monitor_rx = workers_with_configs.clone();
-        let monitor_cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+        //
+        // In EPP mode (skip_initial_worker_wait=true) we skip the monitoring task:
+        // the per-request allowed_worker_ids is the source of truth, workers are
+        // lazily registered via register_external_workers() from the C bindings,
+        // and update_workers() would impose discovery-based lifecycle (add/remove)
+        // on the slot tracker, conflicting with EPP ownership.
+        if kv_router_config.skip_initial_worker_wait {
+            tracing::info!("skipping discovery-based worker monitoring");
+        } else {
+            let slots_monitor = slots.clone();
+            let mut monitor_rx = workers_with_configs.clone();
+            let monitor_cancel_token = component.drt().child_token();
+            tokio::spawn(async move {
+                tracing::trace!("KvScheduler workers monitoring task started");
+                let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
-            loop {
-                tokio::select! {
-                    _ = monitor_cancel_token.cancelled() => {
-                        tracing::trace!("KvScheduler workers monitoring task shutting down");
-                        break;
-                    }
-                    result = monitor_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                loop {
+                    tokio::select! {
+                        _ = monitor_cancel_token.cancelled() => {
+                            tracing::trace!("KvScheduler workers monitoring task shutting down");
                             break;
                         }
+                        result = monitor_rx.changed() => {
+                            if result.is_err() {
+                                tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                                break;
+                            }
+                        }
+                    }
+
+                    let current_workers = monitor_rx.borrow_and_update().clone();
+
+                    if current_workers != last_workers {
+                        let dp_range: HashMap<u64, (u32, u32)> = current_workers
+                            .iter()
+                            .map(|(&id, c)| {
+                                (id, (c.data_parallel_start_rank, c.data_parallel_size))
+                            })
+                            .collect();
+                        slots_monitor.update_workers(&dp_range);
+                        last_workers = current_workers;
                     }
                 }
-
-                let current_workers = monitor_rx.borrow_and_update().clone();
-
-                if current_workers != last_workers {
-                    let dp_sizes: HashMap<u64, u32> = current_workers
-                        .iter()
-                        .map(|(&id, c)| (id, c.data_parallel_size))
-                        .collect();
-                    slots_monitor.update_workers(&dp_sizes);
-                    last_workers = current_workers;
-                }
-            }
-        });
+            });
+        }
 
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
+
+        let policy =
+            RouterSchedulingPolicy::new(kv_router_config.router_queue_policy, block_size as usize);
+        tracing::info!(
+            "Router queue policy: {}",
+            kv_router_config.router_queue_policy
+        );
 
         let queue = Arc::new(SchedulerQueue::new(
             slots.clone(),
@@ -105,6 +129,7 @@ impl KvScheduler {
             kv_router_config.router_queue_threshold,
             block_size,
             selector,
+            policy,
         ));
         let queue_clone = queue.clone();
 
@@ -127,9 +152,11 @@ impl KvScheduler {
                         };
                         tracing::trace!("received request to be scheduled");
                         queue_clone.enqueue(request).await;
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, queue_clone.pending_count());
                     }
                     _ = recheck_interval.tick() => {
                         queue_clone.update().await;
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, queue_clone.pending_count());
                     }
                 }
             }
@@ -144,7 +171,7 @@ impl KvScheduler {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
         maybe_request_id: Option<String>,
@@ -155,6 +182,7 @@ impl KvScheduler {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         #[cfg(feature = "bench")]
@@ -172,6 +200,7 @@ impl KvScheduler {
             update_states,
             lora_name,
             priority_jump,
+            expected_output_tokens,
             allowed_worker_ids,
             resp_tx: Some(resp_tx),
         };
@@ -201,6 +230,11 @@ impl KvScheduler {
         Ok(response)
     }
 
+    /// Register externally-provided workers in the slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        self.queue.register_workers(worker_ids);
+    }
+
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.slots.add_request(req).await
     }
@@ -210,13 +244,20 @@ impl KvScheduler {
             .mark_prefill_completed(&request_id.to_string())
             .await?;
         self.queue.update().await;
+        ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.queue.pending_count());
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await?;
         self.queue.update().await;
+        ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.queue.pending_count());
         Ok(())
+    }
+
+    /// Number of requests currently parked in the scheduler queue.
+    pub fn pending_count(&self) -> usize {
+        self.queue.pending_count()
     }
 
     /// Get the worker type for this scheduler ("prefill" or "decode").
