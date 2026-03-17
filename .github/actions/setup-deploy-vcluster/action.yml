@@ -81,7 +81,9 @@ runs:
         set -x
         vcluster create ${VCLUSTER_NAME} \
           --namespace ${NAMESPACE} \
-          --connect=false
+          --connect=false \
+          --set controlPlane.distro.k8s.enabled=true \
+          --set controlPlane.distro.k8s.version=v1.32.13
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
