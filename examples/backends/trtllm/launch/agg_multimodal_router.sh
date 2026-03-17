@@ -17,7 +17,6 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-2B-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-2B-Instruct"}
@@ -29,8 +28,7 @@ export BLOCK_SIZE=${BLOCK_SIZE:-32}
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Aggregated Multimodal + MM Router" "$MODEL_PATH" "$HTTP_PORT"
 
-# Start TRT-LLM worker with "__internal" suffix so frontend doesn't discover it directly.
-# The MM Router Worker will connect to it via the "trtllm" component endpoint.
+# TRT-LLM worker: "__internal" suffix hides it from frontend discovery.
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "${SERVED_MODEL_NAME}__internal" \
@@ -39,9 +37,7 @@ python3 -m dynamo.trtllm \
   --publish-events-and-metrics \
   --kv-block-size "$BLOCK_SIZE" &
 
-# Start MM Router Worker from workspace root (it's not an installed package).
-# Registers with the real model name so frontend discovers and routes to it.
-# Connects to downstream trtllm workers for KV-aware routing.
+# MM Router Worker: registers with the real model name; does KV-aware routing internally.
 (cd "$DYNAMO_HOME" && python3 -m examples.backends.trtllm.mm_router_worker \
   --model "$MODEL_PATH" \
   --model-type "$MODEL_TYPE" \
@@ -52,8 +48,7 @@ python3 -m dynamo.trtllm \
   --downstream-endpoint generate \
   --block-size "$BLOCK_SIZE") &
 
-# Start frontend
-python3 -m dynamo.frontend &
+# Frontend: round-robin to mm_router (KV routing happens inside mm_router, not here).
+python3 -m dynamo.frontend --router-mode round-robin &
 
-# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
