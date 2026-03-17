@@ -10,7 +10,8 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+from sglang.srt.utils import get_zmq_socket, maybe_wrap_ipv6_address
+from sglang.srt.utils.network import get_local_ip_auto
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
