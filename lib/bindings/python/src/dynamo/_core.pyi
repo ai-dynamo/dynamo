@@ -209,19 +209,35 @@ class Client:
         """
         ...
 
-    async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+    async def random(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick a random instance of the endpoint and issue the request
         """
         ...
 
-    async def round_robin(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+    async def round_robin(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick the next instance of the endpoint in a round-robin fashion
         """
         ...
 
-    async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
+    async def direct(
+            self,
+            request: JsonLike,
+            instance_id: int,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
         """

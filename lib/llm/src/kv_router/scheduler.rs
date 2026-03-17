@@ -47,7 +47,9 @@ impl KvScheduler {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(None, worker_type)));
 
         // Get initial workers from watch receiver.
-        // Caller must ensure at least one worker is present (via wait_for).
+        // When skip_initial_worker_wait is false, the caller ensures at least one
+        // worker is present (via wait_for). When true the map may be empty;
+        // workers will be lazily registered via allowed_worker_ids per-request.
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
@@ -64,39 +66,51 @@ impl KvScheduler {
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Spawn background task to sync slots when the watch value changes.
-        let slots_monitor = slots.clone();
-        let mut monitor_rx = workers_with_configs.clone();
-        let monitor_cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+        //
+        // In EPP mode (skip_initial_worker_wait=true) we skip the monitoring task:
+        // the per-request allowed_worker_ids is the source of truth, workers are
+        // lazily registered via register_external_workers() from the C bindings,
+        // and update_workers() would impose discovery-based lifecycle (add/remove)
+        // on the slot tracker, conflicting with EPP ownership.
+        if kv_router_config.skip_initial_worker_wait {
+            tracing::info!("skipping discovery-based worker monitoring");
+        } else {
+            let slots_monitor = slots.clone();
+            let mut monitor_rx = workers_with_configs.clone();
+            let monitor_cancel_token = component.drt().child_token();
+            tokio::spawn(async move {
+                tracing::trace!("KvScheduler workers monitoring task started");
+                let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
-            loop {
-                tokio::select! {
-                    _ = monitor_cancel_token.cancelled() => {
-                        tracing::trace!("KvScheduler workers monitoring task shutting down");
-                        break;
-                    }
-                    result = monitor_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                loop {
+                    tokio::select! {
+                        _ = monitor_cancel_token.cancelled() => {
+                            tracing::trace!("KvScheduler workers monitoring task shutting down");
                             break;
                         }
+                        result = monitor_rx.changed() => {
+                            if result.is_err() {
+                                tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                                break;
+                            }
+                        }
+                    }
+
+                    let current_workers = monitor_rx.borrow_and_update().clone();
+
+                    if current_workers != last_workers {
+                        let dp_range: HashMap<u64, (u32, u32)> = current_workers
+                            .iter()
+                            .map(|(&id, c)| {
+                                (id, (c.data_parallel_start_rank, c.data_parallel_size))
+                            })
+                            .collect();
+                        slots_monitor.update_workers(&dp_range);
+                        last_workers = current_workers;
                     }
                 }
-
-                let current_workers = monitor_rx.borrow_and_update().clone();
-
-                if current_workers != last_workers {
-                    let dp_range: HashMap<u64, (u32, u32)> = current_workers
-                        .iter()
-                        .map(|(&id, c)| (id, (c.data_parallel_start_rank, c.data_parallel_size)))
-                        .collect();
-                    slots_monitor.update_workers(&dp_range);
-                    last_workers = current_workers;
-                }
-            }
-        });
+            });
+        }
 
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
@@ -213,6 +227,11 @@ impl KvScheduler {
         );
 
         Ok(response)
+    }
+
+    /// Register externally-provided workers in the slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        self.queue.register_workers(worker_ids);
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {

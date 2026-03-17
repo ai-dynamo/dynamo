@@ -103,6 +103,8 @@ operator:
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
   - 'docs/kubernetes/api-reference.md'
+  - 'deploy/helm/charts/platform/**'
+  - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 deploy:
   - '!**/*.md'

@@ -299,7 +299,7 @@ class TestGenerateDisagg:
         decode_resp = MagicMock()
         decode_resp.data.return_value = decode_json
 
-        async def fake_round_robin(payload):
+        async def fake_round_robin(payload, context=None):
             async def _stream():
                 yield decode_resp
 
