@@ -22,6 +22,7 @@ mod block_proptest;
 
 pub(crate) use active::ActivePool;
 pub(crate) use inactive::InactivePool;
+pub use inactive::AllocatedBlocks;
 pub use inactive::InactivePoolBackend;
 pub(crate) use inactive::backends;
 pub use reset::FifoBlockAllocator;

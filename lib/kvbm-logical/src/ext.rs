@@ -15,6 +15,7 @@ pub use crate::SequenceHash;
 pub use crate::blocks::Block;
 pub use crate::blocks::state::{Registered, Reset};
 pub use crate::blocks::{BlockError, BlockMetadata};
+pub use crate::pools::AllocatedBlocks;
 pub use crate::pools::BlockAllocator;
 pub use crate::pools::FifoBlockAllocator;
 pub use crate::pools::InactivePoolBackend;

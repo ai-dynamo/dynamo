@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::metrics::BlockPoolMetrics;
 
+use crate::blocks::state::Reset;
 use super::{
     Block, BlockId, BlockMetadata, InactiveBlock, MutableBlock, PrimaryBlock, Registered,
     RegisteredBlock, SequenceHash, reset::ResetPool,
@@ -37,7 +38,7 @@ pub trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
         touch: bool,
     ) -> Vec<(SequenceHash, Block<T, Registered>)>;
 
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>>;
+    fn allocate(&mut self, count: usize) -> AllocatedBlocks<T>;
 
     fn insert(&mut self, block: Block<T, Registered>) -> bool;
 
@@ -54,7 +55,7 @@ pub trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     /// Allocate all blocks from the pool, removing them from the backend.
     /// Default implementation calls len() then allocate(), which is atomic
     /// since the caller holds the lock.
-    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+    fn allocate_all(&mut self) -> AllocatedBlocks<T> {
         let count = self.len();
         self.allocate(count)
     }
@@ -66,6 +67,20 @@ pub trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
         false
     }
 }
+
+/// Result type for [`InactivePoolBackend::allocate`].
+///
+/// Backends that manage blocks in `Registered` state return the [`Registered`](Self::Registered)
+/// variant. External backends (e.g. FlashCache) that operate on `Reset` blocks
+/// return the [`Reset`](Self::Reset) variant, skipping the `.reset()` call in
+/// [`InactivePool::allocate_blocks`].
+pub enum AllocatedBlocks<T: BlockMetadata> {
+    /// Blocks in Registered state -- InactivePool calls `.reset()` before wrapping in MutableBlock.
+    Registered(Vec<Block<T, Registered>>),
+    /// Blocks already in Reset state -- InactivePool wraps directly in MutableBlock.
+    Reset(Vec<Block<T, Reset>>),
+}
+
 use crate::blocks::{RegisteredReturnFn, ResetReturnFn};
 
 /// Pool for managing registered (immutable) blocks
@@ -207,29 +222,60 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             return None;
         }
 
-        let allocated_blocks = inner.backend.allocate(count);
+        let allocated = inner.backend.allocate(count);
 
-        if allocated_blocks.len() == count {
-            if let Some(ref m) = self.metrics {
-                for _ in 0..count {
-                    m.dec_inactive_pool_size();
+        match allocated {
+            AllocatedBlocks::Registered(registered_blocks) => {
+                if registered_blocks.len() == count {
+                    if let Some(ref m) = self.metrics {
+                        for _ in 0..count {
+                            m.dec_inactive_pool_size();
+                        }
+                    }
+                    let mutable_blocks: Vec<MutableBlock<T>> = registered_blocks
+                        .into_iter()
+                        .map(|registered_block| {
+                            let reset_block = registered_block.reset();
+                            MutableBlock::new(
+                                reset_block,
+                                self.reset_return_fn.clone(),
+                                self.metrics.clone(),
+                            )
+                        })
+                        .collect();
+                    Some(mutable_blocks)
+                } else {
+                    // Count mismatch — re-insert all blocks
+                    for block in registered_blocks {
+                        inner.backend.insert(block);
+                    }
+                    None
                 }
             }
-            let mut mutable_blocks = Vec::with_capacity(count);
-            mutable_blocks.extend(allocated_blocks.into_iter().map(|registered_block| {
-                let reset_block = registered_block.reset();
-                MutableBlock::new(
-                    reset_block,
-                    self.reset_return_fn.clone(),
-                    self.metrics.clone(),
-                )
-            }));
-            Some(mutable_blocks)
-        } else {
-            for block in allocated_blocks {
-                inner.backend.insert(block);
+            AllocatedBlocks::Reset(reset_blocks) => {
+                // Reset variant: blocks are already in Reset state, skip .reset()
+                // Note: In Phase 1, the only Reset backend (FlashCacheInactiveBackend) always
+                // returns empty vec, so this path returns Some(empty vec). The count == 0
+                // early return above handles the typical case. This arm exists for future
+                // backends that return non-empty Reset blocks.
+                let len = reset_blocks.len();
+                if let Some(ref m) = self.metrics {
+                    for _ in 0..len {
+                        m.dec_inactive_pool_size();
+                    }
+                }
+                let mutable_blocks: Vec<MutableBlock<T>> = reset_blocks
+                    .into_iter()
+                    .map(|reset_block| {
+                        MutableBlock::new(
+                            reset_block,
+                            self.reset_return_fn.clone(),
+                            self.metrics.clone(),
+                        )
+                    })
+                    .collect();
+                Some(mutable_blocks)
             }
-            None
         }
     }
 
@@ -285,24 +331,47 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// The MutableBlocks will return to the ResetPool when dropped via RAII.
     pub(crate) fn allocate_all_blocks(&self) -> Vec<MutableBlock<T>> {
         let mut inner = self.inner.write();
-        let blocks = inner.backend.allocate_all();
-        let count = blocks.len();
-        if let Some(ref m) = self.metrics {
-            for _ in 0..count {
-                m.dec_inactive_pool_size();
+        let allocated = inner.backend.allocate_all();
+
+        match allocated {
+            AllocatedBlocks::Registered(blocks) => {
+                let count = blocks.len();
+                if let Some(ref m) = self.metrics {
+                    for _ in 0..count {
+                        m.dec_inactive_pool_size();
+                    }
+                }
+                blocks
+                    .into_iter()
+                    .map(|registered_block| {
+                        let reset_block = registered_block.reset();
+                        MutableBlock::new(
+                            reset_block,
+                            self.reset_return_fn.clone(),
+                            self.metrics.clone(),
+                        )
+                    })
+                    .collect()
+            }
+            AllocatedBlocks::Reset(blocks) => {
+                let count = blocks.len();
+                if let Some(ref m) = self.metrics {
+                    for _ in 0..count {
+                        m.dec_inactive_pool_size();
+                    }
+                }
+                blocks
+                    .into_iter()
+                    .map(|reset_block| {
+                        MutableBlock::new(
+                            reset_block,
+                            self.reset_return_fn.clone(),
+                            self.metrics.clone(),
+                        )
+                    })
+                    .collect()
             }
         }
-        blocks
-            .into_iter()
-            .map(|registered_block| {
-                let reset_block = registered_block.reset();
-                MutableBlock::new(
-                    reset_block,
-                    self.reset_return_fn.clone(),
-                    self.metrics.clone(),
-                )
-            })
-            .collect()
     }
 }
 
