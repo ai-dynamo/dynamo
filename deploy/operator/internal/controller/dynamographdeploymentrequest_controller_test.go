@@ -2711,7 +2711,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, dgdr)).Should(Succeed())
 
 			// Call updateProfilingSubPhase
-			reconciler.updateProfilingSubPhase(ctx, dgdr)
+			Expect(reconciler.updateProfilingSubPhase(ctx, dgdr)).Should(Succeed())
 
 			// Verify in-memory status was updated
 			Expect(dgdr.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseSweepingPrefill))
@@ -2761,7 +2761,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, dgdr)).Should(Succeed())
 
 			// Call updateProfilingSubPhase — should not change anything
-			reconciler.updateProfilingSubPhase(ctx, dgdr)
+			Expect(reconciler.updateProfilingSubPhase(ctx, dgdr)).Should(Succeed())
 
 			// ProfilingPhase should remain Initializing
 			Expect(dgdr.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseInitializing))
@@ -2819,7 +2819,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, dgdr)).Should(Succeed())
 
 			// Call updateProfilingSubPhase — should not update since phase hasn't changed
-			reconciler.updateProfilingSubPhase(ctx, dgdr)
+			Expect(reconciler.updateProfilingSubPhase(ctx, dgdr)).Should(Succeed())
 
 			// Should still be SweepingPrefill
 			Expect(dgdr.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseSweepingPrefill))
