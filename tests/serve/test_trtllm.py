@@ -200,7 +200,7 @@ trtllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
-        delayed_start=120,
+        delayed_start=60,
         request_payloads=[
             multimodal_payload_default(
                 text="Describe what you see in this image.",
