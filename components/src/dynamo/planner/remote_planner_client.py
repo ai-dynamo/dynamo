@@ -103,7 +103,7 @@ class RemotePlannerClient:
         # calling any dynamo endpoint, regardless of its registered name)
         request_json = request.model_dump_json()
         assert self._client is not None
-        stream = await self._client.generate(request_json)  # type: ignore[arg-type]
+        stream = await self._client.generate(request_json)
 
         response_data = None
         async for output in stream:
@@ -114,7 +114,7 @@ class RemotePlannerClient:
             raise RuntimeError("No response from centralized planner")
 
         # Parse response
-        response = ScaleResponse(**response_data)  # type: ignore[arg-type]
+        response = ScaleResponse(**response_data)
         logger.info(f"Scale request response: {response.status} - {response.message}")
 
         return response

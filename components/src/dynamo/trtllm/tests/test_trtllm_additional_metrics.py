@@ -19,7 +19,7 @@ try:
 except ImportError:
     # handler_base imports torch which requires CUDA libraries at import time;
     # gracefully skip on CPU-only CI runners.
-    HandlerBase = None  # type: ignore[misc, assignment]
+    HandlerBase = None
 
 
 class TestAdditionalMetricsCollector(unittest.TestCase):
@@ -50,7 +50,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
                 if buckets is not None:
                     kwargs["buckets"] = buckets
                 return Histogram(
-                    name, documentation, labelnames=labelnames or [], **kwargs  # type: ignore[arg-type]
+                    name, documentation, labelnames=labelnames or [], **kwargs
                 )
 
             MockCounter.side_effect = make_counter
@@ -192,7 +192,7 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
                 isinstance(e, (ast.Constant, ast.Str)) for e in node.elts
             ):
                 vals = {
-                    e.value if isinstance(e, ast.Constant) else e.s for e in node.elts  # type: ignore[attr-defined]
+                    e.value if isinstance(e, ast.Constant) else e.s for e in node.elts
                 }
                 if "json_object" in vals:  # identify the right tuple
                     detection_keys = vals
@@ -220,7 +220,7 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
         )
 
         # Detection should cover all canonical keys
-        missing = canonical_keys - detection_keys  # type: ignore[operator]
+        missing = canonical_keys - detection_keys
         self.assertFalse(
             missing,
             f"Keys in GuidedDecodingParams but not in metrics detection: {missing}",

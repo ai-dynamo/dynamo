@@ -48,7 +48,7 @@ async def init_embedding(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate,  # type: ignore[arg-type]
+                handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,

@@ -131,9 +131,6 @@ def run_sla_planner_dryrun(
         est_isl.append(_est_isl)
         est_osl.append(_est_osl)
 
-        if _est_rr is None or _est_isl is None or _est_osl is None:
-            continue
-
         _num_p = (
             prefill_planner._compute_replica_requirements(_est_rr, _est_isl, _est_osl)
             if prefill_planner is not None

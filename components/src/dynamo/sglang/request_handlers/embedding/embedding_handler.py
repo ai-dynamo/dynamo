@@ -31,7 +31,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         self.engine.shutdown()
         logging.info("Engine shutdown")
 
-    async def generate(  # type: ignore[override]
+    async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """

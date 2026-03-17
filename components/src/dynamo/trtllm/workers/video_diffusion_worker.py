@@ -62,7 +62,6 @@ async def init_video_diffusion_worker(
     )
 
     # Build DiffusionConfig from the main Config
-    assert config.endpoint is not None
     diffusion_config = DiffusionConfig(
         namespace=config.namespace,
         component=config.component,
@@ -154,7 +153,7 @@ async def init_video_diffusion_worker(
     # Serve the endpoint
     try:
         await endpoint.serve_endpoint(
-            handler.generate,  # type: ignore[arg-type]
+            handler.generate,
             graceful_shutdown=True,
         )
     except asyncio.CancelledError:

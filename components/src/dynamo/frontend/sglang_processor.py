@@ -233,7 +233,7 @@ class SglangProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
         if self.debug_perf:
-            from .perf_instrumentation import (  # type: ignore[import-untyped]
+            from .perf_instrumentation import (  # type: ignore[import-not-found]
                 enter_generator,
                 exit_generator,
             )
@@ -324,8 +324,6 @@ class SglangProcessor:
 
         # --- Phase 1: Preprocess (semaphore held) ---
         try:
-            assert self._worker_semaphore is not None
-            assert self.preprocess_pool is not None
             async with self._worker_semaphore:
                 future = self.preprocess_pool.submit(
                     _preprocess_worker,
@@ -556,7 +554,7 @@ class SglangEngineFactory:
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
-            router = await generate_endpoint.client(  # type: ignore[assignment]
+            router = await generate_endpoint.client(
                 router_mode=self.router_config.router_mode
             )
 

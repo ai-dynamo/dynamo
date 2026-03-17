@@ -293,7 +293,6 @@ class TestConvertTools:
             }
         ]
         result = convert_tools(tools)
-        assert result is not None
         assert len(result) == 1
         assert result[0].function.name == "get_weather"
         assert result[0].type == "function"
@@ -310,7 +309,6 @@ class TestConvertTools:
             },
         ]
         result = convert_tools(tools)
-        assert result is not None
         assert len(result) == 2
         assert result[0].function.name == "f1"
         assert result[1].function.name == "f2"
@@ -331,7 +329,7 @@ class TestConvertTools:
             }
         ]
         result = convert_tools(tools)
-        dumped = result[0].model_dump()  # type: ignore[index]
+        dumped = result[0].model_dump()
         assert dumped["function"]["name"] == "search"
         assert "properties" in dumped["function"]["parameters"]
 

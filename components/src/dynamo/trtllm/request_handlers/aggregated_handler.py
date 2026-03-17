@@ -62,6 +62,6 @@ class AggregatedHandler(HandlerBase):
                     ep_disaggregated_params = result
 
         async for res in self.generate_locally(
-            request, context, embeddings, ep_disaggregated_params  # type: ignore[arg-type]
+            request, context, embeddings, ep_disaggregated_params
         ):
             yield res

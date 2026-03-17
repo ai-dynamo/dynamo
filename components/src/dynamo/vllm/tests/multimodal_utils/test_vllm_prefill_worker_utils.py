@@ -46,7 +46,7 @@ class TestLoadMultimodalEmbeddings:
                 AsyncMock(),
                 [url],
                 "req-1",
-                None,  # type: ignore[arg-type]
+                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
                 cache=cache,
@@ -77,7 +77,7 @@ class TestLoadMultimodalEmbeddings:
                 AsyncMock(),
                 [url],
                 "req-1",
-                None,  # type: ignore[arg-type]
+                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
                 cache=cache,
@@ -111,7 +111,7 @@ class TestLoadMultimodalEmbeddings:
                 AsyncMock(),
                 [url],
                 "req-1",
-                None,  # type: ignore[arg-type]
+                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
                 cache=None,
@@ -149,7 +149,7 @@ class TestLoadMultimodalEmbeddings:
                 AsyncMock(),
                 [url_cached, url_miss],
                 "req-1",
-                None,  # type: ignore[arg-type]
+                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
                 cache=cache,

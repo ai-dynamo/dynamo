@@ -13,7 +13,7 @@ from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import DisaggregationMode
 from .multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
@@ -167,7 +167,7 @@ class WorkerFactory:
                 generate_endpoint=generate_endpoint,
             )
         else:
-            handler = MultimodalPDWorkerHandler(  # type: ignore[assignment]
+            handler = MultimodalPDWorkerHandler(
                 runtime,
                 engine_client,
                 config,
@@ -185,7 +185,7 @@ class WorkerFactory:
             config, generate_endpoint, vllm_config
         )
         if kv_publisher:
-            handler.kv_publisher = kv_publisher  # type: ignore[attr-defined]
+            handler.kv_publisher = kv_publisher
 
         if not config.multimodal_decode_worker:
             model_type = parse_endpoint_types(config.endpoint_types)
@@ -205,7 +205,7 @@ class WorkerFactory:
         try:
             serve_tasks = [
                 generate_endpoint.serve_endpoint(
-                    handler.generate,  # type: ignore[arg-type]
+                    handler.generate,
                     metrics_labels=metrics_labels,
                 ),
                 clear_endpoint.serve_endpoint(
@@ -252,7 +252,6 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint]
 
-        assert isinstance(config.embedding_transfer_mode, EmbeddingTransferMode)
         handler = EncodeWorkerHandler(
             config.engine_args, config.embedding_transfer_mode
         )

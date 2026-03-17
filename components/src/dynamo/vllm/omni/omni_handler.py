@@ -13,7 +13,6 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union
 import PIL.Image
 from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
-from pydantic import BaseModel
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.multimodal import ImageLoader
@@ -99,7 +98,7 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
 
-    async def generate(  # type: ignore[override]
+    async def generate(
         self, request: Dict[str, Any], context
     ) -> AsyncGenerator[Dict, None]:
         """Generate outputs via the unified OpenAI mode.
@@ -117,7 +116,7 @@ class OmniHandler(BaseOmniHandler):
         async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
-    async def _generate_openai_mode(  # type: ignore[override]
+    async def _generate_openai_mode(
         self, request: Dict[str, Any], context, request_id: str
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
@@ -210,7 +209,9 @@ class OmniHandler(BaseOmniHandler):
 
     def build_engine_inputs(
         self,
-        parsed_request: Union[BaseModel, Dict[str, Any]],
+        parsed_request: Union[
+            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+        ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
     ) -> EngineInputs:
@@ -226,13 +227,10 @@ class OmniHandler(BaseOmniHandler):
             EngineInputs ready for engine_client.generate().
         """
         if request_type == RequestType.CHAT_COMPLETION:
-            assert isinstance(parsed_request, dict)
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
-            assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
-            assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
 
         elif request_type == RequestType.AUDIO_GENERATION:

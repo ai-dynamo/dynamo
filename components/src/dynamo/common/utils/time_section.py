@@ -32,8 +32,8 @@ class Timer:
 
     def __init__(
         self,
-        interval_func: Callable[[float], None] | None = None,
-        stop_func: Callable[[float], None] | None = None,
+        interval_func: Callable[[float], None] = None,
+        stop_func: Callable[[float], None] = None,
     ):
         """Initialize the Timer and start timing immediately.
 

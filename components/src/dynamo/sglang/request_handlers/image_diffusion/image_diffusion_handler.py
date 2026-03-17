@@ -66,7 +66,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         logger.info("Image diffusion generator cleanup complete")
         super().cleanup()
 
-    async def generate(  # type: ignore[override]
+    async def generate(
         self, request: dict[str, Any], context: Context
     ) -> AsyncGenerator[dict[str, Any], None]:
         """

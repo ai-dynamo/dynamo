@@ -148,11 +148,11 @@ class GlobalRouterHandler:
 
         # Forward request to local router and stream back responses
         try:
-            stream = await client.generate(request)  # type: ignore[arg-type]
+            stream = await client.generate(request)
             async for output in stream:
                 # Extract data from stream response object
                 data = output.data() if hasattr(output, "data") else output
-                yield data  # type: ignore[misc]
+                yield data
         except Exception as e:
             logger.error(f"Error forwarding prefill request to {namespace}: {e}")
             raise
@@ -196,11 +196,11 @@ class GlobalRouterHandler:
 
         # Forward request to local router and stream back responses
         try:
-            stream = await client.generate(request)  # type: ignore[arg-type]
+            stream = await client.generate(request)
             async for output in stream:
                 # Extract data from stream response object
                 data = output.data() if hasattr(output, "data") else output
-                yield data  # type: ignore[misc]
+                yield data
         except Exception as e:
             logger.error(f"Error forwarding decode request to {namespace}: {e}")
             raise

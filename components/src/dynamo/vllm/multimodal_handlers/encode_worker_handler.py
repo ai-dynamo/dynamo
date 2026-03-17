@@ -88,9 +88,9 @@ class EncodeWorkerHandler:
         if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_sender = LocalEmbeddingSender()
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_sender = NixlWriteEmbeddingSender()  # type: ignore[assignment]
+            self.embedding_sender = NixlWriteEmbeddingSender()
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
-            self.embedding_sender = NixlReadEmbeddingSender()  # type: ignore[assignment]
+            self.embedding_sender = NixlReadEmbeddingSender()
         else:
             raise ValueError(
                 f"Invalid embedding transfer mode: {embedding_transfer_mode}"
@@ -152,16 +152,15 @@ class EncodeWorkerHandler:
 
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
-                assert request.multimodal_inputs is not None
                 need_encode_indexes = []
                 embedding_lists: list[EmbeddingItem | None] = [None] * len(
                     request.multimodal_inputs
                 )
                 for idx in range(len(request.multimodal_inputs)):
-                    if not request.multimodal_inputs[idx].multimodal_input.image_url:  # type: ignore[index, union-attr]
+                    if not request.multimodal_inputs[idx].multimodal_input.image_url:
                         raise ValueError("image_url is required for the encode worker.")
 
-                    image_url = request.multimodal_inputs[  # type: ignore[index, union-attr]
+                    image_url = request.multimodal_inputs[
                         idx
                     ].multimodal_input.image_url
                     # see if we have local cache
@@ -190,7 +189,7 @@ class EncodeWorkerHandler:
                 image_tasks = []
                 image_to_load = []
                 for idx, _ in need_encode_indexes:
-                    url = request.multimodal_inputs[idx].multimodal_input.image_url  # type: ignore[index, union-attr]
+                    url = request.multimodal_inputs[idx].multimodal_input.image_url
                     image_tasks.append(
                         asyncio.create_task(self.image_loader.load_image(url))
                     )
@@ -202,11 +201,13 @@ class EncodeWorkerHandler:
                     if isinstance(result, Exception):
                         url = image_to_load[i]
                         logger.error(
-                            f"Failed to load image from {url[:80]}...: {result}"  # type: ignore[index]
+                            f"Failed to load image from {url[:80]}...: {result}"
                         )
-                        collective_exceptions += f"Failed to load image from {url[:80]}...: {result}\n"  # type: ignore[index]
+                        collective_exceptions += (
+                            f"Failed to load image from {url[:80]}...: {result}\n"
+                        )
                         continue
-                    loaded_images.append(result)  # type: ignore[index]
+                    loaded_images.append(result)
                 if collective_exceptions:
                     raise ValueError(
                         f"Errors occurred during image loading:\n{collective_exceptions}"
@@ -304,14 +305,14 @@ class EncodeWorkerHandler:
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
                     # Update request for transfer metadata
-                    request.multimodal_inputs[idx].multimodal_input.image_url = None  # type: ignore[index, union-attr]
-                    request.multimodal_inputs[  # type: ignore[index]
+                    request.multimodal_inputs[idx].multimodal_input.image_url = None
+                    request.multimodal_inputs[
                         idx
                     ].image_grid_thw = embedding_item.image_grid_thw
-                    request.multimodal_inputs[idx].embeddings_shape = tuple(  # type: ignore[index, assignment]
+                    request.multimodal_inputs[idx].embeddings_shape = tuple(
                         embedding_item.embeddings.shape
                     )
-                    request.multimodal_inputs[  # type: ignore[index]
+                    request.multimodal_inputs[
                         idx
                     ].serialized_request = transfer_request[0]
 

@@ -32,10 +32,10 @@ def _stub_sglang_io_struct(monkeypatch):
         def __init__(self, tags=None):
             self.tags = tags
 
-    io_struct.PauseGenerationReqInput = _Req  # type: ignore[attr-defined]
-    io_struct.ReleaseMemoryOccupationReqInput = _Req  # type: ignore[attr-defined]
-    io_struct.ResumeMemoryOccupationReqInput = _Req  # type: ignore[attr-defined]
-    io_struct.ContinueGenerationReqInput = _Req  # type: ignore[attr-defined]
+    io_struct.PauseGenerationReqInput = _Req
+    io_struct.ReleaseMemoryOccupationReqInput = _Req
+    io_struct.ResumeMemoryOccupationReqInput = _Req
+    io_struct.ContinueGenerationReqInput = _Req
 
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
 

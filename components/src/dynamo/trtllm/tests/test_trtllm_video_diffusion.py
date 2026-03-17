@@ -200,7 +200,7 @@ class TestVideHandlerParseSize:
 
         # Create handler with mocked dependencies
         self.handler = object.__new__(VideoGenerationHandler)
-        self.handler.config = MockDiffusionConfig()  # type: ignore[assignment]
+        self.handler.config = MockDiffusionConfig()
 
     def test_parse_size_valid(self):
         """Test valid 'WxH' string parsing."""
@@ -279,7 +279,7 @@ class TestVideoHandlerComputeNumFrames:
         )
 
         self.handler = object.__new__(VideoGenerationHandler)
-        self.handler.config = MockDiffusionConfig()  # type: ignore[assignment]
+        self.handler.config = MockDiffusionConfig()
 
     def test_compute_num_frames_explicit(self):
         """Test that explicit num_frames takes priority."""
@@ -377,12 +377,12 @@ class TestNvCreateVideoRequest:
         assert req.seconds == 5
         assert req.size == "1920x1080"
         assert req.response_format == "b64_json"
-        assert req.nvext.fps == 30  # type: ignore[union-attr]
-        assert req.nvext.num_frames == 150  # type: ignore[union-attr]
-        assert req.nvext.num_inference_steps == 30  # type: ignore[union-attr]
-        assert req.nvext.guidance_scale == 7.5  # type: ignore[union-attr]
-        assert req.nvext.negative_prompt == "blurry, low quality"  # type: ignore[union-attr]
-        assert req.nvext.seed == 42  # type: ignore[union-attr]
+        assert req.nvext.fps == 30
+        assert req.nvext.num_frames == 150
+        assert req.nvext.num_inference_steps == 30
+        assert req.nvext.guidance_scale == 7.5
+        assert req.nvext.negative_prompt == "blurry, low quality"
+        assert req.nvext.seed == 42
 
 
 class TestVideoData:

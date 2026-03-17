@@ -1106,7 +1106,7 @@ async def init_omni(
 
     try:
         await generate_endpoint.serve_endpoint(
-            handler.generate,  # type: ignore[arg-type]
+            handler.generate,
             graceful_shutdown=True,
             metrics_labels=[
                 (

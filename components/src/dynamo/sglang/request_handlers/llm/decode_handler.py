@@ -89,7 +89,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    async def generate(  # type: ignore[override]
+    async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate response in aggregated or disaggregated mode.
@@ -255,7 +255,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         routed_experts.numpy().tobytes()
                     ).decode("utf-8")
                     # Internal transport field consumed by frontend nvext mapping.
-                    out["disaggregated_params"] = {"routed_experts": routed_experts}  # type: ignore[assignment]
+                    out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]
@@ -263,7 +263,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {  # type: ignore[assignment]
+                    out["completion_usage"] = {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": input_tokens + completion_tokens,

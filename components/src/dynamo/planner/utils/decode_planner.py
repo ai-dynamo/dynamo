@@ -97,7 +97,7 @@ class DecodePlanner(BasePlanner):
             / self.config.throughput_adjustment_interval,
             context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
         )
-        self.d_correction_factor = self.last_metrics.itl / expect_itl  # type: ignore[operator]
+        self.d_correction_factor = self.last_metrics.itl / expect_itl
         logger.info(f"Correction factor (decode ITL): {self.d_correction_factor:.3f}")
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
             self.prometheus_metrics.d_correction_factor.set(self.d_correction_factor)
@@ -130,14 +130,14 @@ class DecodePlanner(BasePlanner):
             next_num_req * next_osl / self.config.throughput_adjustment_interval
         )
         next_num_d = math.ceil(
-            pred_decode_throughput  # type: ignore[operator]
+            pred_decode_throughput
             / pred_decode_thpt_per_gpu
             / self.config.decode_engine_num_gpu
         )
         next_num_d = max(next_num_d, self.config.min_endpoint)
         logger.info(
             f"Decode calculation: {pred_decode_throughput:.2f}(d_thpt) / "
-            f"{pred_decode_thpt_per_gpu * self.config.decode_engine_num_gpu:.2f}(d_engine_cap) = "  # type: ignore[operator]
+            f"{pred_decode_thpt_per_gpu * self.config.decode_engine_num_gpu:.2f}(d_engine_cap) = "
             f"{next_num_d}(num_d)"
         )
         return next_num_d

@@ -21,7 +21,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher = None,  # type: ignore[assignment]
+        publisher: DynamoSglangPublisher = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
@@ -52,7 +52,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
                 f"{engine.tokenizer_manager.server_args.dllm_algorithm}"
             )
 
-    async def generate(  # type: ignore[override]
+    async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate response using diffusion LM.

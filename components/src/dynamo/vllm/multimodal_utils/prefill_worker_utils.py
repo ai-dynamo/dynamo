@@ -201,14 +201,10 @@ async def _fetch_from_encode_workers(
     with time_and_log_code_section(
         f"[PREFILL] request: {request_id} receive embeddings"
     ):
-        tasks = []
-        for group in multimodal_groups:
-            assert group.serialized_request is not None
-            tasks.append(
-                asyncio.create_task(
-                    receiver.receive_embeddings(group.serialized_request)
-                )
-            )
+        tasks = [
+            asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
+            for group in multimodal_groups
+        ]
         loaded = await asyncio.gather(*tasks)
 
     is_local = isinstance(receiver, LocalEmbeddingReceiver)

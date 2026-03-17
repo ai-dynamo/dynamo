@@ -80,7 +80,7 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_trtllm_cli):
 
     config = parse_args()
 
-    assert "$JINJA_DIR" not in config.custom_jinja_template  # type: ignore[operator]
+    assert "$JINJA_DIR" not in config.custom_jinja_template
     assert config.custom_jinja_template == JINJA_TEMPLATE_PATH, (
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.custom_jinja_template}"

@@ -65,7 +65,7 @@ class RequestHandlerConfig:
 
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
-    publisher: Optional[Publisher]
+    publisher: Publisher
     disaggregation_mode: DisaggregationMode
     encode_client: Optional[object] = None
     multimodal_processor: Optional[
@@ -558,7 +558,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # PREFILL/ENCODE/AGGREGATED: Process multimodal content if available
         if self.multimodal_processor:
-            processed_input = await self.multimodal_processor.process_openai_request(  # type: ignore[assignment]
+            processed_input = await self.multimodal_processor.process_openai_request(
                 request, embeddings, ep_disaggregated_params
             )
             if processed_input:
@@ -776,7 +776,7 @@ class HandlerBase(BaseGenerativeHandler):
         # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
         if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
-            adapters = create_trtllm_adapters(processors)  # type: ignore[arg-type]
+            adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
 
         prefill_result = request.get("prefill_result")

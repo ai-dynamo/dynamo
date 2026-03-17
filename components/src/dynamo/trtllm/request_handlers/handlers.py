@@ -112,7 +112,7 @@ class PrefillHandler(HandlerBase):
         """
         # Get response with shape info and readable metadata
         encode_response = None
-        async for res in await self.encode_client.round_robin(request):  # type: ignore[attr-defined]
+        async for res in await self.encode_client.round_robin(request):
             encode_response = res.data()
             break
 
@@ -120,7 +120,6 @@ class PrefillHandler(HandlerBase):
             raise RuntimeError("Did not receive a response from the encode worker.")
 
         # Use utility function to handle NIXL reading and reconstruction
-        assert self.connector is not None
         return await EncodeHelper.read_embeddings_from_encode_response(
             encode_response, self.connector
         )

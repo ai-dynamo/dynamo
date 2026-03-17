@@ -22,7 +22,6 @@ from typing import Awaitable, Callable, Dict, Optional
 import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
-    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 
@@ -76,10 +75,7 @@ class AsyncEncoderCache:
         Returns:
             Cached tensor or None if not found.
         """
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached.tensor
-        return None
+        return self._cache.get(key)
 
     async def get_or_compute(
         self,
@@ -106,7 +102,7 @@ class AsyncEncoderCache:
         # Check cache first
         cached = self._cache.get(key)
         if cached is not None:
-            return cached.tensor
+            return cached
 
         # Wait if already in-flight
         if key in self._in_flight:
@@ -119,7 +115,7 @@ class AsyncEncoderCache:
         self._in_flight[key] = future
         try:
             tensor = await compute_fn()
-            self._cache.set(key, CachedEmbedding(tensor=tensor))
+            self._cache.set(key, tensor)
             future.set_result(tensor)
             return tensor
         except Exception as e:
