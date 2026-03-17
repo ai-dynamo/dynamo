@@ -93,10 +93,10 @@ python -m dynamo.frontend --http-port 8000 &
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-build_gpu_mem_args vllm "$MODEL_NAME"
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME")
 
 CUDA_VISIBLE_DEVICES=0 python3 components/audio_encode_worker.py --model $MODEL_NAME &
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill "${GPU_MEM_ARGS[@]}" &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
 
 # Wait for all background processes to complete
 wait

@@ -5,7 +5,6 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
@@ -83,19 +82,19 @@ EXTRA_ARGS=""
 export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
+# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
+# In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    build_gpu_mem_args vllm "$MODEL_NAME" --workers-per-gpu 2 --default-frac 0.4
-    DYN_ENCODE_GPU_MEM="${GPU_MEM_FRACTION}"
-    DYN_PD_GPU_MEM="${GPU_MEM_FRACTION}"
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
+    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
-    build_gpu_mem_args vllm "$MODEL_NAME" --default-frac 0.9
-    DYN_ENCODE_GPU_MEM="${GPU_MEM_FRACTION}"
-    DYN_PD_GPU_MEM="${GPU_MEM_FRACTION}"
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
+    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
 fi
 
 # Start encode worker

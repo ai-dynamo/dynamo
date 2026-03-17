@@ -26,7 +26,7 @@ MODEL="Qwen/Qwen3-0.6B"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
 
-build_gpu_mem_args sglang "$MODEL" "$CONTEXT_LENGTH" "$MAX_RUNNING_REQUESTS" --workers-per-gpu 2
+GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --max-model-len "$CONTEXT_LENGTH" --max-num-seqs "$MAX_RUNNING_REQUESTS" --workers-per-gpu 2)
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 

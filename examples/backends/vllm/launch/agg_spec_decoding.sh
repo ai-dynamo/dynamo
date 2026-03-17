@@ -22,7 +22,7 @@ python -m dynamo.frontend --http-port="$HTTP_PORT" &
 # 2. Speculative Main Worker
 # ---------------------------
 # This runs the main model with EAGLE as the draft model for speculative decoding
-build_gpu_mem_args vllm "$MODEL" --default-frac 0.8
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --default-frac 0.8)
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
@@ -34,7 +34,7 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
         "num_speculative_tokens": 2,
         "method": "eagle3"
     }' \
-    "${GPU_MEM_ARGS[@]}" &
+    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

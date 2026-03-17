@@ -26,7 +26,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-build_gpu_mem_args vllm "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2)
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
