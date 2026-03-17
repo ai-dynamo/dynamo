@@ -331,6 +331,7 @@ jobs:
     outputs:
       NAMESPACE: ${{ steps.namespace.outputs.namespace }}
       OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
+      VCLUSTER_NAME: ${{ steps.vcluster-name.outputs.name }}
     steps:
     - uses: actions/checkout@v4
     - name: Determine operator tag
@@ -349,18 +350,22 @@ jobs:
         BRANCH: ${{ github.ref_name }}
       run: |
         # Sanitize branch name for k8s namespace
-        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
         BRANCH_SANITIZED="${BRANCH//\//-}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
         NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
-    - name: Setup namespace and operator
-      uses: ./.github/actions/setup-deploy-namespace
+    - name: Generate vCluster name
+      id: vcluster-name
+      run: |
+        echo "name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+    - name: Setup vCluster and operator
+      uses: ./.github/actions/setup-deploy-vcluster
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        namespace: ${{ steps.namespace.outputs.namespace }}
+        vcluster_name: ${{ steps.vcluster-name.outputs.name }}
+        vcluster_namespace: ${{ steps.namespace.outputs.namespace }}
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         operator_tag: ${{ steps.operator-tag.outputs.tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
@@ -396,12 +401,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -433,12 +445,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -474,12 +493,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -522,9 +548,10 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Teardown namespace
+    - name: Teardown vCluster
       if: needs.deploy-operator.outputs.NAMESPACE != ''
-      uses: ./.github/actions/teardown-deploy-namespace
+      uses: ./.github/actions/teardown-deploy-vcluster
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+        vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
