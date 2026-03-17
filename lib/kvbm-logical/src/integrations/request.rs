@@ -224,7 +224,7 @@ impl<T: BlockMetadata> RequestSequence<T> {
     ///
     /// Returns `true` if all blocks were successfully acquired.
     pub fn reacquire(&mut self, manager: &BlockManager<T>) -> bool {
-        debug_assert!(
+        assert!(
             self.assignments.is_empty(),
             "reacquire called with existing assignments"
         );

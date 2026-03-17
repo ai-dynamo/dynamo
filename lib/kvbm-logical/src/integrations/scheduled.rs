@@ -383,10 +383,10 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
             return Err(ApplyError::MissingTokenOnFinalChunk);
         }
 
+        let blocks_registered_before = self.inner.assigned_blocks();
+
         // Stage and register the prefill blocks
         self.inner.complete_and_register_pending(manager);
-
-        let blocks_registered_before = self.inner.assigned_blocks();
         self.prefill_position = new_position;
         self.kv_position = self.prefill_position;
 
@@ -511,6 +511,9 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
         self.require_prefill_complete()?;
         self.require_not_complete()?;
         self.require_one_dangling()?;
+
+        // Clamp to remaining output budget to prevent append_token panics.
+        let num_draft_tokens = num_draft_tokens.min(self.inner.remaining_tokens());
 
         let bs = self.inner.block_size();
         let future_total = self.inner.total_tokens() + num_draft_tokens;
@@ -652,6 +655,11 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
     /// LIFO-drop up to `count` unassigned blocks. Returns the actual number
     /// dropped. Valid only in Idle state.
     pub fn drop_unassigned(&mut self, count: usize) -> usize {
+        assert!(
+            self.state == SequenceState::Idle,
+            "drop_unassigned called in non-Idle state: {:?}",
+            self.state
+        );
         let dropped = self.lifo_pop_unassigned(count);
         if dropped > 0 {
             self.delegate
@@ -693,6 +701,12 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
     /// Requires Idle state.
     pub fn append_tokens(&mut self, tokens: &[Token]) -> Result<(), ApplyError> {
         self.require_idle_for_apply()?;
+        assert!(
+            tokens.len() <= self.inner.remaining_tokens(),
+            "append_tokens: {} tokens exceeds remaining budget of {}",
+            tokens.len(),
+            self.inner.remaining_tokens()
+        );
         for &token in tokens {
             self.inner.append_token(token);
         }
