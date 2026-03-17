@@ -218,6 +218,8 @@ filterwarnings = [
     ################################################################################################
     # Triton emits a UserWarning at import time on CPU-only runners (no GPU driver available)
     "ignore:Triton is not supported on current platform.*:UserWarning",
+    # torch.jit.script_method deprecation from PyTorch internals (torch.utils.mkldnn)
+    "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
 ]
 
 
