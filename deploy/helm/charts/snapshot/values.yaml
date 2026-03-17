@@ -157,7 +157,8 @@ config:
     # K8s-specific options (recommended defaults for containers)
     leaveRunning: true      # Keep process running after checkpoint
     shellJob: true          # Containers are often session leaders
-    tcpClose: true          # Pod IPs change on restore/migration
+    tcpClose: false         # Close non-listening TCP sockets on restore
+    tcpEstablished: true    # Preserve established TCP sockets during restore
     fileLocks: true         # Applications use file locks
     orphanPtsMaster: true   # Containers with TTYs
     extUnixSk: true         # External Unix sockets

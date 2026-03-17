@@ -32,6 +32,12 @@ func (c *AgentConfig) Validate() error {
 	if strings.TrimSpace(c.BasePath) == "" {
 		return &ConfigError{Field: "basePath", Message: "basePath is required"}
 	}
+	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
+		return &ConfigError{
+			Field:   "criu",
+			Message: "tcpClose and tcpEstablished cannot both be true",
+		}
+	}
 	return c.Restore.Validate()
 }
 
@@ -65,6 +71,7 @@ type CRIUSettings struct {
 	LeaveRunning      bool   `yaml:"leaveRunning"`
 	ShellJob          bool   `yaml:"shellJob"`
 	TcpClose          bool   `yaml:"tcpClose"`
+	TcpEstablished    bool   `yaml:"tcpEstablished"`
 	FileLocks         bool   `yaml:"fileLocks"`
 	OrphanPtsMaster   bool   `yaml:"orphanPtsMaster"`
 	ExtUnixSk         bool   `yaml:"extUnixSk"`

@@ -29,6 +29,7 @@ data:
       leaveRunning: {{ .Values.config.criu.leaveRunning }}
       shellJob: {{ .Values.config.criu.shellJob }}
       tcpClose: {{ .Values.config.criu.tcpClose }}
+      tcpEstablished: {{ .Values.config.criu.tcpEstablished }}
       fileLocks: {{ .Values.config.criu.fileLocks }}
       orphanPtsMaster: {{ .Values.config.criu.orphanPtsMaster }}
       extUnixSk: {{ .Values.config.criu.extUnixSk }}
