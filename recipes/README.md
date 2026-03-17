@@ -42,7 +42,6 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
-| **[Kimi-K2.5](kimi-k2.5/)** 🚧 | TensorRT-LLM | Aggregated | 8x B200 | ✅ | ❌ | Experimental — MoE model, TP8×EP8, reasoning + tool calling | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
@@ -58,6 +57,15 @@ These recipes demonstrate functional deployments with Dynamo features, but have 
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/disagg/)** | SGLang | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, nixl KV transfer, 1.0+ |
+| **[Kimi-K2.5 (Baseten)](kimi-k2.5/trtllm/agg/baseten/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling |
+
+### Experimental Recipes
+
+These recipes are under active development and may require additional setup steps (e.g., container patching). They are functional but not yet fully validated for production use.
+
+| Model | Framework | Mode | GPUs | Deployment | Notes |
+|-------|-----------|------|------|------------|-------|
+| **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/trtllm/agg/nvidia/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling. Requires [container patch](kimi-k2.5/trtllm/agg/nvidia/patch/). Vision input not yet functional with the patch. |
 
 ## Recipe Structure
 

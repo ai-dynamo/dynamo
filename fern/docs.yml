@@ -100,6 +100,9 @@ layout:
   tabs-placement: header
   hide-feedback: true
 
+metadata:
+  canonical-host: "docs.nvidia.com/dynamo"
+
 experimental:
   mdx-components:
     - ./components
