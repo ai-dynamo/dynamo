@@ -78,7 +78,7 @@ impl IndexerArgs {
         }
     }
 
-    fn supports_remove(name: &str) -> bool {
+    fn supports_remove(_name: &str) -> bool {
         true
     }
 
