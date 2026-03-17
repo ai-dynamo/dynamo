@@ -68,17 +68,21 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
-  build-epp-image:
-    name: Build EPP Image
-    needs: changed-files
+  build-frontend-image:
+    name: Build Frontend Image
+    needs: [changed-files]
     if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
     runs-on: prod-builder-v3
     outputs:
-      epp_image_ref: ${{ steps.build-epp-image.outputs.epp_image_ref }}
+      target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
     env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
       IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo/dynamo-epp
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      TARGET: frontend
+      CUDA_VERSION: "12.9"
+      FRAMEWORK: dynamo
+      PLATFORM: "linux/amd64,linux/arm64"
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -118,26 +122,6 @@ jobs:
             GIT_TAG="${EPP_IMAGE_TAG}" \
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
-
-
-  build-frontend-image:
-    name: Build Frontend Image
-    needs: [changed-files, build-epp-image]
-    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
-    runs-on: prod-builder-v3
-    outputs:
-      target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      TARGET: frontend
-      CUDA_VERSION: "12.9"
-      FRAMEWORK: dynamo
-      PLATFORM: "linux/amd64,linux/arm64"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Generate Dockerfile
         shell: bash
         run: |
@@ -157,7 +141,7 @@ jobs:
           TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}"
           echo "ecr_image_base=${ECR_IMAGE_BASE}" >> $GITHUB_OUTPUT
           echo "default_target_image_uri=${ECR_IMAGE_BASE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}" >> $GITHUB_OUTPUT
+          echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${{ steps.build-epp-image.outputs.epp_image_ref }}" >> $GITHUB_OUTPUT
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
       - name: Print Build Container parameters
@@ -171,20 +155,7 @@ jobs:
           echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
           echo "epp_image_uri: ${{ steps.calculate-target-tag.outputs.epp_image_uri }}"
           echo "push_image: true"
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
-        with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          flavor: general
-          all_arch: 'true'
+
       - name: Build Frontend Container
         id: build-image
         timeout-minutes: 30
@@ -256,7 +227,7 @@ jobs:
 
   frontend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, build-frontend-image, build-epp-image]
+    needs: [changed-files, build-frontend-image]
     if: always()
     steps:
       - name: "Check all dependent jobs"
