@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Allure Test Report
+
+on:
+  workflow_run:
+    workflows:
+      - 'PR'
+      - 'Post-Merge CI Pipeline'
+      - 'Nightly CI Pipeline'
+      - 'Release Pipeline'
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to download allure-results artifacts from'
+        required: true
+        type: string
+      report_subdir:
+        description: 'Subdirectory on gh-pages for the report'
+        required: false
+        type: string
+        default: 'dev'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  allure-report:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion != 'skipped'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine report parameters
+        id: params
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run_id=${{ inputs.run_id }}" >> $GITHUB_OUTPUT
+            echo "subdir=${{ inputs.report_subdir }}" >> $GITHUB_OUTPUT
+          else
+            echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+            case "$WORKFLOW_NAME" in
+              "PR") echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
+              *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
+              *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
+              *"Release"*) echo "subdir=release" >> $GITHUB_OUTPUT ;;
+              *) echo "subdir=other" >> $GITHUB_OUTPUT ;;
+            esac
+          fi
+
+      - name: Download Allure Results
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.params.outputs.run_id }}
+          pattern: allure-results-*
+          path: allure-results
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for Allure results
+        id: check-results
+        run: |
+          if [ -d allure-results ] && [ "$(ls -A allure-results 2>/dev/null)" ]; then
+            echo "has_results=true" >> $GITHUB_OUTPUT
+            echo "Found allure results:"
+            ls -la allure-results/
+          else
+            echo "has_results=false" >> $GITHUB_OUTPUT
+            echo "No allure results found. Skipping report generation."
+          fi
+
+      - name: Install Allure 2 CLI
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          ALLURE_VERSION="2.32.0"
+          wget -q "https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.tgz"
+          tar -xzf "allure-${ALLURE_VERSION}.tgz"
+          mv "allure-${ALLURE_VERSION}" allure2-cli
+
+      - name: Install Allure 3 CLI
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          npm install -g allure
+
+      - name: Get Allure history from gh-pages
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          SUBDIR="${{ steps.params.outputs.subdir }}"
+          git fetch origin gh-pages:gh-pages 2>/dev/null || echo "No gh-pages branch yet"
+
+          # Restore history for Allure 2 report
+          if git show "gh-pages:${SUBDIR}/history" 2>/dev/null; then
+            mkdir -p allure-results/history
+            for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
+              git show "gh-pages:${SUBDIR}/history/$f" > "allure-results/history/$f" 2>/dev/null || true
+            done
+            echo "Restored Allure 2 history from gh-pages/${SUBDIR}"
+          else
+            echo "No previous Allure 2 history found"
+          fi
+
+          # Restore history for Allure 3 report
+          if git show "gh-pages:${SUBDIR}-v3/history" 2>/dev/null; then
+            mkdir -p allure-results-v3-history
+            for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
+              git show "gh-pages:${SUBDIR}-v3/history/$f" > "allure-results-v3-history/$f" 2>/dev/null || true
+            done
+            echo "Restored Allure 3 history from gh-pages/${SUBDIR}-v3"
+          else
+            echo "No previous Allure 3 history found"
+          fi
+
+      - name: Generate Allure 2 Report
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          ./allure2-cli/bin/allure generate allure-results -o allure-report --clean
+
+      - name: Generate Allure 3 Report
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          mkdir -p allure-v3-workspace/allure-results
+          cp -r allure-results/* allure-v3-workspace/allure-results/
+          if [ -d allure-results-v3-history ]; then
+            mkdir -p allure-v3-workspace/allure-results/history
+            cp allure-results-v3-history/* allure-v3-workspace/allure-results/history/ 2>/dev/null || true
+          fi
+          allure generate --cwd allure-v3-workspace -o allure-report-v3
+
+      - name: Deploy to GitHub Pages
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          SUBDIR="${{ steps.params.outputs.subdir }}"
+          DEPLOY_DIR=$(mktemp -d)
+          cd "$DEPLOY_DIR"
+          git init
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Reuse the checkout token for push access
+          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(echo -n "x-access-token:${{ github.token }}" | base64)"
+
+          # Pull existing gh-pages content or start fresh
+          if git ls-remote --exit-code origin gh-pages &>/dev/null; then
+            git fetch origin gh-pages
+            git checkout gh-pages
+          else
+            git checkout --orphan gh-pages
+          fi
+
+          # Deploy Allure 2 report
+          mkdir -p "${SUBDIR}"
+          rm -rf "${SUBDIR}/"*
+          cp -r "${GITHUB_WORKSPACE}/allure-report/"* "${SUBDIR}/"
+
+          # Deploy Allure 3 report
+          mkdir -p "${SUBDIR}-v3"
+          rm -rf "${SUBDIR}-v3/"*
+          cp -r "${GITHUB_WORKSPACE}/allure-report-v3/"* "${SUBDIR}-v3/"
+
+          # Commit and push
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to deploy"
+          else
+            git commit -m "Deploy Allure reports for ${SUBDIR} (run ${{ github.run_id }})"
+            git push origin gh-pages
+          fi
+
+      - name: Print report URLs
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          SUBDIR="${{ steps.params.outputs.subdir }}"
+          echo "## Allure Reports" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure 2 Report](https://ai-dynamo.github.io/dynamo/${SUBDIR}/)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure 3 Report](https://ai-dynamo.github.io/dynamo/${SUBDIR}-v3/)" >> $GITHUB_STEP_SUMMARY
