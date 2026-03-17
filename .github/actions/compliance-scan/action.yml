@@ -100,11 +100,11 @@ runs:
     - name: Generate attribution CSVs
       shell: bash
       run: |
-        ARGS="--target-dir /tmp/compliance-target --output ${{ inputs.artifact_name }}.csv"
+        ARGS=(--target-dir /tmp/compliance-target --output "${{ inputs.artifact_name }}.csv")
         if [ -n "${{ steps.resolve-base.outputs.base_image }}" ]; then
-          ARGS+=" --base-dir /tmp/compliance-base"
+          ARGS+=(--base-dir /tmp/compliance-base)
         fi
-        python3 container/compliance/process_results.py ${ARGS}
+        python3 container/compliance/process_results.py "${ARGS[@]}"
 
     - name: Upload attribution artifacts
       if: always()
@@ -113,3 +113,9 @@ runs:
         name: ${{ inputs.artifact_name }}
         path: ${{ inputs.artifact_name }}*.csv
         retention-days: ${{ inputs.retention_days }}
+
+    - name: Cleanup compliance builder
+      if: always()
+      shell: bash
+      run: |
+        docker buildx rm compliance-${{ github.run_id }}-${{ github.run_attempt }} || true
