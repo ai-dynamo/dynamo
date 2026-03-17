@@ -45,7 +45,7 @@ use tokio_util::codec::FramedRead;
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 struct CounterEngine {}
 
@@ -273,7 +273,7 @@ fn inc_counter(
 #[allow(deprecated)]
 #[tokio::test]
 async fn test_http_service() {
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
@@ -285,7 +285,7 @@ async fn test_http_service() {
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
-    let task = tokio::spawn(async move { service.run(token.clone()).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
     // Wait for the service to be ready before proceeding
     wait_for_service_ready(port).await;
@@ -581,8 +581,14 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
-async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, u16) {
-    let port = get_random_port().await;
+async fn service_with_engines() -> (
+    HttpService,
+    Arc<CounterEngine>,
+    Arc<AlwaysFailEngine>,
+    tokio::net::TcpListener,
+    u16,
+) {
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -606,7 +612,7 @@ async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysF
         .add_completions_model("bar", card.mdcsum(), failure.clone())
         .unwrap();
 
-    (service, counter, failure, port)
+    (service, counter, failure, listener, port)
 }
 
 fn pure_openai_client(port: u16) -> PureOpenAIClient {
@@ -635,14 +641,14 @@ fn generic_byot_client(port: u16) -> GenericBYOTClient {
 
 #[tokio::test]
 async fn test_pure_openai_client() {
-    let (service, _counter, _failure, port) = service_with_engines().await;
+    let (service, _counter, _failure, listener, port) = service_with_engines().await;
     let pure_openai_client = pure_openai_client(port);
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -747,14 +753,14 @@ async fn test_pure_openai_client() {
 
 #[tokio::test]
 async fn test_nv_custom_client() {
-    let (service, _counter, _failure, port) = service_with_engines().await;
+    let (service, _counter, _failure, listener, port) = service_with_engines().await;
     let nv_custom_client = nv_custom_client(port);
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -886,14 +892,14 @@ async fn test_nv_custom_client() {
 
 #[tokio::test]
 async fn test_generic_byot_client() {
-    let (service, _counter, _failure, port) = service_with_engines().await;
+    let (service, _counter, _failure, listener, port) = service_with_engines().await;
     let generic_byot_client = generic_byot_client(port);
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -981,7 +987,7 @@ async fn test_generic_byot_client() {
 
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -995,7 +1001,7 @@ async fn test_client_disconnect_cancellation_unary() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -1073,7 +1079,7 @@ async fn test_client_disconnect_cancellation_unary() {
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -1087,7 +1093,7 @@ async fn test_client_disconnect_cancellation_streaming() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -1176,7 +1182,7 @@ async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -1190,7 +1196,7 @@ async fn test_request_id_annotation() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;

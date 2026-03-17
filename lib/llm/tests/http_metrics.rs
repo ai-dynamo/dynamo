@@ -24,7 +24,7 @@ use std::{sync::Arc, time::Duration};
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 // Mock engine for testing metrics
 struct MockModelEngine {}
@@ -65,10 +65,10 @@ impl
 async fn test_metrics_prefix_default() {
     // Test default prefix when no env var is set
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener);
         wait_for_metrics_ready(port).await;
 
         // Populate labeled metrics
@@ -104,10 +104,10 @@ async fn test_metrics_prefix_default() {
 async fn test_metrics_prefix_custom() {
     // Test custom prefix override via environment variable
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("custom_prefix"))], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener);
         wait_for_metrics_ready(port).await;
 
         // Populate labeled metrics
@@ -139,10 +139,10 @@ async fn test_metrics_prefix_custom() {
 async fn test_metrics_prefix_sanitized() {
     // Test that invalid prefix characters are sanitized
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("nv-llm/http service"))], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener);
         wait_for_metrics_ready(port).await;
 
         let state = service.state_clone();
@@ -190,7 +190,7 @@ async fn test_metrics_with_mock_model() {
     // Test metrics collection with a mock model serving requests
     // Ensure we use the default prefix
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
             .enable_chat_endpoints(true)
@@ -203,7 +203,7 @@ async fn test_metrics_with_mock_model() {
         // Start the HTTP service
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
+        let task = tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
         // Add mock model engine
         let card = ModelDeploymentCard::with_name_only("mockmodel");
@@ -305,7 +305,7 @@ mod integration_tests {
     #[ignore = "Requires etcd and distributed runtime"]
     async fn test_metrics_with_mdc_registration() {
         // Integration test for metrics collection with full MDC registration (like real model servers)
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
 
         // Create distributed runtime (required for MDC registration)
         let runtime = dynamo_runtime::Runtime::from_settings().unwrap();
@@ -407,8 +407,7 @@ mod integration_tests {
         // Start the HTTP service
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let service_for_task = service.clone();
-        let task = tokio::spawn(async move { service_for_task.run(token.clone()).await });
+        let task = service.spawn_with_listener(token.clone(), listener);
 
         // Wait for service to be ready
         wait_for_metrics_ready(port).await;
