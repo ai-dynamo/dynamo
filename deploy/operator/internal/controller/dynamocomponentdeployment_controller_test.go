@@ -37,6 +37,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -2136,6 +2137,116 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
+}
+
+func Test_reconcileDeploymentResources_DeletesFailedRestorePods(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	s := scheme.Scheme
+	g.Expect(v1alpha1.AddToScheme(s)).To(gomega.Succeed())
+	g.Expect(appsv1.AddToScheme(s)).To(gomega.Succeed())
+	g.Expect(corev1.AddToScheme(s)).To(gomega.Succeed())
+
+	replicas := int32(1)
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        &replicas,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Image: "test-image:latest",
+						Args:  []string{"--test-arg"},
+					},
+				},
+			},
+		},
+	}
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-component",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+			ReadyReplicas:      0,
+			AvailableReplicas:  0,
+			Conditions: []appsv1.DeploymentCondition{
+				{
+					Type:   appsv1.DeploymentAvailable,
+					Status: corev1.ConditionFalse,
+				},
+			},
+		},
+	}
+
+	failedRestorePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failed-restore",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:  "test-component",
+				commonconsts.KubeLabelIsRestoreTarget: commonconsts.KubeLabelValueTrue,
+			},
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationRestoreStatus: "failed",
+			},
+		},
+	}
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd, deployment, failedRestorePod).
+		WithStatusSubresource(dcd, deployment).
+		Build()
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fakeKubeClient,
+		Recorder:      record.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	result, err := reconciler.reconcileDeploymentResources(ctx, dcd)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(result).To(gomega.Equal(ComponentReconcileResult{
+		modified: true,
+		status:   metav1.ConditionFalse,
+		reason:   "DeploymentNotReady",
+		message:  "Deployment is not ready",
+		serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
+			ComponentKind:     v1alpha1.ComponentKindDeployment,
+			ComponentName:     "test-component",
+			ComponentNames:    []string{"test-component"},
+			Replicas:          1,
+			UpdatedReplicas:   1,
+			ReadyReplicas:     ptr.To(int32(0)),
+			AvailableReplicas: ptr.To(int32(0)),
+		},
+	}))
+
+	err = fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(failedRestorePod), &corev1.Pod{})
+	g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue())
 }
 
 func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {

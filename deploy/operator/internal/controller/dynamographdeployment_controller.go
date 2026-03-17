@@ -87,6 +87,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -695,6 +696,17 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				}
 			}
 		}
+	}
+
+	deletedPods, err := deleteFailedRestorePods(ctx, r.Client, dynamoDeployment.Namespace, map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
+	})
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to recycle failed restore pods: %w", err)
+	}
+	for _, podName := range deletedPods {
+		logger.Info("Deleting failed restore pod", "pod", podName, "namespace", dynamoDeployment.Namespace)
+		r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeWarning, "RestoreRetrying", "Deleting failed restore pod %s to retry restore", podName)
 	}
 
 	// Check resource readiness
@@ -1571,6 +1583,19 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
 			)
+
+		ctrlBuilder = ctrlBuilder.Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.mapFailedRestorePodToRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(ce event.CreateEvent) bool { return isFailedRestorePod(ce.Object) },
+				DeleteFunc: func(de event.DeleteEvent) bool { return false },
+				UpdateFunc: func(ue event.UpdateEvent) bool {
+					return !isFailedRestorePod(ue.ObjectOld) && isFailedRestorePod(ue.ObjectNew)
+				},
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		)
 	}
 	// Wrap with metrics collection
 	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
@@ -1579,6 +1604,10 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+func (r *DynamoGraphDeploymentReconciler) mapFailedRestorePodToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	return mapFailedRestorePodToOwnerRequests(obj, consts.KubeLabelDynamoGraphDeploymentName)
 }
 
 // mapPodCliqueToRequests maps a PodClique to reconcile requests for its owning DGD

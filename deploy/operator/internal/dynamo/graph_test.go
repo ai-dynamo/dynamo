@@ -6837,13 +6837,14 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
 		},
 		"Worker",
-		&checkpoint.CheckpointInfo{
-			Enabled: true,
-			Ready:   false,
-			Hash:    "resolved-hash",
-		},
 	)
 	require.NoError(t, err)
+	annotations := map[string]string{}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
+		Enabled: true,
+		Ready:   false,
+		Hash:    "resolved-hash",
+	})
 	assert.Equal(t, "keep", labels["user-label"])
 	assert.Equal(t, "keep-too", labels["extra-label"])
 	_, hasRestoreTarget := labels[commonconsts.KubeLabelIsRestoreTarget]
@@ -6870,13 +6871,14 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
 		},
 		"Worker",
-		&checkpoint.CheckpointInfo{
-			Enabled: true,
-			Ready:   true,
-			Hash:    "resolved-hash",
-		},
 	)
 	require.NoError(t, err)
+	annotations := map[string]string{}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
+		Enabled: true,
+		Ready:   true,
+		Hash:    "resolved-hash",
+	})
 	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[commonconsts.KubeLabelIsRestoreTarget])
 	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointHash])
 }
@@ -6905,7 +6907,6 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
 		},
 		"Worker",
-		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])

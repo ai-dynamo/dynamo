@@ -60,17 +60,6 @@ type CheckpointReconciler struct {
 	Recorder      record.EventRecorder
 }
 
-// Helper function to compute checkpoint location from operator config
-func (r *CheckpointReconciler) getCheckpointLocation(identityHash string) string {
-	basePath := checkpoint.GetPVCBasePath(&r.Config.Checkpoint)
-	return fmt.Sprintf("%s/%s", basePath, identityHash)
-}
-
-// Helper function to get checkpoint storage type from operator config
-func (r *CheckpointReconciler) getCheckpointStorageType() nvidiacomv1alpha1.DynamoCheckpointStorageType {
-	return nvidiacomv1alpha1.DynamoCheckpointStorageType(r.Config.Checkpoint.Storage.Type)
-}
-
 // GetRecorder returns the event recorder (implements controller_common.Reconciler interface)
 func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
@@ -185,7 +174,15 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	jobName := fmt.Sprintf("checkpoint-%s", ckpt.Name)
+	hash := ckpt.Status.IdentityHash
+	if hash == "" {
+		var err error
+		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
+		}
+	}
+	jobName := fmt.Sprintf("checkpoint-job-%s", hash)
 
 	// Use SyncResource to create/update the checkpoint Job
 	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
@@ -341,10 +338,14 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", "Checkpoint creation completed successfully")
 
 		now := metav1.Now()
+		location, storageType, err := checkpoint.ResolveCheckpointStorage(ckpt.Status.IdentityHash, &r.Config.Checkpoint)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		ckpt.Status.CreatedAt = &now
-		ckpt.Status.Location = r.getCheckpointLocation(ckpt.Status.IdentityHash)
-		ckpt.Status.StorageType = r.getCheckpointStorageType()
+		ckpt.Status.Location = location
+		ckpt.Status.StorageType = storageType
 		ckpt.Status.Message = ""
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
@@ -425,8 +426,15 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if podTemplate.Labels == nil {
 		podTemplate.Labels = make(map[string]string)
 	}
-	podTemplate.Labels[consts.KubeLabelCheckpointHash] = hash
-	podTemplate.Labels[consts.KubeLabelIsCheckpointSource] = "true"
+	if podTemplate.Annotations == nil {
+		podTemplate.Annotations = make(map[string]string)
+	}
+	location, storageType, err := checkpoint.ResolveCheckpointStorage(hash, &r.Config.Checkpoint)
+	if err != nil {
+		location = ""
+		storageType = ""
+	}
+	checkpoint.ApplyCheckpointSourcePodMetadata(podTemplate.Labels, podTemplate.Annotations, hash, location, storageType)
 
 	hasPodInfoVolume := false
 	for _, volume := range podTemplate.Spec.Volumes {
@@ -503,7 +511,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		})
 	}
 
-	// Add checkpoint env vars to the main container.
+	// Configure the main container for checkpoint mode.
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
 
@@ -515,7 +523,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		)
 		dynamo.AddStandardEnvVars(mainContainer, r.Config)
 
-		// Add checkpoint env vars
+		// Add the ready-for-checkpoint signal path.
 		mainContainer.Env = append(mainContainer.Env,
 			corev1.EnvVar{
 				Name:  consts.EnvReadyForCheckpointFile,

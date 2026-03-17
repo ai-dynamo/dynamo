@@ -141,7 +141,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	job := r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
+	job := r.buildCheckpointJob(ckpt, "checkpoint-job-"+testHash)
 	podSpec := job.Spec.Template.Spec
 	main := podSpec.Containers[0]
 
@@ -236,7 +236,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
 	ckpt.Spec.Job.BackoffLimit = &backoff
 	ckpt.Spec.Job.TTLSecondsAfterFinished = &ttl
-	job = r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
+	job = r.buildCheckpointJob(ckpt, "checkpoint-job-"+testHash)
 	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(600), *job.Spec.TTLSecondsAfterFinished)
@@ -246,7 +246,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 		},
 	}
-	job = r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
+	job = r.buildCheckpointJob(ckpt, "checkpoint-job-"+testHash)
 	assert.Equal(t, []string{"cuda-checkpoint", "--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
 }
 
@@ -269,7 +269,7 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
-	job := r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
+	job := r.buildCheckpointJob(ckpt, "checkpoint-job-"+testHash)
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == consts.KubeValueNameSharedMemory {
 			require.NotNil(t, v.EmptyDir)
@@ -360,7 +360,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
-		assert.Equal(t, "checkpoint-"+testHash, updated.Status.JobName)
+		assert.Equal(t, "checkpoint-job-"+testHash, updated.Status.JobName)
 	})
 }
 

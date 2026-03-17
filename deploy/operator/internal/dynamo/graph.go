@@ -1167,7 +1167,7 @@ func GenerateBasePodSpec(
 	// This handles ALL checkpoint-related modifications:
 	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
 	// - Security context (hostIPC, privileged mode)
-	// - Environment variables (checkpoint path, hash, CRIU settings)
+	// - Restore/checkpoint pod metadata (labels/annotations)
 	// - Storage configuration (volumes, mounts)
 	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
 	// Checkpoint config comes from the operator's controller config (Helm values)
@@ -1418,7 +1418,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1427,6 +1427,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
+			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
 
 			// Apply restart annotation if this service should be restarted.
 			// For services not in the current restart order, preserve their existing annotation
@@ -1476,7 +1477,6 @@ func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
@@ -1514,17 +1514,6 @@ func generateLabels(
 	}
 	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
-	}
-	// Restore labels are operator-controlled state. Clear any stale or
-	// user-provided values after metadata merge so users cannot force restore
-	// targeting by setting labels directly in the spec.
-	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
-	delete(labels, commonconsts.KubeLabelCheckpointHash)
-
-	// Only mark pods as restore targets when a concrete checkpoint is ready.
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
-		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
 	}
 	return labels, nil
 }

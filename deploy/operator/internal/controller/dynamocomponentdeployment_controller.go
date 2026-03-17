@@ -51,6 +51,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -82,7 +83,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
@@ -260,6 +261,12 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
+	restoreRetryModified, err := r.deleteFailedRestorePods(ctx, dynamoComponentDeployment, deployment.Name)
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("failed to recycle restore pods: %w", err)
+	}
+	deploymentModified = deploymentModified || restoreRetryModified
+
 	logger.V(1).Info("Deployment sync completed",
 		"deploymentModified", deploymentModified,
 		"deploymentName", deployment.Name,
@@ -296,6 +303,21 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		message:              "Deployment is not ready",
 		serviceReplicaStatus: serviceReplicaStatus,
 	}, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) deleteFailedRestorePods(ctx context.Context, dcd *v1alpha1.DynamoComponentDeployment, deploymentName string) (bool, error) {
+	logger := log.FromContext(ctx)
+	deletedPods, err := deleteFailedRestorePods(ctx, r.Client, dcd.Namespace, map[string]string{
+		commonconsts.KubeLabelDynamoSelector: deploymentName,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, podName := range deletedPods {
+		logger.Info("Deleting failed restore pod", "pod", podName, "namespace", dcd.Namespace)
+		r.Recorder.Eventf(dcd, corev1.EventTypeWarning, "RestoreRetrying", "Deleting failed restore pod %s to retry restore", podName)
+	}
+	return len(deletedPods) > 0, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
@@ -1078,20 +1100,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if workerHash := opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
-	// Restore labels are operator-controlled state. Clear any stale or
-	// user-provided values after metadata merge so users cannot force restore
-	// targeting by setting labels directly in the spec.
-	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
-	delete(podLabels, commonconsts.KubeLabelCheckpointHash)
-
-	// Explicit restore orchestration contract:
-	// only mark pods as restore targets when checkpoint material is ready.
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		podLabels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
-		if checkpointInfo.Hash != "" {
-			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
-		}
-	}
+	// Restore labels are operator-controlled state. Clear stale values after
+	// metadata merge and only reapply them when checkpoint material is ready.
+	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart
@@ -1178,6 +1189,18 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.findComponentsForFailedRestorePod),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(ce event.CreateEvent) bool { return isFailedRestorePod(ce.Object) },
+				DeleteFunc: func(de event.DeleteEvent) bool { return false },
+				UpdateFunc: func(ue event.UpdateEvent) bool {
+					return !isFailedRestorePod(ue.ObjectOld) && isFailedRestorePod(ue.ObjectNew)
+				},
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
@@ -1210,4 +1233,8 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+func (r *DynamoComponentDeploymentReconciler) findComponentsForFailedRestorePod(ctx context.Context, obj client.Object) []ctrl.Request {
+	return mapFailedRestorePodToOwnerRequests(obj, commonconsts.KubeLabelDynamoSelector)
 }

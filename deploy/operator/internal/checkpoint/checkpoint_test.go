@@ -83,10 +83,6 @@ func testInfo() *CheckpointInfo {
 // --- Helper function tests ---
 
 func TestHelpers(t *testing.T) {
-	// GetPVCBasePath
-	assert.Equal(t, "", GetPVCBasePath(nil))
-	assert.Equal(t, "/checkpoints", GetPVCBasePath(testPVCConfig()))
-
 	// getCheckpointInfoFromCheckpoint — ready
 	hash, err := ComputeIdentityHash(testIdentity())
 	require.NoError(t, err)
@@ -133,58 +129,39 @@ func TestInjectionIdempotency(t *testing.T) {
 	assert.Len(t, container.VolumeMounts, 2)
 }
 
-// --- InjectCheckpointEnvVars tests ---
+func TestApplyCheckpointPodMetadata(t *testing.T) {
+	t.Run("checkpoint source metadata uses annotations for location and storage", func(t *testing.T) {
+		labels := map[string]string{}
+		annotations := map[string]string{}
 
-func TestInjectCheckpointEnvVars(t *testing.T) {
-	t.Run("PVC storage injects PATH and HASH", func(t *testing.T) {
-		container := &corev1.Container{}
-		InjectCheckpointEnvVars(container, testInfo(), testPVCConfig())
+		ApplyCheckpointSourcePodMetadata(labels, annotations, testHash, "/checkpoints/"+testHash, "pvc")
 
-		envMap := make(map[string]string, len(container.Env))
-		for _, e := range container.Env {
-			envMap[e.Name] = e.Value
+		assert.Equal(t, consts.KubeLabelValueTrue, labels[consts.KubeLabelIsCheckpointSource])
+		assert.Equal(t, testHash, labels[consts.KubeLabelCheckpointHash])
+		assert.Equal(t, "/checkpoints/"+testHash, annotations[consts.KubeAnnotationCheckpointLocation])
+		assert.Equal(t, "pvc", annotations[consts.KubeAnnotationCheckpointStorageType])
+	})
+
+	t.Run("restore metadata clears stale values when checkpoint is not ready", func(t *testing.T) {
+		labels := map[string]string{
+			consts.KubeLabelIsRestoreTarget: consts.KubeLabelValueTrue,
+			consts.KubeLabelCheckpointHash:  "stale-hash",
 		}
-		assert.Equal(t, "/checkpoints", envMap[consts.EnvCheckpointPath])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
-		_, hasLocation := envMap[consts.EnvCheckpointLocation]
+		annotations := map[string]string{
+			consts.KubeAnnotationCheckpointLocation:    "/checkpoints/stale-hash",
+			consts.KubeAnnotationCheckpointStorageType: "pvc",
+		}
+
+		ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: true, Ready: false})
+
+		_, hasRestoreTarget := labels[consts.KubeLabelIsRestoreTarget]
+		_, hasCheckpointHash := labels[consts.KubeLabelCheckpointHash]
+		_, hasLocation := annotations[consts.KubeAnnotationCheckpointLocation]
+		_, hasStorageType := annotations[consts.KubeAnnotationCheckpointStorageType]
+		assert.False(t, hasRestoreTarget)
+		assert.False(t, hasCheckpointHash)
 		assert.False(t, hasLocation)
-	})
-
-	t.Run("S3 storage injects LOCATION and HASH", func(t *testing.T) {
-		container := &corev1.Container{}
-		info := &CheckpointInfo{Enabled: true, Hash: testHash, Location: "s3://bucket/" + testHash + ".tar"}
-		config := &configv1alpha1.CheckpointConfiguration{
-			Storage: configv1alpha1.CheckpointStorageConfiguration{
-				Type: configv1alpha1.CheckpointStorageTypeS3,
-				S3:   configv1alpha1.CheckpointS3Config{URI: "s3://bucket"},
-			},
-		}
-		InjectCheckpointEnvVars(container, info, config)
-
-		envMap := make(map[string]string, len(container.Env))
-		for _, e := range container.Env {
-			envMap[e.Name] = e.Value
-		}
-		assert.Equal(t, "s3://bucket/"+testHash+".tar", envMap[consts.EnvCheckpointLocation])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
-	})
-
-	t.Run("disabled is a no-op", func(t *testing.T) {
-		container := &corev1.Container{}
-		InjectCheckpointEnvVars(container, &CheckpointInfo{Enabled: false}, testPVCConfig())
-		assert.Empty(t, container.Env)
-	})
-
-	t.Run("preserves existing env vars", func(t *testing.T) {
-		container := &corev1.Container{Env: []corev1.EnvVar{{Name: "EXISTING", Value: "keep"}}}
-		InjectCheckpointEnvVars(container, testInfo(), testPVCConfig())
-
-		envMap := make(map[string]string, len(container.Env))
-		for _, e := range container.Env {
-			envMap[e.Name] = e.Value
-		}
-		assert.Equal(t, "keep", envMap["EXISTING"])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
+		assert.False(t, hasStorageType)
 	})
 }
 
@@ -230,7 +207,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NotNil(t, podSpec.SecurityContext.SeccompProfile)
 	})
 
-	t.Run("PVC storage injects volumes, mounts, and env vars", func(t *testing.T) {
+	t.Run("PVC storage injects volumes and mounts", func(t *testing.T) {
 		podSpec := testPodSpec()
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, testInfo(), testPVCConfig()))
 
@@ -266,14 +243,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		assert.Equal(t, "/checkpoints", mountPaths[consts.CheckpointVolumeName])
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
-
-		// Env
-		envMap := make(map[string]string, len(podSpec.Containers[0].Env))
-		for _, e := range podSpec.Containers[0].Env {
-			envMap[e.Name] = e.Value
-		}
-		assert.Equal(t, "/checkpoints", envMap[consts.EnvCheckpointPath])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
 	})
 
 	t.Run("computes hash from identity when hash is empty", func(t *testing.T) {
@@ -321,9 +290,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"PVC name missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
 			}, "no PVC name"},
-			{"PVC base path missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{PVCName: "snapshot-pvc"}},
-			}, "no PVC base path"},
 			{"S3 URI missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "s3"},
 			}, "S3"},

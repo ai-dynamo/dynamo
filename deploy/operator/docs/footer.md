@@ -242,17 +242,6 @@ These are injected into all components when the corresponding infrastructure ser
 | --- | --- | --- | --- | --- |
 | `OMPI_MCA_orte_keep_fqdn_hostnames` | Instructs OpenMPI to preserve FQDN hostnames for inter-node communication | `1` | `string` | Multinode deployments only |
 
-### Checkpoint / Restore
-
-These environment variables are injected when checkpoint/restore is enabled for a component.
-
-| Variable | Purpose | Default | Type | Condition |
-| --- | --- | --- | --- | --- |
-| `DYN_CHECKPOINT_PATH` | Base directory where checkpoint data is stored | From operator checkpoint config `storage.pvc.basePath` | `string` | PVC storage type |
-| `DYN_CHECKPOINT_LOCATION` | Full checkpoint URI (for non-PVC backends) | — | `string` | S3 or OCI storage type |
-| `DYN_CHECKPOINT_HASH` | Identity hash that uniquely identifies the checkpoint | — | `string` | Always set when checkpoint is enabled |
-| `SKIP_WAIT_FOR_CHECKPOINT` | Skips the checkpoint readiness polling loop; checks once and proceeds | — | `string` | Set on restored and DGD pods |
-
 ## Service Accounts
 
 The following component types automatically receive dedicated service accounts:
