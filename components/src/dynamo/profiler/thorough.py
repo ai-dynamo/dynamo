@@ -408,7 +408,7 @@ async def run_thorough(
         ops.output_dir,
         status=ProfilerStatus.RUNNING,
         message="Sweeping parallelization strategies for prefill, measuring TTFT",
-        phase=ops.current_phase ,
+        phase=ops.current_phase,
     )
     prefill_df = await _benchmark_prefill_candidates(
         prefill_candidates,

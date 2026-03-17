@@ -451,9 +451,7 @@ class DynamoDeploymentClient:
         base_dir = self.base_log_dir / self.deployment_name
         base_dir.mkdir(parents=True, exist_ok=True)
 
-        for component, original_name in zip(
-            self.components, self._original_components
-        ):
+        for component, original_name in zip(self.components, self._original_components):
             component_dir = base_dir / component
             component_dir.mkdir(exist_ok=True)
 
