@@ -480,6 +480,7 @@ async def init_llm_worker(
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             enable_thinking_default=config.dyn_enable_thinking_default,
+            prompt_injects_thinking_tag=config.dyn_prompt_injects_thinking_tag,
         )
 
         # Register the model with runtime config

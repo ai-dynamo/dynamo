@@ -530,7 +530,7 @@ class StreamingPostProcessor:
                 self.in_progress_tool_calls.clear()
             if len(delta) > 1:
                 choice = self._build_choice(output, delta)
-                if has_tool_calls and choice:
+                if has_tool_calls:
                     choice["finish_reason"] = "tool_calls"
         elif self.in_progress_tool_calls:
             choice = self._emit_tool_calls_choice(output)

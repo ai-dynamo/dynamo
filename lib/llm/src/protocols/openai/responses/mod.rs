@@ -521,23 +521,31 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Map service_tier
         let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
 
-        // FIX: Proper reasoning + guided decoding interaction
-        // Case 1: JSON schema WITHOUT reasoning → disable thinking
-        // Case 2: JSON schema WITH reasoning → enable thinking (requires structural_tag in Python layer)
-        let chat_template_args = if response_format.is_some() {
+        // Reasoning + guided decoding interaction for Responses API.
+        //
+        // The server-level reasoning parser is always active when configured. We should NOT
+        // disable it just because the `reasoning` param is absent — the model may still emit
+        // <think>...</think> content by default, and the reasoning parser needs to run to
+        // split reasoning_content from the final answer.
+        //
+        // Set enable_thinking=true only when the Responses API caller explicitly requests
+        // reasoning alongside guided decoding; this signals the Python handler to wrap the
+        // guided decoding constraint in a structural_tag that allows free-text reasoning.
+        let chat_template_args = if response_format.is_some() && resp.inner.reasoning.is_some() {
+            // Guided decoding WITH explicit reasoning → enable thinking
+            // The Python handler generates a structural_tag with sequence format
             let mut args = std::collections::HashMap::new();
-            if resp.inner.reasoning.is_none() {
-                // Case 1: Guided decoding without reasoning → disable thinking
-                // This prevents the server-level reasoning parser from treating all content as reasoning
-                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
-            } else {
-                // Case 2: Guided decoding WITH reasoning → enable thinking
-                // The Python handler should generate a structural_tag with sequence format:
-                // <think>...</think> for reasoning, then JSON schema constraint for final answer
-                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
-            }
+            args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
             Some(args)
         } else {
+            // No guided decoding, or guided decoding without explicit reasoning param:
+            // Don't set chat_template_args — let the server's default reasoning parser
+            // handle it. The preprocessor will check prompt_injected_reasoning from the
+            // rendered template and enable reasoning parsing accordingly.
+            //
+            // Note: thinking-off with guided decoding is not currently expressible via
+            // the Responses API surface. It relies on the server's dyn_enable_thinking_default
+            // being unset (None), which applies plain guided decoding without structural_tag.
             None
         };
 

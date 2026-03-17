@@ -30,10 +30,11 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     # Server-level default for enable_thinking when combining reasoning with guided decoding.
-    # - True: Default thinking-on mode (reasoning before answer, e.g., DeepSeek-R1)
-    # - False: Default thinking-off mode (</think> at start, e.g., GLM-4.7)
-    # - None: No auto-generation, require explicit enable_thinking in request
+    # - True: Model generates <think>...</think> before the final answer (thinking-on)
+    # - False: Model skips the thinking phase (thinking-off)
+    # - None: No auto-generation; require explicit enable_thinking per request
     dyn_enable_thinking_default: Optional[bool] = None
+    dyn_prompt_injects_thinking_tag: bool = False
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -166,12 +167,26 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENABLE_THINKING_DEFAULT",
             default=None,
             help=(
-                "Server-level default for enable_thinking when combining reasoning with guided decoding. "
-                "Set to 'true' for thinking-on mode (e.g., DeepSeek-R1), 'false' for thinking-off mode "
-                "(e.g., GLM-4.7). If not set, guided decoding requires explicit enable_thinking in request. "
-                "For GLM-4.7, set to 'false' to enable structural_tag generation for reasoning + JSON output."
+                "Server-level default for thinking mode when combining reasoning with guided decoding. "
+                "Set to 'true' if the model generates <think>...</think> before the final answer "
+                "(thinking-on, e.g., DeepSeek-R1, Qwen3). Set to 'false' if the model skips the "
+                "thinking phase (thinking-off). If not set, guided decoding is applied without any "
+                "reasoning-aware structural_tag wrapping."
             ),
             type=lambda x: None if x.lower() == "none" else x.lower() == "true",
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-prompt-injects-thinking-tag",
+            env_var="DYN_PROMPT_INJECTS_THINKING_TAG",
+            default=False,
+            help=(
+                "Set to true when the model's chat template already appends <think> to the end "
+                "of the prompt. Prevents the structural_tag from adding a duplicate <think> that "
+                "causes model degeneration with guided decoding. Applies to any model whose "
+                "template injects the reasoning start tag (e.g., GLM-4.7, Qwen3)."
+            ),
+            type=lambda x: x.lower() in ("true", "1", "yes"),
         )
         add_argument(
             g,
