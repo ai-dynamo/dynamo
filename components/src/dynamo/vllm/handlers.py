@@ -23,7 +23,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-import dynamo.nixl_connect as nixl_connect
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
@@ -314,20 +313,19 @@ class BaseWorkerHandler(ABC):
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
-        self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
-        self.enable_frontend_decoding = enable_frontend_decoding
-        # NIXL connector for frontend decoding - lazy initialized
-        self._nixl_connector: nixl_connect.Connector | None = None
-        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
+
+        self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -978,18 +976,9 @@ class BaseWorkerHandler(ABC):
         mm_map = request["multi_modal_data"]
         vllm_mm_data = {}
 
-        # Lazy-init NIXL connector only when frontend decoding is enabled
-        if self.enable_frontend_decoding:
-            async with self._nixl_connector_lock:
-                if self._nixl_connector is None:
-                    self._nixl_connector = nixl_connect.Connector()
-                    await self._nixl_connector.initialize()
-
         # Process image_url entries
         images = await self.image_loader.load_image_batch(
             mm_map.get(IMAGE_URL_KEY, []),
-            enable_frontend_decoding=self.enable_frontend_decoding,
-            nixl_connector=self._nixl_connector,
         )
 
         if images:
