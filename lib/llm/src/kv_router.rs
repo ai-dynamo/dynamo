@@ -335,13 +335,14 @@ impl KvRouter {
 
         let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
 
-        // Wait for at least one worker with a known runtime config before starting scheduler
-        let _ = workers_with_configs
-            .wait_for(|m| !m.is_empty())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("runtime config watch closed before any workers appeared")
-            })?;
+        if !kv_router_config.skip_initial_worker_wait {
+            let _ = workers_with_configs
+                .wait_for(|m| !m.is_empty())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("runtime config watch closed before any workers appeared")
+                })?;
+        }
 
         let scheduler = KvScheduler::start(
             component.clone(),
@@ -485,6 +486,11 @@ impl KvRouter {
         );
 
         Ok((response.best_worker, response.overlap_blocks))
+    }
+
+    /// Register externally-provided workers in the slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        self.scheduler.register_workers(worker_ids);
     }
 
     #[allow(clippy::too_many_arguments)]

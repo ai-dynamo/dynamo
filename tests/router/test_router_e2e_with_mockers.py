@@ -40,7 +40,11 @@ from tests.router.helper import (
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -226,14 +230,12 @@ class MockerProcess:
         # Alias for consistency with vLLM/SGLang workers
         self.data_parallel_size = self.dp_size
 
-        # Allocate ZMQ base ports for KV event publishing.
-        # Each worker's DP ranks bind on base_port + dp_rank, so we need bases
-        # spaced dp_size apart. Allocate num_mockers * dp_size ports total,
-        # then pick every dp_size'th port as a base.
+        # Allocate contiguous ZMQ port blocks for KV event publishing because
+        # the mocker binds base_port + dp_rank for each DP rank.
         if zmq_kv_events:
             dp_size = mocker_args.get("dp_size", 1)
-            self._zmq_kv_events_ports = allocate_ports(
-                num_mockers * dp_size, BASE_PORT_ZMQ
+            self._zmq_kv_events_ports = allocate_contiguous_ports(
+                num_mockers, dp_size, BASE_PORT_ZMQ
             )
             bases = [self._zmq_kv_events_ports[i * dp_size] for i in range(num_mockers)]
             if not standalone_indexer:
@@ -243,11 +245,11 @@ class MockerProcess:
                 f"(bases: {bases}) for {num_mockers} workers"
             )
 
-        # Allocate ZMQ replay ports (same layout as event ports)
+        # Allocate contiguous ZMQ replay port blocks with the same layout.
         if zmq_replay and zmq_kv_events:
             dp_size = mocker_args.get("dp_size", 1)
-            self._zmq_replay_ports = allocate_ports(
-                num_mockers * dp_size, BASE_PORT_ZMQ + 1000
+            self._zmq_replay_ports = allocate_contiguous_ports(
+                num_mockers, dp_size, BASE_PORT_ZMQ + 1000
             )
             replay_bases = [
                 self._zmq_replay_ports[i * dp_size] for i in range(num_mockers)
@@ -401,12 +403,18 @@ class MockerProcess:
                     f"(known_ids={known_ids})"
                 )
 
-            # Register each dp_rank endpoint with the standalone indexer
+            # Register each dp_rank endpoint with the standalone indexer.
+            # The mocker binds on base_port + dp_rank (contiguous), so we must
+            # use the same formula here rather than indexing into the allocated
+            # port list, which may contain gaps when intervening ports are busy.
             zmq_addresses = {}
             register_url = f"{self.standalone_indexer_url}/register"
+            replay_base = (
+                self._zmq_replay_ports[i * dp_size] if self._zmq_replay_ports else None
+            )
             async with aiohttp.ClientSession() as session:
                 for dp_rank in range(dp_size):
-                    port = self._zmq_kv_events_ports[i * dp_size + dp_rank]
+                    port = base_port + dp_rank
                     endpoint = f"tcp://127.0.0.1:{port}"
                     zmq_addresses[dp_rank] = endpoint
 
@@ -419,9 +427,10 @@ class MockerProcess:
                             "block_size", BLOCK_SIZE
                         ),
                     }
-                    if self._zmq_replay_ports:
-                        replay_port = self._zmq_replay_ports[i * dp_size + dp_rank]
-                        payload["replay_endpoint"] = f"tcp://127.0.0.1:{replay_port}"
+                    if replay_base is not None:
+                        payload[
+                            "replay_endpoint"
+                        ] = f"tcp://127.0.0.1:{replay_base + dp_rank}"
                     async with session.post(register_url, json=payload) as resp:
                         if resp.status != 201:
                             body = await resp.text()
