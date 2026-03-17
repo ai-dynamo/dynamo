@@ -55,6 +55,7 @@ import torch
 import uvloop
 from fastvideo import VideoGenerator
 from fastvideo.configs.pipelines.base import PipelineConfig
+from fastvideo.platforms.interface import AttentionBackendEnum
 from pydantic import BaseModel, Field
 
 from dynamo.llm import ModelInput, ModelType, register_llm  # type: ignore[attr-defined]
@@ -64,6 +65,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "FastVideo/LTX2-Distilled-Diffusers"
 DEFAULT_ATTENTION_BACKEND = "TORCH_SDPA"
+# FastVideo exposes NO_ATTENTION in the enum, but it is not a selectable
+# inference backend for this worker's FASTVIDEO_ATTENTION_BACKEND override.
+ATTENTION_BACKEND_CHOICES = tuple(
+    backend_name
+    for backend_name in AttentionBackendEnum.__members__
+    if backend_name != "NO_ATTENTION"
+)
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
@@ -438,9 +446,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--attention-backend",
+        choices=ATTENTION_BACKEND_CHOICES,
         default=DEFAULT_ATTENTION_BACKEND,
         dest="attention_backend",
-        help=f"Attention backend to set via FASTVIDEO_ATTENTION_BACKEND (default: {DEFAULT_ATTENTION_BACKEND})",
+        help=(
+            "Attention backend to set via FASTVIDEO_ATTENTION_BACKEND "
+            f"(choices: {', '.join(ATTENTION_BACKEND_CHOICES)}; "
+            f"default: {DEFAULT_ATTENTION_BACKEND})"
+        ),
     )
     return parser.parse_args()
 

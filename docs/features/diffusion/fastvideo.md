@@ -238,7 +238,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `--model` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
 | `--enable-optimizations` | off | Enables FP4 quantization and `torch.compile` |
-| `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; defaults to `TORCH_SDPA` |
+| `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
 
 ### Request Parameters (`nvext`)
 
@@ -257,7 +257,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `FASTVIDEO_VIDEO_CODEC` | `libx264` | Video codec for MP4 encoding |
 | `FASTVIDEO_X264_PRESET` | `ultrafast` | x264 encoding speed preset |
-| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `worker.py` sets this from `--attention-backend` |
+| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `worker.py` sets this from `--attention-backend` and validates `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, and `SAGE_SLA_ATTN` |
 | `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
 | `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
 
