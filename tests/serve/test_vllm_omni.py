@@ -113,34 +113,43 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
-    # TODO: Enable once CI has faster model download/caching for large models.
+    # Qwen2.5-Omni-7B requires ~80GB GPU memory, exceeds CI GPU capacity.
     # "omni_text": VLLMOmniConfig(
     #     name="omni_text",
     #     directory=vllm_dir,
     #     script_name="agg_omni.sh",
     #     marks=[
     #         pytest.mark.gpu_1,
-    #         pytest.mark.pre_merge,
+    #         pytest.mark.post_merge,
     #         pytest.mark.timeout(1200),
     #     ],
     #     model="Qwen/Qwen2.5-Omni-7B",
     #     request_payloads=[
-    #         chat_payload(
-    #             "Say hello",
+    #         ChatPayload(
+    #             body={
+    #                 "messages": [{"role": "user", "content": "Say hello"}],
+    #                 "max_tokens": 32,
+    #                 "temperature": 0.0,
+    #             },
     #             repeat_count=1,
     #             expected_response=["hello", "Hello"],
-    #             temperature=0.0,
-    #             max_tokens=32,
+    #             expected_log=[],
     #         ),
     #     ],
     # ),
+    # Qwen/Qwen-Image requires ~56GB GPU memory, exceeds CI GPU capacity.
     # "omni_image": VLLMOmniConfig(
     #     name="omni_image",
     #     directory=vllm_dir,
     #     script_name="agg_omni_image.sh",
+    #     script_args=[
+    #         "--vae-use-slicing",
+    #         "--vae-use-tiling",
+    #         "--enforce-eager",
+    #     ],
     #     marks=[
     #         pytest.mark.gpu_1,
-    #         pytest.mark.pre_merge,
+    #         pytest.mark.post_merge,
     #         pytest.mark.timeout(1200),
     #     ],
     #     model="Qwen/Qwen-Image",
@@ -158,37 +167,43 @@ vllm_omni_configs = {
     #         ),
     #     ],
     # ),
-    # "omni_i2v": VLLMOmniConfig(
-    #     name="omni_i2v",
-    #     directory=vllm_dir,
-    #     script_name="agg_omni_i2v.sh",
-    #     marks=[
-    #         pytest.mark.gpu_1,
-    #         pytest.mark.pre_merge,
-    #         pytest.mark.timeout(1200),
-    #     ],
-    #     model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
-    #     request_payloads=[
-    #         I2VPayload(
-    #             body={
-    #                 "prompt": "Make it dance",
-    #                 "size": "832x480",
-    #                 "response_format": "url",
-    #                 "nvext": {
-    #                     "num_inference_steps": 20,
-    #                     "num_frames": 33,
-    #                     "guidance_scale": 1.0,
-    #                     "boundary_ratio": 0.875,
-    #                     "guidance_scale_2": 1.0,
-    #                     "seed": 42,
-    #                 },
-    #             },
-    #             repeat_count=1,
-    #             expected_response=[],
-    #             expected_log=[],
-    #         ),
-    #     ],
-    # ),
+    "omni_i2v": VLLMOmniConfig(
+        name="omni_i2v",
+        directory=vllm_dir,
+        script_name="agg_omni_i2v.sh",
+        script_args=[
+            "--vae-use-slicing",
+            "--vae-use-tiling",
+            "--enforce-eager",
+            "--enable-cpu-offload",
+        ],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(1200),
+        ],
+        model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        request_payloads=[
+            I2VPayload(
+                body={
+                    "prompt": "Make it dance",
+                    "size": "320x192",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 5,
+                        "num_frames": 9,
+                        "guidance_scale": 1.0,
+                        "boundary_ratio": 0.875,
+                        "guidance_scale_2": 1.0,
+                        "seed": 42,
+                    },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_video": VLLMOmniConfig(
         name="omni_video",
         directory=vllm_dir,
