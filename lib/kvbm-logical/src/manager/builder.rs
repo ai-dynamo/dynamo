@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Builder and configuration types for [`BlockManager`](super::BlockManager).
+//! Builder and configuration types for [`StandardBlockManager`](super::StandardBlockManager).
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use crate::{
     registry::BlockRegistry,
 };
 
-use super::BlockManager;
+use super::StandardBlockManager;
 
 /// Capacity settings for the TinyLFU frequency tracker used by
 /// [`BlockRegistry`] and the multi-level LRU backend.
@@ -68,7 +68,7 @@ pub enum InactiveBackendConfig {
     Lineage,
 }
 
-/// Error types for [`BlockManager`] builder validation.
+/// Error types for [`StandardBlockManager`] builder validation.
 #[derive(Debug, thiserror::Error)]
 pub enum BlockManagerBuilderError {
     #[error("Block count must be greater than 0")]
@@ -81,16 +81,16 @@ pub enum BlockManagerBuilderError {
     ValidationError(String),
 }
 
-/// Error types for [`BlockManager::reset_inactive_pool`].
+/// Error types for [`StandardBlockManager::reset_inactive_pool`].
 #[derive(Debug, thiserror::Error)]
 pub enum BlockManagerResetError {
     #[error("Reset pool count mismatch: expected {expected}, got {actual}")]
     BlockCountMismatch { expected: usize, actual: usize },
 }
 
-/// Builder for [`BlockManager`] configuration.
+/// Builder for [`StandardBlockManager`] configuration.
 ///
-/// Construct via [`BlockManager::builder()`] and finish with [`build()`](Self::build).
+/// Construct via [`StandardBlockManager::builder()`] and finish with [`build()`](Self::build).
 pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Number of blocks in the pool
     block_count: Option<usize>,
@@ -343,12 +343,12 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         Ok(())
     }
 
-    /// Build the [`BlockManager`].
+    /// Build the [`StandardBlockManager`].
     ///
     /// Validates configuration and constructs all pools, the upgrade closure,
     /// and the metrics source. Returns an error if validation fails or
     /// backend construction fails.
-    pub fn build(mut self) -> Result<BlockManager<T>, BlockManagerBuilderError> {
+    pub fn build(mut self) -> Result<StandardBlockManager<T>, BlockManagerBuilderError> {
         // First validate the configuration
         self.validate()
             .map_err(BlockManagerBuilderError::ValidationError)?;
@@ -464,7 +464,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             aggregator.register_source(metrics.clone());
         }
 
-        Ok(BlockManager {
+        Ok(StandardBlockManager {
             reset_pool,
             active_pool,
             inactive_pool,

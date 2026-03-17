@@ -3,11 +3,12 @@
 
 //! Block lifecycle orchestration across reset, active, and inactive pools.
 //!
-//! [`BlockManager`] is the top-level owner of the three pool tiers and the
-//! block registry. It exposes allocation, registration, matching, and scanning
-//! operations while keeping all pool transitions behind a single API surface.
+//! [`BlockManager`] is the trait defining the public API surface for block
+//! lifecycle management. [`StandardBlockManager`] is the in-process
+//! implementation backed by reset, active, and inactive pool tiers.
 //!
-//! Construction uses a builder pattern — see [`BlockManagerConfigBuilder`].
+//! Construction uses a builder pattern — see [`BlockManagerConfigBuilder`] via
+//! [`StandardBlockManager::builder()`].
 //!
 //! # Re-exported configuration types
 //!
@@ -35,14 +36,52 @@ use crate::metrics::BlockPoolMetrics;
 use crate::pools::{ActivePool, BlockDuplicationPolicy, InactivePool, ResetPool, SequenceHash};
 use crate::registry::BlockRegistry;
 
-/// Manages the full block lifecycle across three pool tiers:
-/// reset (free), active (in-use), and inactive (cached, evictable).
+/// Trait for managing the full block lifecycle.
 ///
-/// Thread-safe: allocation is serialised via an internal [`Mutex`]; individual
-/// pools use their own internal locking.
+/// Implementations provide allocation, registration, matching, and scanning
+/// of KV cache blocks. See [`StandardBlockManager`] for the in-process
+/// implementation.
+pub trait BlockManager<T: BlockMetadata> {
+    /// Allocate `count` mutable blocks for writing.
+    /// Returns `None` if insufficient blocks are available.
+    fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>>;
+
+    /// Register a single completed block and return an immutable handle.
+    fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T>;
+
+    /// Register a batch of completed blocks, returning immutable handles.
+    fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>>;
+
+    /// Linear prefix match: walks `seq_hash` left-to-right, stopping on first miss.
+    fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>>;
+
+    /// Scatter-gather scan: finds all blocks matching any hash, without stopping on misses.
+    fn scan_matches(
+        &self,
+        seq_hashes: &[SequenceHash],
+        touch: bool,
+    ) -> HashMap<SequenceHash, ImmutableBlock<T>>;
+
+    /// Total number of blocks managed (constant after construction).
+    fn total_blocks(&self) -> usize;
+
+    /// Blocks available for allocation.
+    fn available_blocks(&self) -> usize;
+
+    /// Tokens per block (constant after construction).
+    fn block_size(&self) -> usize;
+
+    /// Current duplication policy.
+    fn duplication_policy(&self) -> &BlockDuplicationPolicy;
+
+    /// Reference to the shared block registry.
+    fn block_registry(&self) -> &BlockRegistry;
+}
+
+/// Standard in-process block manager backed by reset, active, and inactive pools.
 ///
-/// Construct via [`BlockManager::builder()`].
-pub struct BlockManager<T: BlockMetadata> {
+/// Construct via [`StandardBlockManager::builder()`].
+pub struct StandardBlockManager<T: BlockMetadata> {
     reset_pool: ResetPool<T>,
     active_pool: ActivePool<T>,
     inactive_pool: InactivePool<T>,
@@ -55,29 +94,12 @@ pub struct BlockManager<T: BlockMetadata> {
     metrics: Arc<BlockPoolMetrics>,
 }
 
-impl<T: BlockMetadata> BlockManager<T> {
-    /// Create a new builder for BlockManager.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
-    /// let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
-    ///
-    /// let manager = BlockManager::builder()
-    ///     .block_count(1000)
-    ///     .registry(registry)
-    ///     .with_multi_lru_backend()
-    ///     .build()?;
-    /// ```
-    pub fn builder() -> BlockManagerConfigBuilder<T> {
-        BlockManagerConfigBuilder::default()
-    }
-
+impl<T: BlockMetadata> BlockManager<T> for StandardBlockManager<T> {
     /// Allocate `count` mutable blocks, drawing first from the reset pool
     /// then evicting from the inactive pool if needed.
     ///
     /// Returns `None` if fewer than `count` blocks are available across both pools.
-    pub fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
+    fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
         let _guard = self.allocate_mutex.lock();
         let from_reset = self.reset_pool.allocate_blocks(count);
         let from_reset_count = from_reset.len();
@@ -100,35 +122,8 @@ impl<T: BlockMetadata> BlockManager<T> {
         }
     }
 
-    /// Drain the inactive pool, returning all blocks to the reset pool.
-    ///
-    /// 1. Acquires the inactive pool lock and allocates all blocks.
-    /// 2. Releases the lock.
-    /// 3. Drops the allocated blocks (RAII returns them to reset).
-    /// 4. Verifies the reset pool contains the expected total.
-    ///
-    /// Returns an error under contention when blocks are in active use.
-    pub fn reset_inactive_pool(&self) -> Result<(), BlockManagerResetError> {
-        // 1. Allocate all blocks from inactive pool (acquires lock internally)
-        let blocks = self.inactive_pool.allocate_all_blocks();
-
-        // 2. Drop blocks - RAII returns them to reset pool
-        drop(blocks);
-
-        // 3. Verify block count (may fail under contention - that's OK)
-        let reset_count = self.reset_pool.len();
-        if reset_count != self.total_blocks {
-            return Err(BlockManagerResetError::BlockCountMismatch {
-                expected: self.total_blocks,
-                actual: reset_count,
-            });
-        }
-
-        Ok(())
-    }
-
     /// Register a batch of completed blocks, returning immutable handles.
-    pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
+    fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
         blocks
             .into_iter()
             .map(|block| self.register_block(block))
@@ -138,7 +133,7 @@ impl<T: BlockMetadata> BlockManager<T> {
     /// Register a single completed block and return an immutable handle.
     ///
     /// Deduplication is governed by the configured [`BlockDuplicationPolicy`].
-    pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
+    fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
         self.metrics.inc_registrations();
         let handle = self
             .block_registry
@@ -159,7 +154,7 @@ impl<T: BlockMetadata> BlockManager<T> {
     /// Linear prefix match: walks `seq_hash` left-to-right, stopping on first miss.
     ///
     /// Checks the active pool first, then the inactive pool for remaining hashes.
-    pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
+    fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         self.metrics
             .inc_match_hashes_requested(seq_hash.len() as u64);
 
@@ -208,7 +203,7 @@ impl<T: BlockMetadata> BlockManager<T> {
     /// Scatter-gather scan: finds all blocks matching any hash, without stopping on misses.
     ///
     /// Returns a map of found hashes to immutable handles.
-    pub fn scan_matches(
+    fn scan_matches(
         &self,
         seq_hashes: &[SequenceHash],
         touch: bool,
@@ -251,28 +246,74 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     /// Total number of blocks managed (constant after construction).
-    pub fn total_blocks(&self) -> usize {
+    fn total_blocks(&self) -> usize {
         self.total_blocks
     }
 
     /// Blocks available for allocation (reset + inactive pools).
-    pub fn available_blocks(&self) -> usize {
+    fn available_blocks(&self) -> usize {
         self.reset_pool.len() + self.inactive_pool.len()
     }
 
     /// Tokens per block (constant after construction).
-    pub fn block_size(&self) -> usize {
+    fn block_size(&self) -> usize {
         self.block_size
     }
 
     /// Current duplication policy.
-    pub fn duplication_policy(&self) -> &BlockDuplicationPolicy {
+    fn duplication_policy(&self) -> &BlockDuplicationPolicy {
         &self.duplication_policy
     }
 
     /// Reference to the shared block registry.
-    pub fn block_registry(&self) -> &BlockRegistry {
+    fn block_registry(&self) -> &BlockRegistry {
         &self.block_registry
+    }
+}
+
+impl<T: BlockMetadata> StandardBlockManager<T> {
+    /// Create a new builder for StandardBlockManager.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
+    /// let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
+    ///
+    /// let manager = StandardBlockManager::builder()
+    ///     .block_count(1000)
+    ///     .registry(registry)
+    ///     .with_multi_lru_backend()
+    ///     .build()?;
+    /// ```
+    pub fn builder() -> BlockManagerConfigBuilder<T> {
+        BlockManagerConfigBuilder::default()
+    }
+
+    /// Drain the inactive pool, returning all blocks to the reset pool.
+    ///
+    /// 1. Acquires the inactive pool lock and allocates all blocks.
+    /// 2. Releases the lock.
+    /// 3. Drops the allocated blocks (RAII returns them to reset).
+    /// 4. Verifies the reset pool contains the expected total.
+    ///
+    /// Returns an error under contention when blocks are in active use.
+    pub fn reset_inactive_pool(&self) -> Result<(), BlockManagerResetError> {
+        // 1. Allocate all blocks from inactive pool (acquires lock internally)
+        let blocks = self.inactive_pool.allocate_all_blocks();
+
+        // 2. Drop blocks - RAII returns them to reset pool
+        drop(blocks);
+
+        // 3. Verify block count (may fail under contention - that's OK)
+        let reset_count = self.reset_pool.len();
+        if reset_count != self.total_blocks {
+            return Err(BlockManagerResetError::BlockCountMismatch {
+                expected: self.total_blocks,
+                actual: reset_count,
+            });
+        }
+
+        Ok(())
     }
 
     /// Reference to the block pool metrics.
