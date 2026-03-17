@@ -14,6 +14,7 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
@@ -30,6 +31,7 @@ type RestoreRequest struct {
 	PodName        string
 	PodNamespace   string
 	ContainerName  string
+	Clientset      kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
@@ -112,7 +114,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		targetGPUUUIDs, err := cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, containerName, log)
+		targetGPUUUIDs, err := cuda.GetPodGPUUUIDs(ctx, req.Clientset, req.PodName, req.PodNamespace, containerName, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}

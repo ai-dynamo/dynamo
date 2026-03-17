@@ -12,6 +12,7 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
@@ -28,6 +29,7 @@ type CheckpointRequest struct {
 	NodeName       string
 	PodName        string
 	PodNamespace   string
+	Clientset      kubernetes.Interface
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -130,7 +132,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	cudaPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
 	var gpuUUIDs []string
 	if len(cudaPIDs) > 0 {
-		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName, log)
+		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.Clientset, req.PodName, req.PodNamespace, req.ContainerName, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}

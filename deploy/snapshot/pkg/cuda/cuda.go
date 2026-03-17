@@ -12,6 +12,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"k8s.io/client-go/kubernetes"
 
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
@@ -25,30 +26,13 @@ var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
 
-// extractGPUUUIDFromCDIDevices returns the first valid GPU UUID found among
-// the given CDI device names. CDI names follow "vendor.com/class=device-name";
-// the NVIDIA DRA driver sets device-name to the canonical GPU UUID.
-func extractGPUUUIDFromCDIDevices(cdiDevices []*podresourcesv1.CDIDevice) string {
-	for _, cdi := range cdiDevices {
-		parts := strings.SplitN(cdi.GetName(), "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		candidate := parts[1]
-		if gpuUUIDPattern.MatchString(candidate) {
-			return candidate
-		}
-	}
-	return ""
-}
-
-// GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
-// It first checks device-plugin-allocated GPUs (nvidia.com/gpu entries in GetDevices()).
-// If none are found, it checks DRA-allocated GPUs (gpu.nvidia.com entries in
-// GetDynamicResources()), extracting the UUID from CDI device names rather than
-// the opaque device name. DRA entries whose CDI names lack a valid GPU UUID are
-// skipped so the caller can fall back to nvidia-smi discovery.
-func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string, log logr.Logger) ([]string, error) {
+// GetPodGPUUUIDs resolves GPU UUIDs for a pod/container via two strategies:
+//  1. Kubelet PodResources API -- checks device-plugin-allocated GPUs
+//     (nvidia.com/gpu entries in GetDevices()).
+//  2. Kubernetes DRA API -- if (1) finds nothing and clientset is non-nil,
+//     queries ResourceClaim -> ResourceSlice to extract UUIDs from device
+//     attributes published by the NVIDIA DRA driver.
+func GetPodGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, log logr.Logger) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
 	}
@@ -82,31 +66,15 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 					uuids = append(uuids, device.GetDeviceIds()...)
 				}
 			}
-			if len(uuids) == 0 {
-				for _, dr := range container.GetDynamicResources() {
-					for _, cr := range dr.GetClaimResources() {
-						if cr.GetDriverName() != nvidiaGPUDRADriver {
-							continue
-						}
-						cdiDevices := cr.GetCdiDevices()
-						if len(cdiDevices) > 0 {
-							names := make([]string, len(cdiDevices))
-							for i, d := range cdiDevices {
-								names[i] = d.GetName()
-							}
-							log.Info("DRA claim resource has CDI devices", "device", cr.GetDeviceName(), "cdi_names", names)
-						}
-						uuid := extractGPUUUIDFromCDIDevices(cdiDevices)
-						if uuid == "" {
-							log.V(1).Info("DRA device has no valid GPU UUID in CDI names, skipping", "device", cr.GetDeviceName())
-							continue
-						}
-						log.Info("found DRA GPU", "uuid", uuid)
-						uuids = append(uuids, uuid)
-					}
-				}
-			}
+
 		}
+	}
+	if len(uuids) == 0 && clientset != nil {
+		draUUIDs, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
+		if err != nil {
+			return nil, err
+		}
+		uuids = draUUIDs
 	}
 
 	return uuids, nil

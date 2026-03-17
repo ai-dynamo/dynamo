@@ -354,6 +354,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 		NodeName:       w.config.NodeName,
 		PodName:        pod.Name,
 		PodNamespace:   pod.Namespace,
+		Clientset:      w.clientset,
 	}
 	if err := orchestrate.Checkpoint(ctx, w.containerd, log, req, w.config); err != nil {
 		log.Error(err, "Checkpoint failed")
@@ -443,6 +444,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 		PodName:        pod.Name,
 		PodNamespace:   pod.Namespace,
 		ContainerName:  containerName,
+		Clientset:      w.clientset,
 	}
 	restoredPID, err := orchestrate.Restore(ctx, w.containerd, log, req)
 	if err != nil {

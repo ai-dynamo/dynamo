@@ -93,64 +93,6 @@ func (s *testPodResourcesServer) Get(context.Context, *podresourcesv1.GetPodReso
 	return nil, status.Error(codes.Unimplemented, "not implemented in test")
 }
 
-func TestExtractGPUUUIDFromCDIDevices(t *testing.T) {
-	tests := []struct {
-		name string
-		cdis []*podresourcesv1.CDIDevice
-		want string
-	}{
-		{
-			name: "valid UUID in CDI name",
-			cdis: []*podresourcesv1.CDIDevice{
-				{Name: "gpu.nvidia.com/gpu=GPU-551720f0-caf0-22b7-f525-2a51a6ab478d"},
-			},
-			want: "GPU-551720f0-caf0-22b7-f525-2a51a6ab478d",
-		},
-		{
-			name: "multiple CDI devices, second has UUID",
-			cdis: []*podresourcesv1.CDIDevice{
-				{Name: "gpu.nvidia.com/mps=some-partition"},
-				{Name: "gpu.nvidia.com/gpu=GPU-aabbccdd-1122-3344-5566-778899aabbcc"},
-			},
-			want: "GPU-aabbccdd-1122-3344-5566-778899aabbcc",
-		},
-		{
-			name: "no valid UUID",
-			cdis: []*podresourcesv1.CDIDevice{
-				{Name: "gpu.nvidia.com/gpu=gpu-0"},
-			},
-			want: "",
-		},
-		{
-			name: "empty CDI list",
-			cdis: nil,
-			want: "",
-		},
-		{
-			name: "malformed CDI name without equals sign",
-			cdis: []*podresourcesv1.CDIDevice{
-				{Name: "gpu.nvidia.com/gpu"},
-			},
-			want: "",
-		},
-		{
-			name: "non-NVIDIA CDI name ignored",
-			cdis: []*podresourcesv1.CDIDevice{
-				{Name: "other.vendor.com/device=not-a-gpu-uuid"},
-			},
-			want: "",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := extractGPUUUIDFromCDIDevices(tc.cdis)
-			if got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestGetPodGPUUUIDs(t *testing.T) {
 	socketDir := t.TempDir()
 	socketPath := filepath.Join(socketDir, "kubelet.sock")
@@ -235,7 +177,7 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, err := GetPodGPUUUIDs(ctx, "test-pod", "default", "main", logr.Discard())
+	got, err := GetPodGPUUUIDs(ctx, nil, "test-pod", "default", "main", logr.Discard())
 	if err != nil {
 		t.Fatalf("GetPodGPUUUIDs: %v", err)
 	}
@@ -248,133 +190,5 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
-	}
-}
-
-func TestGetPodGPUUUIDs_DRA(t *testing.T) {
-	tests := []struct {
-		name string
-		resp *podresourcesv1.ListPodResourcesResponse
-		want []string
-	}{
-		{
-			name: "valid UUID in CDI device name",
-			resp: &podresourcesv1.ListPodResourcesResponse{
-				PodResources: []*podresourcesv1.PodResources{{
-					Name: "dra-pod", Namespace: "default",
-					Containers: []*podresourcesv1.ContainerResources{{
-						Name: "main",
-						DynamicResources: []*podresourcesv1.DynamicResource{{
-							ClaimName: "gpu-claim", ClaimNamespace: "default",
-							ClaimResources: []*podresourcesv1.ClaimResource{
-								{
-									DriverName: nvidiaGPUDRADriver,
-									DeviceName: "gpu-0",
-									CdiDevices: []*podresourcesv1.CDIDevice{
-										{Name: "gpu.nvidia.com/gpu=GPU-aabbccdd-1122-3344-5566-778899aabbcc"},
-									},
-								},
-								{
-									DriverName: nvidiaGPUDRADriver,
-									DeviceName: "gpu-1",
-									CdiDevices: []*podresourcesv1.CDIDevice{
-										{Name: "gpu.nvidia.com/gpu=GPU-11223344-aabb-ccdd-eeff-556677889900"},
-									},
-								},
-							},
-						}},
-					}},
-				}},
-			},
-			want: []string{
-				"GPU-aabbccdd-1122-3344-5566-778899aabbcc",
-				"GPU-11223344-aabb-ccdd-eeff-556677889900",
-			},
-		},
-		{
-			name: "opaque CDI names yield empty result for fallback",
-			resp: &podresourcesv1.ListPodResourcesResponse{
-				PodResources: []*podresourcesv1.PodResources{{
-					Name: "dra-pod", Namespace: "default",
-					Containers: []*podresourcesv1.ContainerResources{{
-						Name: "main",
-						DynamicResources: []*podresourcesv1.DynamicResource{{
-							ClaimName: "gpu-claim", ClaimNamespace: "default",
-							ClaimResources: []*podresourcesv1.ClaimResource{{
-								DriverName: nvidiaGPUDRADriver,
-								DeviceName: "gpu-0",
-								CdiDevices: []*podresourcesv1.CDIDevice{
-									{Name: "gpu.nvidia.com/gpu=gpu-0"},
-								},
-							}},
-						}},
-					}},
-				}},
-			},
-			want: nil,
-		},
-		{
-			name: "no CDI devices yields empty result for fallback",
-			resp: &podresourcesv1.ListPodResourcesResponse{
-				PodResources: []*podresourcesv1.PodResources{{
-					Name: "dra-pod", Namespace: "default",
-					Containers: []*podresourcesv1.ContainerResources{{
-						Name: "main",
-						DynamicResources: []*podresourcesv1.DynamicResource{{
-							ClaimName: "gpu-claim", ClaimNamespace: "default",
-							ClaimResources: []*podresourcesv1.ClaimResource{{
-								DriverName: nvidiaGPUDRADriver,
-								DeviceName: "gpu-0",
-							}},
-						}},
-					}},
-				}},
-			},
-			want: nil,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			socketDir := t.TempDir()
-			socketPath := filepath.Join(socketDir, "kubelet.sock")
-			listener, err := net.Listen("unix", socketPath)
-			if err != nil {
-				t.Fatalf("listen unix socket: %v", err)
-			}
-			defer listener.Close()
-
-			srv := grpc.NewServer()
-			podresourcesv1.RegisterPodResourcesListerServer(srv, &testPodResourcesServer{resp: tc.resp})
-			go func() {
-				if serveErr := srv.Serve(listener); serveErr != nil {
-					if errors.Is(serveErr, grpc.ErrServerStopped) || strings.Contains(serveErr.Error(), "use of closed network connection") {
-						return
-					}
-					t.Errorf("serve: %v", serveErr)
-				}
-			}()
-			t.Cleanup(srv.Stop)
-
-			prev := podResourcesSocketPath
-			podResourcesSocketPath = socketPath
-			t.Cleanup(func() { podResourcesSocketPath = prev })
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			got, err := GetPodGPUUUIDs(ctx, "dra-pod", "default", "main", logr.Discard())
-			if err != nil {
-				t.Fatalf("GetPodGPUUUIDs: %v", err)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("got %v (len %d), want %v (len %d)", got, len(got), tc.want, len(tc.want))
-			}
-			for i := range tc.want {
-				if got[i] != tc.want[i] {
-					t.Fatalf("got[%d] = %q, want %q", i, got[i], tc.want[i])
-				}
-			}
-		})
 	}
 }
