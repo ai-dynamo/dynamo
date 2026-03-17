@@ -361,7 +361,7 @@ jobs:
       run: |
         echo "name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
     - name: Setup vCluster and operator
-      uses: ./.github/actions/setup-deploy-vcluster
+      uses: ./.github/actions/setup-deploy
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         vcluster_name: ${{ steps.vcluster-name.outputs.name }}
@@ -401,6 +401,23 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-deploy
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -421,6 +438,13 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
           platform_arch: amd64
+      - name: Self-cleanup vCluster (rerun)
+        if: always() && steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/teardown-deploy
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   deploy-test-sglang:
     runs-on: prod-default-small-v2
@@ -445,6 +469,23 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-deploy
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -465,6 +506,13 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
           platform_arch: amd64
+      - name: Self-cleanup vCluster (rerun)
+        if: always() && steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/teardown-deploy
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
@@ -493,6 +541,23 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-deploy
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -513,6 +578,13 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
           platform_arch: amd64
+      - name: Self-cleanup vCluster (rerun)
+        if: always() && steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/teardown-deploy
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   # ============================================================================
   # CLEANUP JOBS
@@ -550,7 +622,7 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
     - name: Teardown vCluster
       if: needs.deploy-operator.outputs.NAMESPACE != ''
-      uses: ./.github/actions/teardown-deploy-vcluster
+      uses: ./.github/actions/teardown-deploy
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}

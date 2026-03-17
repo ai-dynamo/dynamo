@@ -1,4 +1,4 @@
-name: 'Setup Deploy vCluster'
+name: 'Setup Deploy'
 description: 'Create a vCluster, install the Dynamo platform operator inside it via Helm'
 
 inputs:
@@ -22,11 +22,6 @@ inputs:
     description: 'HuggingFace token for model access'
     required: false
     default: ''
-  vcluster_version:
-    description: 'vCluster CLI version to install'
-    required: false
-    default: 'v0.33.0'
-
 runs:
   using: "composite"
   steps:
@@ -38,21 +33,7 @@ runs:
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
 
     - name: Install vCluster CLI
-      shell: bash
-      run: |
-        echo "::group::Install vCluster CLI ${{ inputs.vcluster_version }}"
-        ARCH=$(uname -m)
-        case "${ARCH}" in
-          x86_64)  VCLUSTER_ARCH="amd64" ;;
-          aarch64) VCLUSTER_ARCH="arm64" ;;
-          *)       echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
-        esac
-        curl -L -o /tmp/vcluster \
-          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${VCLUSTER_ARCH}"
-        sudo mv /tmp/vcluster /usr/local/bin/vcluster
-        sudo chmod +x /usr/local/bin/vcluster
-        vcluster version
-        echo "::endgroup::"
+      uses: ./.github/actions/install-vcluster-cli
 
     - name: Create host namespace
       shell: bash
@@ -82,6 +63,7 @@ runs:
         vcluster create ${VCLUSTER_NAME} \
           --namespace ${NAMESPACE} \
           --connect=false \
+          --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
           --set controlPlane.distro.k8s.version=v1.32.13
         echo "::endgroup::"

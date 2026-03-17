@@ -11,11 +11,6 @@ inputs:
   vcluster_namespace:
     description: 'Host namespace where the vCluster is running'
     required: true
-  vcluster_version:
-    description: 'vCluster CLI version to install'
-    required: false
-    default: 'v0.33.0'
-
 outputs:
   kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for the vCluster (points to 127.0.0.1:8443 via port-forward)'
@@ -32,21 +27,7 @@ runs:
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
 
     - name: Install vCluster CLI
-      shell: bash
-      run: |
-        echo "::group::Install vCluster CLI ${{ inputs.vcluster_version }}"
-        ARCH=$(uname -m)
-        case "${ARCH}" in
-          x86_64)  VCLUSTER_ARCH="amd64" ;;
-          aarch64) VCLUSTER_ARCH="arm64" ;;
-          *)       echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
-        esac
-        curl -L -o /tmp/vcluster \
-          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${VCLUSTER_ARCH}"
-        sudo mv /tmp/vcluster /usr/local/bin/vcluster
-        sudo chmod +x /usr/local/bin/vcluster
-        vcluster version
-        echo "::endgroup::"
+      uses: ./.github/actions/install-vcluster-cli
 
     - name: Connect to vCluster
       id: connect
