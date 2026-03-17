@@ -21,12 +21,12 @@ pub mod tests;
 mod block_proptest;
 
 pub(crate) use active::ActivePool;
-pub(crate) use inactive::InactivePool;
+pub use inactive::InactivePool;
 pub use inactive::AllocatedBlocks;
 pub use inactive::InactivePoolBackend;
 pub(crate) use inactive::backends;
 pub use reset::FifoBlockAllocator;
-pub(crate) use reset::ResetPool;
+pub use reset::ResetPool;
 
 // Re-export RAII guards from guards module
 use crate::blocks::{

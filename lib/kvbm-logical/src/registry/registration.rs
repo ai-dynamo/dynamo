@@ -19,7 +19,7 @@ use std::any::TypeId;
 use std::sync::{Arc, Weak};
 
 impl BlockRegistrationHandle {
-    pub(crate) fn register_block<T: BlockMetadata + Sync>(
+    pub fn register_block<T: BlockMetadata + Sync>(
         &self,
         mut block: CompleteBlock<T>,
         duplication_policy: BlockDuplicationPolicy,

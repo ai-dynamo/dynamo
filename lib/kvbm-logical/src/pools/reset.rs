@@ -15,7 +15,7 @@ use super::{Block, BlockAllocator, BlockMetadata, MutableBlock, Reset};
 use parking_lot::Mutex;
 use std::{collections::VecDeque, sync::Arc};
 
-pub(crate) struct ResetPool<T> {
+pub struct ResetPool<T> {
     block_allocator: Arc<Mutex<dyn BlockAllocator<T> + Send + Sync>>,
     return_fn: Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
     block_size: usize,
@@ -23,7 +23,7 @@ pub(crate) struct ResetPool<T> {
 }
 
 impl<T: BlockMetadata> ResetPool<T> {
-    pub(crate) fn new(
+    pub fn new(
         blocks: Vec<Block<T, Reset>>,
         block_size: usize,
         metrics: Option<Arc<BlockPoolMetrics>>,

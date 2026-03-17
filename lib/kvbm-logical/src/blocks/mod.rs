@@ -90,7 +90,7 @@ use std::sync::Arc;
 
 /// Return function for blocks transitioning back to Reset state.
 /// Used by MutableBlock, DuplicateBlock, and CompleteBlock drop paths.
-pub(crate) type ResetReturnFn<T> = Arc<dyn Fn(Block<T, state::Reset>) + Send + Sync>;
+pub type ResetReturnFn<T> = Arc<dyn Fn(Block<T, state::Reset>) + Send + Sync>;
 
 /// Return function for registered blocks returning to the inactive pool.
 /// Used by PrimaryBlock drop and pool management.
@@ -98,7 +98,7 @@ pub(crate) type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, state::Registere
 
 /// Upgrade function for finding/promoting blocks by sequence hash.
 /// Used by ImmutableBlock and WeakBlock upgrade paths.
-pub(crate) type UpgradeFn<T> =
+pub type UpgradeFn<T> =
     Arc<dyn Fn(SequenceHash) -> Option<Arc<dyn RegisteredBlock<T>>> + Send + Sync>;
 
 /// Error returned by block state transitions.
@@ -158,7 +158,7 @@ pub struct Block<T, State> {
 ///
 /// Both [`PrimaryBlock`] and [`DuplicateBlock`] implement this trait so that
 /// [`ImmutableBlock`] can hold either variant behind a `dyn RegisteredBlock<T>`.
-pub(crate) trait RegisteredBlock<T>: Send + Sync {
+pub trait RegisteredBlock<T>: Send + Sync {
     fn block_id(&self) -> BlockId;
     fn sequence_hash(&self) -> SequenceHash;
     fn registration_handle(&self) -> &BlockRegistrationHandle;

@@ -116,7 +116,7 @@ use crate::blocks::{RegisteredReturnFn, ResetReturnFn};
 /// RegisteredBlock RAII guards that automatically return to the pool on drop.
 
 #[derive(Clone)]
-pub(crate) struct InactivePool<T: BlockMetadata> {
+pub struct InactivePool<T: BlockMetadata> {
     // Inner state protected by RwLock for thread-safe access from guards
     inner: Arc<RwLock<InactivePoolInner<T>>>,
     // Return function for MutableBlocks to return to ResetPool
@@ -134,7 +134,7 @@ struct InactivePoolInner<T: BlockMetadata> {
 
 impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// Create a new InactivePool with the given backend and reset pool
-    pub(crate) fn new(
+    pub fn new(
         backend: Box<dyn InactivePoolBackend<T>>,
         reset_pool: &ResetPool<T>,
         metrics: Option<Arc<BlockPoolMetrics>>,
@@ -350,7 +350,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         inner.backend.is_empty()
     }
 
-    pub(crate) fn return_fn(&self) -> RegisteredReturnFn<T> {
+    pub fn return_fn(&self) -> RegisteredReturnFn<T> {
         self.return_fn.clone()
     }
 

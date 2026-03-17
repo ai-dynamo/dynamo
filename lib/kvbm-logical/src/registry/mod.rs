@@ -128,6 +128,12 @@ pub struct BlockRegistry {
 }
 
 impl BlockRegistry {
+    /// Returns a BlockToken proving this registry was properly constructed.
+    /// External crates use this token to call factory functions in [`ext`](crate::ext).
+    pub fn token(&self) -> crate::ext::BlockToken {
+        crate::ext::BlockToken(())
+    }
+
     /// Creates a new builder for BlockRegistry.
     pub fn builder() -> BlockRegistryBuilder {
         BlockRegistryBuilder::new()
