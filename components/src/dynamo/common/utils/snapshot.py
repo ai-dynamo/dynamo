@@ -209,5 +209,6 @@ def reload_snapshot_restore_identity() -> tuple[str, str]:
 
         os.environ[env_name] = value
 
+    # Snapshot restore only runs in Kubernetes-managed pods, so discovery resets here.
     os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
     return get_worker_namespace(), "kubernetes"
