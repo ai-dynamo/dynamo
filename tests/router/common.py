@@ -2071,8 +2071,8 @@ def _test_disagg_direct_mode(
                                         f"Models registered: {[m.get('id') for m in models]}"
                                     )
                                     return
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error checking models endpoint: {e}")
                 await asyncio.sleep(1)
             raise TimeoutError("Timeout waiting for models in Direct-mode frontend")
 
@@ -2158,15 +2158,18 @@ def _test_disagg_direct_mode(
                     )
 
                 # Test 2: Request WITHOUT headers should fail (Direct mode
-                # rejects requests that have no worker ID)
+                # rejects requests that have no worker ID).
+                # Assert a 4xx client error, not just any non-200: a 5xx
+                # would indicate a server bug rather than intentional rejection.
                 logger.info(
                     "Sending request without headers (should fail in Direct mode)..."
                 )
                 no_header_payload = {**test_payload, "stream": False}
                 async with session.post(chat_url, json=no_header_payload) as response:
-                    assert response.status != 200, (
-                        f"Expected non-200 status without routing headers in Direct mode, "
-                        f"got {response.status}. Direct mode must reject unaddressed requests."
+                    assert 400 <= response.status < 500, (
+                        f"Expected 4xx client error without routing headers in Direct mode, "
+                        f"got {response.status}. Direct mode must reject unaddressed requests "
+                        f"with a client error, not a server error."
                     )
                     logger.info(
                         f"Correctly rejected headerless request: status={response.status}"

@@ -1232,7 +1232,6 @@ def test_disagg_direct_mode_epp_headers(
     This test verifies the EPP-driven routing path used in the GAIE deploy recipe:
       - Frontend runs with --router-mode direct (no autonomous worker selection)
       - Worker IDs are supplied via x-worker-instance-id / x-prefill-instance-id headers
-      - Prefill and decode workers are separate pools
 
     Validates:
       1. Requests with explicit headers succeed and report correct worker IDs
