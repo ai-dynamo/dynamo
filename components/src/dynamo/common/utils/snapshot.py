@@ -42,6 +42,8 @@ class CheckpointConfig:
         if not ready_file:
             return None
 
+        configure_checkpoint_transport_env()
+
         location = os.environ.get("DYN_CHECKPOINT_LOCATION", "")
         if not location:
             checkpoint_path = os.environ.get("DYN_CHECKPOINT_PATH", "").rstrip("/")
@@ -135,6 +137,62 @@ class CheckpointConfig:
             for task in waiters:
                 if not task.done():
                     task.cancel()
+
+
+def configure_checkpoint_transport_env() -> None:
+    gloo_ifname = os.environ.get("GLOO_SOCKET_IFNAME")
+    if gloo_ifname and gloo_ifname != "lo":
+        logger.warning(
+            "Overriding GLOO_SOCKET_IFNAME=%r with 'lo' for checkpoint mode "
+            "because CRIU cannot restore sockets bound to non-loopback addresses",
+            gloo_ifname,
+        )
+    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+
+    nccl_ifname = os.environ.get("NCCL_SOCKET_IFNAME")
+    if nccl_ifname and nccl_ifname != "lo":
+        logger.warning(
+            "Overriding NCCL_SOCKET_IFNAME=%r with 'lo' for checkpoint mode "
+            "because CRIU cannot restore sockets bound to non-loopback addresses",
+            nccl_ifname,
+        )
+    os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+
+    nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
+    if nccl_cumem_enable and nccl_cumem_enable != "0":
+        logger.warning(
+            "Overriding NCCL_CUMEM_ENABLE=%r with '0' for checkpoint mode "
+            "because cuda-checkpoint does not support cuMem-backed NCCL allocations",
+            nccl_cumem_enable,
+        )
+    os.environ["NCCL_CUMEM_ENABLE"] = "0"
+
+    nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
+    if nccl_p2p_disable and nccl_p2p_disable != "0":
+        logger.warning(
+            "Overriding NCCL_P2P_DISABLE=%r with '0' for checkpoint mode "
+            "to keep NCCL on GPU P2P transport when topology allows it",
+            nccl_p2p_disable,
+        )
+    os.environ["NCCL_P2P_DISABLE"] = "0"
+
+    nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
+    if nccl_nvls_enable and nccl_nvls_enable != "0":
+        logger.warning(
+            "Overriding NCCL_NVLS_ENABLE=%r with '0' for checkpoint mode "
+            "to avoid NVLS and keep NCCL on the legacy P2P path",
+            nccl_nvls_enable,
+        )
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+
+    nccl_ib_disable = os.environ.get("NCCL_IB_DISABLE")
+    if nccl_ib_disable and nccl_ib_disable != "1":
+        logger.warning(
+            "Overriding NCCL_IB_DISABLE=%r with '1' for checkpoint mode "
+            "because CRIU and cuda-checkpoint cannot restore InfiniBand state",
+            nccl_ib_disable,
+        )
+    os.environ["NCCL_IB_DISABLE"] = "1"
 
 
 def get_checkpoint_config() -> tuple[bool, CheckpointConfig | None]:
