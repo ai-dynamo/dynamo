@@ -41,9 +41,10 @@ runs:
       shell: bash
       run: |
         echo "::group::Install vCluster CLI ${{ inputs.vcluster_version }}"
-        curl -L -o /usr/local/bin/vcluster \
+        curl -L -o /tmp/vcluster \
           "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-amd64"
-        chmod +x /usr/local/bin/vcluster
+        sudo mv /tmp/vcluster /usr/local/bin/vcluster
+        sudo chmod +x /usr/local/bin/vcluster
         vcluster version
         echo "::endgroup::"
 
