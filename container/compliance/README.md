@@ -57,7 +57,15 @@ python container/compliance/process_results.py \
 
 ### Full example with base image diff
 
+Use `resolve_base_image.py` to look up the correct base image from `container/context.yaml`
+rather than hardcoding the URI:
+
 ```bash
+# Resolve base image from context.yaml (requires: pip install pyyaml)
+BASE_IMAGE=$(python container/compliance/resolve_base_image.py \
+  --framework vllm \
+  --cuda-version 12.9)
+
 # Extract target image
 docker buildx build \
   --builder compliance-builder \
@@ -72,7 +80,7 @@ docker buildx build \
 docker buildx build \
   --builder compliance-builder \
   --platform linux/amd64 \
-  --build-arg TARGET_IMAGE=nvcr.io/nvidia/cuda:12.9.1-runtime-ubuntu24.04 \
+  --build-arg TARGET_IMAGE="${BASE_IMAGE}" \
   --output type=local,dest=./base-output \
   --pull \
   -f container/compliance/Dockerfile.extract \
@@ -85,6 +93,15 @@ python container/compliance/process_results.py \
   --output attribution.csv
 # Produces: attribution.csv (full) and attribution_diff.csv (delta from base)
 ```
+
+### resolve_base_image.py flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--framework` | *(required)* | `vllm`, `sglang`, `trtllm`, or `dynamo` |
+| `--target` | `runtime` | `runtime` or `frontend` |
+| `--cuda-version` | — | Required for runtime targets (e.g. `12.9`, `13.0`, `13.1`) |
+| `--context-yaml` | `container/context.yaml` | Path to context.yaml |
 
 ### process_results.py flags
 
