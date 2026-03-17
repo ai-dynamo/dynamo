@@ -51,6 +51,7 @@ def patch_torch_memory_saver() -> None:
 
         # Check hook_mode - use GMS for None or explicit "gms"
         hook_mode = self._impl_ctor_kwargs.get("hook_mode")
+        logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
 
         if hook_mode is None or hook_mode == "gms":
             # Use our GPU Memory Service implementation

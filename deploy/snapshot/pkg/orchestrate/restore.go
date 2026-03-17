@@ -129,15 +129,15 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		if len(targetGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
 		}
-		log.Info("GPU UUIDs for device map",
-			"source_uuids", m.CUDA.SourceGPUUUIDs,
-			"target_uuids", targetGPUUUIDs,
-		)
 		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
-		log.Info("Built CUDA device map", "device_map", cudaDeviceMap)
+		log.Info("GPU UUIDs for device map",
+			"source_uuids", m.CUDA.SourceGPUUUIDs,
+			"target_uuids", targetGPUUUIDs,
+			"device_map", cudaDeviceMap,
+		)
 	}
 
 	return &types.RestoreContainerSnapshot{
