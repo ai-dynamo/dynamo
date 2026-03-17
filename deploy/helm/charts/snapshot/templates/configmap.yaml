@@ -13,9 +13,7 @@ data:
     basePath: {{ .Values.storage.pvc.basePath | quote }}
 
     overlay:
-      systemDirs: {{ toYaml .Values.config.overlay.systemDirs | nindent 8 }}
-      cacheDirs: {{ toYaml .Values.config.overlay.cacheDirs | nindent 8 }}
-      additionalExclusions: {{ toYaml .Values.config.overlay.additionalExclusions | nindent 8 }}
+      exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
     restore:
       nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}

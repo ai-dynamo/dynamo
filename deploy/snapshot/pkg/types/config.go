@@ -90,9 +90,7 @@ type CRIUSettings struct {
 
 // OverlaySettings is the static config for rootfs exclusions.
 type OverlaySettings struct {
-	SystemDirs           []string `yaml:"systemDirs"`
-	CacheDirs            []string `yaml:"cacheDirs"`
-	AdditionalExclusions []string `yaml:"additionalExclusions"`
+	Exclusions []string `yaml:"exclusions"`
 }
 
 // ConfigError represents a configuration validation error.
