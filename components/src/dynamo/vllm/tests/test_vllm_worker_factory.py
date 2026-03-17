@@ -88,6 +88,7 @@ class TestHandles:
         assert not WorkerFactory.handles(config)
 
 
+@pytest.mark.asyncio
 class TestCreate:
     """Test WorkerFactory.create() routing."""
 
