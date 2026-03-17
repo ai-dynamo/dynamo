@@ -40,6 +40,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Deployment profile to test (e.g., agg, disagg, disagg_router). "
         "If not specified, runs all profiles for the selected framework.",
     )
+    parser.addoption(
+        "--frontend-image",
+        type=str,
+        default=None,
+        help="Frontend container image (used by GAIE deploy tests).",
+    )
+    parser.addoption(
+        "--vllm-image",
+        type=str,
+        default=None,
+        help="vLLM runtime container image (used by GAIE deploy tests).",
+    )
 
 
 @dataclass(frozen=True)

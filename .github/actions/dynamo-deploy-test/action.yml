@@ -22,18 +22,33 @@ inputs:
     default: ''
 
   framework:
-    description: 'Framework name (vllm, sglang, trtllm)'
-    required: true
+    description: 'Framework name (vllm, sglang, trtllm). Optional when using a custom test_file.'
+    required: false
+    default: ''
   profile:
-    description: 'Deployment profile (e.g., disagg_router, agg)'
-    required: true
+    description: 'Deployment profile (e.g., disagg_router, agg). Optional when using a custom test_file.'
+    required: false
+    default: ''
   image:
-    description: 'Full container image reference for the framework runtime'
-    required: true
+    description: 'Full container image reference for the framework runtime. Optional when using a custom test_file.'
+    required: false
+    default: ''
   platform_arch:
     description: 'Platform architecture (amd64, arm64)'
     required: false
     default: 'amd64'
+  test_file:
+    description: 'Pytest test file to run (default: tests/deploy/test_deploy.py)'
+    required: false
+    default: 'tests/deploy/test_deploy.py'
+  test_name:
+    description: 'Name used for artifact naming. Defaults to {framework}_{profile} when not set.'
+    required: false
+    default: ''
+  extra_pytest_args:
+    description: 'Additional pytest arguments passed to the test invocation'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -111,16 +126,34 @@ runs:
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
+        TEST_FILE: ${{ inputs.test_file }}
+        TEST_NAME: ${{ inputs.test_name }}
+        EXTRA_PYTEST_ARGS: ${{ inputs.extra_pytest_args }}
       run: |
         mkdir -p test-results
-        pytest tests/deploy/test_deploy.py \
-          --framework="${FRAMEWORK}" \
-          --profile="${PROFILE}" \
-          --image="${IMAGE}" \
+
+        PYTEST_ARGS=""
+        if [ -n "${FRAMEWORK}" ]; then
+          PYTEST_ARGS+=" --framework=${FRAMEWORK}"
+        fi
+        if [ -n "${PROFILE}" ]; then
+          PYTEST_ARGS+=" --profile=${PROFILE}"
+        fi
+        if [ -n "${IMAGE}" ]; then
+          PYTEST_ARGS+=" --image=${IMAGE}"
+        fi
+
+        if [ -z "${TEST_NAME}" ]; then
+          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
+        fi
+
+        pytest ${TEST_FILE} \
+          ${PYTEST_ARGS} \
           --namespace="${NAMESPACE}" \
+          ${EXTRA_PYTEST_ARGS} \
           -v -s \
           --durations=10 \
-          --junitxml=test-results/pytest_deploy_${FRAMEWORK}_${PROFILE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --junitxml=test-results/pytest_deploy_${TEST_NAME}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
           --log-cli-level=INFO
 
     - name: Cleanup Deployment
@@ -160,10 +193,22 @@ runs:
         kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
         namespace: ${{ steps.ns-check.outputs.ns }}
 
+    - name: Determine test name for artifacts
+      id: test-name
+      if: always()
+      shell: bash
+      run: |
+        TEST_NAME="${{ inputs.test_name }}"
+        if [ -z "${TEST_NAME}" ]; then
+          TEST_NAME="${{ inputs.framework }}_${{ inputs.profile }}"
+          TEST_NAME="${TEST_NAME:-unknown_unknown}"
+        fi
+        echo "name=${TEST_NAME}" >> $GITHUB_OUTPUT
+
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: test-results-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: test-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_deploy_${{ steps.test-name.outputs.name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
