@@ -104,7 +104,7 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      push_image: false
+      push_image: true
     secrets: inherit
 
   sglang-dev-pipeline:
@@ -117,7 +117,7 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      push_image: false
+      push_image: true
     secrets: inherit
 
   trtllm-dev-pipeline:
@@ -130,7 +130,7 @@ jobs:
       cuda_versions: '["13.1"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      push_image: false
+      push_image: true
     secrets: inherit
 
   # ============================================================================
