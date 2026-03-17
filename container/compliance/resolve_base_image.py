@@ -49,7 +49,10 @@ def main() -> None:
     try:
         import yaml
     except ImportError:
-        print("ERROR: pyyaml is required — install with: pip install pyyaml", file=sys.stderr)
+        print(
+            "ERROR: pyyaml is required — install with: pip install pyyaml",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     context_yaml = Path(args.context_yaml)
@@ -63,7 +66,10 @@ def main() -> None:
     if args.target == "frontend":
         image = ctx.get("dynamo", {}).get("frontend_image")
         if not image:
-            print("ERROR: frontend_image not found in context.yaml dynamo section", file=sys.stderr)
+            print(
+                "ERROR: frontend_image not found in context.yaml dynamo section",
+                file=sys.stderr,
+            )
             sys.exit(1)
         print(image)
         return

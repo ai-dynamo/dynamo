@@ -124,7 +124,9 @@ Examples:
             sys.exit(1)
         base_packages = read_extraction_dir(base_dir)
         diff_packages = compute_diff(target_packages, base_packages)
-        print(f"Diff: {len(diff_packages)} new/changed packages vs base", file=sys.stderr)
+        print(
+            f"Diff: {len(diff_packages)} new/changed packages vs base", file=sys.stderr
+        )
 
         if output_path:
             diff_path = output_path.with_stem(output_path.stem + "_diff")
