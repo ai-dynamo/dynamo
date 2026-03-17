@@ -94,6 +94,7 @@ impl KvRouterConfig {
                 router_queue_threshold,
                 router_event_threads,
                 router_enable_cache_control,
+                skip_initial_worker_wait: false,
                 router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
                     panic!("invalid router_queue_policy: {router_queue_policy:?}")
                 }),

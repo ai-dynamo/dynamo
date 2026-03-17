@@ -130,6 +130,17 @@ pub struct KvRouterConfig {
     /// When true, the router starts immediately without waiting for discovery-based
     /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
+    /// Scheduling policy for the router queue.
+    /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
+    /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+    pub router_queue_policy: RouterQueuePolicy,
+
+    /// Component name of a standalone KV indexer to use for overlap scoring.
+    /// When set, the router creates a `Remote` indexer that queries the standalone
+    /// indexer via the request plane instead of maintaining a local radix tree.
+    /// The standalone indexer handles its own event subscription and discovery.
+    #[serde(default)]
+    pub remote_indexer_component: Option<String>,
 }
 
 impl Default for KvRouterConfig {
@@ -151,6 +162,7 @@ impl Default for KvRouterConfig {
             router_queue_threshold: Some(2.0),
             router_event_threads: 4,
             router_enable_cache_control: false,
+            skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
         }

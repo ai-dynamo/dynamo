@@ -15,12 +15,18 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
 };
+
+// How often we force expire stale requests across all workers. See the comment
+// in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
+// more details.
+const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -690,5 +696,63 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             *counts.entry(lora_name).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// Force expire stale requests across all workers (one-shot).
+    ///
+    /// This is necessary because worker expiration otherwise only runs as a side-effect
+    /// of `add_request`. If a worker has many expired active sequences and no new
+    /// requests are added, expiration never runs. This method forces it on all workers.
+    ///
+    /// To run this periodically, use start_periodic_force_expiry_across_all_workers.
+    pub fn force_expire_requests_across_all_workers(&self) {
+        let now = Instant::now();
+        let table = self.workers.read();
+        let mut removed_request_count = 0;
+        for (worker, lock) in &table.slots {
+            let removed_requests = lock.write().force_expiry();
+            if !removed_requests.is_empty() {
+                for expired_id in &removed_requests {
+                    self.request_to_worker.remove(expired_id);
+                    self.request_to_lora.remove(expired_id);
+                    removed_request_count += 1;
+                }
+                self.publish_active_load_for_worker(*worker);
+            }
+        }
+        let duration = now.elapsed();
+        tracing::debug!(
+            duration = duration.as_secs_f64(),
+            removed_request_count,
+            "Force expired stale requests across all workers"
+        );
+    }
+
+    /// Spawn a background task that calls `force_expire_requests_across_all_workers`
+    /// at the given interval until `cancel_token` is cancelled.
+    ///
+    /// **Concurrency note:** This type is always used as `Arc<ActiveSequencesMultiWorker>`. All
+    /// mutation is via interior mutability (`RwLock<WorkerTable>`, `DashMap`), so the periodic
+    /// task only needs `&self` and does not block other callers.
+    pub fn start_periodic_force_expiry_across_all_workers(
+        self: &Arc<Self>,
+        cancel_token: CancellationToken,
+    ) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut expiry_interval =
+                tokio::time::interval(FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL);
+            expiry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = expiry_interval.tick() => {
+                        this.force_expire_requests_across_all_workers();
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                }
+            }
+        });
     }
 }

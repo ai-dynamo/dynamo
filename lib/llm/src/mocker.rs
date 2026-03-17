@@ -226,15 +226,17 @@ impl ZmqKvEventSink {
                         let zmq_msg = zeromq::ZmqMessage::try_from(frames)
                             .expect("Failed to create ZMQ multipart message");
 
-                        if let Err(e) = pub_socket.send(zmq_msg).await {
-                            tracing::warn!("Failed to send ZMQ KV event: {e}");
-                        }
-
                         if router_socket.is_some() {
                             if ring_buffer.len() >= REPLAY_BUFFER_CAPACITY {
                                 ring_buffer.pop_front();
                             }
                             ring_buffer.push_back((seq_num, payload));
+                        }
+
+                        // Record the batch for replay before live publish so listeners
+                        // can recover even if the PUB send is missed or fails.
+                        if let Err(e) = pub_socket.send(zmq_msg).await {
+                            tracing::warn!("Failed to send ZMQ KV event: {e}");
                         }
 
                         seq_num += 1;

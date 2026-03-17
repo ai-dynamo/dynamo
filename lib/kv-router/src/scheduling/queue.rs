@@ -132,6 +132,11 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
             return;
         };
 
+        if request.allowed_worker_ids.is_some() {
+            self.schedule(request).await;
+            return;
+        }
+
         if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref()) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
