@@ -559,23 +559,16 @@ impl DirectRoutingRouter {
     }
 
     /// Extract worker ID from request routing hints.
-    /// Returns a `DynamoError::InvalidArgument` (→ HTTP 400) if no worker ID
-    /// is found, since it is the caller's responsibility to supply the header.
+    /// Returns an error if no worker ID is found (required in direct routing mode).
     fn get_worker_id(request: &PreprocessedRequest) -> Result<u64, Error> {
         let routing = request.routing.as_ref();
         let worker_id = routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id));
 
         worker_id.ok_or_else(|| {
-            dynamo_runtime::error::DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
-                .message(
-                    "Worker ID required (--direct-route) but none found in request. \
-                     Expected decode_worker_id or backend_instance_id to be set by \
-                     external router (e.g., EPP) via x-worker-instance-id header."
-                        .to_string(),
-                )
-                .build()
-                .into()
+            anyhow::anyhow!(
+                "Worker ID required (--direct-route) but none found in request. \
+                 Expected decode_worker_id or backend_instance_id to be set by external router (e.g., EPP)."
+            )
         })
     }
 }
