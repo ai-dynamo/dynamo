@@ -1,1 +1,0 @@
-DEBUG    dynamo.common.config_dump.config_dumper:config_dumper.py:218 Registering encoder for <class 'dynamo.frontend.frontend_args.FrontendConfig'>

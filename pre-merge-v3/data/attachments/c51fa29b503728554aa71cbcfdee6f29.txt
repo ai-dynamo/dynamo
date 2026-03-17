@@ -1,1 +1,0 @@
-DEBUG    dynamo.vllm.handlers:handlers.py:899 Decoded PyTorch format embeddings: shape=torch.Size([1024]), dtype=torch.float32, size=5673 bytes

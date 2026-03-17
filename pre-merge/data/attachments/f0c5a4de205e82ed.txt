@@ -1,0 +1,9 @@
+[2m2026-03-17T21:41:07.920196Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 2 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B', 'Qwen/Qwen3-VL-2B-Instruct'}
+[2m2026-03-17T21:41:07.920307Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-03-17T21:41:07.920356Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:03,  2.87it/s]Fetching 10 files:  30%|███       | 3/10 [00:00<00:01,  5.76it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  1.57it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  2.51it/s]
+[2m2026-03-17T21:41:12.090973Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-03-17T21:41:12.091049Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [00:00<00:01,  7.89it/s]Fetching 12 files:  58%|█████▊    | 7/12 [00:05<00:03,  1.34it/s]Fetching 12 files: 100%|██████████| 12/12 [00:05<00:00,  2.38it/s]
+[2m2026-03-17T21:41:17.247947Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct

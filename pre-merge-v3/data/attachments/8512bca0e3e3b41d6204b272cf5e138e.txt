@@ -1,0 +1,12 @@
+[2m2026-03-17T21:44:38.750886Z[0m [32m INFO[0m [2mplanner_core.observe_traffic_stats[0m[2m:[0m Observed num_req: 10.00 isl: 3000.00 osl: 150.00
+[2m2026-03-17T21:44:38.750989Z[0m [32m INFO[0m [2mplanner_core.observe_traffic_stats[0m[2m:[0m Observed ttft: 400.00ms itl: 30.00ms
+[2m2026-03-17T21:44:38.751217Z[0m [32m INFO[0m [2mplanner_core.predict_load[0m[2m:[0m Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+[2m2026-03-17T21:44:38.751490Z[0m [32m INFO[0m [2mprefill_planner._compute_replica_requirements[0m[2m:[0m Prefill calculation: 500.00(p_thpt) / 49481.09(p_engine_cap) = 1(num_p)
+[2m2026-03-17T21:44:38.751558Z[0m [32m INFO[0m [2mplanner_core.predict_load[0m[2m:[0m Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+[2m2026-03-17T21:44:38.751678Z[0m [32m INFO[0m [2mdecode_planner._compute_replica_requirements[0m[2m:[0m Decode calculation: 25.00(d_thpt) / 6794.77(d_engine_cap) = 1(num_d)
+[2m2026-03-17T21:44:38.752079Z[0m [32m INFO[0m [2mplanner_core.observe_traffic_stats[0m[2m:[0m Observed num_req: 5000.00 isl: 3000.00 osl: 150.00
+[2m2026-03-17T21:44:38.752132Z[0m [32m INFO[0m [2mplanner_core.observe_traffic_stats[0m[2m:[0m Observed ttft: 400.00ms itl: 30.00ms
+[2m2026-03-17T21:44:38.752304Z[0m [32m INFO[0m [2mplanner_core.predict_load[0m[2m:[0m Predicted load: num_req=5000.00, isl=3000.00, osl=150.00
+[2m2026-03-17T21:44:38.752478Z[0m [32m INFO[0m [2mprefill_planner._compute_replica_requirements[0m[2m:[0m Prefill calculation: 250000.00(p_thpt) / 49481.09(p_engine_cap) = 6(num_p)
+[2m2026-03-17T21:44:38.752537Z[0m [32m INFO[0m [2mplanner_core.predict_load[0m[2m:[0m Predicted load: num_req=5000.00, isl=3000.00, osl=150.00
+[2m2026-03-17T21:44:38.752634Z[0m [32m INFO[0m [2mdecode_planner._compute_replica_requirements[0m[2m:[0m Decode calculation: 12500.00(d_thpt) / 6794.77(d_engine_cap) = 2(num_d)

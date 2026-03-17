@@ -1,0 +1,116 @@
+[2m2026-03-17T21:45:06.665568Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4320 in /workspace
+[2m2026-03-17T21:45:06.666575Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4320
+[2m2026-03-17T21:45:06.767261Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4320
+[2m2026-03-17T21:45:06.767547Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-17T21:45:06.769814Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-17T21:45:06.770478Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2388 --advertise-client-urls http://0.0.0.0:2388 --listen-peer-urls http://0.0.0.0:2389 --initial-advertise-peer-urls http://localhost:2389 --initial-cluster default=http://localhost:2389 --data-dir /tmp/etcd_se2da73v in /workspace
+[2m2026-03-17T21:45:06.771344Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2388
+[2m2026-03-17T21:45:06.872055Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2388
+[2m2026-03-17T21:45:06.874655Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting embedding_agg test_deployment
+[2m2026-03-17T21:45:06.874731Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-Embedding-4B
+[2m2026-03-17T21:45:06.874786Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_embed.sh
+[2m2026-03-17T21:45:06.875009Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/sglang/launch/agg_embed.sh in /workspace/examples/backends/sglang
+[2m2026-03-17T21:45:06.876193Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8023/v1/models
+[2m2026-03-17T21:45:28.917337Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8023/v1/models (attempt=12, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-Embedding-4B",
+      "object": "model",
+      "created": 1773783927,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-17T21:45:28.917505Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8023/health
+[2m2026-03-17T21:45:29.920958Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8023/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 893574189783049481,
+      "transport": {
+        "tcp": "10.1.86.130:42295/c669cfdc279e509/generate"
+      }
+    }
+  ]
+}
+[2m2026-03-17T21:45:29.921180Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: EmbeddingPayload
+[2m2026-03-17T21:45:29.921358Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8023/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "The sky is blue.",
+    "Machine learning is fascinating."
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+[2m2026-03-17T21:45:30.746117Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.82s
+[2m2026-03-17T21:45:30.750969Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Generated 2 embeddings with dimension']
+[2m2026-03-17T21:45:30.751030Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Generated 2 embeddings with dimension 2560
+[2m2026-03-17T21:45:30.751117Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8023/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "The sky is blue.",
+    "Machine learning is fascinating."
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+[2m2026-03-17T21:45:30.946959Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.20s
+[2m2026-03-17T21:45:30.951887Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Generated 2 embeddings with dimension']
+[2m2026-03-17T21:45:30.951955Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Generated 2 embeddings with dimension 2560
+[2m2026-03-17T21:45:30.952011Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: EmbeddingPayload
+[2m2026-03-17T21:45:30.952144Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8023/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "Hello, world!"
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+[2m2026-03-17T21:45:30.989267Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.04s
+[2m2026-03-17T21:45:30.991684Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Generated 1 embeddings with dimension']
+[2m2026-03-17T21:45:30.991753Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Generated 1 embeddings with dimension 2560
+[2m2026-03-17T21:45:30.991807Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: EmbeddingPayload
+[2m2026-03-17T21:45:30.991939Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8023/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "The quick brown fox jumps over the lazy dog.",
+    "Machine learning is transforming technology.",
+    "Natural language processing enables computers to understand text."
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+[2m2026-03-17T21:45:31.121431Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.13s
+[2m2026-03-17T21:45:31.128397Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Generated 3 embeddings with dimension']
+[2m2026-03-17T21:45:31.128494Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Generated 3 embeddings with dimension 2560
+[2m2026-03-17T21:45:31.132187Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5019
+[2m2026-03-17T21:45:39.244736Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5021 name: tee
+[2m2026-03-17T21:45:39.244896Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5021 tee
+[2m2026-03-17T21:45:39.248002Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5020 name: sed
+[2m2026-03-17T21:45:39.248096Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5020 sed
+[2m2026-03-17T21:45:39.253523Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5006
+[2m2026-03-17T21:45:39.356926Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5007 name: sed
+[2m2026-03-17T21:45:39.357034Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5007 sed
+[2m2026-03-17T21:45:39.360379Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4993
+[2m2026-03-17T21:45:39.464039Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4994 name: sed
+[2m2026-03-17T21:45:39.464144Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4994 sed
