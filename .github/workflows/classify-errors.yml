@@ -17,6 +17,8 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: true
+      CI_CLASSIFIER_API_BASE_URL:
+        required: true
   workflow_dispatch:
     inputs:
       run_id:
@@ -73,7 +75,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
           MODEL: "nvcf/meta/llama-3.3-70b-instruct"
         run: |
           PR_ARGS=""
