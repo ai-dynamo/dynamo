@@ -11,7 +11,7 @@ title: Snapshot
 | Startup Type | Time | What Happens |
 |--------------|------|--------------|
 | **Cold Start** | ~1 min | Download model, load to GPU, initialize engine |
-| **Warm Start** (restore from checkpoint) | ~ 10 sec | Restore from checkpoint tar |
+| **Warm Start** (restore from checkpoint) | ~ 10 sec | Restore from a ready checkpoint directory |
 
 > ⚠️ Restore time may vary depending on cluster configuration (storage bandwidth, GPU model, etc.)
 
@@ -163,23 +163,23 @@ Apply the manifest:
 kubectl apply -f vllm-snapshot-demo.yaml -n ${NAMESPACE}
 ```
 
-On the first rollout, the worker cold-starts, the operator creates a `DynamoCheckpoint`, and the checkpoint Job writes data into `snapshot-pvc`.
+On the first rollout, the worker cold-starts, the operator creates a `DynamoCheckpoint`, and the checkpoint Job writes a new checkpoint directory into `snapshot-pvc`.
 
 ### 5. Wait for the checkpoint to become ready
 
-Auto mode creates a `DynamoCheckpoint` named with the deterministic 16-character identity hash. For the sample identity above, the checkpoint name is `0d888542e79d9df4`:
+Auto mode creates a `DynamoCheckpoint` named `checkpoint-<hash>`, where `<hash>` is the deterministic 16-character identity hash. For the sample identity above, the checkpoint name is `checkpoint-0d888542e79d9df4`:
 
 ```bash
 kubectl get dckpt -n ${NAMESPACE}
 
 kubectl wait \
   --for=jsonpath='{.status.phase}'=Ready \
-  "dynamocheckpoint/0d888542e79d9df4" \
+  "dynamocheckpoint/checkpoint-0d888542e79d9df4" \
   -n ${NAMESPACE} \
   --timeout=30m
 ```
 
-If you change the checkpoint identity, the checkpoint name changes with it.
+If you change the checkpoint identity, the hash changes and so does the auto-created checkpoint name.
 
 ### 6. Trigger restore
 
@@ -287,7 +287,7 @@ The `DynamoCheckpoint` (shortname: `dckpt`) is a Kubernetes Custom Resource that
 - **Pre-warming:** Create checkpoints before deploying DGDs for instant startup
 - **Explicit control:** Manage checkpoint lifecycle independently from DGDs
 
-The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set the checkpoint environment variables manually; the operator injects them for checkpoint jobs and restored pods.
+The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set checkpoint-control plumbing manually; the operator injects the checkpoint-ready signal path for checkpoint jobs and adds the restore metadata that restored pods and the snapshot-agent use.
 `spec.job.backoffLimit` is deprecated and ignored. Checkpoint Jobs are always single-attempt.
 
 **Create a checkpoint:**
@@ -382,7 +382,7 @@ kubectl describe dckpt qwen3-06b-bf16 -n ${NAMESPACE}
 Status:
   Phase: Ready
   IdentityHash: 0ef92fc0f7239834
-  JobName: checkpoint-qwen3-06b-bf16
+  JobName: checkpoint-job-0ef92fc0f7239834
   Location: /checkpoints/0ef92fc0f7239834
   StorageType: pvc
   CreatedAt: 2026-01-29T10:05:00Z
@@ -407,7 +407,7 @@ Or use `mode: Auto` with the same identity, and the operator will reuse the same
 
 - **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-GPU only**: Multi-GPU configurations may work in very basic hardware configurations, but are not officially supported yet.
-- **Network state**: No active TCP connections can be checkpointed
+- **Network state**: Restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets can work with the supported CRIU TCP policies, but non-loopback or pod-IP-bound connections can still break restore.
 - **Security**: Dynamo Snapshot runs as a **privileged DaemonSet** which is required to run CRIU and cuda-checkpoint. However, workload pods do not need to be privileged.
 
 ## Troubleshooting
