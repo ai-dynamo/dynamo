@@ -78,6 +78,7 @@ runs:
           --build-arg TARGET_IMAGE="${{ inputs.image }}" \
           --output "type=local,dest=/tmp/compliance-target" \
           --pull \
+          --no-cache-filter extractor \
           --progress=plain \
           -f container/compliance/Dockerfile.extract \
           container/compliance/
@@ -93,6 +94,7 @@ runs:
           --build-arg TARGET_IMAGE="${{ steps.resolve-base.outputs.base_image }}" \
           --output "type=local,dest=/tmp/compliance-base" \
           --pull \
+          --no-cache-filter extractor \
           --progress=plain \
           -f container/compliance/Dockerfile.extract \
           container/compliance/

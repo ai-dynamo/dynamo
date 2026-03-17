@@ -13,8 +13,15 @@
 #     --build-arg TARGET_IMAGE=<image:tag> \
 #     --output type=local,dest=<output_dir> \
 #     --pull \
+#     --no-cache-filter extractor \
 #     -f container/compliance/Dockerfile.extract \
 #     container/compliance/
+#
+# --no-cache-filter extractor: always re-runs the extraction stage to avoid
+# stale results. BuildKit's cache key for RUN --mount=type=bind,from=<stage>
+# does not reliably include the mounted stage's content digest when the source
+# is a stage name rather than a direct image reference, so a cache hit could
+# return TSVs from a previous run against a different image.
 #
 # Output files in <output_dir>:
 #   dpkg.tsv         - tab-separated: package_name\tversion\tspdx_license

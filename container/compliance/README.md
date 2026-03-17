@@ -39,6 +39,7 @@ docker buildx build \
   --build-arg TARGET_IMAGE=<image:tag> \
   --output type=local,dest=./output \
   --pull \
+  --no-cache-filter extractor \
   --progress=plain \
   -f container/compliance/Dockerfile.extract \
   container/compliance/
@@ -46,6 +47,14 @@ docker buildx build \
 
 This produces `./output/dpkg.tsv` and `./output/python.tsv` — tab-separated files
 with `package_name\tversion\tspdx_license` per line.
+
+> **Why `--no-cache-filter extractor`?** BuildKit's cache key for
+> `RUN --mount=type=bind,from=<stage>` does not reliably include the mounted
+> stage's content digest when the source is a stage name (vs. a direct image
+> reference). Without this flag, a cache hit could return TSVs from a previous
+> run against a different image even if `--pull` resolved a new digest.
+> `--no-cache-filter extractor` forces only the extraction stage to re-run;
+> the `python:3.12-slim` base layer and helper script COPYs are still cached.
 
 ### Step 3 — Convert to CSV
 
@@ -73,6 +82,7 @@ docker buildx build \
   --build-arg TARGET_IMAGE=<image:tag> \
   --output type=local,dest=./output \
   --pull \
+  --no-cache-filter extractor \
   -f container/compliance/Dockerfile.extract \
   container/compliance/
 
@@ -83,6 +93,7 @@ docker buildx build \
   --build-arg TARGET_IMAGE="${BASE_IMAGE}" \
   --output type=local,dest=./base-output \
   --pull \
+  --no-cache-filter extractor \
   -f container/compliance/Dockerfile.extract \
   container/compliance/
 
