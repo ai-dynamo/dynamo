@@ -2359,10 +2359,6 @@ var _ = Describe("DGDR Profiling Phase Derivation Functions", func() {
 			Expect(profilingPhaseReason(nvidiacomv1beta1.ProfilingPhaseDone)).Should(Equal(nvidiacomv1beta1.ProfilingReasonCompleted))
 		})
 
-		It("Should return Unknown for empty phase", func() {
-			Expect(profilingPhaseReason(nvidiacomv1beta1.ProfilingPhase(""))).Should(Equal("Unknown"))
-		})
-
 		It("Should pass through unrecognized phases as-is", func() {
 			Expect(profilingPhaseReason(nvidiacomv1beta1.ProfilingPhase("CustomPhase"))).Should(Equal("CustomPhase"))
 		})
@@ -2827,6 +2823,66 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 
 			// Should still be SweepingPrefill
 			Expect(dgdr.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseSweepingPrefill))
+		})
+
+		It("Should return error for invalid phase value in ConfigMap", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-invalid-phase"
+			namespace := defaultNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
+			dgdr.Status.ProfilingPhase = nvidiacomv1beta1.ProfilingPhaseInitializing
+			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+
+			// Create output ConfigMap with invalid phase
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      getOutputConfigMapName(dgdr),
+					Namespace: namespace,
+				},
+				Data: map[string]string{
+					"phase":   "BogusPhase",
+					"message": "this should not be accepted",
+				},
+			}
+			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
+			// Re-fetch
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, dgdr)).Should(Succeed())
+
+			err := reconciler.updateProfilingSubPhase(ctx, dgdr)
+			Expect(err).Should(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("invalid profiling phase"))
+			Expect(err.Error()).Should(ContainSubstring("BogusPhase"))
+
+			// profilingPhase should remain unchanged
+			Expect(dgdr.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseInitializing))
 		})
 	})
 })

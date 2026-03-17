@@ -304,8 +304,29 @@ func profilingPhaseReason(phase nvidiacomv1beta1.ProfilingPhase) string {
 
 // profilingPhaseFailureReason returns the condition Reason for a failed profiling sub-phase.
 // By convention, failure reasons are "<Phase>Failed" (e.g., "SweepingDecodeFailed").
+// An empty phase yields the generic "ProfilingFailed".
 func profilingPhaseFailureReason(phase nvidiacomv1beta1.ProfilingPhase) string {
+	if phase == "" {
+		return "ProfilingFailed"
+	}
 	return string(phase) + "Failed"
+}
+
+// validProfilingPhases is the set of phases the profiler sidecar may report.
+var validProfilingPhases = map[nvidiacomv1beta1.ProfilingPhase]struct{}{
+	nvidiacomv1beta1.ProfilingPhaseInitializing:    {},
+	nvidiacomv1beta1.ProfilingPhaseSweepingPrefill: {},
+	nvidiacomv1beta1.ProfilingPhaseSweepingDecode:  {},
+	nvidiacomv1beta1.ProfilingPhaseSelectingConfig: {},
+	nvidiacomv1beta1.ProfilingPhaseBuildingCurves:  {},
+	nvidiacomv1beta1.ProfilingPhaseGeneratingDGD:   {},
+	nvidiacomv1beta1.ProfilingPhaseDone:            {},
+}
+
+// isValidProfilingPhase returns true if phase is a recognized ProfilingPhase value.
+func isValidProfilingPhase(phase string) bool {
+	_, ok := validProfilingPhases[nvidiacomv1beta1.ProfilingPhase(phase)]
+	return ok
 }
 
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
@@ -481,6 +502,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateProfilingSubPhase(
 	phase, exists := cm.Data["phase"]
 	if !exists || phase == "" {
 		return nil
+	}
+
+	if !isValidProfilingPhase(phase) {
+		return fmt.Errorf("invalid profiling phase %q in ConfigMap %s", phase, outputCMName)
 	}
 
 	profilingPhase := nvidiacomv1beta1.ProfilingPhase(phase)
