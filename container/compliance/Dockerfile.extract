@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BuildKit-based extraction Dockerfile.
+# Mounts the target image filesystem read-only and runs helper scripts to extract
+# dpkg and Python package data — no `docker run` of the target image required.
+#
+# Usage:
+#   docker buildx build \
+#     --builder <builder> \
+#     --platform linux/amd64 \
+#     --build-arg TARGET_IMAGE=<image:tag> \
+#     --output type=local,dest=<output_dir> \
+#     --pull \
+#     --no-cache-filter extractor \
+#     -f container/compliance/Dockerfile.extract \
+#     container/compliance/
+#
+# --no-cache-filter extractor: always re-runs the extraction stage to avoid
+# stale results. BuildKit's cache key for RUN --mount=type=bind,from=<stage>
+# does not reliably include the mounted stage's content digest when the source
+# is a stage name rather than a direct image reference, so a cache hit could
+# return TSVs from a previous run against a different image.
+#
+# Output files in <output_dir>:
+#   dpkg.tsv         - tab-separated: package_name\tversion\tspdx_license
+#   python.tsv       - tab-separated: package_name\tversion\tspdx_license
+#   dpkg_err.txt     - stderr from dpkg extraction (for debugging)
+#   python_err.txt   - stderr from python extraction (for debugging)
+
+ARG TARGET_IMAGE=scratch
+ARG EXTRACTOR_IMAGE=python:3.12-slim
+FROM ${TARGET_IMAGE} AS target
+FROM ${EXTRACTOR_IMAGE} AS extractor
+RUN mkdir /output
+COPY helpers/dpkg_helper.py /helpers/dpkg_helper.py
+COPY helpers/python_helper.py /helpers/python_helper.py
+RUN --mount=type=bind,from=target,target=/target \
+    python3 /helpers/dpkg_helper.py --root /target > /output/dpkg.tsv 2>/output/dpkg_err.txt ; \
+    python3 /helpers/python_helper.py --root /target > /output/python.tsv 2>/output/python_err.txt ; \
+    cat /output/dpkg_err.txt >&2 ; \
+    cat /output/python_err.txt >&2 ; \
+    [ -s /output/dpkg.tsv ] || { echo "ERROR: dpkg extraction produced no output" >&2; exit 1; } ; \
+    [ -s /output/python.tsv ] || echo "⚠️  WARNING: python extraction produced no output" >&2
+
+FROM scratch
+COPY --from=extractor /output/ /
