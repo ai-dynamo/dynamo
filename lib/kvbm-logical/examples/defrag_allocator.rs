@@ -25,12 +25,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kvbm_logical::ext::{
-    Block, BlockAllocator, BlockId, BlockMetadata, InactivePoolBackend, PresenceDelegate,
-    Registered, Reset, SequenceHash,
+    Block, BlockId, BlockMetadata, Reset, SequenceHash,
 };
+use kvbm_logical::blocks::state::Registered;
+use kvbm_logical::pools::{AllocatedBlocks, BlockAllocator, InactivePoolBackend};
+use kvbm_logical::registry::PresenceDelegate;
 use kvbm_logical::pools::LineageBackend;
 use kvbm_logical::registry::BlockRegistrationHandle;
-use kvbm_logical::{BlockManager, BlockRegistry};
+use kvbm_logical::{BlockManager, KvbmBlockManager, BlockRegistry};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -205,7 +207,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LoggingInactiveBackend<T> {
         result
     }
 
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
+    fn allocate(&mut self, count: usize) -> AllocatedBlocks<T> {
         let result = self.inner.allocate(count);
         eprintln!(
             "  [LoggingBackend] allocate({count}) → {} blocks (pool now {})",

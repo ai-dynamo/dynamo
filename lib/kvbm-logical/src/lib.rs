@@ -20,7 +20,7 @@ pub mod testing;
 pub use blocks::{
     BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
 };
-pub use manager::{BlockManager, StandardBlockManager};
+pub use manager::{KvbmBlockManager, BlockManager};
 pub use registry::BlockRegistry;
 
 pub type BlockId = usize;

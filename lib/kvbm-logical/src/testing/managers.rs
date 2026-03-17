@@ -11,17 +11,17 @@ use anyhow::Result;
 use crate::SequenceHash;
 use crate::blocks::{BlockMetadata, BlockRegistry};
 use crate::events::EventsManager;
-use crate::manager::{BlockManager, StandardBlockManager, FrequencyTrackingCapacity};
+use crate::manager::{KvbmBlockManager, BlockManager, FrequencyTrackingCapacity};
 
 use super::token_blocks;
 
 /// Create a basic test manager with LRU backend.
-pub fn create_test_manager<T: BlockMetadata>(block_count: usize) -> StandardBlockManager<T> {
+pub fn create_test_manager<T: BlockMetadata>(block_count: usize) -> BlockManager<T> {
     let registry = BlockRegistry::builder()
         .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
         .build();
 
-    StandardBlockManager::<T>::builder()
+    BlockManager::<T>::builder()
         .block_count(block_count)
         .block_size(4) // Most tests use 4-token blocks
         .registry(registry)
@@ -34,12 +34,12 @@ pub fn create_test_manager<T: BlockMetadata>(block_count: usize) -> StandardBloc
 pub fn create_test_manager_with_block_size<T: BlockMetadata>(
     block_count: usize,
     block_size: usize,
-) -> StandardBlockManager<T> {
+) -> BlockManager<T> {
     let registry = BlockRegistry::builder()
         .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
         .build();
 
-    StandardBlockManager::<T>::builder()
+    BlockManager::<T>::builder()
         .block_count(block_count)
         .block_size(block_size)
         .registry(registry)
@@ -206,12 +206,12 @@ impl<T: BlockMetadata> TestManagerBuilder<T> {
         self
     }
 
-    /// Builds the StandardBlockManager.
+    /// Builds the BlockManager.
     ///
     /// # Panics
     ///
     /// Panics if `block_count` or `block_size` are not set.
-    pub fn build(self) -> StandardBlockManager<T> {
+    pub fn build(self) -> BlockManager<T> {
         let block_count = self.block_count.expect("block_count is required");
         let block_size = self.block_size.expect("block_size is required");
 
@@ -224,7 +224,7 @@ impl<T: BlockMetadata> TestManagerBuilder<T> {
             builder.build()
         });
 
-        StandardBlockManager::<T>::builder()
+        BlockManager::<T>::builder()
             .block_count(block_count)
             .block_size(block_size)
             .registry(registry)
@@ -245,7 +245,7 @@ impl<T: BlockMetadata> TestManagerBuilder<T> {
 /// # Returns
 /// Vec of sequence hashes for the registered blocks (in order)
 pub fn populate_manager_with_blocks<T: BlockMetadata>(
-    manager: &StandardBlockManager<T>,
+    manager: &BlockManager<T>,
     token_blocks: &[dynamo_tokens::TokenBlock],
 ) -> Result<Vec<SequenceHash>> {
     let blocks = manager
@@ -286,7 +286,7 @@ pub fn create_and_populate_manager<T: BlockMetadata>(
     block_size: usize,
     start_token: u32,
     registry: BlockRegistry,
-) -> Result<(StandardBlockManager<T>, Vec<SequenceHash>)> {
+) -> Result<(BlockManager<T>, Vec<SequenceHash>)> {
     let manager = TestManagerBuilder::<T>::new()
         .block_count(block_count)
         .block_size(block_size)

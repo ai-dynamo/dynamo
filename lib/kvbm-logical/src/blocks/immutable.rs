@@ -9,7 +9,7 @@
 //! an `ImmutableBlock` if the block is still present.
 
 use super::{
-    BlockId, BlockMetadata, BlockRegistrationHandle, RegisteredBlock, SequenceHash, UpgradeFn,
+    BlockId, BlockMetadata, RegisteredBlock, SequenceHash, UpgradeFn,
 };
 
 use crate::metrics::BlockPoolMetrics;
@@ -111,11 +111,6 @@ impl<T: BlockMetadata> ImmutableBlock<T> {
     pub fn sequence_hash(&self) -> SequenceHash {
         self.block.sequence_hash()
     }
-
-    // /// Returns a clone of the [`BlockRegistrationHandle`] for this block.
-    // pub fn registration_handle(&self) -> BlockRegistrationHandle {
-    //     self.block.registration_handle().clone()
-    // }
 
     /// Returns the number of strong (`Arc`) references to the underlying
     /// registered block, including internal pool references.

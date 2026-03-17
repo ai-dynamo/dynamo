@@ -27,7 +27,7 @@ fn create_test_token_block_8_from_iota(start: u32) -> dynamo_tokens::TokenBlock 
 }
 
 /// Helper function to create a basic manager for testing
-fn create_test_manager(block_count: usize) -> StandardBlockManager<TestBlockData> {
+fn create_test_manager(block_count: usize) -> BlockManager<TestBlockData> {
     testing::create_test_manager::<TestBlockData>(block_count)
 }
 
@@ -41,7 +41,7 @@ mod builder_tests {
     #[test]
     fn test_builder_default() {
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .registry(registry)
             .build()
@@ -61,7 +61,7 @@ mod builder_tests {
     #[test]
     fn test_builder_with_lru_backend() {
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .registry(registry)
             .with_lru_backend()
@@ -79,7 +79,7 @@ mod builder_tests {
         let registry = BlockRegistry::builder()
             .frequency_tracker(FrequencyTrackingCapacity::Small.create_tracker())
             .build();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .registry(registry)
             .with_multi_lru_backend()
@@ -97,7 +97,7 @@ mod builder_tests {
         let registry = BlockRegistry::builder()
             .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
             .build();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .registry(registry)
             .with_multi_lru_backend_custom_thresholds(2, 6, 12)
@@ -113,7 +113,7 @@ mod builder_tests {
     #[test]
     fn test_builder_with_duplication_policy() {
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(50)
             .registry(registry)
             .duplication_policy(BlockDuplicationPolicy::Reject)
@@ -129,7 +129,7 @@ mod builder_tests {
     #[test]
     fn test_builder_validation_zero_blocks() {
         let registry = BlockRegistry::new();
-        let result = StandardBlockManager::<TestBlockData>::builder()
+        let result = BlockManager::<TestBlockData>::builder()
             .block_count(0)
             .registry(registry)
             .build();
@@ -146,7 +146,7 @@ mod builder_tests {
     #[test]
     fn test_builder_validation_missing_block_count() {
         let registry = BlockRegistry::new();
-        let result = StandardBlockManager::<TestBlockData>::builder()
+        let result = BlockManager::<TestBlockData>::builder()
             .registry(registry)
             .with_lru_backend()
             .build();
@@ -159,7 +159,7 @@ mod builder_tests {
 
     #[test]
     fn test_builder_validation_missing_registry() {
-        let result = StandardBlockManager::<TestBlockData>::builder()
+        let result = BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .with_lru_backend()
             .build();
@@ -173,7 +173,7 @@ mod builder_tests {
     #[test]
     #[should_panic(expected = "must be <= 15")]
     fn test_builder_invalid_threshold_too_high() {
-        StandardBlockManager::<TestBlockData>::builder()
+        BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .with_multi_lru_backend_custom_thresholds(2, 6, 20); // 20 > 15, should panic
     }
@@ -181,7 +181,7 @@ mod builder_tests {
     #[test]
     #[should_panic(expected = "must be in ascending order")]
     fn test_builder_invalid_threshold_order() {
-        StandardBlockManager::<TestBlockData>::builder()
+        BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .with_multi_lru_backend_custom_thresholds(6, 2, 10); // Not ascending, should panic
     }
@@ -189,7 +189,7 @@ mod builder_tests {
     #[test]
     fn test_builder_multi_lru_requires_frequency_tracking() {
         let registry = BlockRegistry::new(); // No frequency tracking
-        let result = StandardBlockManager::<TestBlockData>::builder()
+        let result = BlockManager::<TestBlockData>::builder()
             .block_count(100)
             .registry(registry)
             .with_multi_lru_backend()
@@ -675,7 +675,7 @@ mod block_size_tests {
     #[test]
     fn test_custom_block_size() {
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(32)
             .registry(registry)
@@ -701,7 +701,7 @@ mod block_size_tests {
     fn test_block_size_validation_wrong_size() {
         // Create a manager expecting 8-token blocks
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(8)
             .registry(registry)
@@ -744,7 +744,7 @@ mod block_size_tests {
     #[case(1024)]
     fn test_builder_block_size_power_of_two(#[case] size: usize) {
         let registry = BlockRegistry::new();
-        let result = StandardBlockManager::<TestBlockData>::builder()
+        let result = BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(size)
             .registry(registry)
@@ -755,7 +755,7 @@ mod block_size_tests {
     #[test]
     #[should_panic(expected = "block_size must be a power of 2")]
     fn test_builder_block_size_not_power_of_two() {
-        StandardBlockManager::<TestBlockData>::builder()
+        BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(15); // Not a power of 2
     }
@@ -763,7 +763,7 @@ mod block_size_tests {
     #[test]
     #[should_panic(expected = "block_size must be between 1 and 1024")]
     fn test_builder_block_size_too_large() {
-        StandardBlockManager::<TestBlockData>::builder()
+        BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(2048); // Too large
     }
@@ -771,7 +771,7 @@ mod block_size_tests {
     #[test]
     #[should_panic(expected = "block_size must be between 1 and 1024")]
     fn test_builder_block_size_zero() {
-        StandardBlockManager::<TestBlockData>::builder()
+        BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(0); // Zero is invalid
     }
@@ -779,7 +779,7 @@ mod block_size_tests {
     #[test]
     #[should_panic(expected = "block_size must be a power of 2")]
     fn test_builder_validation_invalid_block_size() {
-        StandardBlockManager::<TestBlockData>::builder()
+        BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(7); // Not a power of 2, panics immediately
     }
@@ -788,7 +788,7 @@ mod block_size_tests {
     fn test_different_block_sizes() {
         // Test with block size 4
         let registry_4 = BlockRegistry::new();
-        let manager_4 = StandardBlockManager::<TestBlockData>::builder()
+        let manager_4 = BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(4)
             .registry(registry_4)
@@ -808,7 +808,7 @@ mod block_size_tests {
 
         // Test with block size 8
         let registry_8 = BlockRegistry::new();
-        let manager_8 = StandardBlockManager::<TestBlockData>::builder()
+        let manager_8 = BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(8)
             .registry(registry_8)
@@ -906,7 +906,7 @@ mod registration_tests {
         #[case] expect_same_block_id: bool,
     ) {
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(10)
             .block_size(4)
             .registry(registry)
@@ -978,7 +978,7 @@ mod registration_tests {
     #[test]
     fn test_register_mutable_block_from_existing_reject_returns_block_to_reset_pool() {
         let registry = BlockRegistry::new();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(2)
             .block_size(4)
             .registry(registry)
@@ -1535,7 +1535,7 @@ mod integration_tests {
             .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
             .build();
         let manager = backend_builder(
-            StandardBlockManager::<TestBlockData>::builder()
+            BlockManager::<TestBlockData>::builder()
                 .block_count(20)
                 .block_size(4)
                 .registry(registry),
@@ -1653,7 +1653,7 @@ mod integration_tests {
         struct G2;
 
         // Create two managers with different metadata types and policies
-        let manager1 = StandardBlockManager::<G1>::builder()
+        let manager1 = BlockManager::<G1>::builder()
             .block_count(100)
             .block_size(4)
             .registry(registry.clone())
@@ -1662,7 +1662,7 @@ mod integration_tests {
             .build()
             .expect("Should build manager1");
 
-        let manager2 = StandardBlockManager::<G2>::builder()
+        let manager2 = BlockManager::<G2>::builder()
             .block_count(100)
             .block_size(4)
             .registry(registry.clone())
@@ -1697,19 +1697,19 @@ mod integration_tests {
 mod capacity_lifecycle_tests {
     use super::*;
 
-    /// Build a StandardBlockManager with any backend. Always includes frequency_tracker
+    /// Build a BlockManager with any backend. Always includes frequency_tracker
     /// so MultiLRU works; LRU/Lineage ignore it.
     fn create_backend_manager(
         block_count: usize,
         backend_builder: fn(
             BlockManagerConfigBuilder<TestBlockData>,
         ) -> BlockManagerConfigBuilder<TestBlockData>,
-    ) -> StandardBlockManager<TestBlockData> {
+    ) -> BlockManager<TestBlockData> {
         let registry = BlockRegistry::builder()
             .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
             .build();
         backend_builder(
-            StandardBlockManager::<TestBlockData>::builder()
+            BlockManager::<TestBlockData>::builder()
                 .block_count(block_count)
                 .block_size(4)
                 .registry(registry),
@@ -1721,7 +1721,7 @@ mod capacity_lifecycle_tests {
     /// Allocate N, complete each with a unique token block, register all.
     /// Returns the ImmutableBlocks.
     fn allocate_complete_register_all(
-        manager: &StandardBlockManager<TestBlockData>,
+        manager: &BlockManager<TestBlockData>,
         block_count: usize,
         iota_base: u32,
     ) -> Vec<ImmutableBlock<TestBlockData>> {
@@ -1990,7 +1990,7 @@ mod capacity_lifecycle_tests {
         let registry = BlockRegistry::builder()
             .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
             .build();
-        let manager = StandardBlockManager::<TestBlockData>::builder()
+        let manager = BlockManager::<TestBlockData>::builder()
             .block_count(32)
             .block_size(4)
             .registry(registry)

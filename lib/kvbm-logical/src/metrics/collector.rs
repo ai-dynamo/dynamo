@@ -123,7 +123,7 @@ impl MetricsAggregator {
         }
     }
 
-    /// Register a `BlockPoolMetrics` source (called by `BlockManager::build()`).
+    /// Register a `BlockPoolMetrics` source (called by `BlockManager::builder().build()`).
     pub fn register_source(&self, source: Arc<BlockPoolMetrics>) {
         self.inner
             .sources

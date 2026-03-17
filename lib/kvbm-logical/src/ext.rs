@@ -3,32 +3,19 @@
 
 //! Extension points for custom block lifecycle strategies.
 //!
-//! - Implement [`BlockAllocator`] to plug in a custom allocation strategy
-//!   (e.g., remote/networked block allocation). Use [`FifoBlockAllocator`]
-//!   as a reference implementation.
-//! - Implement [`InactivePoolBackend`] to customize inactive pool storage,
-//!   eviction, and the [`should_reset`](InactivePoolBackend::should_reset)
-//!   hook. Use [`ResetInactiveBlocksBackend`] to disable the inactive cache.
 //! - Use [`BlockToken`] (obtained via [`BlockRegistry::token()`](crate::registry::BlockRegistry::token))
 //!   together with [`make_mutable_block`] and [`make_immutable_block`] to construct
 //!   RAII guard types from external block managers without accessing `pub(crate)` internals.
+//! - Implement [`RegisteredBlock`] to provide custom registered block types.
 
 use std::sync::Arc;
 
 pub use crate::BlockId;
 pub use crate::SequenceHash;
 pub use crate::blocks::Block;
-pub use crate::blocks::state::{Registered, Reset};
+pub use crate::blocks::state::Reset;
 pub use crate::blocks::{BlockDuplicationPolicy, BlockError, BlockMetadata};
-pub use crate::blocks::{CompleteBlock, RegisteredBlock, ResetReturnFn, UpgradeFn};
-pub use crate::pools::AllocatedBlocks;
-pub use crate::pools::BlockAllocator;
-pub use crate::pools::FifoBlockAllocator;
-pub use crate::pools::InactivePool;
-pub use crate::pools::InactivePoolBackend;
-pub use crate::pools::ResetInactiveBlocksBackend;
-pub use crate::pools::ResetPool;
-pub use crate::registry::{PresenceDelegate, typed_presence_delegate};
+pub use crate::blocks::{CompleteBlock, ImmutableBlock, RegisteredBlock, ResetReturnFn, UpgradeFn};
 
 /// Sealed capability token proving the holder went through a properly-constructed
 /// [`BlockRegistry`](crate::registry::BlockRegistry).
@@ -50,6 +37,21 @@ pub fn make_mutable_block<T: BlockMetadata>(
     on_drop: impl Fn(Block<T, Reset>) + Send + Sync + 'static,
 ) -> crate::blocks::MutableBlock<T> {
     crate::blocks::MutableBlock::new(block, Arc::new(on_drop), None)
+}
+
+/// Consume a [`CompleteBlock`], extracting its identity without triggering the drop handler.
+///
+/// This is used by external block managers that handle registration themselves
+/// (e.g., via an external cache system) and need to prevent the CompleteBlock's
+/// RAII return-to-pool behavior from firing.
+pub fn consume_complete_block<T: BlockMetadata>(
+    _token: &BlockToken,
+    mut block: CompleteBlock<T>,
+) -> (BlockId, SequenceHash) {
+    let id = block.block_id();
+    let hash = block.sequence_hash();
+    block.block.take(); // prevent Drop from firing return_fn
+    (id, hash)
 }
 
 /// Construct an [`ImmutableBlock<T>`] from a registered block and an upgrade function.

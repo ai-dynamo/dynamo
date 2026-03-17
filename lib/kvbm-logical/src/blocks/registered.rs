@@ -13,7 +13,7 @@ use std::any::TypeId;
 use std::sync::{Arc, Weak};
 
 use super::{
-    Block, BlockId, BlockMetadata, BlockRegistrationHandle, RegisteredBlock, RegisteredReturnFn,
+    Block, BlockId, BlockMetadata, RegisteredBlock, RegisteredReturnFn,
     ResetReturnFn, SequenceHash, state::Registered,
 };
 
@@ -129,10 +129,6 @@ impl<T: BlockMetadata> RegisteredBlock<T> for PrimaryBlock<T> {
     fn sequence_hash(&self) -> SequenceHash {
         self.block.as_ref().unwrap().sequence_hash()
     }
-
-    fn registration_handle(&self) -> &BlockRegistrationHandle {
-        self.block.as_ref().unwrap().registration_handle()
-    }
 }
 
 impl<T: BlockMetadata> RegisteredBlock<T> for DuplicateBlock<T> {
@@ -142,10 +138,6 @@ impl<T: BlockMetadata> RegisteredBlock<T> for DuplicateBlock<T> {
 
     fn sequence_hash(&self) -> SequenceHash {
         self.block.as_ref().unwrap().sequence_hash()
-    }
-
-    fn registration_handle(&self) -> &BlockRegistrationHandle {
-        self.block.as_ref().unwrap().registration_handle()
     }
 }
 

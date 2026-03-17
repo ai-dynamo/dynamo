@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-/// Raw atomic metrics for a single block pool (one per `BlockManager<T>`).
+/// Raw atomic metrics for a single block pool (one per [`BlockManager<T>`](crate::manager::BlockManager)).
 ///
 /// Counters are monotonically increasing `AtomicU64`.
 /// Gauges are bidirectional `AtomicI64`.

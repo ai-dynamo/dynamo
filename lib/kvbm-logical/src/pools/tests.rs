@@ -5,7 +5,7 @@
 
 use super::super::{
     blocks::{state::*, *},
-    manager::BlockManager,
+    manager::KvbmBlockManager,
     pools::*,
     testing::{self, TestMeta},
 };
@@ -254,7 +254,6 @@ fn test_immutable_block_downgrade_and_upgrade() {
     // Check accessors
     assert_eq!(immutable_block.sequence_hash(), seq_hash);
     let _block_id = immutable_block.block_id();
-    // let _handle = immutable_block.registration_handle();
     assert!(immutable_block.use_count() >= 1);
 
     // Downgrade to WeakBlock

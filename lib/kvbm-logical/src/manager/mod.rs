@@ -3,12 +3,12 @@
 
 //! Block lifecycle orchestration across reset, active, and inactive pools.
 //!
-//! [`BlockManager`] is the trait defining the public API surface for block
-//! lifecycle management. [`StandardBlockManager`] is the in-process
+//! [`KvbmBlockManager`] is the trait defining the public API surface for block
+//! lifecycle management. [`BlockManager`] is the in-process
 //! implementation backed by reset, active, and inactive pool tiers.
 //!
 //! Construction uses a builder pattern — see [`BlockManagerConfigBuilder`] via
-//! [`StandardBlockManager::builder()`].
+//! [`BlockManager::builder()`].
 //!
 //! # Re-exported configuration types
 //!
@@ -39,9 +39,9 @@ use crate::registry::BlockRegistry;
 /// Trait for managing the full block lifecycle.
 ///
 /// Implementations provide allocation, registration, matching, and scanning
-/// of KV cache blocks. See [`StandardBlockManager`] for the in-process
+/// of KV cache blocks. See [`BlockManager`] for the in-process
 /// implementation.
-pub trait BlockManager<T: BlockMetadata> {
+pub trait KvbmBlockManager<T: BlockMetadata> {
     /// Allocate `count` mutable blocks for writing.
     /// Returns `None` if insufficient blocks are available.
     fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>>;
@@ -70,18 +70,12 @@ pub trait BlockManager<T: BlockMetadata> {
 
     /// Tokens per block (constant after construction).
     fn block_size(&self) -> usize;
-
-    /// Current duplication policy.
-    fn duplication_policy(&self) -> &BlockDuplicationPolicy;
-
-    /// Reference to the shared block registry.
-    fn block_registry(&self) -> &BlockRegistry;
 }
 
 /// Standard in-process block manager backed by reset, active, and inactive pools.
 ///
-/// Construct via [`StandardBlockManager::builder()`].
-pub struct StandardBlockManager<T: BlockMetadata> {
+/// Construct via [`BlockManager::builder()`].
+pub struct BlockManager<T: BlockMetadata> {
     reset_pool: ResetPool<T>,
     active_pool: ActivePool<T>,
     inactive_pool: InactivePool<T>,
@@ -94,7 +88,7 @@ pub struct StandardBlockManager<T: BlockMetadata> {
     metrics: Arc<BlockPoolMetrics>,
 }
 
-impl<T: BlockMetadata> BlockManager<T> for StandardBlockManager<T> {
+impl<T: BlockMetadata> KvbmBlockManager<T> for BlockManager<T> {
     /// Allocate `count` mutable blocks, drawing first from the reset pool
     /// then evicting from the inactive pool if needed.
     ///
@@ -259,27 +253,27 @@ impl<T: BlockMetadata> BlockManager<T> for StandardBlockManager<T> {
     fn block_size(&self) -> usize {
         self.block_size
     }
+}
 
+impl<T: BlockMetadata> BlockManager<T> {
     /// Current duplication policy.
-    fn duplication_policy(&self) -> &BlockDuplicationPolicy {
+    pub fn duplication_policy(&self) -> &BlockDuplicationPolicy {
         &self.duplication_policy
     }
 
     /// Reference to the shared block registry.
-    fn block_registry(&self) -> &BlockRegistry {
+    pub fn block_registry(&self) -> &BlockRegistry {
         &self.block_registry
     }
-}
 
-impl<T: BlockMetadata> StandardBlockManager<T> {
-    /// Create a new builder for StandardBlockManager.
+    /// Create a new builder for BlockManager.
     ///
     /// # Example
     /// ```ignore
     /// let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
     /// let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
     ///
-    /// let manager = StandardBlockManager::builder()
+    /// let manager = BlockManager::builder()
     ///     .block_count(1000)
     ///     .registry(registry)
     ///     .with_multi_lru_backend()

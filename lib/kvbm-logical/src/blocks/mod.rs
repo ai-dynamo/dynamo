@@ -71,8 +71,6 @@ pub use mutable::MutableBlock;
 pub mod state;
 pub(crate) use registered::{DuplicateBlock, PrimaryBlock, WeakBlockEntry};
 
-// Re-export from the new registry module location for backward compatibility
-pub use crate::registry::BlockRegistrationHandle;
 pub use crate::registry::BlockRegistry;
 
 /// Marker trait for types that can serve as block-level metadata.
@@ -161,5 +159,4 @@ pub struct Block<T, State> {
 pub trait RegisteredBlock<T>: Send + Sync {
     fn block_id(&self) -> BlockId;
     fn sequence_hash(&self) -> SequenceHash;
-    fn registration_handle(&self) -> &BlockRegistrationHandle;
 }
