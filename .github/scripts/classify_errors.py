@@ -20,7 +20,9 @@ MAX_LOG_CHARS = 50_000
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Classify CI errors from GitHub Actions")
+    parser = argparse.ArgumentParser(
+        description="Classify CI errors from GitHub Actions"
+    )
     parser.add_argument("--run-id", required=True, help="GitHub Actions run ID")
     parser.add_argument("--repo", required=True, help="GitHub repo (owner/name)")
     parser.add_argument(
@@ -29,7 +31,9 @@ def main():
         choices=["pr", "nightly", "post-merge", "release"],
     )
     parser.add_argument("--pr-number", type=int, default=None)
-    parser.add_argument("--output-json", required=True, help="Path to write JSON output")
+    parser.add_argument(
+        "--output-json", required=True, help="Path to write JSON output"
+    )
     parser.add_argument(
         "--prompt-file",
         default=os.path.join(os.path.dirname(__file__), "classify_errors_prompt.txt"),
@@ -86,7 +90,9 @@ def main():
             continue
 
         try:
-            result = classify_errors(log, job_name, system_prompt, api_key, model, base_url)
+            result = classify_errors(
+                log, job_name, system_prompt, api_key, model, base_url
+            )
         except Exception as e:
             print(f"    Error classifying job {job_name}: {e}")
             continue
@@ -144,7 +150,10 @@ def load_prompt(path):
 def get_run_metadata(repo, run_id, token):
     """Fetch workflow run metadata."""
     url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     return resp.json()
@@ -153,7 +162,10 @@ def get_run_metadata(repo, run_id, token):
 def get_failed_jobs(repo, run_id, token):
     """Get all failed jobs for a workflow run."""
     url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
     params = {"per_page": 100, "filter": "latest"}
     all_jobs = []
     while url:
@@ -170,7 +182,10 @@ def get_failed_jobs(repo, run_id, token):
 def get_job_log(repo, job_id, token):
     """Fetch job logs, truncated to the last MAX_LOG_CHARS characters."""
     url = f"https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
     resp = requests.get(url, headers=headers, allow_redirects=True)
     if resp.status_code != 200:
         return None
@@ -217,7 +232,10 @@ def parse_llm_response(text):
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        print(f"Warning: Could not find JSON in LLM response: {text[:200]}", file=sys.stderr)
+        print(
+            f"Warning: Could not find JSON in LLM response: {text[:200]}",
+            file=sys.stderr,
+        )
         return None
     try:
         return json.loads(text[start : end + 1])
@@ -257,7 +275,10 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
 {table}
 """
 
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
 
     url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
     resp = requests.post(url, headers=headers, json={"body": body})
@@ -265,8 +286,18 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     resp.raise_for_status()
 
 
-def write_json_output(path, run_id, repo, workflow_name, workflow_type, branch, commit_sha,
-                      pr_number, model, errors):
+def write_json_output(
+    path,
+    run_id,
+    repo,
+    workflow_name,
+    workflow_type,
+    branch,
+    commit_sha,
+    pr_number,
+    model,
+    errors,
+):
     """Write database-ready JSON output."""
     run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
     output = {
