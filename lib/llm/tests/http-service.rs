@@ -285,7 +285,8 @@ async fn test_http_service() {
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
-    let task = tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
     // Wait for the service to be ready before proceeding
     wait_for_service_ready(port).await;

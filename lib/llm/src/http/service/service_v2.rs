@@ -312,7 +312,9 @@ impl HttpService {
 
         if self.enable_tls {
             if listener.is_some() {
-                tracing::warn!("Pre-bound listener ignored when TLS is enabled; the server will bind its own socket");
+                tracing::warn!(
+                    "Pre-bound listener ignored when TLS is enabled; the server will bind its own socket"
+                );
             }
 
             let cert_path = self

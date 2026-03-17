@@ -203,7 +203,8 @@ async fn test_metrics_with_mock_model() {
         // Start the HTTP service
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
         // Add mock model engine
         let card = ModelDeploymentCard::with_name_only("mockmodel");
