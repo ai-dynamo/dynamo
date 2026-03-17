@@ -6,9 +6,6 @@ metadata:
   name: qwen
 spec:
   backendFramework: vllm
-  pvcs:
-    - name: model-cache
-      create: false
   services:
     Epp:
       envFromSecret: hf-token-secret
@@ -16,7 +13,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:fix-header-epp
+          imagePullPolicy: Always
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "16"
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
       eppConfig:
         config:
           plugins:
@@ -62,13 +65,10 @@ spec:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
       sharedMemory:
-        size: 80Gi
+        size: 2Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: docker.io/lambda108/dynamo:post-rebase
         args:
           - -m
           - dynamo.frontend
@@ -76,6 +76,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -94,14 +98,12 @@ spec:
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
-            - name: HF_HOME
-              value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --is-prefill-worker --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 16"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:post-rebase
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
@@ -113,13 +115,10 @@ spec:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
       sharedMemory:
-        size: 80Gi
+        size: 2Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: docker.io/lambda108/dynamo:post-rebase
         args:
           - -m
           - dynamo.frontend
@@ -127,6 +126,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -145,14 +148,12 @@ spec:
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
-            - name: HF_HOME
-              value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 16"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:post-rebase
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
