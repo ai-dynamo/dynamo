@@ -302,7 +302,7 @@ Place images in `docs/assets/` and reference them with relative paths from your
 markdown files:
 
 ```markdown
-![Architecture diagram](../assets/architecture.png)
+![Architecture Diagram](../assets/img/dynamo-architecture.svg)
 ```
 
 ### Custom components
