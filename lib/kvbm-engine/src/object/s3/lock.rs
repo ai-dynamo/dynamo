@@ -128,10 +128,10 @@ impl ObjectLockManager for S3LockManager {
                     Ok(true)
                 }
                 Ok(false) => {
-                    // Lock exists, read it to check deadline
+                    // Lock exists, read it with ETag for CAS-style takeover
                     tracing::debug!(lock_key = %lock_key, "Lock exists, checking deadline");
-                    match client.get_object(&lock_key).await? {
-                        Some(existing_data) => {
+                    match client.get_object_with_etag(&lock_key).await? {
+                        Some((existing_data, etag)) => {
                             match serde_json::from_slice::<LockFileContent>(&existing_data) {
                                 Ok(existing_lock) => {
                                     // Check if we own the lock
@@ -146,13 +146,38 @@ impl ObjectLockManager for S3LockManager {
                                             lock_key = %lock_key,
                                             old_instance = %existing_lock.instance_id,
                                             deadline = %existing_lock.deadline,
-                                            "Lock expired, overwriting"
+                                            "Lock expired, attempting atomic takeover"
                                         );
-                                        // Overwrite the expired lock
-                                        client
-                                            .put_object(&lock_key, bytes::Bytes::from(lock_data))
-                                            .await?;
-                                        Ok(true)
+                                        // Atomically overwrite the expired lock using ETag
+                                        if let Some(etag) = etag {
+                                            let won = client
+                                                .put_object_if_match(
+                                                    &lock_key,
+                                                    bytes::Bytes::from(lock_data),
+                                                    &etag,
+                                                )
+                                                .await?;
+                                            if !won {
+                                                tracing::debug!(
+                                                    lock_key = %lock_key,
+                                                    "Lost race for expired lock takeover"
+                                                );
+                                            }
+                                            Ok(won)
+                                        } else {
+                                            // No ETag available, fall back to unconditional put
+                                            tracing::warn!(
+                                                lock_key = %lock_key,
+                                                "No ETag on expired lock, falling back to unconditional overwrite"
+                                            );
+                                            client
+                                                .put_object(
+                                                    &lock_key,
+                                                    bytes::Bytes::from(lock_data),
+                                                )
+                                                .await?;
+                                            Ok(true)
+                                        }
                                     } else {
                                         tracing::debug!(
                                             lock_key = %lock_key,
@@ -164,16 +189,37 @@ impl ObjectLockManager for S3LockManager {
                                     }
                                 }
                                 Err(e) => {
-                                    // Malformed lock file, overwrite it
+                                    // Malformed lock file, attempt atomic overwrite
                                     tracing::warn!(
                                         lock_key = %lock_key,
                                         error = %e,
-                                        "Malformed lock file, overwriting"
+                                        "Malformed lock file, attempting atomic overwrite"
                                     );
-                                    client
-                                        .put_object(&lock_key, bytes::Bytes::from(lock_data))
-                                        .await?;
-                                    Ok(true)
+                                    if let Some(etag) = etag {
+                                        let won = client
+                                            .put_object_if_match(
+                                                &lock_key,
+                                                bytes::Bytes::from(lock_data),
+                                                &etag,
+                                            )
+                                            .await?;
+                                        if !won {
+                                            tracing::debug!(
+                                                lock_key = %lock_key,
+                                                "Lost race for malformed lock takeover"
+                                            );
+                                        }
+                                        Ok(won)
+                                    } else {
+                                        tracing::warn!(
+                                            lock_key = %lock_key,
+                                            "No ETag on malformed lock, falling back to unconditional overwrite"
+                                        );
+                                        client
+                                            .put_object(&lock_key, bytes::Bytes::from(lock_data))
+                                            .await?;
+                                        Ok(true)
+                                    }
                                 }
                             }
                         }
@@ -216,5 +262,64 @@ impl ObjectLockManager for S3LockManager {
             tracing::debug!(lock_key = %lock_key, "Released lock");
             Ok(())
         })
+    }
+}
+
+#[cfg(feature = "testing-s3")]
+mod s3_integration {
+    use super::*;
+    use crate::object::ObjectLockManager;
+    use crate::object::s3::client::s3_integration::create_test_client;
+
+    #[tokio::test]
+    async fn test_lock_expired_takeover_is_atomic() {
+        let client = Arc::new(create_test_client("test-lock-atomic").await);
+        let hash = SequenceHash::from(0xDEAD_BEEF_u64);
+
+        // Create a lock manager with an already-expired timeout (1ms)
+        let manager_a = S3LockManager::new(client.clone(), "instance-a".into())
+            .with_timeout(Duration::from_millis(1));
+
+        // Acquire the lock with instance A (it will expire almost immediately)
+        let acquired = manager_a.try_acquire_lock(hash).await.unwrap();
+        assert!(acquired, "instance A should acquire lock");
+
+        // Wait for the lock to expire
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now race two instances trying to take over the expired lock
+        let client_b = client.clone();
+        let client_c = client.clone();
+
+        let manager_b =
+            S3LockManager::new(client_b, "instance-b".into()).with_timeout(Duration::from_secs(60));
+        let manager_c =
+            S3LockManager::new(client_c, "instance-c".into()).with_timeout(Duration::from_secs(60));
+
+        let (result_b, result_c) = tokio::join!(
+            manager_b.try_acquire_lock(hash),
+            manager_c.try_acquire_lock(hash),
+        );
+
+        let won_b = result_b.unwrap();
+        let won_c = result_c.unwrap();
+
+        // At most one should win. Both could fail if timing is unlucky (B wins the
+        // conditional put, then C sees B's non-expired lock). The key invariant is
+        // that they can't BOTH win.
+        assert!(
+            !(won_b && won_c),
+            "both instances won the lock — race condition!"
+        );
+
+        // Cleanup
+        if won_b {
+            manager_b.release_lock(hash).await.unwrap();
+        } else if won_c {
+            manager_c.release_lock(hash).await.unwrap();
+        } else {
+            // Neither won, clean up the expired lock
+            client.delete_object(&format!("{}.lock", hash)).await.ok();
+        }
     }
 }

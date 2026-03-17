@@ -453,7 +453,10 @@ impl S3ObjectBlockClient {
 
                     match result {
                         Ok(()) => Ok(key),
-                        Err(_) => Err(key),
+                        Err(e) => {
+                            tracing::warn!(key = %key, error = %e, "put block transfer failed");
+                            Err(key)
+                        }
                     }
                 }
             });
@@ -539,7 +542,10 @@ impl S3ObjectBlockClient {
 
                     match result {
                         Ok(()) => Ok(key),
-                        Err(_) => Err(key),
+                        Err(e) => {
+                            tracing::warn!(key = %key, error = %e, "get block transfer failed");
+                            Err(key)
+                        }
                     }
                 }
             });
@@ -549,6 +555,93 @@ impl S3ObjectBlockClient {
                 .collect()
                 .await
         })
+    }
+
+    /// Get an object's raw bytes along with its ETag.
+    ///
+    /// Used for conditional updates (CAS-style operations) where the caller
+    /// needs the current ETag to perform a conditional PUT.
+    ///
+    /// # Returns
+    /// - `Ok(Some((bytes, etag)))` if the object exists
+    /// - `Ok(None)` if the object does not exist
+    /// - `Err(...)` for other errors
+    pub async fn get_object_with_etag(
+        &self,
+        key: &str,
+    ) -> Result<Option<(Bytes, Option<String>)>> {
+        match self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let etag = resp.e_tag().map(|s| s.to_string());
+                let data = resp
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| anyhow!("failed to collect S3 response body: {}", e))?
+                    .into_bytes();
+                Ok(Some((data, etag)))
+            }
+            Err(e) => {
+                let service_error = e.into_service_error();
+                if service_error.code() == Some("NoSuchKey") {
+                    Ok(None)
+                } else {
+                    Err(anyhow!(
+                        "S3 get_object failed for key '{}': {}",
+                        key,
+                        service_error
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Put an object with an ETag precondition (If-Match).
+    ///
+    /// This performs a conditional write that only succeeds if the object's current
+    /// ETag matches the provided value. Used for CAS-style atomic updates.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if the write succeeded (ETag matched)
+    /// - `Ok(false)` if the ETag did not match (412 PreconditionFailed — lost the race)
+    /// - `Err(...)` for other errors
+    pub async fn put_object_if_match(
+        &self,
+        key: &str,
+        data: Bytes,
+        etag: &str,
+    ) -> Result<bool> {
+        match self
+            .client
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .if_match(etag)
+            .body(ByteStream::from(data))
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let service_error = e.into_service_error();
+                if service_error.code() == Some("PreconditionFailed") {
+                    Ok(false)
+                } else {
+                    Err(anyhow!(
+                        "S3 conditional put (if-match) failed for key '{}': {}",
+                        key,
+                        service_error
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -585,7 +678,8 @@ fn copy_block_to_bytes(
     is_contiguous: bool,
 ) -> Result<Bytes> {
     if is_contiguous {
-        // Fast path: single contiguous region
+        // Fast path: single contiguous region — the layout guarantees that
+        // block_size bytes are contiguous from region(block_id, 0, 0).addr().
         let region = layout.memory_region(block_id, 0, 0)?;
         let slice = unsafe { std::slice::from_raw_parts(region.addr() as *const u8, block_size) };
         Ok(Bytes::copy_from_slice(slice))
@@ -596,6 +690,13 @@ fn copy_block_to_bytes(
         for layer_id in 0..inner_layout.num_layers() {
             for outer_id in 0..inner_layout.outer_dim() {
                 let region = layout.memory_region(block_id, layer_id, outer_id)?;
+                if region.size() < region_size {
+                    return Err(anyhow!(
+                        "memory region too small: got {} bytes, need {}",
+                        region.size(),
+                        region_size
+                    ));
+                }
                 let slice =
                     unsafe { std::slice::from_raw_parts(region.addr() as *const u8, region_size) };
                 buf.extend_from_slice(slice);
@@ -618,7 +719,15 @@ fn copy_bytes_to_block(
     is_contiguous: bool,
 ) -> Result<()> {
     if is_contiguous {
-        // Fast path: single contiguous region
+        // Fast path: single contiguous region — the layout guarantees that
+        // block_size bytes are contiguous from region(block_id, 0, 0).addr().
+        if data.len() < block_size {
+            return Err(anyhow!(
+                "S3 data too short: got {} bytes, expected {}",
+                data.len(),
+                block_size
+            ));
+        }
         let region = layout.memory_region(block_id, 0, 0)?;
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), region.addr() as *mut u8, block_size);
@@ -629,7 +738,22 @@ fn copy_bytes_to_block(
         let inner_layout = layout.layout();
         for layer_id in 0..inner_layout.num_layers() {
             for outer_id in 0..inner_layout.outer_dim() {
+                if offset + region_size > data.len() {
+                    return Err(anyhow!(
+                        "S3 data too short at offset {}: need {} more bytes, only {} remain",
+                        offset,
+                        region_size,
+                        data.len().saturating_sub(offset)
+                    ));
+                }
                 let region = layout.memory_region(block_id, layer_id, outer_id)?;
+                if region.size() < region_size {
+                    return Err(anyhow!(
+                        "memory region too small: got {} bytes, need {}",
+                        region.size(),
+                        region_size
+                    ));
+                }
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         data[offset..].as_ptr(),
@@ -669,7 +793,10 @@ impl ObjectBlockOps for S3ObjectBlockClient {
                         .await
                     {
                         Ok(resp) => (key, resp.content_length().map(|l| l as usize)),
-                        Err(_) => (key, None), // Not found or error
+                        Err(e) => {
+                            tracing::warn!(key = %key, error = %e, "head_object failed, treating as missing");
+                            (key, None)
+                        }
                     }
                 }
             });
@@ -761,5 +888,200 @@ mod tests {
         assert_eq!(config.endpoint_url, Some("http://minio:9000".into()));
         assert_eq!(config.bucket, "test-bucket");
         assert!(config.force_path_style);
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod bounds_check_tests {
+    use super::*;
+    use crate::object::LayoutConfigExt;
+    use kvbm_physical::testing::{create_fc_layout, create_lw_layout, create_test_agent};
+    use kvbm_physical::transfer::StorageKind;
+
+    #[test]
+    fn test_copy_bytes_to_block_rejects_short_data_contiguous() {
+        let agent = create_test_agent("test_short_data_fc");
+        let layout = create_fc_layout(agent, StorageKind::System, 2);
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+
+        // Data is one byte short
+        let short_data = vec![0u8; block_size - 1];
+        let err = copy_bytes_to_block(&short_data, &layout, 0, block_size, region_size, true)
+            .expect_err("should reject short data");
+        assert!(
+            err.to_string().contains("S3 data too short"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_copy_bytes_to_block_rejects_short_data_non_contiguous() {
+        let agent = create_test_agent("test_short_data_lw");
+        let layout = create_lw_layout(agent, StorageKind::System, 2);
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+
+        // Data is one region short
+        let short_data = vec![0u8; block_size - region_size];
+        let err = copy_bytes_to_block(&short_data, &layout, 0, block_size, region_size, false)
+            .expect_err("should reject short data in non-contiguous path");
+        assert!(
+            err.to_string().contains("S3 data too short"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_copy_bytes_to_block_accepts_exact_size() {
+        let agent = create_test_agent("test_exact_fc");
+        let layout = create_fc_layout(agent, StorageKind::System, 2);
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+
+        let data = vec![42u8; block_size];
+        copy_bytes_to_block(&data, &layout, 0, block_size, region_size, true)
+            .expect("exact-size data should succeed");
+    }
+
+    #[test]
+    fn test_copy_block_to_bytes_roundtrip_contiguous() {
+        let agent = create_test_agent("test_roundtrip_fc");
+        let layout = create_fc_layout(agent, StorageKind::System, 2);
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+
+        // Write known data
+        let data = vec![0xAB_u8; block_size];
+        copy_bytes_to_block(&data, &layout, 0, block_size, region_size, true).unwrap();
+
+        // Read it back
+        let out = copy_block_to_bytes(&layout, 0, block_size, region_size, true).unwrap();
+        assert_eq!(out.as_ref(), &data[..]);
+    }
+
+    #[test]
+    fn test_copy_block_to_bytes_roundtrip_non_contiguous() {
+        let agent = create_test_agent("test_roundtrip_lw");
+        let layout = create_lw_layout(agent, StorageKind::System, 2);
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+
+        let data = vec![0xCD_u8; block_size];
+        copy_bytes_to_block(&data, &layout, 0, block_size, region_size, false).unwrap();
+
+        let out = copy_block_to_bytes(&layout, 0, block_size, region_size, false).unwrap();
+        assert_eq!(out.as_ref(), &data[..]);
+    }
+}
+
+#[cfg(feature = "testing-s3")]
+pub mod s3_integration {
+    use super::*;
+
+    /// Create an S3ObjectBlockClient connected to the test MinIO instance.
+    ///
+    /// Reads `S3_TEST_ENDPOINT` from the environment (set by `test-s3.sh`).
+    /// Falls back to `http://localhost:9876`.
+    pub async fn create_test_client(bucket: &str) -> S3ObjectBlockClient {
+        let endpoint =
+            std::env::var("S3_TEST_ENDPOINT").unwrap_or_else(|_| "http://localhost:9876".into());
+        let config = S3Config::minio(endpoint, bucket.to_string());
+        let client = S3ObjectBlockClient::new(config).await.unwrap();
+        client.ensure_bucket_exists().await.unwrap();
+        client
+    }
+
+    #[tokio::test]
+    async fn test_put_get_roundtrip() {
+        let client = create_test_client("test-roundtrip").await;
+        let key = format!("roundtrip-{}", uuid::Uuid::new_v4());
+        let payload = Bytes::from("hello world");
+
+        client.put_object(&key, payload.clone()).await.unwrap();
+
+        let result = client.get_object(&key).await.unwrap();
+        assert_eq!(result, Some(payload));
+
+        // Cleanup
+        client.delete_object(&key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_put_object_if_match_rejects_stale_etag() {
+        let client = create_test_client("test-if-match").await;
+        let key = format!("if-match-{}", uuid::Uuid::new_v4());
+
+        // Write initial object
+        client
+            .put_object(&key, Bytes::from("version1"))
+            .await
+            .unwrap();
+
+        // Get with ETag
+        let (_, etag) = client
+            .get_object_with_etag(&key)
+            .await
+            .unwrap()
+            .expect("object should exist");
+        let etag = etag.expect("should have etag");
+
+        // Overwrite the object to change its ETag
+        client
+            .put_object(&key, Bytes::from("version2"))
+            .await
+            .unwrap();
+
+        // Conditional put with stale ETag should fail
+        let won = client
+            .put_object_if_match(&key, Bytes::from("version3"), &etag)
+            .await
+            .unwrap();
+        assert!(!won, "conditional put with stale ETag should return false");
+
+        // Verify the object still has version2
+        let data = client.get_object(&key).await.unwrap().unwrap();
+        assert_eq!(data, Bytes::from("version2"));
+
+        // Cleanup
+        client.delete_object(&key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_put_object_if_match_accepts_current_etag() {
+        let client = create_test_client("test-if-match-ok").await;
+        let key = format!("if-match-ok-{}", uuid::Uuid::new_v4());
+
+        client
+            .put_object(&key, Bytes::from("version1"))
+            .await
+            .unwrap();
+
+        let (_, etag) = client
+            .get_object_with_etag(&key)
+            .await
+            .unwrap()
+            .expect("object should exist");
+        let etag = etag.expect("should have etag");
+
+        // Conditional put with current ETag should succeed
+        let won = client
+            .put_object_if_match(&key, Bytes::from("version2"), &etag)
+            .await
+            .unwrap();
+        assert!(won, "conditional put with current ETag should succeed");
+
+        let data = client.get_object(&key).await.unwrap().unwrap();
+        assert_eq!(data, Bytes::from("version2"));
+
+        // Cleanup
+        client.delete_object(&key).await.unwrap();
     }
 }
