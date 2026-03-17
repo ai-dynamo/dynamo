@@ -91,13 +91,19 @@ impl LeaderState {
         let coordinated = CoordinatedWorker::new(worker, rank, host_instance);
 
         // Ensure rank-ordered insertion
-        if rank >= self.workers.len() {
-            // Extend with placeholder capacity
-            self.workers.resize_with(rank + 1, || {
-                panic!("Gap in worker ranks - this shouldn't happen")
-            });
+        if rank == self.workers.len() {
+            // Sequential append (expected path)
+            self.workers.push(coordinated);
+        } else if rank < self.workers.len() {
+            // Re-registration or out-of-order within existing range
+            self.workers[rank] = coordinated;
+        } else {
+            panic!(
+                "Gap in worker ranks: rank {} but only {} workers registered",
+                rank,
+                self.workers.len()
+            );
         }
-        self.workers[rank] = coordinated;
     }
 
     /// Number of workers under this leader.
