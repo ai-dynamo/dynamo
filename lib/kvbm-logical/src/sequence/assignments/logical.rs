@@ -5,9 +5,9 @@
 //! mirroring the block lifecycle state machine:
 //! `MutableBlock<T>` → `CompleteBlock<T>` → `ImmutableBlock<T>`.
 
-use crate::{BlockId, SequenceHash};
 use crate::blocks::{BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock};
 use crate::manager::BlockManager;
+use crate::{BlockId, SequenceHash};
 use dynamo_tokens::TokenBlock;
 
 use super::super::store::BlockStore;
