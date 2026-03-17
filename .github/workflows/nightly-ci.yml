@@ -91,6 +91,7 @@ jobs:
       workflow_type: nightly
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CI_CLASSIFIER_API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import requests
 
 MAX_LOG_CHARS = 50_000
+GITHUB_API_TIMEOUT = 30
 
 
 def main():
@@ -42,14 +43,14 @@ def main():
 
     github_token = os.environ.get("GITHUB_TOKEN", "")
     api_key = os.environ.get("API_KEY", "")
-    base_url = os.environ.get("API_BASE_URL", "https://inference-api.nvidia.com/v1")
+    base_url = os.environ.get("API_BASE_URL", "")
     model = os.environ.get("MODEL", "nvcf/meta/llama-3.3-70b-instruct")
 
     if not github_token:
         print("Error: GITHUB_TOKEN not set", file=sys.stderr)
         sys.exit(1)
-    if not api_key:
-        print("Error: API_KEY must be set", file=sys.stderr)
+    if not api_key or not base_url:
+        print("Error: API_KEY and API_BASE_URL must be set", file=sys.stderr)
         sys.exit(1)
 
     system_prompt = load_prompt(args.prompt_file)
@@ -154,7 +155,7 @@ def get_run_metadata(repo, run_id, token):
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
     }
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=GITHUB_API_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
@@ -169,7 +170,9 @@ def get_failed_jobs(repo, run_id, token):
     params = {"per_page": 100, "filter": "latest"}
     all_jobs = []
     while url:
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.get(
+            url, headers=headers, params=params, timeout=GITHUB_API_TIMEOUT
+        )
         resp.raise_for_status()
         data = resp.json()
         all_jobs.extend(data.get("jobs", []))
@@ -186,7 +189,9 @@ def get_job_log(repo, job_id, token):
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
     }
-    resp = requests.get(url, headers=headers, allow_redirects=True)
+    resp = requests.get(
+        url, headers=headers, allow_redirects=True, timeout=GITHUB_API_TIMEOUT
+    )
     if resp.status_code != 200:
         return None
     text = resp.text
@@ -281,7 +286,9 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     }
 
     url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-    resp = requests.post(url, headers=headers, json={"body": body})
+    resp = requests.post(
+        url, headers=headers, json={"body": body}, timeout=GITHUB_API_TIMEOUT
+    )
     print(f"  Comment API response: {resp.status_code} {resp.text[:500]}")
     resp.raise_for_status()
 

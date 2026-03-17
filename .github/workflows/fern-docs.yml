@@ -325,9 +325,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUM="${GITHUB_REF##*/}"
-          gh pr comment "https://github.com/${{ github.repository }}/pull/${PR_NUM}" \
-            --edit-last --create-if-none \
-            --body "🌿 **Fern Docs Preview:** ${{ steps.preview.outputs.url }}/dev"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
+          MARKER="<!-- fern-docs-preview -->"
+          BODY="${MARKER}
+          🌿 **Fern Docs Preview:** ${{ steps.preview.outputs.url }}/dev"
+
+          # Find existing comment with our marker, update it; otherwise create new
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" \
+            --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -X PATCH -f body="$BODY"
+          else
+            gh pr comment "$PR_URL" --body "$BODY"
+          fi
 
       ##########################################################################
       # PUSH AND PUBLISH - push changes to docs-website branch and publish docs
