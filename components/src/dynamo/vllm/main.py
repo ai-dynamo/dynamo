@@ -17,7 +17,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
-from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
@@ -33,7 +32,7 @@ from dynamo.llm import (
     fetch_model,
     register_model,
 )
-from dynamo.runtime import DistributedRuntime, Endpoint
+from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 

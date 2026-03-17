@@ -74,7 +74,6 @@ class WorkerFactory:
         """Helper function to format config for logging."""
         return (
             "{ "
-            f"omni: {config.omni}, "
             f"multimodal_worker: {config.multimodal_worker}, "
             f"multimodal_decode_worker: {config.multimodal_decode_worker}, "
             f"multimodal_encode_worker: {config.multimodal_encode_worker}, "
@@ -85,9 +84,6 @@ class WorkerFactory:
 
     @staticmethod
     def _validate_config(config: Config) -> None:
-        if config.omni:
-            raise NotImplementedError("Omni worker is not supported in WorkerFactory.")
-
         # [gluo FIXME] We are validating config combination for
         # the transition away from "legacy" E/PD creation, which uses specialized
         # P/D classes.

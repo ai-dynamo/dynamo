@@ -83,10 +83,6 @@ class TestHandles:
         )
         assert WorkerFactory.handles(config)
 
-    def test_omni_not_handled(self) -> None:
-        config = _make_config(omni=True)
-        assert not WorkerFactory.handles(config)
-
 
 @pytest.mark.asyncio
 class TestCreate:
