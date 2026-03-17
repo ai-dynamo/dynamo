@@ -96,14 +96,46 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
         }
     }
 
+    /// Register externally-provided workers in the slot tracker.
+    ///
+    /// Looks up DP rank/size from the discovery watch channel; defaults to
+    /// `(0, 1)` for workers not yet known to discovery.
+    pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
+        let discovery_workers = self.workers_with_configs.borrow();
+        let dp_range: std::collections::HashMap<u64, (u32, u32)> = worker_ids
+            .iter()
+            .map(|&id| {
+                let (dp_start, dp_size) = discovery_workers
+                    .get(&id)
+                    .map(|runtime_config| {
+                        (
+                            runtime_config.data_parallel_start_rank(),
+                            runtime_config.data_parallel_size(),
+                        )
+                    })
+                    .unwrap_or((0, 1));
+                (id, (dp_start, dp_size))
+            })
+            .collect();
+        self.slots.register_external_workers(&dp_range);
+    }
+
     /// Enqueue a new request.
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
+    ///
+    /// When `allowed_worker_ids` is set on the request (external routing), the
+    /// capacity check is skipped.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request).await;
             return;
         };
+
+        if request.allowed_worker_ids.is_some() {
+            self.schedule(request).await;
+            return;
+        }
 
         if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref()) {
             tracing::debug!("all workers busy, queueing request");
