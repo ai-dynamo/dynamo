@@ -32,8 +32,20 @@ products:
 redirects:
   - source: "/dynamo/index.html"
     destination: "/dynamo/"
+  - source: "/dynamo/dev/index.html"
+    destination: "/dynamo/dev/"
   - source: "/dynamo/latest/index.html"
     destination: "/dynamo/"
+  # Unversioned root redirects → dev (fixes broken links from docs.nvidia.com/dynamo)
+  # See: https://github.com/ai-dynamo/dynamo/issues/7297
+  - source: "/dynamo/resources/support-matrix"
+    destination: "/dynamo/dev/resources/support-matrix"
+  - source: "/dynamo/resources/feature-matrix"
+    destination: "/dynamo/dev/resources/feature-matrix"
+  - source: "/dynamo/resources/release-artifacts"
+    destination: "/dynamo/dev/resources/release-artifacts"
+  - source: "/dynamo/resources/examples"
+    destination: "/dynamo/dev/resources/examples"
   # Version-scoped getting-started → resources redirects
   # Only for versions where these pages moved (dev, v1.0.0, latest).
   # Older versions (v0.9.x and below) still have pages under getting-started.
