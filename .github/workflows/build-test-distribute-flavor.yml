@@ -284,43 +284,29 @@ jobs:
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
+      - name: Refresh BuildKit builder
+        if: ${{ inputs.target != 'dev' }}
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ inputs.framework }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          CUDA_MAJOR=${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
-          CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-${{ inputs.platform }}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
-          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
-          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
-          fi
-
-          PUSH_ARGS=""
-          if [ "${{ inputs.push_image }}" == "true" ]; then
-            PUSH_ARGS="--push"
-          elif [ "${{ inputs.no_load }}" == "false" ]; then
-            PUSH_ARGS="--load"
-          fi
-
-          NO_CACHE_ARG=""
-          if [ "${{ inputs.no_cache }}" == "true" ]; then
-            NO_CACHE_ARG="--no-cache"
-          fi
-
-          docker buildx build \
-            --progress=plain \
-            ${PUSH_ARGS} \
-            ${NO_CACHE_ARG} \
-            --platform linux/${{ inputs.platform }} \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
-            ${CACHE_ARGS} \
-            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
+        timeout-minutes: ${{ inputs.build_timeout_minutes }}
+        uses: ./.github/actions/docker-test-image-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
+          base_image: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
+          framework: ${{ inputs.framework }}
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          push_image: ${{ inputs.push_image }}
+          no_load: ${{ inputs.no_load }}
+          no_cache: ${{ inputs.no_cache }}
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
