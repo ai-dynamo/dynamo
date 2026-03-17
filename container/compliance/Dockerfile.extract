@@ -24,8 +24,8 @@
 
 ARG TARGET_IMAGE=scratch
 FROM ${TARGET_IMAGE} AS target
-
-FROM python:3.12-slim AS extractor
+ARG EXTRACTOR_IMAGE=python:3.12-slim
+FROM ${EXTRACTOR_IMAGE} AS extractor
 RUN mkdir /output
 COPY helpers/dpkg_helper.py /helpers/dpkg_helper.py
 COPY helpers/python_helper.py /helpers/python_helper.py
