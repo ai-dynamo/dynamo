@@ -39,26 +39,22 @@ use super::{
     accessor::{BlockAccessor, PolicyContext},
     session::{
         BlockHolder,
-        ControlRole,
-        ControllableSession,
         ControllableSessionOptions,
         ControllableSessionResult,
-        EndpointSessionHandle,
+        ControlRole,
         InitiatorSession,
         MessageTransport,
         OnboardMessage,
         OnboardSessionTx,
-        RemoteSessionHandle,
-        RemoteSessionMessage,
-        RemoteSessionTx,
         ResponderSession,
-        // Import the new unified SessionHandle with an alias to distinguish from legacy
-        SessionHandle as UnifiedSessionHandle,
+        ServerSession,
+        ServerSessionHandle,
+        ServerSessionOptions,
+        SessionHandle,
         SessionMessage,
         SessionMessageTx,
         SessionPhase,
-        create_endpoint_session,
-        remote_session_state_channel,
+        create_server_session,
         session_handle_state_channel,
         session_message_channel,
     },
@@ -120,21 +116,10 @@ pub struct InstanceLeader {
     transport: Arc<MessageTransport>,
 
     // ========================================================================
-    // Inverted Control Pattern (Prefill-Decode) Fields
+    // Unified Session Protocol
     // ========================================================================
-    /// Map of controllable sessions (Decode side).
-    /// Used when this instance hosts sessions that can be controlled remotely.
-    controllable_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
-
-    /// Map of remote session receivers (Prefill side).
-    /// Used when this instance controls sessions on remote instances.
-    remote_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
-
-    // ========================================================================
-    // Unified Session Protocol (New)
-    // ========================================================================
-    /// Map of unified session message receivers.
-    /// Used by the new SessionHandle/SessionEndpoint protocol.
+    /// Map of session message receivers.
+    /// Used by SessionHandle/SessionEndpoint/ControllableSession.
     session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
 
     // ========================================================================
@@ -293,8 +278,6 @@ impl InstanceLeaderBuilder {
                 self.remote_leaders.unwrap_or_default(),
             )),
             transport,
-            controllable_sessions: Arc::new(DashMap::new()),
-            remote_sessions: Arc::new(DashMap::new()),
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
         })
@@ -610,8 +593,6 @@ impl InstanceLeader {
 
         let mut service = VeloLeaderService::new(self.messenger.clone(), self.sessions.clone())
             .with_spawn_responder(spawn_responder)
-            .with_controllable_sessions(self.controllable_sessions.clone())
-            .with_remote_sessions(self.remote_sessions.clone())
             .with_session_sessions(self.session_sessions.clone());
 
         if let Some(callback) = export_metadata_callback {
@@ -634,13 +615,9 @@ impl InstanceLeader {
     ///
     /// This is optional - sessions will naturally be cleaned up when the InstanceLeader
     /// is dropped. Call this explicitly if you need to release blocks earlier.
-    ///
-    /// This cleans up all session types: legacy onboard sessions, remote sessions,
-    /// and unified sessions.
     pub fn release_session(&self, session_id: SessionId) {
         self.session_states.remove(&session_id);
         self.sessions.remove(&session_id);
-        self.remote_sessions.remove(&session_id);
         self.session_sessions.remove(&session_id);
     }
 
@@ -696,9 +673,9 @@ impl InstanceLeader {
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
 
-        // Create session channel
-        let (tx, rx) = mpsc::channel(100);
-        self.controllable_sessions.insert(session_id, tx);
+        // Create session channel using unified SessionMessage protocol
+        let (tx, rx) = session_message_channel(100);
+        self.session_sessions.insert(session_id, tx);
 
         // Collect G2 layout handles from workers for round-robin block allocation
         let worker_g2_handles: Vec<LayoutHandle> = self
@@ -707,29 +684,40 @@ impl InstanceLeader {
             .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
             .unwrap_or_default();
 
-        // Create controllable session
-        let session = ControllableSession::new(
+        let endpoint = super::session::SessionEndpoint::new(
             session_id,
             self.messenger.instance_id(),
-            matched_g2_blocks,
-            matched_g3_blocks,
-            worker_g2_handles,
-            self.g2_manager.clone(),
-            self.g3_manager.clone(),
-            self.parallel_worker.clone(),
             self.transport.clone(),
             rx,
-            options,
         );
 
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+
+        let session = ServerSession::new_with_staging(
+            endpoint,
+            BlockHolder::new(matched_g2_blocks),
+            BlockHolder::new(matched_g3_blocks),
+            worker_g2_handles,
+            self.g2_manager.clone(),
+            self.parallel_worker.clone(),
+            cmd_rx,
+            ServerSessionOptions {
+                auto_stage: options.auto_stage,
+            },
+        );
+
+        // Keep handle alive to prevent cmd channel from closing
+        let _handle = ServerSessionHandle::new(session_id, self.messenger.instance_id(), cmd_tx);
+
         // Spawn session task
-        let controllable_sessions = self.controllable_sessions.clone();
+        let session_sessions = self.session_sessions.clone();
         tokio::spawn(async move {
+            let _handle = _handle; // move handle into task to keep cmd channel open
             if let Err(e) = session.run().await {
-                eprintln!("ControllableSession error: {e}");
+                eprintln!("ServerSession error: {e}");
             }
             // Clean up when session completes
-            controllable_sessions.remove(&session_id);
+            session_sessions.remove(&session_id);
         });
 
         Ok(ControllableSessionResult {
@@ -739,120 +727,11 @@ impl InstanceLeader {
         })
     }
 
-    /// Attach to a remote session on another instance (Decode).
-    ///
-    /// This is the "Prefill side" of the inverted control pattern:
-    /// 1. Send AttachSession to Decode
-    /// 2. Receive RemoteSessionHandle for controlling the session
-    /// 3. Use handle to query state, trigger staging, pull blocks via RDMA
-    ///
-    /// If workers are configured, the handle will have RDMA support enabled,
-    /// allowing use of `pull_blocks_rdma()` methods.
-    #[deprecated(note = "Use attach_session instead")]
-    pub async fn attach_remote_session(
-        &self,
-        remote_instance: InstanceId,
-        session_id: SessionId,
-    ) -> Result<RemoteSessionHandle> {
-        // Create local channel for receiving state updates
-        let (state_tx, state_rx) = remote_session_state_channel();
-
-        // Register handler for this session's messages
-        let (msg_tx, msg_rx) = mpsc::channel(100);
-        self.remote_sessions.insert(session_id, msg_tx);
-
-        // Spawn receiver task to update state
-        tokio::spawn(Self::run_remote_session_receiver(msg_rx, state_tx));
-
-        // Send attach message
-        let msg = RemoteSessionMessage::AttachSession {
-            controller: self.messenger.instance_id(),
-            session_id,
-        };
-        self.transport
-            .send_remote_session(remote_instance, msg)
-            .await?;
-
-        let mut handle = RemoteSessionHandle::new(
-            session_id,
-            remote_instance,
-            self.messenger.instance_id(),
-            self.transport.clone(),
-            state_rx,
-        );
-
-        // Add RDMA support if parallel worker is configured
-        if let Some(parallel_worker) = &self.parallel_worker {
-            handle = handle.with_rdma_support(parallel_worker.clone());
-        }
-
-        Ok(handle)
-    }
-
-    /// Internal: Process incoming messages for a remote session.
-    async fn run_remote_session_receiver(
-        mut rx: mpsc::Receiver<RemoteSessionMessage>,
-        state_tx: super::session::RemoteSessionStateTx,
-    ) {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                RemoteSessionMessage::SessionState {
-                    g2_blocks,
-                    g3_pending_count,
-                    g3_blocks,
-                    phase,
-                    ..
-                } => {
-                    state_tx.update_from_session_state(
-                        g2_blocks,
-                        g3_pending_count,
-                        g3_blocks,
-                        phase,
-                    );
-                }
-                RemoteSessionMessage::BlocksStaged {
-                    staged_blocks,
-                    g3_remaining_count,
-                    ..
-                } => {
-                    state_tx.update_from_blocks_staged(staged_blocks, g3_remaining_count);
-                }
-                RemoteSessionMessage::SessionError { error, .. } => {
-                    eprintln!("Remote session error: {}", error);
-                    break;
-                }
-                _ => {
-                    // Ignore outbound message types (AttachSession, TriggerStaging, etc.)
-                }
-            }
-        }
-    }
-
-    /// Release resources for a remote session handle.
-    pub fn release_remote_session(&self, session_id: SessionId) {
-        self.remote_sessions.remove(&session_id);
-    }
-
-    /// Get the controllable sessions map (for Nova handler registration).
-    #[expect(dead_code)]
-    pub(crate) fn controllable_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
-        self.controllable_sessions.clone()
-    }
-
-    /// Get the remote sessions map (for Nova handler registration).
-    #[expect(dead_code)]
-    pub(crate) fn remote_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
-        self.remote_sessions.clone()
-    }
-
     // ========================================================================
-    // Unified Session Protocol (New)
-    // These methods use the new SessionHandle/SessionMessage protocol.
+    // Unified Session Protocol
     // ========================================================================
 
-    /// Attach to a remote session using the unified session protocol.
-    ///
-    /// This is the preferred method for new code, replacing `attach_remote_session`.
+    /// Attach to a remote session.
     /// Returns a `SessionHandle` that uses `SessionMessage` for communication.
     ///
     /// # Arguments
@@ -869,7 +748,7 @@ impl InstanceLeader {
         &self,
         remote_instance: InstanceId,
         session_id: SessionId,
-    ) -> Result<UnifiedSessionHandle> {
+    ) -> Result<SessionHandle> {
         // Create local channel for receiving state updates
         let (state_tx, state_rx) = session_handle_state_channel();
 
@@ -888,7 +767,7 @@ impl InstanceLeader {
         };
         self.transport.send_session(remote_instance, msg).await?;
 
-        let mut handle = UnifiedSessionHandle::new(
+        let mut handle = SessionHandle::new(
             session_id,
             remote_instance,
             self.messenger.instance_id(),
@@ -931,7 +810,7 @@ impl InstanceLeader {
     pub fn create_endpoint_session(
         &self,
         sequence_hashes: &[SequenceHash],
-    ) -> Result<(SessionId, EndpointSessionHandle)> {
+    ) -> Result<(SessionId, ServerSessionHandle)> {
         let session_id = SessionId::from(uuid::Uuid::new_v4());
 
         // Local search
@@ -969,7 +848,7 @@ impl InstanceLeader {
         let block_holder = BlockHolder::new(matched_g2_blocks);
 
         // Create the session and handle
-        let (session, handle) = create_endpoint_session(
+        let (session, handle) = create_server_session(
             session_id,
             self.messenger.instance_id(),
             block_holder,
@@ -983,7 +862,7 @@ impl InstanceLeader {
         let session_sessions = self.session_sessions.clone();
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
-                eprintln!("EndpointSession error: {e}");
+                eprintln!("ServerSession error: {e}");
             }
             // Clean up when session completes
             session_sessions.remove(&session_id);
@@ -1017,7 +896,7 @@ impl InstanceLeader {
         blocks: BlockHolder<G2>,
         sequence_hashes: &[SequenceHash],
         layout_handles: &[LayoutHandle],
-    ) -> Result<(SessionId, EndpointSessionHandle)> {
+    ) -> Result<(SessionId, ServerSessionHandle)> {
         let session_id = SessionId::from(uuid::Uuid::new_v4());
 
         // Create the session channel
@@ -1025,7 +904,7 @@ impl InstanceLeader {
         self.session_sessions.insert(session_id, msg_tx);
 
         // Create the session and handle
-        let (session, handle) = create_endpoint_session(
+        let (session, handle) = create_server_session(
             session_id,
             self.messenger.instance_id(),
             blocks,
@@ -1039,7 +918,7 @@ impl InstanceLeader {
         let session_sessions = self.session_sessions.clone();
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
-                eprintln!("EndpointSession error: {e}");
+                eprintln!("ServerSession error: {e}");
             }
             // Clean up when session completes
             session_sessions.remove(&session_id);

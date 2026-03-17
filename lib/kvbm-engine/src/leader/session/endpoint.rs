@@ -409,7 +409,6 @@ mod tests {
         Arc::new(MessageTransport::local(
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
-            Arc::new(DashMap::new()),
         ))
     }
 

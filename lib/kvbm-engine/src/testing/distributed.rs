@@ -1345,16 +1345,15 @@ mod tests {
         );
 
         // 7. Prefill attaches
-        #[allow(deprecated)]
         let mut handle = pair
             .prefill
             .leader
-            .attach_remote_session(pair.decode.instance_id, session_result.session_id)
+            .attach_session(pair.decode.instance_id, session_result.session_id)
             .await
             .expect("Should attach");
 
         // 8. Wait for initial state
-        let state = timeout(Duration::from_secs(5), handle.wait_for_initial_state())
+        let state = timeout(Duration::from_secs(5), handle.wait_for_ready())
             .await
             .expect("Timeout")
             .expect("Should get state");
@@ -1539,19 +1538,18 @@ mod tests {
             session_result.local_g2_count
         );
 
-        // Prefill attaches using legacy API (already tested)
-        #[allow(deprecated)]
+        // Prefill attaches using unified session API
         let mut prefill_handle = pair
             .prefill
             .leader
-            .attach_remote_session(pair.decode.instance_id, session_result.session_id)
+            .attach_session(pair.decode.instance_id, session_result.session_id)
             .await
             .expect("Should attach");
 
         // Wait for initial state
         let state = timeout(
             Duration::from_secs(5),
-            prefill_handle.wait_for_initial_state(),
+            prefill_handle.wait_for_ready(),
         )
         .await
         .expect("Timeout waiting for initial state")
@@ -1616,8 +1614,7 @@ mod tests {
         }
 
         // Detach without marking blocks pulled (Decode keeps those blocks)
-        // Note: The unified SessionHandle has yield_control(), but legacy RemoteSessionHandle
-        // doesn't - for this test we just detach since Decode's blocks remain held.
+        // Detach without marking blocks pulled (Decode keeps those blocks).
         prefill_handle.detach().await.ok();
         println!("Prefill detached (Decode keeps cached blocks)");
 

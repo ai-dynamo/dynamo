@@ -17,28 +17,21 @@
 //!
 //! ## Session Implementations
 //!
-// Migration notes:
-// - OnboardMessage corresponds to SessionMessage
-// - RemoteSessionMessage corresponds to SessionMessage
-// - RemoteSessionHandle corresponds to SessionHandle
-// - RemoteSessionPhase corresponds to SessionPhase
-//
-// InitiatorSession, ResponderSession, and ControllableSession use
-// the older message types but internally use BlockHolder for RAII block management.
+//! - `ServerSession`: Server-side session (merges former EndpointSession + ControllableSession)
+//! - `InitiatorSession`: Multi-peer search orchestrator (OnboardMessage)
+//! - `ResponderSession`: Responds to search requests (OnboardMessage)
 
 // Core session building blocks
 mod blocks;
 mod endpoint;
-mod endpoint_session;
 mod handle;
+mod server_session;
+mod staging;
 mod state;
 
 // Session implementations
-mod controllable;
 mod initiator;
 mod messages;
-// mod onboard; // Old implementation, will be replaced incrementally
-mod remote_handle;
 mod responder;
 pub mod transport;
 
@@ -52,10 +45,15 @@ pub use blocks::BlockHolder;
 /// Point-to-point session endpoint with state machine.
 pub use endpoint::{SessionEndpoint, SessionMessageTx, session_message_channel};
 
-/// Server-side session that processes incoming SessionMessage.
-pub use endpoint_session::{
-    EndpointSession, EndpointSessionCommand, EndpointSessionHandle, create_endpoint_session,
+/// Server-side session (unified replacement for EndpointSession + ControllableSession).
+pub use server_session::{
+    ServerSession, ServerSessionCommand, ServerSessionHandle, ServerSessionOptions,
+    create_server_session,
 };
+
+// Backwards-compatible aliases for the former EndpointSession types.
+pub use server_session::ServerSessionHandle as EndpointSessionHandle;
+pub use server_session::ServerSessionCommand as EndpointSessionCommand;
 
 /// Unified handle for controlling remote sessions.
 pub use handle::{SessionHandle, SessionHandleStateTx, session_handle_state_channel};
@@ -70,27 +68,29 @@ pub use messages::{BlockInfo, SessionMessage, SessionStateSnapshot};
 // Session Implementations
 // =============================================================================
 
-/// Session implementations for initiator, responder, and controllable patterns.
-pub use controllable::{ControllableSession, ControllableSessionResult};
+/// Session implementations for initiator and responder patterns.
 pub use initiator::InitiatorSession;
 pub use responder::ResponderSession;
 
-/// Message types for session communication.
-pub use messages::{
-    BlockMatch, ControllableSessionOptions, G2BlockInfo, G3BlockInfo, OnboardMessage,
-    RemoteSessionMessage, RemoteSessionPhase,
-};
+/// Backwards-compatible re-exports (ControllableSessionResult is still used externally).
+pub use server_session::ServerSessionOptions as ControllableSessionOptions;
 
-/// Remote session handle and state channel.
-pub use remote_handle::{
-    RemoteSessionHandle, RemoteSessionState, RemoteSessionStateTx, remote_session_state_channel,
-};
+/// Result of creating a controllable/server session.
+#[derive(Debug, Clone)]
+pub struct ControllableSessionResult {
+    /// The unique session ID.
+    pub session_id: super::SessionId,
+    /// Number of G2 blocks found.
+    pub local_g2_count: usize,
+    /// Number of G3 blocks found.
+    pub local_g3_count: usize,
+}
+
+/// Message types for session communication.
+pub use messages::{BlockMatch, OnboardMessage};
 
 /// Transport types.
-pub use transport::{LocalTransport, MessageTransport, RemoteSessionTx, VeloTransport};
-
-// Re-export from onboard for backward compatibility (will be removed later)
-// pub use onboard::OnboardingSession;
+pub use transport::{LocalTransport, MessageTransport, VeloTransport};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -110,9 +110,9 @@ pub async fn dispatch_onboard_message(
 ) -> Result<()> {
     let session_id = message.session_id();
 
-    if let Some(entry) = sessions.get(&session_id) {
-        entry
-            .value()
+    let sender = sessions.get(&session_id).map(|entry| entry.value().clone());
+    if let Some(sender) = sender {
+        sender
             .send(message)
             .await
             .map_err(|e| anyhow::anyhow!("failed to send to session {session_id}: {e}"))?;
@@ -122,60 +122,19 @@ pub async fn dispatch_onboard_message(
     anyhow::bail!("no session task registered for session {session_id}");
 }
 
-/// Route a [`RemoteSessionMessage`] to either the Decode-side or Prefill-side session task.
-///
-/// Message routing by variant:
-/// - `AttachSession`, `TriggerStaging`, `BlocksPulled`, `DetachSession` ->
-///   `controllable_sessions` (commands sent **to** Decode)
-/// - `SessionState`, `BlocksStaged`, `SessionError` ->
-///   `remote_sessions` (responses sent **to** Prefill)
-pub async fn dispatch_remote_session_message(
-    controllable_sessions: &DashMap<SessionId, RemoteSessionTx>,
-    remote_sessions: &DashMap<SessionId, RemoteSessionTx>,
-    message: RemoteSessionMessage,
-) -> Result<()> {
-    let session_id = message.session_id();
-
-    // Route based on message type:
-    // - AttachSession, TriggerStaging, BlocksPulled, DetachSession → controllable_sessions (Decode)
-    // - SessionState, BlocksStaged, SessionError → remote_sessions (Prefill)
-    let sessions = match &message {
-        RemoteSessionMessage::AttachSession { .. }
-        | RemoteSessionMessage::TriggerStaging { .. }
-        | RemoteSessionMessage::BlocksPulled { .. }
-        | RemoteSessionMessage::DetachSession { .. } => controllable_sessions,
-        RemoteSessionMessage::SessionState { .. }
-        | RemoteSessionMessage::BlocksStaged { .. }
-        | RemoteSessionMessage::SessionError { .. } => remote_sessions,
-    };
-
-    if let Some(entry) = sessions.get(&session_id) {
-        entry
-            .value()
-            .send(message)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to send to remote session {session_id}: {e}"))?;
-        return Ok(());
-    }
-
-    anyhow::bail!("no remote session registered for session {session_id}");
-}
-
 /// Route a unified [`SessionMessage`] to its session task.
 ///
-/// This is the new unified protocol that replaces both [`dispatch_onboard_message`]
-/// and [`dispatch_remote_session_message`]. All message variants are routed through
-/// a single `DashMap<SessionId, SessionMessageTx>` registry since the unified
-/// protocol no longer splits by direction.
+/// All message variants are routed through a single `DashMap<SessionId, SessionMessageTx>`
+/// registry.
 pub async fn dispatch_session_message(
     sessions: &DashMap<SessionId, SessionMessageTx>,
     message: SessionMessage,
 ) -> Result<()> {
     let session_id = message.session_id();
 
-    if let Some(entry) = sessions.get(&session_id) {
-        entry
-            .value()
+    let sender = sessions.get(&session_id).map(|entry| entry.value().clone());
+    if let Some(sender) = sender {
+        sender
             .send(message)
             .await
             .map_err(|e| anyhow::anyhow!("failed to send to session {session_id}: {e}"))?;
@@ -183,4 +142,67 @@ pub async fn dispatch_session_message(
     }
 
     anyhow::bail!("no session registered for session {session_id}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dispatch_onboard_message() {
+        let sessions: DashMap<SessionId, OnboardSessionTx> = DashMap::new();
+        let session_id = SessionId::new_v4();
+        let (tx, mut rx) = mpsc::channel(16);
+        sessions.insert(session_id, tx);
+
+        let msg = OnboardMessage::CloseSession {
+            requester: crate::InstanceId::new_v4(),
+            session_id,
+        };
+
+        dispatch_onboard_message(&sessions, msg).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.session_id(), session_id);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_session_message() {
+        let sessions: DashMap<SessionId, SessionMessageTx> = DashMap::new();
+        let session_id = SessionId::new_v4();
+        let (tx, mut rx) = mpsc::channel(16);
+        sessions.insert(session_id, tx);
+
+        let msg = SessionMessage::Close { session_id };
+
+        dispatch_session_message(&sessions, msg).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.session_id(), session_id);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_missing_onboard_session() {
+        let sessions: DashMap<SessionId, OnboardSessionTx> = DashMap::new();
+        let session_id = SessionId::new_v4();
+
+        let msg = OnboardMessage::CloseSession {
+            requester: crate::InstanceId::new_v4(),
+            session_id,
+        };
+
+        let result = dispatch_onboard_message(&sessions, msg).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_missing_session_message() {
+        let sessions: DashMap<SessionId, SessionMessageTx> = DashMap::new();
+        let session_id = SessionId::new_v4();
+
+        let msg = SessionMessage::Close { session_id };
+
+        let result = dispatch_session_message(&sessions, msg).await;
+        assert!(result.is_err());
+    }
 }

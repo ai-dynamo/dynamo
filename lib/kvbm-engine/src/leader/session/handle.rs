@@ -506,7 +506,6 @@ mod tests {
         Arc::new(MessageTransport::local(
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
-            Arc::new(DashMap::new()),
         ))
     }
 
@@ -567,5 +566,73 @@ mod tests {
 
         let state = handle.wait_for_ready().await.unwrap();
         assert_eq!(state.phase, SessionPhase::Ready);
+    }
+
+    #[test]
+    fn test_add_staged_blocks() {
+        let (tx, rx) = session_handle_state_channel();
+
+        // Set initial g3 pending
+        tx.update(SessionStateSnapshot {
+            phase: SessionPhase::Staging,
+            control_role: ControlRole::Controllee,
+            g2_blocks: Vec::new(),
+            g3_pending: 5,
+            ready_layer_range: None,
+        });
+
+        let state = rx.borrow().clone();
+        assert_eq!(state.g3_pending, 5);
+        assert!(state.g2_blocks.is_empty());
+
+        // Add staged blocks with remaining = 0
+        let block = BlockInfo {
+            block_id: 42,
+            sequence_hash: crate::SequenceHash::new(1, None, 100),
+            layout_handle: kvbm_physical::manager::LayoutHandle::new(0, 1),
+        };
+        tx.add_staged_blocks(vec![block], 0, None);
+
+        let state = rx.borrow().clone();
+        assert_eq!(state.g2_blocks.len(), 1);
+        assert_eq!(state.g3_pending, 0);
+        // No layer range + g3_remaining == 0 → Ready
+        assert_eq!(state.phase, SessionPhase::Ready);
+    }
+
+    #[test]
+    fn test_set_failed() {
+        let (tx, rx) = session_handle_state_channel();
+
+        // Initially Searching
+        assert_eq!(rx.borrow().phase, SessionPhase::Searching);
+
+        tx.set_failed();
+
+        assert_eq!(rx.borrow().phase, SessionPhase::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_complete() {
+        let (tx, rx) = session_handle_state_channel();
+        let transport = create_test_transport();
+        let session_id = SessionId::new_v4();
+
+        let mut handle = SessionHandle::new(
+            session_id,
+            InstanceId::new_v4(),
+            InstanceId::new_v4(),
+            transport,
+            rx,
+        );
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            tx.set_phase(SessionPhase::Complete);
+        });
+
+        let state = handle.wait_for_complete().await.unwrap();
+        assert_eq!(state.phase, SessionPhase::Complete);
+        assert!(handle.is_complete());
     }
 }

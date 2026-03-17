@@ -14,9 +14,8 @@ pub use accessor::{BlockAccessor, PolicyContext, TieredBlock};
 pub use instance::InstanceLeader;
 pub use onboarding::*;
 pub use session::{
-    ControllableSession, ControllableSessionOptions, ControllableSessionResult, G2BlockInfo,
-    G3BlockInfo, InitiatorSession, RemoteSessionHandle, RemoteSessionMessage, RemoteSessionPhase,
-    RemoteSessionState, ResponderSession, SessionId,
+    ControllableSessionOptions, ControllableSessionResult, InitiatorSession, ResponderSession,
+    ServerSession, ServerSessionHandle, ServerSessionOptions, SessionId,
 };
 pub use state::{LeaderState, RemoteLeaderInfo, route_local_to_remote};
 pub use types::*;
