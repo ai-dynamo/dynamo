@@ -93,6 +93,11 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Required
 	PodTemplateSpec corev1.PodTemplateSpec `json:"podTemplateSpec"`
 
+	// SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
+	// When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
+	// +optional
+	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
+
 	// ActiveDeadlineSeconds specifies the maximum time the Job can run
 	// +optional
 	// +kubebuilder:validation:Minimum=0

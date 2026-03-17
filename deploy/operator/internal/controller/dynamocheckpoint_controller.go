@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -427,6 +428,81 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	podTemplate.Labels[consts.KubeLabelCheckpointHash] = hash
 	podTemplate.Labels[consts.KubeLabelIsCheckpointSource] = "true"
 
+	hasPodInfoVolume := false
+	for _, volume := range podTemplate.Spec.Volumes {
+		if volume.Name == consts.PodInfoVolumeName {
+			hasPodInfoVolume = true
+			break
+		}
+	}
+	if !hasPodInfoVolume {
+		podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
+			Name: consts.PodInfoVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{
+							Path: consts.PodInfoFileDynNamespace,
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.labels['" + consts.KubeLabelDynamoNamespace + "']",
+							},
+						},
+						{
+							Path: consts.PodInfoFileDynNamespaceWorkerSuffix,
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.labels['" + consts.KubeLabelDynamoWorkerHash + "']",
+							},
+						},
+						{
+							Path: consts.PodInfoFileDynComponent,
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.labels['" + consts.KubeLabelDynamoComponentType + "']",
+							},
+						},
+						{
+							Path: consts.PodInfoFileDynParentDGDName,
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.labels['" + consts.KubeLabelDynamoGraphDeploymentName + "']",
+							},
+						},
+						{
+							Path: consts.PodInfoFileDynParentDGDNamespace,
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.namespace",
+							},
+						},
+						{
+							Path: "pod_name",
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  consts.PodInfoFieldPodName,
+							},
+						},
+						{
+							Path: "pod_uid",
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  consts.PodInfoFieldPodUID,
+							},
+						},
+						{
+							Path: "pod_namespace",
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  consts.PodInfoFieldPodNamespace,
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
 	// Add checkpoint env vars to the main container.
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
@@ -446,6 +522,9 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 				Value: r.Config.Checkpoint.ReadyForCheckpointFilePath,
 			},
 		)
+		if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok && gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0 {
+			mainContainer.Command = append([]string{"cuda-checkpoint", "--launch-job"}, mainContainer.Command...)
+		}
 
 		// Override probes for checkpoint mode
 		// Checkpoint jobs need different probe behavior than regular worker pods:
@@ -464,6 +543,23 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		mainContainer.LivenessProbe = nil
 		// Remove startup probe - not needed for checkpoint jobs
 		mainContainer.StartupProbe = nil
+
+		hasPodInfoMount := false
+		for _, mount := range mainContainer.VolumeMounts {
+			if mount.Name == consts.PodInfoVolumeName {
+				hasPodInfoMount = true
+				break
+			}
+		}
+		if !hasPodInfoMount {
+			mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+				Name:      consts.PodInfoVolumeName,
+				MountPath: consts.PodInfoMountPath,
+				ReadOnly:  true,
+			})
+		}
+
+		dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 	}
 
 	// Set restart policy to Never for Jobs

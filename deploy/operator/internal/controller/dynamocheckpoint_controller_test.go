@@ -31,6 +31,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -191,22 +192,32 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
-	// Checkpoint jobs no longer mount checkpoint storage or restore podinfo.
+	// Checkpoint jobs still mount podinfo for Kubernetes discovery, but not checkpoint storage.
 	volNames := make(map[string]bool)
 	for _, v := range podSpec.Volumes {
 		volNames[v.Name] = true
 	}
 	assert.False(t, volNames[consts.CheckpointVolumeName])
-	assert.False(t, volNames[consts.PodInfoVolumeName])
+	assert.True(t, volNames[consts.PodInfoVolumeName])
 
 	mountPaths := make(map[string]string)
 	for _, m := range main.VolumeMounts {
 		mountPaths[m.Name] = m.MountPath
 	}
 	_, hasCheckpointMount := mountPaths[consts.CheckpointVolumeName]
-	_, hasPodInfoMount := mountPaths[consts.PodInfoVolumeName]
 	assert.False(t, hasCheckpointMount)
-	assert.False(t, hasPodInfoMount)
+	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
+	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
+
+	for _, v := range podSpec.Volumes {
+		if v.Name != consts.KubeValueNameSharedMemory {
+			continue
+		}
+		require.NotNil(t, v.EmptyDir)
+		assert.Equal(t, corev1.StorageMediumMemory, v.EmptyDir.Medium)
+		require.NotNil(t, v.EmptyDir.SizeLimit)
+		assert.Equal(t, resource.MustParse(consts.DefaultSharedMemorySize), *v.EmptyDir.SizeLimit)
+	}
 
 	// Restart policy, user image/command preserved
 	assert.Equal(t, corev1.RestartPolicyNever, podSpec.RestartPolicy)
@@ -229,6 +240,14 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(600), *job.Spec.TTLSecondsAfterFinished)
+
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
+		},
+	}
+	job = r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
+	assert.Equal(t, []string{"cuda-checkpoint", "--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
@@ -248,7 +267,16 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 		PrometheusEndpoint: "http://prometheus:9090",
 	}
 
+	customShmSize := resource.MustParse("16Gi")
+	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
 	job := r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == consts.KubeValueNameSharedMemory {
+			require.NotNil(t, v.EmptyDir)
+			require.NotNil(t, v.EmptyDir.SizeLimit)
+			assert.Equal(t, customShmSize, *v.EmptyDir.SizeLimit)
+		}
+	}
 	main := job.Spec.Template.Spec.Containers[0]
 
 	envMap := make(map[string]string, len(main.Env))

@@ -28,7 +28,6 @@ import (
 
 	istioNetworking "istio.io/api/networking/v1beta1"
 
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -1114,11 +1113,6 @@ func GenerateBasePodSpec(
 			MountPath: mountPoint,
 		})
 	}
-	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
-		volumes = append(volumes, *shmVol)
-		container.VolumeMounts = append(container.VolumeMounts, *shmMount)
-	}
-
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
 	if multinodeDeployer == nil {
@@ -1162,8 +1156,9 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
+	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
@@ -1751,31 +1746,4 @@ func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) str
 		// For unknown backends, don't assume compilation cache support
 		return ""
 	}
-}
-
-func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
-	// default: enabled=true, size=8Gi
-	size := resource.MustParse(commonconsts.DefaultSharedMemorySize)
-	if spec != nil {
-		if spec.Disabled {
-			return nil, nil
-		}
-		if !spec.Size.IsZero() {
-			size = spec.Size
-		}
-	}
-	volume := corev1.Volume{
-		Name: commonconsts.KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &size,
-			},
-		},
-	}
-	volumeMount := corev1.VolumeMount{
-		Name:      commonconsts.KubeValueNameSharedMemory,
-		MountPath: commonconsts.DefaultSharedMemoryMountPath,
-	}
-	return &volume, &volumeMount
 }

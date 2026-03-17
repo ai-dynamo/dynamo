@@ -272,6 +272,11 @@ func (in *DynamoCheckpointIdentity) DeepCopy() *DynamoCheckpointIdentity {
 func (in *DynamoCheckpointJobConfig) DeepCopyInto(out *DynamoCheckpointJobConfig) {
 	*out = *in
 	in.PodTemplateSpec.DeepCopyInto(&out.PodTemplateSpec)
+	if in.SharedMemory != nil {
+		in, out := &in.SharedMemory, &out.SharedMemory
+		*out = new(SharedMemorySpec)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.ActiveDeadlineSeconds != nil {
 		in, out := &in.ActiveDeadlineSeconds, &out.ActiveDeadlineSeconds
 		*out = new(int64)
