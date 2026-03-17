@@ -63,9 +63,9 @@ fn make_store_event_with_parent(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let new_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
 
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash,
@@ -81,7 +81,7 @@ fn make_store_event_with_parent(
             }),
             dp_rank: 0,
         },
-    }
+    )
 }
 
 /// Create a store event with all options.
@@ -95,9 +95,9 @@ fn make_store_event_full(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash,
@@ -113,7 +113,7 @@ fn make_store_event_full(
             }),
             dp_rank,
         },
-    }
+    )
 }
 
 /// Create a remove event for blocks with given local hashes.
@@ -131,9 +131,9 @@ fn make_remove_event_with_dp_rank(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: seq_hashes
@@ -143,7 +143,7 @@ fn make_remove_event_with_dp_rank(
             }),
             dp_rank,
         },
-    }
+    )
 }
 
 /// Create a remove event with parent hash for continuation sequences.
@@ -165,9 +165,9 @@ fn make_remove_event_with_parent(
 
     let suffix_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
 
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: suffix_seq_hashes
@@ -177,7 +177,7 @@ fn make_remove_event_with_parent(
             }),
             dp_rank: 0,
         },
-    }
+    )
 }
 
 /// Snapshot the tree state for deterministic comparison.
@@ -222,14 +222,14 @@ fn make_clear_event(worker_id: u64) -> RouterEvent {
 
 /// Create a clear event with a specific dp_rank.
 fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Cleared,
             dp_rank,
         },
-    }
+    )
 }
 
 // ============================================================================
@@ -646,16 +646,16 @@ async fn test_partial_block_removal(variant: &str) {
     let seq_hashes = compute_seq_hash_for_block(&full_hashes);
     let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]); // Last block's hash
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
+    let remove_event = RouterEvent::new(
+        0,
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![block_3_seq_hash],
             }),
             dp_rank: 0,
         },
-    };
+    );
     index.apply_event(remove_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -698,16 +698,16 @@ async fn test_remove_mid_chain_block(variant: &str) {
     let seq_hashes = compute_seq_hash_for_block(&full_hashes);
     let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]);
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
+    let remove_event = RouterEvent::new(
+        0,
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![block_3_seq_hash],
             }),
             dp_rank: 0,
         },
-    };
+    );
     index.apply_event(remove_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -895,9 +895,9 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
     let lora_seq = compute_seq_hash_for_block(&lora_hashes);
 
     // Store base-model blocks on worker 0
-    let base_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
+    let base_event = RouterEvent::new(
+        0,
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
@@ -913,13 +913,13 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
             }),
             dp_rank: 0,
         },
-    };
+    );
     index.apply_event(base_event).await;
 
     // Store LoRA blocks on worker 1
-    let lora_event = RouterEvent {
-        worker_id: 1,
-        event: KvCacheEvent {
+    let lora_event = RouterEvent::new(
+        1,
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
@@ -935,7 +935,7 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
             }),
             dp_rank: 0,
         },
-    };
+    );
     index.apply_event(lora_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1003,9 +1003,9 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
 
     // Worker 0: base model
     index
-        .apply_event(RouterEvent {
-            worker_id: 0,
-            event: KvCacheEvent {
+        .apply_event(RouterEvent::new(
+            0,
+            KvCacheEvent {
                 event_id: 0,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
@@ -1021,15 +1021,15 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
                 }),
                 dp_rank: 0,
             },
-        })
+        ))
         .await;
 
     // Worker 1: LoRA adapter — different LocalBlockHash, so this goes to
     // a separate tree path instead of colliding with worker 0's node.
     index
-        .apply_event(RouterEvent {
-            worker_id: 1,
-            event: KvCacheEvent {
+        .apply_event(RouterEvent::new(
+            1,
+            KvCacheEvent {
                 event_id: 0,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
@@ -1045,7 +1045,7 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
                 }),
                 dp_rank: 0,
             },
-        })
+        ))
         .await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1094,9 +1094,9 @@ async fn test_different_lora_adapters_do_not_conflict(variant: &str) {
 
     // Store adapter-a blocks on worker 0
     index
-        .apply_event(RouterEvent {
-            worker_id: 0,
-            event: KvCacheEvent {
+        .apply_event(RouterEvent::new(
+            0,
+            KvCacheEvent {
                 event_id: 0,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
@@ -1112,14 +1112,14 @@ async fn test_different_lora_adapters_do_not_conflict(variant: &str) {
                 }),
                 dp_rank: 0,
             },
-        })
+        ))
         .await;
 
     // Store adapter-b blocks on worker 1
     index
-        .apply_event(RouterEvent {
-            worker_id: 1,
-            event: KvCacheEvent {
+        .apply_event(RouterEvent::new(
+            1,
+            KvCacheEvent {
                 event_id: 0,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
@@ -1135,7 +1135,7 @@ async fn test_different_lora_adapters_do_not_conflict(variant: &str) {
                 }),
                 dp_rank: 0,
             },
-        })
+        ))
         .await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1317,16 +1317,16 @@ async fn test_long_sequence_partial_removal(variant: &str) {
         .map(|&h| ExternalSequenceBlockHash(h))
         .collect();
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
+    let remove_event = RouterEvent::new(
+        0,
+        KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: remove_hashes,
             }),
             dp_rank: 0,
         },
-    };
+    );
     index.apply_event(remove_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1868,6 +1868,7 @@ async fn test_frequency(variant: &str) {
 // KvIndexerMetrics tests
 // ============================================================================
 
+#[cfg(feature = "metrics")]
 #[test]
 fn test_increment_event_applied() {
     let metrics = KvIndexerMetrics::new_unregistered();

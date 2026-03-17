@@ -40,20 +40,20 @@ pub fn create_store_event(
     hashes: Vec<u64>,
     parent: Option<ExternalSequenceBlockHash>,
 ) -> RouterEvent {
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id,
             data: add_blocks(hashes, parent),
             dp_rank: 0,
         },
-    }
+    )
 }
 
 pub fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
-    RouterEvent {
+    RouterEvent::new(
         worker_id,
-        event: KvCacheEvent {
+        KvCacheEvent {
             event_id,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: hashes
@@ -63,7 +63,7 @@ pub fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>)
             }),
             dp_rank: 0,
         },
-    }
+    )
 }
 
 /// No-op [`SequencePublisher`] for tests and benchmarks that don't need event transport.
