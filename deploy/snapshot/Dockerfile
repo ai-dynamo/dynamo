@@ -16,7 +16,8 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.25
-ARG CRIU_VERSION=v4.2
+ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
+ARG CRIU_VERSION=add-aio-and-parallel-memfd
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -74,6 +75,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 # =============================================================================
 FROM ubuntu:24.04 AS criu-builder
 
+ARG CRIU_REPO
 ARG CRIU_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -97,7 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --branch ${CRIU_VERSION} https://github.com/checkpoint-restore/criu.git /tmp/criu \
+RUN git clone --depth 1 --branch ${CRIU_VERSION} ${CRIU_REPO} /tmp/criu \
     && cd /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
