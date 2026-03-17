@@ -43,6 +43,8 @@ use std::fmt;
 pub enum ErrorType {
     /// Uncategorized or unknown error.
     Unknown,
+    /// The request contains invalid input (e.g., prompt exceeds context length).
+    InvalidArgument,
     /// Failed to establish a connection to a remote worker.
     CannotConnect,
     /// An established connection was lost unexpectedly.
@@ -57,6 +59,7 @@ impl fmt::Display for ErrorType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ErrorType::Unknown => write!(f, "Unknown"),
+            ErrorType::InvalidArgument => write!(f, "InvalidArgument"),
             ErrorType::CannotConnect => write!(f, "CannotConnect"),
             ErrorType::Disconnected => write!(f, "Disconnected"),
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),

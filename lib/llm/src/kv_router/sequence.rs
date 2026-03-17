@@ -133,6 +133,9 @@ pub async fn create_multi_worker_sequences(
         arc.start_replica_sync(subscriber, cancel_token);
     }
 
+    let expiry_cancel = component.drt().runtime().child_token();
+    arc.start_periodic_force_expiry_across_all_workers(expiry_cancel);
+
     Ok(arc)
 }
 

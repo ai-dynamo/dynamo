@@ -1,9 +1,9 @@
 # CI Filter Patterns - See FILTERS.md for documentation
 #
 # Filters that trigger CI jobs:
-#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm), deploy tests
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   deploy   -> deploy-test-vllm-disagg-router
+#   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
@@ -67,6 +67,7 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
+  - 'container/Dockerfile.test'
 
 core:
   # Exclude documentation files first, then include patterns override for specific paths
@@ -82,6 +83,7 @@ core:
   - 'container/templates/wheel_builder.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
+  - 'container/compliance/**'
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
@@ -101,13 +103,17 @@ operator:
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
   - 'docs/kubernetes/api-reference.md'
+  - 'deploy/helm/charts/platform/**'
+  - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 deploy:
   - '!**/*.md'
   - '!**/*.rst'
+  - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-  - 'deploy/chrek/**'
+  - 'deploy/snapshot/**'
+  - 'tests/deploy/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
@@ -151,6 +157,7 @@ frontend:
   - '*.toml'
   - '*.lock'
   - 'container/deps/*'
+  - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'

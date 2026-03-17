@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import threading
+from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
 
@@ -377,13 +378,13 @@ class EncodeHelper:
     @staticmethod
     async def process_encode_request(
         request: Dict[str, Any],
-        multimodal_processor,
+        multimodal_processor: Any,
         connector: Optional[nixl_connect.Connector],
-        tokenizer=None,
-        model_dir=None,
-        model_type=None,
-        engine=None,
-    ):
+        tokenizer: Any = None,
+        model_dir: Optional[str] = None,
+        model_type: Optional[str] = None,
+        engine: Any = None,
+    ) -> AsyncGenerator[dict, None]:
         """
         Process an ENCODE-mode request. Dispatches to the appropriate flow.
 
@@ -447,7 +448,7 @@ class EncodeHelper:
             # if the model's tokenizer_config chat template emits them).
             token_ids = request.get("token_ids")
             async for response in EncodeHelper._process_full_epd_flow(
-                token_ids,
+                token_ids,  # type: ignore
                 image_urls,
                 tokenizer,
                 model_dir,

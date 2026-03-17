@@ -6,7 +6,7 @@ use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregate
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }

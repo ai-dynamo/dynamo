@@ -7,8 +7,9 @@ on:
   push:
     branches:
     - main
+    - 'release/*.*.*'
     - "pull-request/[0-9]+"
-    # Note: release/* branches are handled by release.yml which calls this workflow
+    # Note: release/* branches always build (change detection skipped)
   workflow_call:
     inputs:
       skip_change_detection:
@@ -17,7 +18,7 @@ on:
         type: boolean
         default: false
       image_prefix:
-        description: 'Optional prefix for image tags (e.g., release-0.9.0). When set, images are also tagged as {prefix}-frontend-{arch}.'
+        description: 'Optional prefix for image tags (e.g., release-0.9.0). When set, images are also tagged as {prefix}-frontend.'
         required: false
         type: string
         default: ''
@@ -70,7 +71,7 @@ jobs:
   build-epp-image:
     name: Build EPP Image
     needs: changed-files
-    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true
+    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
     runs-on: prod-builder-v3
     outputs:
       epp_image_ref: ${{ steps.build-epp-image.outputs.epp_image_ref }}
@@ -122,12 +123,10 @@ jobs:
   build-frontend-image:
     name: Build Frontend Image
     needs: [changed-files, build-epp-image]
-    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
+    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
     runs-on: prod-builder-v3
+    outputs:
+      target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
     env:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
@@ -135,6 +134,7 @@ jobs:
       TARGET: frontend
       CUDA_VERSION: "12.9"
       FRAMEWORK: dynamo
+      PLATFORM: "linux/amd64,linux/arm64"
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -145,7 +145,7 @@ jobs:
           python ./container/render.py \
               --target=${{ env.TARGET }} \
               --framework=${{ env.FRAMEWORK }} \
-              --platform=${{ matrix.arch }} \
+              --platform=${{ env.PLATFORM }} \
               --cuda-version=${{ env.CUDA_VERSION }} \
               --show-result \
               --output-short-filename
@@ -154,7 +154,7 @@ jobs:
         shell: bash
         run: |
           ECR_IMAGE_BASE="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
-          TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
+          TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}"
           echo "ecr_image_base=${ECR_IMAGE_BASE}" >> $GITHUB_OUTPUT
           echo "default_target_image_uri=${ECR_IMAGE_BASE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}" >> $GITHUB_OUTPUT
@@ -166,7 +166,7 @@ jobs:
           echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
           echo "framework: ${{ env.FRAMEWORK }}"
           echo "target: ${{ env.TARGET }}"
-          echo "platform: ${{ matrix.arch }}"
+          echo "platform: ${{ env.PLATFORM }}"
           echo "cuda_version: ${{ env.CUDA_VERSION }}"
           echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
           echo "epp_image_uri: ${{ steps.calculate-target-tag.outputs.epp_image_uri }}"
@@ -184,7 +184,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          arch: ${{ matrix.arch }}
+          all_arch: 'true'
       - name: Build Frontend Container
         id: build-image
         timeout-minutes: 30
@@ -193,7 +193,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ env.FRAMEWORK }}
           target: ${{ env.TARGET }}
-          platform: ${{ matrix.arch }}
+          platform: ${{ env.PLATFORM }}
           cuda_version: ${{ env.CUDA_VERSION }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -204,20 +204,55 @@ jobs:
           extra_build_args: |
             EPP_IMAGE=${{ steps.calculate-target-tag.outputs.epp_image_uri }}
           extra_tags: |
-            ${{ matrix.arch == 'amd64' && steps.calculate-target-tag.outputs.azure_target_image_uri || '' }}
-            ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}', steps.calculate-target-tag.outputs.ecr_image_base, matrix.arch) || '' }}
-            ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}-{2}', steps.calculate-target-tag.outputs.ecr_image_base, github.sha, matrix.arch) || '' }}
-            ${{ inputs.image_prefix != '' && format('{0}:{1}-frontend-{2}', steps.calculate-target-tag.outputs.ecr_image_base, inputs.image_prefix, matrix.arch) || '' }}
+            ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}
+            ${{ github.ref_name == 'main' && format('{0}:main-frontend', steps.calculate-target-tag.outputs.ecr_image_base) || '' }}
+            ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}', steps.calculate-target-tag.outputs.ecr_image_base, github.sha) || '' }}
+            ${{ inputs.image_prefix != '' && format('{0}:{1}-frontend', steps.calculate-target-tag.outputs.ecr_image_base, inputs.image_prefix) || '' }}
 
       - name: Show summary
         shell: bash
         run: |
-          echo "### 🐳 ${{ env.FRAMEWORK }}-cuda${{ env.CUDA_VERSION }}-${{ matrix.arch }} Default Image" >> $GITHUB_STEP_SUMMARY
+          echo "### Frontend Image (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # COMPLIANCE — Generate attribution CSVs for dpkg and Python packages
+  # ============================================================================
+  compliance:
+    needs: [build-frontend-image, changed-files]
+    if: needs.build-frontend-image.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: prod-builder-amd-v1
+          - arch: arm64
+            runner: prod-tester-arm-v1
+    name: Compliance frontend-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Compliance scan
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build-frontend-image.outputs.target_tag }}
+          artifact_name: compliance-frontend-${{ matrix.arch }}
+          framework: dynamo
+          target: frontend
 
   frontend-status-check:
     runs-on: ubuntu-latest

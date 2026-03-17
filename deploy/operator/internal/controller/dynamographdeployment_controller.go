@@ -74,7 +74,7 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
-	MPISecretReplicator   *secret.SecretReplicator
+	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
 }
 
@@ -322,12 +322,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
-	// Always ensure MPI SSH secret is available in this namespace
-	if r.MPISecretReplicator != nil {
-		err := r.MPISecretReplicator.Replicate(ctx, dynamoDeployment.Namespace)
-		if err != nil {
-			logger.Error(err, "Failed to replicate MPI secret", "namespace", dynamoDeployment.Namespace)
-			return ReconcileResult{}, fmt.Errorf("failed to replicate MPI secret: %w", err)
+	if r.SSHKeyManager != nil && hasMultinode {
+		if err := r.SSHKeyManager.EnsureAndReplicate(ctx, dynamoDeployment.Namespace); err != nil {
+			logger.Error(err, "Failed to ensure MPI SSH key secret", "namespace", dynamoDeployment.Namespace)
+			return ReconcileResult{}, fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
 		}
 	}
 

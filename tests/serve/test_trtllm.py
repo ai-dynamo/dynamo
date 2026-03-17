@@ -67,7 +67,7 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.post_merge],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -121,11 +121,8 @@ trtllm_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.skip(
-                reason="DYN-2265 https://github.com/ai-dynamo/dynamo/pull/6704/changes#r2866554157 TODO enable this test when upgrading from trtllm 1.3.0rc5 to 1.3.0rc5.post1"
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -154,7 +151,7 @@ trtllm_configs = {
             chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],

@@ -180,7 +180,7 @@ class TestLoadMultimodalData:
         mock_client = MagicMock()
         handler = _make_handler(encode_worker_client=mock_client)
 
-        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})
+        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})  # type: ignore
         with patch.object(
             mod,
             "load_multimodal_embeddings",
@@ -299,7 +299,7 @@ class TestGenerateDisagg:
         decode_resp = MagicMock()
         decode_resp.data.return_value = decode_json
 
-        async def fake_round_robin(payload):
+        async def fake_round_robin(payload, context=None):
             async def _stream():
                 yield decode_resp
 

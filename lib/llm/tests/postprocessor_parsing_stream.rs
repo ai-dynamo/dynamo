@@ -120,7 +120,7 @@ async fn postprocessor_parsing_stream_replays_unit_test_fixture() {
 
     let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request)
+        .postprocessor_parsing_stream(input_stream, &request, false)
         .expect("postprocessor_parsing_stream should build");
 
     let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
@@ -176,7 +176,7 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
 
     let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request)
+        .postprocessor_parsing_stream(input_stream, &request, false)
         .expect("postprocessor_parsing_stream should build");
 
     let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =

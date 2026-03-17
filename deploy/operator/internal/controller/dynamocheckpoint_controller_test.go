@@ -58,7 +58,7 @@ func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
 			Storage: configv1alpha1.CheckpointStorageConfiguration{
 				Type: configv1alpha1.CheckpointStorageTypePVC,
 				PVC: configv1alpha1.CheckpointPVCConfig{
-					PVCName:  "chrek-pvc",
+					PVCName:  "snapshot-pvc",
 					BasePath: "/checkpoints",
 				},
 			},
@@ -143,7 +143,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 		volNames[v.Name] = true
 		if v.Name == consts.CheckpointVolumeName {
 			require.NotNil(t, v.PersistentVolumeClaim)
-			assert.Equal(t, "chrek-pvc", v.PersistentVolumeClaim.ClaimName)
+			assert.Equal(t, "snapshot-pvc", v.PersistentVolumeClaim.ClaimName)
 		}
 		if v.Name == consts.PodInfoVolumeName {
 			require.NotNil(t, v.DownwardAPI)

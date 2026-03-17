@@ -194,21 +194,11 @@ impl ModelManager {
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
-        let mut names = HashSet::new();
-        for entry in self.models.iter() {
-            let model = entry.value();
-            if model.has_chat_engine()
-                || model.has_completions_engine()
-                || model.has_embeddings_engine()
-                || model.has_images_engine()
-                || model.has_tensor_engine()
-                || model.has_videos_engine()
-                || model.has_prefill()
-            {
-                names.insert(entry.key().clone());
-            }
-        }
-        names
+        self.models
+            .iter()
+            .filter(|entry| entry.value().is_displayable())
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     pub fn list_chat_completions_models(&self) -> Vec<String> {
@@ -573,6 +563,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        model_name: Option<String>,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
 
@@ -598,7 +589,10 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
+        let selector = Box::new(DefaultWorkerSelector::new(
+            kv_router_config.clone(),
+            worker_type,
+        ));
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
@@ -607,6 +601,7 @@ impl ModelManager {
             Some(selector),
             kv_router_config,
             worker_type,
+            model_name,
         )
         .await?;
         Ok(Arc::new(chooser))
