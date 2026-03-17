@@ -4067,6 +4067,7 @@ dependencies = [
  "anyhow",
  "async-once-cell",
  "cbindgen",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
  "libc",
