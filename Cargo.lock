@@ -1985,7 +1985,6 @@ dependencies = [
  "dialoguer",
  "dynamo-async-openai",
  "dynamo-bench",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
