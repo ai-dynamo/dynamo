@@ -307,6 +307,7 @@ mod tests {
         (queue, slots)
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_queue_with_sender(
         num_workers: usize,
         block_size: u32,
@@ -561,17 +562,23 @@ mod tests {
         // Also update the config watch so the selector can see these workers
         let mut configs = HashMap::new();
         for &id in &[100_u64, 200_u64] {
-            configs.insert(id, SimpleWorkerConfig {
-                max_num_batched_tokens: Some(isl as u64),
-                ..Default::default()
-            });
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
         }
         cfg_tx.send(configs).unwrap();
 
         // Routing after registration must succeed and pick one of the registered workers
         let (req_ok, rx_ok) = make_request("after-register", isl);
         queue.enqueue(req_ok).await;
-        let resp = rx_ok.await.expect("oneshot dropped").expect("scheduling failed");
+        let resp = rx_ok
+            .await
+            .expect("oneshot dropped")
+            .expect("scheduling failed");
         assert!(
             resp.best_worker.worker_id == 100 || resp.best_worker.worker_id == 200,
             "expected worker 100 or 200, got {}",
@@ -600,10 +607,13 @@ mod tests {
         slots.register_external_workers(&dp1);
 
         let mut configs = HashMap::new();
-        configs.insert(10_u64, SimpleWorkerConfig {
-            max_num_batched_tokens: Some(isl as u64),
-            ..Default::default()
-        });
+        configs.insert(
+            10_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        );
         cfg_tx.send(configs.clone()).unwrap();
 
         // Register worker 20 (worker 10 must NOT be evicted)
@@ -611,10 +621,13 @@ mod tests {
         dp2.insert(20_u64, (0_u32, 1_u32));
         slots.register_external_workers(&dp2);
 
-        configs.insert(20_u64, SimpleWorkerConfig {
-            max_num_batched_tokens: Some(isl as u64),
-            ..Default::default()
-        });
+        configs.insert(
+            20_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        );
         cfg_tx.send(configs).unwrap();
 
         // Send enough requests to statistically prove both workers are available
@@ -623,7 +636,10 @@ mod tests {
             let req_id = format!("add-{i}");
             let (req, rx) = make_request(&req_id, isl);
             queue.enqueue(req).await;
-            let resp = rx.await.expect("oneshot dropped").expect("scheduling failed");
+            let resp = rx
+                .await
+                .expect("oneshot dropped")
+                .expect("scheduling failed");
             seen.insert(resp.best_worker.worker_id);
             slots.mark_prefill_completed(&req_id).await.unwrap();
             slots.free(&req_id).await.unwrap();
@@ -652,10 +668,13 @@ mod tests {
 
         let mut configs = HashMap::new();
         for &id in &[1_u64, 2_u64, 3_u64] {
-            configs.insert(id, SimpleWorkerConfig {
-                max_num_batched_tokens: Some(isl as u64),
-                ..Default::default()
-            });
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
         }
         cfg_tx.send(configs).unwrap();
 
@@ -680,13 +699,19 @@ mod tests {
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;
-        let resp = rx.await.expect("oneshot dropped").expect("scheduling failed");
+        let resp = rx
+            .await
+            .expect("oneshot dropped")
+            .expect("scheduling failed");
         assert_eq!(
             resp.best_worker.worker_id, 2,
             "request must be routed to allowed worker 2, got {}",
             resp.best_worker.worker_id
         );
-        slots.mark_prefill_completed(&"filter-0".to_string()).await.unwrap();
+        slots
+            .mark_prefill_completed(&"filter-0".to_string())
+            .await
+            .unwrap();
         slots.free(&"filter-0".to_string()).await.unwrap();
     }
 }
