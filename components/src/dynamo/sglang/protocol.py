@@ -129,7 +129,7 @@ class SglangMultimodalRequest(BaseModel):
     embeddings_shape: Optional[
         Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[TransferRequest] = None
+    transfer_payload: Optional[TransferRequest] = None
 
 
 class DisaggSglangMultimodalRequest(BaseModel):

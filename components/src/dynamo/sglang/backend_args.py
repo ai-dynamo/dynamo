@@ -68,7 +68,7 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--embedding-transfer-mode",
             env_var="DYN_SGL_EMBEDDING_TRANSFER_MODE",
             default=EmbeddingTransferMode.NIXL_WRITE.value,
-            help="Worker embedding transfer mode: 'local', 'nixl-write', or 'nixl-read'.",
+            help="Worker embedding transfer mode: 'local', 'nixl-write', or 'nixl-read'. Can also be set with environment variable DYN_SGL_EMBEDDING_TRANSFER_MODE.",
             choices=[m.value for m in EmbeddingTransferMode],
         )
 

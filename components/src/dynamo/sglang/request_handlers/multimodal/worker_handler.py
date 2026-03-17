@@ -11,12 +11,7 @@ import torch
 
 from dynamo._core import Client, Context
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
-from dynamo.common.multimodal import (
-    LocalEmbeddingReceiver,
-    NixlReadEmbeddingReceiver,
-    NixlWriteEmbeddingReceiver,
-    TransferRequest,
-)
+from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config
@@ -80,21 +75,12 @@ class EmbeddingsProcessor:
     """Handles multimodal embeddings processing and multimodal item creation"""
 
     def __init__(self, embedding_transfer_mode: EmbeddingTransferMode):
-        if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_receiver = LocalEmbeddingReceiver()
-        elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_receiver = NixlWriteEmbeddingReceiver()
-        elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
-            # Match vLLM behavior: avoid fixed-size warmed descriptors for now.
-            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
-        else:
+        receiver = EMBEDDING_RECEIVER_FACTORIES.get(embedding_transfer_mode)
+        if receiver is None:
             raise ValueError(
                 f"Invalid embedding transfer mode: {embedding_transfer_mode}"
             )
-
-    async def initialize(self):
-        """Initialize async components for embeddings processing."""
-        return
+        self.embedding_receiver = receiver()
 
     async def process_embeddings(
         self, request: SglangMultimodalRequest
@@ -106,9 +92,9 @@ class EmbeddingsProcessor:
         if not multimodal_groups:
             raise ValueError("multimodal_inputs is required")
 
-        transfer_request = request.serialized_request
+        transfer_request = request.transfer_payload
         if transfer_request is None:
-            raise ValueError("serialized_request is required on request")
+            raise ValueError("transfer_payload is required on request")
 
         if not isinstance(transfer_request, TransferRequest):
             transfer_request = TransferRequest.model_validate(transfer_request)
@@ -304,10 +290,6 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         else:
             logger.info("Multimodal aggregated worker handler initialized")
 
-    async def async_init(self):
-        """Initialize async components"""
-        await self.embeddings_processor.initialize()
-
     def _validate_and_parse_request(self, request) -> SglangMultimodalRequest:
         """Validate and parse incoming request"""
         if type(request) is not SglangMultimodalRequest:
@@ -442,6 +424,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             try:
                 async for output in StreamProcessor.process_sglang_stream(agg_stream):
                     if first_token:
+                        if tensor_id is not None:
+                            self.embeddings_processor.release_embeddings(tensor_id)
+                            tensor_id = None
                         end_ttft()
                         _nvtx.end_range(rng_first)
                         first_token = False
@@ -530,10 +515,6 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         logger.info(
             f"Multimodal prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
-
-    async def async_init(self):
-        """Initialize async components like connector"""
-        await self.embeddings_processor.initialize()
 
     async def generate(
         self, disagg_request: DisaggSglangMultimodalRequest, context: Context
@@ -630,11 +611,15 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
 
     async def _consume_results(self, results, tensor_id: int):
         """Consume prefill results without returning them (like regular SGLang)"""
+        released = False
         try:
             async for _ in results:
-                pass
+                if not released:
+                    self.embeddings_processor.release_embeddings(tensor_id)
+                    released = True
         finally:
-            self.embeddings_processor.release_embeddings(tensor_id)
+            if not released:
+                self.embeddings_processor.release_embeddings(tensor_id)
 
     def cleanup(self):
         super().cleanup()
