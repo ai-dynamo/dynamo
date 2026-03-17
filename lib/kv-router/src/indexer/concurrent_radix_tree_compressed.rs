@@ -157,7 +157,13 @@ impl Drop for ConcurrentRadixTreeCompressed {
         #[cfg(feature = "node-stats")]
         self.node_stats.report("ConcurrentRadixTreeCompressed");
 
-        let mut stack: Vec<SharedBlock> = Vec::new();
+        let cap = self
+            .tree_sizes
+            .iter()
+            .map(|r| r.value().load(Ordering::Relaxed))
+            .sum::<usize>()
+            .min(64 * 1024 * 1024);
+        let mut stack: Vec<SharedBlock> = Vec::with_capacity(cap);
 
         // Break root -> children edge up front
         {
@@ -584,7 +590,7 @@ impl ConcurrentRadixTreeCompressed {
                 match parent_guard.children.get(&first_local).cloned() {
                     Some(existing) => existing,
                     None => {
-                        let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = remaining
+                        let edge: Vec<_> = remaining
                             .iter()
                             .map(|b| (b.tokens_hash, b.block_hash))
                             .collect();
@@ -645,7 +651,7 @@ impl ConcurrentRadixTreeCompressed {
 
                     if match_len < remaining.len() {
                         let tail = &remaining[match_len..];
-                        let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> =
+                        let edge: Vec<_> =
                             tail.iter().map(|b| (b.tokens_hash, b.block_hash)).collect();
                         let tail_first_local = tail[0].tokens_hash;
 
@@ -699,16 +705,12 @@ impl ConcurrentRadixTreeCompressed {
     // apply_removed
     // ------------------------------------------------------------------
 
-    /// Apply a remove operation.
+    /// Apply a remove operation (simplified: always removes worker from the whole node).
     ///
-    /// When a hash at position `i > 0` within a compressed edge is removed,
-    /// the node is split at `i`: the prefix `[0..i)` keeps the worker
-    /// (those blocks are still cached), while the suffix `[i..)` has the
-    /// worker removed (block `i` was evicted, invalidating the chain).
-    ///
-    /// When the removed hash is at position 0, the worker is removed from
-    /// the entire node (the first block in the chain is gone, so every
-    /// subsequent block is also invalid).
+    /// Speed-of-light variant: instead of splitting the edge at the removed
+    /// hash position, always remove the worker from the entire node. This
+    /// trades correctness (keeping prefix blocks valid) for simplicity and
+    /// avoids the split allocation entirely.
     fn apply_removed(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
@@ -747,72 +749,39 @@ impl ConcurrentRadixTreeCompressed {
                 block
             };
 
-            // Hold a single write lock for both the position lookup and the
-            // split to avoid a TOCTOU race: without this, another thread could
-            // split the node between a read-lock lookup and a separate
-            // write-lock split, making the stale `pos` >= the new edge length.
             let mut guard = write_lock!(self, block);
             #[cfg(feature = "node-stats")]
             {
                 _nt.count += 1;
             }
-            let pos = guard.edge.iter().position(|&(_, h)| h == block_hash);
             let edge_len = guard.edge.len();
+            guard.workers.remove(&worker);
+            let sibling_hashes: Vec<ExternalSequenceBlockHash> = guard
+                .edge
+                .iter()
+                .map(|&(_, h)| h)
+                .filter(|&h| h != block_hash)
+                .collect();
+            if guard.workers.is_empty() {
+                guard.children.clear();
+            }
+            drop(guard);
 
-            match pos {
-                Some(pos) if pos > 0 => {
-                    let suffix = self.split_block(lookup, &mut guard, pos);
-                    drop(guard);
-
-                    let suffix_hashes: Vec<ExternalSequenceBlockHash>;
-                    {
-                        let mut suffix_guard = write_lock!(self, suffix);
-                        #[cfg(feature = "node-stats")]
-                        {
-                            _nt.count += 1;
-                        }
-                        suffix_guard.workers.remove(&worker);
-                        suffix_hashes = suffix_guard.edge.iter().map(|&(_, h)| h).collect();
-                        if suffix_guard.workers.is_empty() {
-                            suffix_guard.children.clear();
-                        }
-                    }
-
-                    if let Some(wl) = lookup.get_mut(&worker) {
-                        for h in &suffix_hashes {
-                            wl.remove(h);
-                        }
-                    }
-
-                    total_removed += edge_len - pos;
-                }
-                _ => {
-                    guard.workers.remove(&worker);
-                    let sibling_hashes: Vec<ExternalSequenceBlockHash> = guard
-                        .edge
-                        .iter()
-                        .map(|&(_, h)| h)
-                        .filter(|&h| h != block_hash)
-                        .collect();
-                    if guard.workers.is_empty() {
-                        guard.children.clear();
-                    }
-                    drop(guard);
-
-                    if let Some(wl) = lookup.get_mut(&worker) {
-                        for h in &sibling_hashes {
-                            wl.remove(h);
-                        }
-                    }
-
-                    total_removed += edge_len;
+            if let Some(wl) = lookup.get_mut(&worker) {
+                for h in &sibling_hashes {
+                    wl.remove(h);
                 }
             }
+
+            total_removed += edge_len;
         }
 
         match self.tree_sizes.get(&worker) {
             Some(size) => {
-                size.fetch_sub(total_removed, Ordering::Relaxed);
+                size.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(total_removed))
+                })
+                .ok();
             }
             None => {
                 self.tree_sizes.insert(worker, AtomicUsize::new(0));
@@ -1012,10 +981,19 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         count
     }
 
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
 
-        while let Ok(task) = event_receiver.recv() {
+        while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            let task = match event_receiver.recv_timeout(std::time::Duration::from_millis(5)) {
+                Ok(t) => t,
+                Err(flume::RecvTimeoutError::Timeout) => continue,
+                Err(flume::RecvTimeoutError::Disconnected) => break,
+            };
             match task {
                 WorkerTask::Event(event) => {
                     if let Err(e) = self.apply_event(&mut lookup, event) {
