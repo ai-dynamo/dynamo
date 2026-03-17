@@ -205,13 +205,29 @@ The I2V-specific `nvext` fields (`boundary_ratio`, `guidance_scale_2`) control t
 
 ## CLI Reference
 
-For the full list of Omni-related flags (including `--omni`, `--output-modalities`, `--stage-configs-path`, `--media-output-fs-url`, `--media-output-http-url`, and the `--omni-*` diffusion flags), run:
+The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
-```bash
-python -m dynamo.vllm --help
-```
-
-See also the [Argument Reference](vllm-reference-guide.md#argument-reference) in the Reference Guide.
+| Flag | Description |
+|---|---|
+| `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
+| `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
+| `--boundary-ratio <float>` | MoE expert switching boundary (default: 0.875) |
+| `--flow-shift <float>` | Scheduler flow_shift (5.0 for 720p, 12.0 for 480p) |
+| `--vae-use-slicing` | Enable VAE slicing for memory optimization |
+| `--vae-use-tiling` | Enable VAE tiling for memory optimization |
+| `--default-video-fps <int>` | Default frames per second for generated videos (default: 16) |
+| `--enable-layerwise-offload` | Enable layerwise offloading on DiT modules to reduce GPU memory |
+| `--layerwise-num-gpu-layers <int>` | Number of ready layers to keep on GPU during generation (default: 1) |
+| `--cache-backend <backend>` | Diffusion cache: `cache_dit` or `tea_cache` |
+| `--cache-config <json>` | Cache configuration as JSON string (overrides defaults) |
+| `--enable-cache-dit-summary` | Enable cache-dit summary logging after diffusion forward passes |
+| `--enforce-eager` | Disable torch.compile for diffusion models |
+| `--enable-cpu-offload` | Enable CPU offloading for diffusion models |
+| `--ulysses-degree <int>` | GPUs for Ulysses sequence parallelism in diffusion (default: 1) |
+| `--ring-degree <int>` | GPUs for ring sequence parallelism in diffusion (default: 1) |
+| `--cfg-parallel-size <int>` | GPUs for classifier-free guidance parallelism (1 or 2, default: 1) |
+| `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
+| `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
 
 ## Storage Configuration
 
