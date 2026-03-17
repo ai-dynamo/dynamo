@@ -39,10 +39,10 @@ COPY helpers/python_helper.py /helpers/python_helper.py
 RUN --mount=type=bind,from=target,target=/target \
     python3 /helpers/dpkg_helper.py --root /target > /output/dpkg.tsv 2>/output/dpkg_err.txt ; \
     python3 /helpers/python_helper.py --root /target > /output/python.tsv 2>/output/python_err.txt ; \
-    if [ -s /output/dpkg_err.txt ]; then echo "dpkg extraction errors:" >&2; cat /output/dpkg_err.txt >&2; fi ; \
-    if [ -s /output/python_err.txt ]; then echo "python extraction errors:" >&2; cat /output/python_err.txt >&2; fi ; \
+    cat /output/dpkg_err.txt >&2 ; \
+    cat /output/python_err.txt >&2 ; \
     [ -s /output/dpkg.tsv ] || { echo "ERROR: dpkg extraction produced no output" >&2; exit 1; } ; \
-    [ -s /output/python.tsv ] || echo "WARNING: python extraction produced no output" >&2
+    [ -s /output/python.tsv ] || echo "⚠️  WARNING: python extraction produced no output" >&2
 
 FROM scratch
 COPY --from=extractor /output/ /

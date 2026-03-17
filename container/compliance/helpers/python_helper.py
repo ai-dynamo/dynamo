@@ -8,6 +8,7 @@
 import argparse
 import glob
 import importlib.metadata
+import sys
 
 # Conservative classifier -> SPDX mapping
 _CLASSIFIER_MAP = {
@@ -112,17 +113,26 @@ def main():
 
     if root != "/":
         # BuildKit mode: scan site-packages directories in the mounted target filesystem
+        _patterns = [
+            "/usr/lib/python*/dist-packages",
+            "/usr/lib/python*/site-packages",
+            "/usr/local/lib/python*/dist-packages",
+            "/usr/local/lib/python*/site-packages",
+            # conda / virtualenv layouts common in ML containers (e.g. /opt/conda)
+            "/opt/*/lib/python*/site-packages",
+            "/opt/*/lib/python*/dist-packages",
+            # virtualenv one level deeper (e.g. /opt/dynamo/venv/lib/python*/site-packages)
+            "/opt/*/*/lib/python*/site-packages",
+            "/opt/*/*/lib/python*/dist-packages",
+        ]
         search_paths = []
-        search_paths += glob.glob(f"{root}/usr/lib/python*/dist-packages")
-        search_paths += glob.glob(f"{root}/usr/lib/python*/site-packages")
-        search_paths += glob.glob(f"{root}/usr/local/lib/python*/dist-packages")
-        search_paths += glob.glob(f"{root}/usr/local/lib/python*/site-packages")
-        # conda / virtualenv layouts common in ML containers (e.g. /opt/conda)
-        search_paths += glob.glob(f"{root}/opt/*/lib/python*/site-packages")
-        search_paths += glob.glob(f"{root}/opt/*/lib/python*/dist-packages")
-        # virtualenv one level deeper (e.g. /opt/dynamo/venv/lib/python*/site-packages)
-        search_paths += glob.glob(f"{root}/opt/*/*/lib/python*/site-packages")
-        search_paths += glob.glob(f"{root}/opt/*/*/lib/python*/dist-packages")
+        print(f"[python] search paths ({len(_patterns)} patterns):", file=sys.stderr)
+        for pattern in _patterns:
+            matches = glob.glob(f"{root}{pattern}")
+            marker = "+" if matches else "-"
+            label = f"({len(matches)} match)" if matches else "(no match)"
+            print(f"[python]   {marker} {root}{pattern}  {label}", file=sys.stderr)
+            search_paths.extend(matches)
         dists = importlib.metadata.distributions(path=search_paths)
     else:
         # Local mode: enumerate distributions in the running Python environment
@@ -142,6 +152,10 @@ def main():
         version = dist.metadata["Version"] or "UNKNOWN"
         spdx = get_license(dist)
         print(f"{name}\t{version}\t{spdx}")
+
+    count = len(seen)
+    icon = "✅" if count > 0 else "⚠️"
+    print(f"{icon} [python] extracted {count} package(s)", file=sys.stderr)
 
 
 if __name__ == "__main__":

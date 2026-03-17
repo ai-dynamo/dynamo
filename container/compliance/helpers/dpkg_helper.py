@@ -141,6 +141,7 @@ def main():
     args = parser.parse_args()
     root = args.root.rstrip("/") or "/"
 
+    count = 0
     if root != "/":
         # BuildKit mode: parse dpkg status file from mounted target filesystem
         status_path = f"{root}/var/lib/dpkg/status"
@@ -148,6 +149,7 @@ def main():
         for pkg, version in pkgs.items():
             license_id = get_license_for_package(pkg, root)
             print(f"{pkg}\t{version}\t{license_id}")
+            count += 1
     else:
         # Local mode: run dpkg-query inside the container
         result = subprocess.run(
@@ -166,6 +168,10 @@ def main():
             pkg, version = parts
             license_id = get_license_for_package(pkg)
             print(f"{pkg}\t{version}\t{license_id}")
+            count += 1
+
+    icon = "✅" if count > 0 else "⚠️"
+    print(f"{icon} [dpkg] extracted {count} package(s)", file=sys.stderr)
 
 
 if __name__ == "__main__":
