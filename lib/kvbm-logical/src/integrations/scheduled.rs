@@ -202,6 +202,13 @@ pub enum ApplyError {
 // SchedulableSequence
 // =============================================================================
 
+/// Generates simple `&self` forwarding methods to `self.inner`.
+macro_rules! delegate_to_inner {
+    ( $( $(#[$meta:meta])* $vis:vis fn $name:ident(&self) -> $ret:ty; )* ) => {
+        $( $(#[$meta])* $vis fn $name(&self) -> $ret { self.inner.$name() } )*
+    };
+}
+
 /// Two-phase schedule/apply wrapper over [`RequestSequence`].
 ///
 /// Enforces a state machine protocol:
@@ -729,52 +736,19 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
 
     // Forwarded from RequestSequence
 
-    pub fn generated_tokens(&self) -> usize {
-        self.inner.generated_tokens()
-    }
-
-    pub fn max_output_tokens(&self) -> usize {
-        self.inner.max_output_tokens()
-    }
-
-    pub fn num_input_tokens(&self) -> usize {
-        self.inner.num_input_tokens()
-    }
-
-    pub fn total_tokens(&self) -> usize {
-        self.inner.total_tokens()
-    }
-
-    pub fn remaining_tokens(&self) -> usize {
-        self.inner.remaining_tokens()
-    }
-
-    pub fn num_blocks(&self) -> usize {
-        self.inner.num_blocks()
-    }
-
-    pub fn assigned_blocks(&self) -> usize {
-        self.inner.assigned_blocks()
-    }
-
-    pub fn staged_blocks(&self) -> usize {
-        self.inner.staged_blocks()
-    }
-
-    pub fn unassigned_blocks(&self) -> usize {
-        self.inner.unassigned_blocks()
-    }
-
-    pub fn prefix_matched_blocks(&self) -> usize {
-        self.inner.prefix_matched_blocks()
-    }
-
-    pub fn block_size(&self) -> usize {
-        self.inner.block_size()
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.inner.is_complete()
+    delegate_to_inner! {
+        pub fn generated_tokens(&self) -> usize;
+        pub fn max_output_tokens(&self) -> usize;
+        pub fn num_input_tokens(&self) -> usize;
+        pub fn total_tokens(&self) -> usize;
+        pub fn remaining_tokens(&self) -> usize;
+        pub fn num_blocks(&self) -> usize;
+        pub fn assigned_blocks(&self) -> usize;
+        pub fn staged_blocks(&self) -> usize;
+        pub fn unassigned_blocks(&self) -> usize;
+        pub fn prefix_matched_blocks(&self) -> usize;
+        pub fn block_size(&self) -> usize;
+        pub fn is_complete(&self) -> bool;
     }
 
     /// Reference to the underlying `RequestSequence`.

@@ -355,19 +355,10 @@ impl<T: BlockMetadata> RequestSequence<T> {
     ///
     /// Block IDs identity-map to page indices in the GPU page pool.
     pub fn page_indices(&self) -> Vec<u32> {
-        let a = &self.assignments;
-        let cap = a.assigned_count() + a.staged_count() + a.unassigned_count();
-        let mut pages = Vec::with_capacity(cap);
-        for (id, _) in a.assigned_iter() {
-            pages.push(*id as u32);
-        }
-        for (id, _) in a.staged_iter() {
-            pages.push(*id as u32);
-        }
-        for (id, _) in a.unassigned_iter() {
-            pages.push(*id as u32);
-        }
-        pages
+        self.assignments
+            .all_block_ids()
+            .map(|&id| id as u32)
+            .collect()
     }
 
     /// Drop excess unassigned blocks beyond `keep` count.

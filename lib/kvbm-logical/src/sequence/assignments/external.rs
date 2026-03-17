@@ -234,18 +234,15 @@ impl ExternalBlockAssignments {
         &mut self,
         items: impl IntoIterator<Item = (BlockId, SequenceHash)>,
     ) -> Result<usize, BlockSequenceError> {
-        // Phase 1: collect
         let items: Vec<(BlockId, SequenceHash)> = items.into_iter().collect();
 
-        // Phase 2: validate
-        let mut seen = indexmap::IndexSet::with_capacity(items.len());
-        for (id, _) in &items {
-            if self.contains(id) || !seen.insert(*id) {
-                return Err(BlockSequenceError::DuplicateBlockId { block_id: *id });
-            }
+        if let Err(block_id) = self
+            .store
+            .validate_no_duplicates(items.iter().map(|(id, _)| *id), items.len())
+        {
+            return Err(BlockSequenceError::DuplicateBlockId { block_id });
         }
 
-        // Phase 3: commit
         let count = items.len();
         for (id, hash) in items {
             self.store.insert_assigned(id, hash);

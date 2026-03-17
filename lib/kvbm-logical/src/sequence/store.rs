@@ -154,6 +154,34 @@ impl<U, S, A> BlockStore<U, S, A> {
 
     // -- Bulk -----------------------------------------------------------------
 
+    /// Iterates over all block IDs across all three collections in lifecycle
+    /// order: assigned → staged → unassigned.
+    pub fn all_block_ids(&self) -> impl Iterator<Item = &BlockId> {
+        self.assigned
+            .keys()
+            .chain(self.staged.keys())
+            .chain(self.unassigned.keys())
+    }
+
+    /// Validates that none of the given `ids` collide with existing entries
+    /// or with each other.
+    ///
+    /// Returns `Ok(())` if all IDs are unique, or `Err(id)` with the first
+    /// duplicate found.
+    pub fn validate_no_duplicates(
+        &self,
+        ids: impl Iterator<Item = BlockId>,
+        count_hint: usize,
+    ) -> Result<(), BlockId> {
+        let mut seen = indexmap::IndexSet::with_capacity(count_hint);
+        for id in ids {
+            if self.contains(&id) || !seen.insert(id) {
+                return Err(id);
+            }
+        }
+        Ok(())
+    }
+
     /// Clears all three collections.
     pub fn clear(&mut self) {
         self.assigned.clear();

@@ -114,6 +114,12 @@ impl<T: BlockMetadata> LogicalBlockAssignments<T> {
         self.store.unassigned_iter()
     }
 
+    /// Iterates over all block IDs across all three collections in lifecycle
+    /// order: assigned → staged → unassigned.
+    pub fn all_block_ids(&self) -> impl Iterator<Item = &BlockId> {
+        self.store.all_block_ids()
+    }
+
     // -- Mutation -----------------------------------------------------------
 
     /// Adds mutable blocks to the unassigned queue.
@@ -125,22 +131,15 @@ impl<T: BlockMetadata> LogicalBlockAssignments<T> {
         &mut self,
         blocks: impl IntoIterator<Item = MutableBlock<T>>,
     ) -> Result<usize, LogicalBlockAssignmentError<T>> {
-        // Phase 1: collect
         let blocks: Vec<MutableBlock<T>> = blocks.into_iter().collect();
 
-        // Phase 2: validate — check against existing collections and within input
-        let mut seen = indexmap::IndexSet::with_capacity(blocks.len());
-        for block in &blocks {
-            let id = block.block_id();
-            if self.store.contains(&id) || !seen.insert(id) {
-                return Err(LogicalBlockAssignmentError::DuplicateBlockId {
-                    block_id: id,
-                    blocks,
-                });
-            }
+        if let Err(block_id) = self
+            .store
+            .validate_no_duplicates(blocks.iter().map(|b| b.block_id()), blocks.len())
+        {
+            return Err(LogicalBlockAssignmentError::DuplicateBlockId { block_id, blocks });
         }
 
-        // Phase 3: commit
         let count = blocks.len();
         for block in blocks {
             let id = block.block_id();
@@ -163,22 +162,15 @@ impl<T: BlockMetadata> LogicalBlockAssignments<T> {
         &mut self,
         blocks: impl IntoIterator<Item = ImmutableBlock<T>>,
     ) -> Result<usize, LogicalBlockAssignmentError<T>> {
-        // Phase 1: collect
         let blocks: Vec<ImmutableBlock<T>> = blocks.into_iter().collect();
 
-        // Phase 2: validate — check against existing collections and within input
-        let mut seen = indexmap::IndexSet::with_capacity(blocks.len());
-        for block in &blocks {
-            let id = block.block_id();
-            if self.store.contains(&id) || !seen.insert(id) {
-                return Err(LogicalBlockAssignmentError::DuplicateAssignedBlockId {
-                    block_id: id,
-                    blocks,
-                });
-            }
+        if let Err(block_id) = self
+            .store
+            .validate_no_duplicates(blocks.iter().map(|b| b.block_id()), blocks.len())
+        {
+            return Err(LogicalBlockAssignmentError::DuplicateAssignedBlockId { block_id, blocks });
         }
 
-        // Phase 3: commit
         let count = blocks.len();
         for block in blocks {
             let id = block.block_id();
