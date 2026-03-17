@@ -12,6 +12,51 @@ use crate::protocols::{
 };
 use crate::sequences::SequencePublisher;
 
+pub fn router_event(
+    worker_id: WorkerId,
+    event_id: u64,
+    dp_rank: u32,
+    data: KvCacheEventData,
+) -> RouterEvent {
+    RouterEvent::new(
+        worker_id,
+        KvCacheEvent {
+            event_id,
+            data,
+            dp_rank,
+        },
+    )
+}
+
+pub fn stored_blocks_with_sequence_hashes(
+    local_hashes: &[LocalBlockHash],
+    seq_hashes: &[u64],
+) -> Vec<KvCacheStoredBlockData> {
+    local_hashes
+        .iter()
+        .zip(seq_hashes.iter())
+        .map(|(&local, &seq)| KvCacheStoredBlockData {
+            tokens_hash: local,
+            block_hash: ExternalSequenceBlockHash(seq),
+            mm_extra_info: None,
+        })
+        .collect()
+}
+
+pub fn remove_event(
+    worker_id: WorkerId,
+    event_id: u64,
+    dp_rank: u32,
+    block_hashes: Vec<ExternalSequenceBlockHash>,
+) -> RouterEvent {
+    router_event(
+        worker_id,
+        event_id,
+        dp_rank,
+        KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+    )
+}
+
 /// Creates blocks with artificial hash mapping (hash * 100) for testing.
 pub fn make_blocks(hashes: Vec<u64>) -> Vec<KvCacheStoredBlockData> {
     hashes
@@ -40,30 +85,19 @@ pub fn create_store_event(
     hashes: Vec<u64>,
     parent: Option<ExternalSequenceBlockHash>,
 ) -> RouterEvent {
-    RouterEvent {
-        worker_id,
-        event: KvCacheEvent {
-            event_id,
-            data: add_blocks(hashes, parent),
-            dp_rank: 0,
-        },
-    }
+    router_event(worker_id, event_id, 0, add_blocks(hashes, parent))
 }
 
 pub fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
-    RouterEvent {
+    remove_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: hashes
-                    .iter()
-                    .map(|i| ExternalSequenceBlockHash(*i * 100))
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    }
+        event_id,
+        0,
+        hashes
+            .iter()
+            .map(|i| ExternalSequenceBlockHash(*i * 100))
+            .collect(),
+    )
 }
 
 /// No-op [`SequencePublisher`] for tests and benchmarks that don't need event transport.
