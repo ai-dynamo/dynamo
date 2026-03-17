@@ -429,16 +429,23 @@ where
         }
 
         let isl_tokens = tokens.len();
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name: lora_name.as_deref(),
+            is_eagle: Some(self.is_eagle),
+        };
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes").in_scope(|| {
-            compute_block_hash_for_seq(
+            compute_block_hash_for_seq(tokens, self.block_size, hash_options)
+        });
+        // Compute seq_hashes only if scheduler needs it for active blocks tracking
+        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+            self.kv_router_config.compute_seq_hashes_for_tracking(
                 tokens,
                 self.block_size,
-                BlockHashOptions {
-                    block_mm_infos,
-                    lora_name: lora_name.as_deref(),
-                    is_eagle: Some(self.is_eagle),
-                },
+                router_config_override,
+                hash_options,
+                Some(&block_hashes),
             )
         });
         let hash_elapsed = start.elapsed();
@@ -450,19 +457,6 @@ where
             .await?;
         let find_matches_elapsed = start.elapsed();
 
-        // Compute seq_hashes only if scheduler needs it for active blocks tracking
-        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
-            self.kv_router_config.compute_seq_hashes_for_tracking(
-                tokens,
-                self.block_size,
-                router_config_override,
-                BlockHashOptions {
-                    block_mm_infos,
-                    lora_name: lora_name.as_deref(),
-                    is_eagle: Some(self.is_eagle),
-                },
-            )
-        });
         let seq_hash_elapsed = start.elapsed();
 
         let response = self
@@ -524,16 +518,18 @@ where
         router_config_override: Option<&RouterConfigOverride>,
     ) {
         let isl_tokens = tokens.len();
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name: lora_name.as_deref(),
+            is_eagle: Some(self.is_eagle),
+        };
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
-            BlockHashOptions {
-                block_mm_infos,
-                lora_name: lora_name.as_deref(),
-                is_eagle: Some(self.is_eagle),
-            },
+            hash_options,
+            None,
         );
 
         if let Err(e) = self
@@ -615,27 +611,22 @@ where
         lora_name: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(
-            tokens,
-            self.block_size,
-            BlockHashOptions {
-                block_mm_infos,
-                lora_name,
-                is_eagle: Some(self.is_eagle),
-            },
-        );
-        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name,
+            is_eagle: Some(self.is_eagle),
+        };
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
-            BlockHashOptions {
-                block_mm_infos,
-                lora_name,
-                is_eagle: Some(self.is_eagle),
-            },
+            hash_options,
+            Some(&block_hashes),
         );
+
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         Ok(self
             .scheduler
