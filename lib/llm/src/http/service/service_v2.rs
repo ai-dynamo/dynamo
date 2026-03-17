@@ -268,7 +268,10 @@ impl HttpService {
     }
 
     /// Like [`spawn`](Self::spawn), but uses a pre-bound TCP listener instead
-    /// of binding a new one. This eliminates port-collision races in tests.
+    /// of binding a new one in non-TLS mode.
+    ///
+    /// When TLS is enabled, the provided listener is ignored and the service
+    /// binds its own TLS socket.
     pub fn spawn_with_listener(
         &self,
         cancel_token: CancellationToken,
@@ -283,7 +286,10 @@ impl HttpService {
     }
 
     /// Like [`run`](Self::run), but uses a pre-bound TCP listener instead of
-    /// binding a new one. This eliminates port-collision races in tests.
+    /// binding a new one in non-TLS mode.
+    ///
+    /// When TLS is enabled, the provided listener is ignored and the service
+    /// binds its own TLS socket.
     pub async fn run_with_listener(
         &self,
         cancel_token: CancellationToken,
