@@ -35,13 +35,13 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
     .replace("_", "-")
 }
 
+use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
+use dynamo_kv_router::protocols::*;
 pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 use dynamo_kv_router::zmq_wire::*;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-    indexer::{KvIndexerMetrics, LocalKvIndexer},
-    protocols::*,
     worker_query::start_worker_kv_query_endpoint,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
@@ -1048,7 +1048,7 @@ impl WorkerMetricsPublisher {
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use crate::kv_router::protocols::compute_block_hash_for_seq;
+    use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
@@ -1452,9 +1452,9 @@ mod test_event_processing {
 mod tests_startup_helpers {
     use super::*;
     use crate::kv_router::KvIndexer;
-    use crate::kv_router::indexer::KvIndexerInterface;
-    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use bytes::Bytes;
+    use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexerInterface};
+    use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
     use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
@@ -1608,7 +1608,7 @@ mod tests_startup_helpers {
             // Try up to 20 times (200ms total)
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
-                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .send(GetWorkersRequest { resp: resp_tx })
                 .await
                 .unwrap();
             let workers: Vec<u64> = resp_rx.await.unwrap();
@@ -2014,7 +2014,7 @@ mod tests_startup_helpers {
         for _ in 0..20 {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
-                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .send(GetWorkersRequest { resp: resp_tx })
                 .await
                 .unwrap();
             let workers: Vec<u64> = resp_rx.await.unwrap();
@@ -2085,7 +2085,7 @@ mod tests_startup_helpers {
             .unwrap();
         let router_overlap = overlap
             .scores
-            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .get(&dynamo_kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -2101,9 +2101,9 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
-            crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
-            crate::kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")
             }
             other => panic!("Unexpected response: {:?}", other),
@@ -2129,7 +2129,7 @@ mod tests_startup_helpers {
         let overlap = router_indexer.find_matches(block_hashes_2).await.unwrap();
         let router_overlap_after = overlap
             .scores
-            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .get(&dynamo_kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -2193,7 +2193,7 @@ mod test_exponential_backoff {
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
-    use crate::kv_router::protocols::ActiveLoad;
+    use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::EventSubscriber;
 

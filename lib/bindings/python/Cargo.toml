@@ -24,7 +24,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
-kv-indexer = ["dep:dynamo-kv-router", "dep:clap", "dep:tracing-subscriber"]
+kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-runtime = ["kv-indexer", "dynamo-kv-router/indexer-runtime"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 
@@ -46,8 +46,8 @@ tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }
 
-# kv-indexer (optional)
-dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"], optional = true }
+# kv-indexer / shared kv-router types
+dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"] }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 

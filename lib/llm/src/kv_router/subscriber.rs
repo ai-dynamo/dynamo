@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::kv_router::{
-    Indexer, KV_EVENT_SUBJECT, KvRouterConfig, protocols::RouterEvent,
-    worker_query::WorkerQueryClient,
-};
+use crate::kv_router::{Indexer, worker_query::WorkerQueryClient};
 use anyhow::Result;
+use dynamo_kv_router::{
+    config::KvRouterConfig,
+    protocols::{KV_EVENT_SUBJECT, RouterEvent},
+};
 use dynamo_runtime::{
     component::Component, discovery::EventTransportKind, prelude::*,
     transports::event_plane::EventSubscriber,

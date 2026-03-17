@@ -21,9 +21,11 @@ use futures::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::kv_router::Indexer;
-use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
-use crate::kv_router::protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId};
 use crate::kv_router::worker_kv_indexer_query_endpoint;
+use dynamo_kv_router::{
+    indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse},
+    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
+};
 
 // Recovery retry configuration
 const RECOVERY_MAX_RETRIES: u32 = 8;
@@ -763,11 +765,10 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
 mod tests {
     use super::*;
     use crate::kv_router::Indexer;
-    use crate::kv_router::RouterEvent;
-    use crate::kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use crate::kv_router::protocols::{
+    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use std::collections::VecDeque;

@@ -106,15 +106,16 @@ jobs:
         timeout-minutes: 20
         run: |
           set -x
-          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
+          EPP_REPOSITORY="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
+          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
           EPP_IMAGE_TAG="${{ github.sha }}"
-          EPP_IMAGE_REF="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${EPP_IMAGE_TAG}"
+          EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
           echo "epp_image_ref=${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
           CACHE_ARGS=""
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache,mode=max "
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
           fi
 
           make -C deploy/inference-gateway/epp image-multiarch-push \
@@ -199,13 +200,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: prod-builder-amd-v1
-          - arch: arm64
-            runner: prod-tester-arm-v1
+        arch: [amd64, arm64]
     name: Compliance frontend-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -222,6 +219,7 @@ jobs:
         with:
           image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build-frontend-image.outputs.target_tag }}
           artifact_name: compliance-frontend-${{ matrix.arch }}
+          arch: ${{ matrix.arch }}
           framework: dynamo
           target: frontend
 
