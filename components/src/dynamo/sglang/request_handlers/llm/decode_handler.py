@@ -119,9 +119,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if bootstrap_info is not None:
             logging.debug(
                 f"Using bootstrap_info: "
-                f"host={bootstrap_info['bootstrap_host']}, "
-                f"port={bootstrap_info['bootstrap_port']}, "
-                f"room={bootstrap_info['bootstrap_room']}"
+                f"host={bootstrap_info.get('bootstrap_host')}, "
+                f"port={bootstrap_info.get('bootstrap_port')}, "
+                f"room={bootstrap_info.get('bootstrap_room')}"
             )
 
         if self.serving_mode == DisaggregationMode.DECODE:
