@@ -22,13 +22,14 @@ import (
 
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID    string
-	ContainerName  string
-	CheckpointHash string
-	CheckpointDir  string
-	NodeName       string
-	PodName        string
-	PodNamespace   string
+	ContainerID           string
+	ContainerName         string
+	CheckpointHash        string
+	CheckpointLocation    string
+	CheckpointStorageType string
+	NodeName              string
+	PodName               string
+	PodNamespace          string
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -41,8 +42,15 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
-	finalDir := filepath.Join(req.CheckpointDir, req.CheckpointHash)
-	tmpRoot := filepath.Join(req.CheckpointDir, "tmp")
+	if req.CheckpointStorageType != "pvc" {
+		return fmt.Errorf("checkpoint storage type %q is not supported", req.CheckpointStorageType)
+	}
+	if req.CheckpointLocation == "" {
+		return fmt.Errorf("checkpoint location is required")
+	}
+
+	finalDir := req.CheckpointLocation
+	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
 	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
 		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
 	}

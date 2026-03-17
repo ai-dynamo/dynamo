@@ -34,7 +34,8 @@ storage:
     storageClass: ""
     # Access mode - ReadWriteMany required for multi-pod access
     accessMode: ReadWriteMany
-    # Base path for checkpoints (mounted in pods)
+    # PVC mount path inside the snapshot-agent pod.
+    # This must match the operator checkpoint.storage.pvc.basePath setting.
     basePath: /checkpoints
 
   # S3 configuration (when type=s3)

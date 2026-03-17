@@ -43,7 +43,6 @@ func main() {
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
-		"checkpoint_dir", cfg.BasePath,
 		"watch_namespace", cfg.RestrictedNamespace,
 	)
 

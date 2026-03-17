@@ -4,7 +4,6 @@ package types
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -13,7 +12,6 @@ import (
 type AgentConfig struct {
 	NodeName            string          `yaml:"-"`
 	RestrictedNamespace string          `yaml:"-"`
-	BasePath            string          `yaml:"basePath"`
 	Overlay             OverlaySettings `yaml:"overlay"`
 	Restore             RestoreSpec     `yaml:"restore"`
 	CRIU                CRIUSettings    `yaml:"criu"`
@@ -29,9 +27,6 @@ func (c *AgentConfig) LoadEnvOverrides() {
 }
 
 func (c *AgentConfig) Validate() error {
-	if strings.TrimSpace(c.BasePath) == "" {
-		return &ConfigError{Field: "basePath", Message: "basePath is required"}
-	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",

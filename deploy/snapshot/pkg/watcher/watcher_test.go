@@ -30,7 +30,6 @@ func makeTestWatcher(t *testing.T, objs ...runtime.Object) *Watcher {
 	return &Watcher{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
-			BasePath: t.TempDir(),
 		},
 		clientset: fake.NewClientset(objs...),
 		log:       testr.New(t),
@@ -206,7 +205,14 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 				}
 			}
 
-			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, nil)
+			var annotations map[string]string
+			if tc.hash != "" {
+				annotations = map[string]string{
+					kubeAnnotationCheckpointLocation:    "/checkpoints/" + tc.hash,
+					kubeAnnotationCheckpointStorageType: "pvc",
+				}
+			}
+			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
 			objs := []runtime.Object{job}
 			if tc.lease != nil {
 				objs = append(objs, tc.lease)
@@ -366,18 +372,27 @@ func TestHandleRestorePodEvent(t *testing.T) {
 				labels[kubeLabelCheckpointHash] = tc.hash
 			}
 
+			w := makeTestWatcher(t)
+			checkpointDir := t.TempDir()
+
 			var annotations map[string]string
 			if tc.annotation != "" {
 				annotations = map[string]string{
 					kubeAnnotationRestoreStatus: tc.annotation,
 				}
 			}
+			if tc.hash != "" {
+				if annotations == nil {
+					annotations = make(map[string]string)
+				}
+				annotations[kubeAnnotationCheckpointLocation] = filepath.Join(checkpointDir, tc.hash)
+				annotations[kubeAnnotationCheckpointStorageType] = "pvc"
+			}
 
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
-			w := makeTestWatcher(t)
 
 			if tc.createDir && tc.hash != "" {
-				dir := filepath.Join(w.config.BasePath, tc.hash)
+				dir := filepath.Join(checkpointDir, tc.hash)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatalf("failed to create checkpoint dir: %v", err)
 				}
@@ -436,7 +451,6 @@ func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testin
 	w := &Watcher{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
-			BasePath: t.TempDir(),
 		},
 		clientset: clientset,
 		log:       testr.New(t),
@@ -447,7 +461,7 @@ func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testin
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.doCheckpoint(context.Background(), pod, job, "abc123", "default/test-pod")
+	err := w.doCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "pvc", "default/test-pod")
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}
@@ -491,7 +505,6 @@ func TestDoRestoreKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 	w := &Watcher{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
-			BasePath: t.TempDir(),
 		},
 		clientset: clientset,
 		log:       testr.New(t),
@@ -502,7 +515,7 @@ func TestDoRestoreKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.doRestore(context.Background(), pod, "abc123", "default/test-pod")
+	err := w.doRestore(context.Background(), pod, "abc123", filepath.Join(t.TempDir(), "abc123"), "pvc", "default/test-pod")
 	if err == nil {
 		t.Fatal("expected terminal restore status update to fail")
 	}
