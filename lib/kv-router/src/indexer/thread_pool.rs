@@ -123,6 +123,28 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 }
 
+impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
+    fn drop(&mut self) {
+        // Send Terminate to all worker threads so they exit their recv loops
+        // and drop their Arc<T> clones. Then join the threads to ensure the
+        // clones are actually dropped before the compiler drops `self.backend`.
+        // Without this, worker threads may still be alive when `backend` drops,
+        // keeping the Arc refcount > 0 and preventing T::drop() from running.
+        for channel in self.worker_event_channels.iter() {
+            let _ = channel.send(WorkerTask::Terminate);
+        }
+        let handles = std::mem::take(
+            &mut *self
+                .thread_handles
+                .lock()
+                .expect("thread_handles mutex poisoned"),
+        );
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[async_trait]
 impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     async fn find_matches(

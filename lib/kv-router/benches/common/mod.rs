@@ -36,11 +36,11 @@ pub struct CommonArgs {
     pub test: bool,
 
     /// Number of GPU blocks available in the mock engine's KV cache.
-    #[clap(long, default_value = "1048576")]
+    #[clap(long, default_value = "16384")]
     pub num_gpu_blocks: usize,
 
     /// Number of tokens per KV cache block.
-    #[clap(long, default_value = "512")]
+    #[clap(long, default_value = "128")]
     pub block_size: u32,
 
     /// Wall-clock duration (ms) over which the trace is replayed during event generation.
@@ -52,7 +52,7 @@ pub struct CommonArgs {
     pub benchmark_duration_ms: u64,
 
     /// Number of unique simulated inference workers.
-    #[clap(short, long, default_value = "256")]
+    #[clap(short, long, default_value = "1000")]
     pub num_unique_inference_workers: usize,
 
     /// How many times to duplicate unique workers during the benchmark phase.
@@ -293,13 +293,24 @@ pub fn make_progress_bar(total: Option<u64>) -> ProgressBar {
 }
 
 /// Results from a single benchmark run.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct BenchmarkResults {
     pub offered_ops_throughput: f32,
     pub ops_throughput: f32,
     pub offered_block_throughput: f32,
     pub block_throughput: f32,
+    pub latency_mean_us: f32,
+    pub latency_p50_us: f32,
     pub latency_p99_us: f32,
+    pub store_latency_mean_us: f32,
+    pub store_latency_p50_us: f32,
+    pub store_latency_p99_us: f32,
+    pub remove_latency_mean_us: f32,
+    pub remove_latency_p50_us: f32,
+    pub remove_latency_p99_us: f32,
+    /// Tree size samples taken during the benchmark run: (elapsed_ms, total_stored_blocks).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tree_size_samples: Vec<(f64, usize)>,
 }
 
 /// Load, transform, and partition the mooncake trace into per-worker request lists.
@@ -560,18 +571,39 @@ pub fn compute_sweep_durations(min_ms: u64, max_ms: u64, steps: usize) -> Vec<u6
 pub fn print_sweep_summary(name: &str, results: &[(u64, BenchmarkResults)]) {
     println!("\n=== Sweep Summary: {} ===", name);
     println!(
-        "{:>12} {:>14} {:>14} {:>14} {:>14} {:>10}",
-        "duration_ms", "ops/s_off", "ops/s", "blk_ops/s_off", "blk_ops/s", "p99(us)"
+        "{:>12} {:>14} {:>14} {:>14} {:>14}  {:>10} {:>10} {:>10}  {:>12} {:>12} {:>12}  {:>12} {:>12} {:>12}",
+        "duration_ms",
+        "ops/s_off",
+        "ops/s",
+        "blk_ops/s_off",
+        "blk_ops/s",
+        "mean(us)",
+        "p50(us)",
+        "p99(us)",
+        "st_mean(us)",
+        "st_p50(us)",
+        "st_p99(us)",
+        "rm_mean(us)",
+        "rm_p50(us)",
+        "rm_p99(us)",
     );
     for (dur, r) in results {
         println!(
-            "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>10.1}",
+            "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>14.1}  {:>10.1} {:>10.1} {:>10.1}  {:>12.1} {:>12.1} {:>12.1}  {:>12.1} {:>12.1} {:>12.1}",
             dur,
             r.offered_ops_throughput,
             r.ops_throughput,
             r.offered_block_throughput,
             r.block_throughput,
+            r.latency_mean_us,
+            r.latency_p50_us,
             r.latency_p99_us,
+            r.store_latency_mean_us,
+            r.store_latency_p50_us,
+            r.store_latency_p99_us,
+            r.remove_latency_mean_us,
+            r.remove_latency_p50_us,
+            r.remove_latency_p99_us,
         );
     }
 }
@@ -722,6 +754,86 @@ pub fn generate_sequences(
     }
 
     sequences
+}
+
+pub fn plot_tree_size(
+    all_samples: &[(&str, &[(f64, usize)])],
+    output_path: &str,
+) -> anyhow::Result<()> {
+    if all_samples.iter().all(|(_, s)| s.is_empty()) {
+        return Ok(());
+    }
+
+    let colors = [
+        RGBColor(31, 119, 180),
+        RGBColor(255, 127, 14),
+        RGBColor(44, 160, 44),
+        RGBColor(214, 39, 40),
+        RGBColor(148, 103, 189),
+        RGBColor(140, 86, 75),
+    ];
+
+    let mut x_max: f64 = 0.0;
+    let mut y_max: usize = 0;
+    for (_, samples) in all_samples {
+        for &(t, s) in *samples {
+            if t > x_max {
+                x_max = t;
+            }
+            if s > y_max {
+                y_max = s;
+            }
+        }
+    }
+
+    if y_max == 0 {
+        return Ok(());
+    }
+
+    let root = SVGBackend::new(output_path, (800, 500)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption(
+            "Tree Size Over Time (unique nodes)",
+            ("sans-serif", 20).into_font(),
+        )
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(70)
+        .build_cartesian_2d(0.0..x_max * 1.05, 0.0..(y_max as f64 * 1.1))?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Elapsed (ms)")
+        .y_desc("Unique Nodes")
+        .draw()?;
+
+    for (i, (name, samples)) in all_samples.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        let points: Vec<(f64, f64)> = samples.iter().map(|&(t, s)| (t, s as f64)).collect();
+
+        chart
+            .draw_series(LineSeries::new(points.iter().copied(), &color))?
+            .label(*name)
+            .legend(move |(x, y)| {
+                plotters::element::PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    color.stroke_width(2),
+                )
+            });
+    }
+
+    chart
+        .configure_series_labels()
+        .position(SeriesLabelPosition::UpperLeft)
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()?;
+
+    root.present()?;
+    println!("Tree size plot saved to {}", output_path);
+    Ok(())
 }
 
 /// Compute median of durations.

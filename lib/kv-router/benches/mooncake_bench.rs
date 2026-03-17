@@ -190,6 +190,14 @@ impl Args {
     }
 }
 
+/// Which kind of operation was timed during replay.
+#[derive(Clone, Copy)]
+enum OpKind {
+    Request,
+    Store,
+    Remove,
+}
+
 /// A single entry in a worker's merged benchmark timeline.
 #[derive(Clone)]
 enum WorkerTraceEntry {
@@ -288,12 +296,27 @@ struct SweepStepResult {
     results: BenchmarkResults,
 }
 
+/// Compute mean, p50, and p99 latencies (in microseconds) from a sorted slice
+/// of nanosecond latency values. Returns (mean, p50, p99).
+fn latency_stats(sorted_ns: &[u64]) -> (f32, f32, f32) {
+    if sorted_ns.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mean = sorted_ns.iter().sum::<u64>() as f64 / sorted_ns.len() as f64 / 1000.0;
+    let p50 = sorted_ns[sorted_ns.len() * 50 / 100] as f32 / 1000.0;
+    let p99 = sorted_ns[sorted_ns.len() * 99 / 100] as f32 / 1000.0;
+    (mean as f32, p50, p99)
+}
+
 /// Run the benchmark: replay each worker's merged trace against the indexer,
 /// measuring find_matches latency and event processing throughput.
 ///
 /// Workers are spawned as tokio tasks, each replaying its trace at the
 /// original inter-entry timing. After all workers finish, the event queue is
 /// flushed and latency percentiles / throughput stats are printed.
+///
+/// A background task samples `indexer.total_tree_size()` every 50ms
+/// and records (elapsed_ms, size) pairs in the returned `BenchmarkResults`.
 async fn run_benchmark(
     indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
     traces: Vec<Vec<MooncakeRequest>>,
@@ -319,6 +342,25 @@ async fn run_benchmark(
             * args.common.inference_worker_duplication_factor as u64,
     ));
 
+    // let sample_cancel = tokio_util::sync::CancellationToken::new();
+    // let sample_indexer = indexer.clone();
+    // let sample_token = sample_cancel.clone();
+    // let sample_task = tokio::spawn(async move {
+    //     let start = Instant::now();
+    //     let mut samples: Vec<(f64, usize)> = Vec::new();
+    //     loop {
+    //         let size = sample_indexer.total_tree_size();
+    //         samples.push((start.elapsed().as_secs_f64() * 1000.0, size));
+    //         tokio::select! {
+    //             _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+    //             _ = sample_token.cancelled() => { break; }
+    //         }
+    //     }
+    //     let size = sample_indexer.total_tree_size();
+    //     samples.push((start.elapsed().as_secs_f64() * 1000.0, size));
+    //     samples
+    // });
+
     let mut tasks = Vec::new();
     for replica in 0..args.common.inference_worker_duplication_factor {
         for (worker_id, worker_trace) in worker_traces.iter().enumerate() {
@@ -328,24 +370,32 @@ async fn run_benchmark(
             let worker_id = worker_id + replica * worker_traces.len();
             tasks.push(tokio::spawn(async move {
                 let mut request_latencies = Vec::with_capacity(trace.len());
+                let mut store_latencies = Vec::new();
+                let mut remove_latencies = Vec::new();
 
                 let submit = |entry: WorkerTrace| async {
                     match entry.entry {
                         WorkerTraceEntry::Request(request) => {
                             let start = minstant::Instant::now();
                             indexer.find_matches(request).await?;
-                            Ok::<Option<u64>, anyhow::Error>(
-                                Some(start.elapsed().as_nanos() as u64),
-                            )
+                            Ok::<(OpKind, u64), anyhow::Error>((
+                                OpKind::Request,
+                                start.elapsed().as_nanos() as u64,
+                            ))
                         }
                         WorkerTraceEntry::Event(event) => {
+                            let kind = match &event.data {
+                                KvCacheEventData::Stored(_) => OpKind::Store,
+                                _ => OpKind::Remove,
+                            };
+                            let start = minstant::Instant::now();
                             indexer
                                 .apply_event(RouterEvent {
                                     worker_id: worker_id as u64,
                                     event,
                                 })
                                 .await;
-                            Ok(None)
+                            Ok((kind, start.elapsed().as_nanos() as u64))
                         }
                     }
                 };
@@ -360,14 +410,20 @@ async fn run_benchmark(
                     let mut processed = 1;
                     let entry_timestamp_us = entry.timestamp_us;
 
-                    if let Some(latency) = submit(entry.clone()).await? {
-                        request_latencies.push(latency);
+                    let (kind, latency) = submit(entry.clone()).await?;
+                    match kind {
+                        OpKind::Request => request_latencies.push(latency),
+                        OpKind::Store => store_latencies.push(latency),
+                        OpKind::Remove => remove_latencies.push(latency),
                     }
 
                     while let Some(next) = trace.peek() {
                         if next.timestamp_us == entry_timestamp_us {
-                            if let Some(latency) = submit(trace.next().unwrap().clone()).await? {
-                                request_latencies.push(latency);
+                            let (kind, latency) = submit(trace.next().unwrap().clone()).await?;
+                            match kind {
+                                OpKind::Request => request_latencies.push(latency),
+                                OpKind::Store => store_latencies.push(latency),
+                                OpKind::Remove => remove_latencies.push(latency),
                             }
                             processed += 1;
                         } else {
@@ -393,16 +449,24 @@ async fn run_benchmark(
 
                 progress.inc(local_count);
 
-                Ok::<_, anyhow::Error>(request_latencies)
+                Ok::<_, anyhow::Error>((request_latencies, store_latencies, remove_latencies))
             }));
         }
     }
 
     let mut latencies = Vec::new();
+    let mut store_latencies_all = Vec::new();
+    let mut remove_latencies_all = Vec::new();
 
     for task in tasks {
-        latencies.extend(task.await??);
+        let (req_lats, store_lats, remove_lats) = task.await??;
+        latencies.extend(req_lats);
+        store_latencies_all.extend(store_lats);
+        remove_latencies_all.extend(remove_lats);
     }
+
+    // sample_cancel.cancel();
+    // let tree_size_samples = sample_task.await.unwrap_or_default();
 
     if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
         eprintln!(
@@ -461,25 +525,52 @@ async fn run_benchmark(
     let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
 
     latencies.sort_unstable();
-    let latency_p99_us = if latencies.is_empty() {
-        0.0
-    } else {
-        latencies[latencies.len() * 99 / 100] as f32 / 1000.0
-    };
+    let (latency_mean_us, latency_p50_us, latency_p99_us) = latency_stats(&latencies);
+
+    store_latencies_all.sort_unstable();
+    let (store_latency_mean_us, store_latency_p50_us, store_latency_p99_us) =
+        latency_stats(&store_latencies_all);
+
+    remove_latencies_all.sort_unstable();
+    let (remove_latency_mean_us, remove_latency_p50_us, remove_latency_p99_us) =
+        latency_stats(&remove_latencies_all);
 
     println!(
-        "Ops Throughput: {} ops/s (requests + events)",
-        ops_throughput
+        "Ops Throughput: {} / {} offered ops/s (requests + events)",
+        ops_throughput, offered_ops_throughput
     );
-    println!("Block Throughput: {} block ops/s", block_throughput);
-    println!("Latency p99: {}us", latency_p99_us);
+    println!(
+        "Block Throughput: {} / {} offered block ops/s",
+        block_throughput, offered_block_throughput
+    );
+    println!(
+        "Latency (find_matches): mean={:.1}us  p50={:.1}us  p99={:.1}us",
+        latency_mean_us, latency_p50_us, latency_p99_us
+    );
+    println!(
+        "Latency (store events): mean={:.1}us  p50={:.1}us  p99={:.1}us",
+        store_latency_mean_us, store_latency_p50_us, store_latency_p99_us
+    );
+    println!(
+        "Latency (remove events): mean={:.1}us  p50={:.1}us  p99={:.1}us",
+        remove_latency_mean_us, remove_latency_p50_us, remove_latency_p99_us
+    );
 
     Ok(BenchmarkResults {
         offered_ops_throughput,
         ops_throughput,
         offered_block_throughput,
         block_throughput,
+        latency_mean_us,
+        latency_p50_us,
         latency_p99_us,
+        store_latency_mean_us,
+        store_latency_p50_us,
+        store_latency_p99_us,
+        remove_latency_mean_us,
+        remove_latency_p50_us,
+        remove_latency_p99_us,
+        tree_size_samples: Vec::new(),
     })
 }
 
@@ -661,6 +752,23 @@ async fn main() -> anyhow::Result<()> {
 
         plot_sweep(&all_results, &args.sweep_output)?;
 
+        // {
+        //     let tree_data: Vec<(&str, &[(f64, usize)])> = all_results
+        //         .iter()
+        //         .filter_map(|(name, results)| {
+        //             results
+        //                 .iter()
+        //                 .max_by_key(|(dur, _)| *dur)
+        //                 .map(|(_, r)| (*name, r.tree_size_samples.as_slice()))
+        //         })
+        //         .collect();
+        //     let tree_plot_path = args
+        //         .sweep_output
+        //         .replace(".png", "_tree_size.svg")
+        //         .replace(".svg", "_tree_size.svg");
+        //     plot_tree_size(&tree_data, &tree_plot_path)?;
+        // }
+
         let json_path = args
             .sweep_output
             .replace(".png", ".json")
@@ -672,13 +780,7 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|(dur, r)| SweepStepResult {
                         duration_ms: *dur,
-                        results: BenchmarkResults {
-                            offered_ops_throughput: r.offered_ops_throughput,
-                            ops_throughput: r.ops_throughput,
-                            offered_block_throughput: r.offered_block_throughput,
-                            block_throughput: r.block_throughput,
-                            latency_p99_us: r.latency_p99_us,
-                        },
+                        results: r.clone(),
                     })
                     .collect();
                 (*name, steps)

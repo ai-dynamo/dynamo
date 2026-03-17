@@ -46,8 +46,40 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "lock-stats")]
+use super::LockContentionStats;
+#[cfg(feature = "node-stats")]
+use super::NodeTouchStats;
 use super::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
+
+#[cfg(feature = "lock-stats")]
+macro_rules! read_lock {
+    ($self:expr, $lock:expr) => {
+        $self.lock_stats.tracked_read(&*$lock)
+    };
+}
+
+#[cfg(not(feature = "lock-stats"))]
+macro_rules! read_lock {
+    ($self:expr, $lock:expr) => {
+        $lock.read()
+    };
+}
+
+#[cfg(feature = "lock-stats")]
+macro_rules! write_lock {
+    ($self:expr, $lock:expr) => {
+        $self.lock_stats.tracked_write(&*$lock)
+    };
+}
+
+#[cfg(not(feature = "lock-stats"))]
+macro_rules! write_lock {
+    ($self:expr, $lock:expr) => {
+        $lock.write()
+    };
+}
 
 /// Thread-safe shared reference to a Block.
 type SharedBlock = Arc<RwLock<Block>>;
@@ -102,6 +134,12 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedBlock,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
+
+    #[cfg(feature = "node-stats")]
+    pub node_stats: NodeTouchStats,
+
+    #[cfg(feature = "lock-stats")]
+    pub lock_stats: LockContentionStats,
 }
 
 impl Default for ConcurrentRadixTreeCompressed {
@@ -114,6 +152,11 @@ impl Default for ConcurrentRadixTreeCompressed {
 // This custom drop implementation avoids this using an iterative approach.
 impl Drop for ConcurrentRadixTreeCompressed {
     fn drop(&mut self) {
+        #[cfg(feature = "lock-stats")]
+        self.lock_stats.report("ConcurrentRadixTreeCompressed");
+        #[cfg(feature = "node-stats")]
+        self.node_stats.report("ConcurrentRadixTreeCompressed");
+
         let mut stack: Vec<SharedBlock> = Vec::new();
 
         // Break root -> children edge up front
@@ -140,6 +183,10 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            #[cfg(feature = "node-stats")]
+            node_stats: NodeTouchStats::new(),
+            #[cfg(feature = "lock-stats")]
+            lock_stats: LockContentionStats::new(),
         }
     }
 
@@ -261,7 +308,7 @@ impl ConcurrentRadixTreeCompressed {
         node: &SharedBlock,
         pos: usize,
     ) -> SharedBlock {
-        let mut guard = node.write();
+        let mut guard = write_lock!(self, node);
         self.split_block(lookup, &mut guard, pos)
     }
 
@@ -271,10 +318,10 @@ impl ConcurrentRadixTreeCompressed {
 
     /// Traverse the radix tree to find the best match for a given sequence of [`LocalBlockHash`]es.
     ///
-    /// Worker sets are checked at node boundaries. Within a compressed edge,
-    /// each hash is compared to determine match length, but per-hash worker
-    /// membership is not checked. This is faster than a regular trie because
-    /// there are fewer nodes to lock and inspect.
+    /// Worker sets are checked at node boundaries. Edge matching compares
+    /// `LocalBlockHash` values element-wise. Each node is locked once for
+    /// edge check, worker check, and next child lookup combined, halving
+    /// lock acquisitions vs the naive two-lock approach.
     ///
     /// ### Arguments
     ///
@@ -290,6 +337,9 @@ impl ConcurrentRadixTreeCompressed {
         sequence: &[LocalBlockHash],
         early_exit: bool,
     ) -> OverlapScores {
+        #[cfg(feature = "node-stats")]
+        let mut _nt = self.node_stats.guard(super::NodeTouchOp::FindMatches);
+
         let mut scores = OverlapScores::new();
 
         if sequence.is_empty() {
@@ -300,35 +350,44 @@ impl ConcurrentRadixTreeCompressed {
         let mut active_count: usize = 0;
         let mut matched_depth: u32 = 0;
         let mut seq_pos: usize = 0;
-        let mut current = self.root.clone();
         let mut first_node = true;
+
+        // Look up the first child while holding the root lock, then release.
+        let mut next_child = {
+            let root_guard = read_lock!(self, self.root);
+            #[cfg(feature = "node-stats")]
+            {
+                _nt.count += 1;
+            }
+            root_guard.children.get(&sequence[0]).cloned()
+        };
 
         loop {
             if seq_pos >= sequence.len() {
                 break;
             }
 
-            // Find child of current matching sequence[seq_pos].
-            let child = {
-                let guard = current.read();
-                guard.children.get(&sequence[seq_pos]).cloned()
+            let child = match next_child.take() {
+                Some(c) => c,
+                None => break,
             };
 
-            let Some(child) = child else {
-                break;
-            };
-
-            // Walk child's edge against sequence[seq_pos..] and check workers
-            // at this node boundary.
             let edge_len;
             let edge_match_len;
             {
-                let guard = child.read();
+                let guard = read_lock!(self, child);
+                #[cfg(feature = "node-stats")]
+                {
+                    _nt.count += 1;
+                }
                 edge_len = guard.edge.len();
 
                 let walk_len = edge_len.min(sequence.len() - seq_pos);
-                let mut match_len = 0;
-                for i in 0..walk_len {
+
+                // First element match is guaranteed by the parent's children
+                // HashMap lookup (keyed on LocalBlockHash). Compare remaining.
+                let mut match_len = 1;
+                for i in 1..walk_len {
                     if guard.edge[i].0 != sequence[seq_pos + i] {
                         break;
                     }
@@ -336,19 +395,6 @@ impl ConcurrentRadixTreeCompressed {
                 }
                 edge_match_len = match_len;
 
-                // Check workers at this node boundary.
-                //
-                // In a clean tree, workers at a child node are always a subset
-                // of the parent (along the same path), so:
-                //   - workers can only drop out, never join, as we descend
-                //   - if child.workers.len() == active_count, the sets are identical
-                //
-                // However, because apply_removed does NOT cascade to descendants,
-                // a child may transiently have MORE workers than its parent
-                // (stale entries from an ancestor remove whose descendant remove
-                // events haven't arrived yet). We detect this via
-                // child_count > active_count and fall back to a full membership
-                // check.
                 if first_node {
                     active = guard.workers.clone();
                     active_count = active.len();
@@ -356,9 +402,6 @@ impl ConcurrentRadixTreeCompressed {
                 } else {
                     let child_count = guard.workers.len();
                     if child_count != active_count {
-                        // Workers changed: either dropped out (child < active)
-                        // or stale entries exist (child > active). Retain only
-                        // workers present in the child, scoring dropouts.
                         let prev_depth = matched_depth;
                         active.retain(|w| {
                             if guard.workers.contains(w) {
@@ -370,11 +413,21 @@ impl ConcurrentRadixTreeCompressed {
                         });
                         active_count = active.len();
                     }
-                    // child_count == active_count: fast path, sets are identical
-                    // (or, in the rare edge case, different membership with same
-                    // cardinality -- accepted as a transient routing quality
-                    // degradation that resolves once pending remove events arrive).
                 }
+
+                // Look up the next child while still holding the lock,
+                // avoiding a redundant lock acquisition next iteration.
+                next_child = if edge_match_len == edge_len
+                    && active_count > 0
+                    && seq_pos + edge_match_len < sequence.len()
+                {
+                    guard
+                        .children
+                        .get(&sequence[seq_pos + edge_match_len])
+                        .cloned()
+                } else {
+                    None
+                };
             }
 
             if active_count == 0 {
@@ -384,26 +437,20 @@ impl ConcurrentRadixTreeCompressed {
             matched_depth += edge_match_len as u32;
 
             if edge_match_len < edge_len {
-                // Partial edge match: can't continue to children.
                 break;
             }
 
-            // Full edge match.
             seq_pos += edge_match_len;
 
             if early_exit && active_count == 1 {
                 break;
             }
-
-            current = child;
         }
 
-        // Record scores for workers that survived through the deepest matched level.
         for worker in &active {
             scores.scores.insert(*worker, matched_depth);
         }
 
-        // Get tree sizes from lookup.
         for worker in scores.scores.keys() {
             if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
                 scores
@@ -482,21 +529,13 @@ impl ConcurrentRadixTreeCompressed {
 
                 // If parent_hash is not the last element in the block's edge,
                 // split so that parent_hash becomes the last element.
-                let needs_split = {
-                    let guard = block.read();
-                    if guard.edge.is_empty() || guard.edge.last().unwrap().1 == parent_hash {
-                        None
-                    } else {
-                        guard
-                            .edge
-                            .iter()
-                            .position(|&(_, h)| h == parent_hash)
-                            .map(|pos| pos + 1)
+                {
+                    let mut guard = write_lock!(self, block);
+                    if !guard.edge.is_empty() && guard.edge.last().unwrap().1 != parent_hash {
+                        if let Some(pos) = guard.edge.iter().position(|&(_, h)| h == parent_hash) {
+                            self.split_block(lookup, &mut guard, pos + 1);
+                        }
                     }
-                };
-
-                if let Some(split_pos) = needs_split {
-                    self.split_node(lookup, &block, split_pos);
                 }
 
                 block
@@ -520,10 +559,6 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     /// Insert a sequence of blocks starting from a parent node.
-    ///
-    /// Uses write locks on parent nodes for atomic check-and-insert of children,
-    /// preventing TOCTOU races between concurrent threads. Child nodes are
-    /// processed under their own write locks for atomic edge-walk + split.
     fn insert_blocks_from(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
@@ -531,22 +566,24 @@ impl ConcurrentRadixTreeCompressed {
         parent: &SharedBlock,
         blocks: &[KvCacheStoredBlockData],
     ) {
+        #[cfg(feature = "node-stats")]
+        let mut _nt = self.node_stats.guard(super::NodeTouchOp::Store);
+
         let mut current_parent = parent.clone();
         let mut remaining = blocks;
 
         while !remaining.is_empty() {
             let first_local = remaining[0].tokens_hash;
 
-            // Atomically check for an existing child under a write lock on the
-            // parent. This prevents a race where two threads both see "no child"
-            // and both try to insert, with one overwriting the other.
             let child = {
-                let mut parent_guard = current_parent.write();
+                let mut parent_guard = write_lock!(self, current_parent);
+                #[cfg(feature = "node-stats")]
+                {
+                    _nt.count += 1;
+                }
                 match parent_guard.children.get(&first_local).cloned() {
                     Some(existing) => existing,
                     None => {
-                        // No matching child: create a new node with all
-                        // remaining blocks and insert under the same lock.
                         let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = remaining
                             .iter()
                             .map(|b| (b.tokens_hash, b.block_hash))
@@ -571,14 +608,14 @@ impl ConcurrentRadixTreeCompressed {
                     }
                 }
             };
-            // parent write lock released here.
+            // parent lock released here.
 
-            // Process the existing child under its own write lock. This is safe
-            // because we already released the parent lock (no nested locks).
-            // The write lock on the child ensures that concurrent threads
-            // processing the same child are serialized.
             {
-                let mut child_guard = child.write();
+                let mut child_guard = write_lock!(self, child);
+                #[cfg(feature = "node-stats")]
+                {
+                    _nt.count += 1;
+                }
                 let edge_len = child_guard.edge.len();
                 let min_len = edge_len.min(remaining.len());
 
@@ -603,14 +640,10 @@ impl ConcurrentRadixTreeCompressed {
                 );
 
                 if match_len < edge_len {
-                    // Partial edge match: split inline under the held write lock.
                     self.split_block(lookup, &mut child_guard, match_len);
-
-                    // Add worker to the prefix (the child node after split).
                     child_guard.workers.insert(worker);
 
                     if match_len < remaining.len() {
-                        // Create a new sibling for the unmatched tail.
                         let tail = &remaining[match_len..];
                         let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> =
                             tail.iter().map(|b| (b.tokens_hash, b.block_hash)).collect();
@@ -683,6 +716,9 @@ impl ConcurrentRadixTreeCompressed {
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
+        #[cfg(feature = "node-stats")]
+        let mut _nt = self.node_stats.guard(super::NodeTouchOp::Remove);
+
         if !lookup.contains_key(&worker) {
             return Err(KvCacheEventError::BlockNotFound);
         }
@@ -690,12 +726,10 @@ impl ConcurrentRadixTreeCompressed {
         let mut total_removed = 0;
 
         for block_hash in op.block_hashes {
-            // Resolve and remove block_hash from worker's lookup.
             let block = {
                 let Some(wl) = lookup.get_mut(&worker) else {
                     continue;
                 };
-                // Resolve stale lookup before removing.
                 let block = match Self::resolve_lookup(wl, block_hash) {
                     Some(b) => b,
                     None => {
@@ -712,37 +746,38 @@ impl ConcurrentRadixTreeCompressed {
                 wl.remove(&block_hash);
                 block
             };
-            // `lookup` borrow released here.
 
-            // Find position of block_hash in the block's edge.
-            let (pos, edge_len) = {
-                let guard = block.read();
-                (
-                    guard.edge.iter().position(|&(_, h)| h == block_hash),
-                    guard.edge.len(),
-                )
-            };
+            // Hold a single write lock for both the position lookup and the
+            // split to avoid a TOCTOU race: without this, another thread could
+            // split the node between a read-lock lookup and a separate
+            // write-lock split, making the stale `pos` >= the new edge length.
+            let mut guard = write_lock!(self, block);
+            #[cfg(feature = "node-stats")]
+            {
+                _nt.count += 1;
+            }
+            let pos = guard.edge.iter().position(|&(_, h)| h == block_hash);
+            let edge_len = guard.edge.len();
 
             match pos {
                 Some(pos) if pos > 0 => {
-                    // block_hash is in the middle/end of the edge. Split the
-                    // node so the prefix [0..pos) keeps the worker and the
-                    // suffix [pos..) has the worker removed.
-                    let suffix = self.split_node(lookup, &block, pos);
+                    let suffix = self.split_block(lookup, &mut guard, pos);
+                    drop(guard);
 
-                    // Remove worker from the suffix.
                     let suffix_hashes: Vec<ExternalSequenceBlockHash>;
                     {
-                        let mut guard = suffix.write();
-                        guard.workers.remove(&worker);
-                        suffix_hashes = guard.edge.iter().map(|&(_, h)| h).collect();
-                        if guard.workers.is_empty() {
-                            guard.children.clear();
+                        let mut suffix_guard = write_lock!(self, suffix);
+                        #[cfg(feature = "node-stats")]
+                        {
+                            _nt.count += 1;
+                        }
+                        suffix_guard.workers.remove(&worker);
+                        suffix_hashes = suffix_guard.edge.iter().map(|&(_, h)| h).collect();
+                        if suffix_guard.workers.is_empty() {
+                            suffix_guard.children.clear();
                         }
                     }
 
-                    // Remove all suffix hashes from the worker's lookup.
-                    // (split_node re-inserted them for this worker)
                     if let Some(wl) = lookup.get_mut(&worker) {
                         for h in &suffix_hashes {
                             wl.remove(h);
@@ -752,25 +787,18 @@ impl ConcurrentRadixTreeCompressed {
                     total_removed += edge_len - pos;
                 }
                 _ => {
-                    // pos == 0 or not found in edge: the first block in the
-                    // chain was removed (or something unexpected), so remove
-                    // the worker from the entire node.
-                    let sibling_hashes: Vec<ExternalSequenceBlockHash>;
-                    {
-                        let mut guard = block.write();
-                        guard.workers.remove(&worker);
-                        sibling_hashes = guard
-                            .edge
-                            .iter()
-                            .map(|&(_, h)| h)
-                            .filter(|&h| h != block_hash)
-                            .collect();
-                        if guard.workers.is_empty() {
-                            guard.children.clear();
-                        }
+                    guard.workers.remove(&worker);
+                    let sibling_hashes: Vec<ExternalSequenceBlockHash> = guard
+                        .edge
+                        .iter()
+                        .map(|&(_, h)| h)
+                        .filter(|&h| h != block_hash)
+                        .collect();
+                    if guard.workers.is_empty() {
+                        guard.children.clear();
                     }
+                    drop(guard);
 
-                    // Remove sibling hashes from worker's lookup.
                     if let Some(wl) = lookup.get_mut(&worker) {
                         for h in &sibling_hashes {
                             wl.remove(h);
@@ -815,16 +843,13 @@ impl ConcurrentRadixTreeCompressed {
 
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
-                // Deduplicate: in a radix tree, multiple ext hashes can map to
-                // the same node. Track visited nodes by Arc pointer to avoid
-                // redundant operations.
                 let mut seen = FxHashSet::<usize>::default();
                 for (_, block) in worker_lookup.into_iter() {
                     let ptr = Arc::as_ptr(&block) as usize;
                     if !seen.insert(ptr) {
                         continue;
                     }
-                    let mut guard = block.write();
+                    let mut guard = write_lock!(self, block);
                     guard.workers.remove(&worker);
                     if guard.workers.is_empty() {
                         guard.children.clear();
@@ -857,7 +882,7 @@ impl ConcurrentRadixTreeCompressed {
                 if !seen.insert(ptr) {
                     continue;
                 }
-                let mut guard = block.write();
+                let mut guard = write_lock!(self, block);
                 guard.workers.remove(&key);
                 if guard.workers.is_empty() {
                     guard.children.clear();
@@ -967,6 +992,26 @@ impl ConcurrentRadixTreeCompressed {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTreeCompressed {
+    fn total_tree_size(&self) -> usize {
+        let mut count = 0usize;
+        let mut stack: Vec<SharedBlock> = Vec::new();
+        {
+            let root = self.root.read();
+            stack.extend(root.children.values().cloned());
+        }
+        let mut visited = FxHashSet::<usize>::default();
+        while let Some(block) = stack.pop() {
+            let ptr = Arc::as_ptr(&block) as usize;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            let guard = block.read();
+            stack.extend(guard.children.values().cloned());
+        }
+        count
+    }
+
     fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
 
