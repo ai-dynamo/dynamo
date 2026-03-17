@@ -138,7 +138,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		}
 		if len(gpuUUIDs) == 0 {
 			log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
-			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(pid)
+			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, common.HostProcPath, pid)
 			if err != nil {
 				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 			}

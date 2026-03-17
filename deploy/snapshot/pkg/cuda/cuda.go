@@ -26,12 +26,8 @@ var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
 
-// GetPodGPUUUIDs resolves GPU UUIDs for a pod/container via two strategies:
-//  1. Kubelet PodResources API -- checks device-plugin-allocated GPUs
-//     (nvidia.com/gpu entries in GetDevices()).
-//  2. Kubernetes DRA API -- if (1) finds nothing and clientset is non-nil,
-//     queries ResourceClaim -> ResourceSlice to extract UUIDs from device
-//     attributes published by the NVIDIA DRA driver.
+// GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
+// PodResources (nvidia.com/gpu entries in GetDevices()).
 func GetPodGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, log logr.Logger) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -69,13 +65,6 @@ func GetPodGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName
 
 		}
 	}
-	if len(uuids) == 0 && clientset != nil {
-		draUUIDs, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
-		if err != nil {
-			return nil, err
-		}
-		uuids = draUUIDs
-	}
 
 	return uuids, nil
 }
@@ -84,10 +73,12 @@ func GetPodGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName
 // container's mount namespace. This is the fallback path when the kubelet
 // PodResources API does not report GPU devices (e.g. when GPUs are allocated
 // via DRA instead of the NVIDIA device plugin).
-func GetGPUUUIDsViaNvidiaSmi(pid int) ([]string, error) {
-	cmd := exec.Command(
+func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
+	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
+	cmd := exec.CommandContext(
+		ctx,
 		"nsenter",
-		fmt.Sprintf("--mount=/host/proc/%d/ns/mnt", pid),
+		fmt.Sprintf("--mount=%s", mountPath),
 		"--",
 		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
 	)

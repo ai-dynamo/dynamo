@@ -120,7 +120,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		}
 		if len(targetGPUUUIDs) == 0 {
 			log.Info("PodResources API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
-			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(placeholderPID)
+			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, common.HostProcPath, placeholderPID)
 			if err != nil {
 				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed for restore target: %w", err)
 			}
