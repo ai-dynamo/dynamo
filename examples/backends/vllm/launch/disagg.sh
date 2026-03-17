@@ -8,7 +8,6 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL="Qwen/Qwen3-0.6B"
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -19,13 +18,11 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_P
 python -m dynamo.frontend &
 
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL")
-
+# TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
-    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
     --disaggregation-mode decode \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
@@ -34,7 +31,6 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
-    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &

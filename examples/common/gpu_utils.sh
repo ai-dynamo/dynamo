@@ -3,9 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Shared GPU utility functions for launch scripts.
-# Run self-test:  bash gpu_utils.sh --self-test
 #
-# Usage:
+# CLI:
+#   ./gpu_utils.sh <engine> --model <name> [options...]   Print GPU fraction
+#   ./gpu_utils.sh --self-test                            Run self-test suite
+#
+# Source:
 #   source "$(dirname "$(readlink -f "$0")")/../common/gpu_utils.sh"
 #   # or with SCRIPT_DIR already set:
 #   source "$SCRIPT_DIR/../common/gpu_utils.sh"
@@ -29,8 +32,6 @@
 #   2. Engine flag passed to this function  (user already chose a value)
 #   3. estimate_worker_vram + gpu_worker_fraction  (model architecture)
 #   4. Empty  (let engine use its own default)
-#   --default-frac acts as a floor: if the estimator produces a lower value,
-#   the default wins.  This prevents under-allocation for calibrated scripts.
 #
 # Options (each flag accepts engine-specific aliases):
 #   --model NAME                 Model name (required).
@@ -44,9 +45,6 @@
 #   --gpu-memory-utilization F   User override (vllm flag name).  Skipped when empty.
 #   --mem-fraction-static F      User override (sglang flag name).
 #   --workers-per-gpu N          Divide the fraction by N (for shared-GPU disagg).
-#                                Only divides profiler/user/estimator, not --default-frac.
-#   --default-frac F             Minimum fraction floor (also used when estimator
-#                                doesn't know the model).  Per-worker value, not divided.
 #
 # Usage:
 #   # Simple single-worker (agg.sh)
@@ -63,9 +61,6 @@
 #   GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --workers-per-gpu 2)
 #   python -m dynamo.sglang ... --mem-fraction-static "${GPU_MEM_FRACTION}" &
 #
-#   # Script with a known default (agg_spec_decoding.sh)
-#   GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --default-frac 0.8)
-#
 #   # trtllm (fraction goes into JSON, not CLI)
 #   GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --workers-per-gpu 2)
 #   OVERRIDE_ARGS=(--override-engine-args "{\"kv_cache_config\":{\"free_gpu_memory_fraction\":${GPU_MEM_FRACTION}}}")
@@ -78,7 +73,6 @@ build_gpu_mem_args() {
     local max_seqs="2"
     local workers_per_gpu=1
     local user_frac=""
-    local default_frac=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -91,7 +85,6 @@ build_gpu_mem_args() {
             --gpu-memory-utilization|--mem-fraction-static)
                                 user_frac="$2";       shift 2 ;;
             --workers-per-gpu)  workers_per_gpu="$2"; shift 2 ;;
-            --default-frac)     default_frac="$2";    shift 2 ;;
             *) echo "build_gpu_mem_args: unknown option '$1'" >&2; return 1 ;;
         esac
     done
@@ -116,14 +109,6 @@ build_gpu_mem_args() {
     # --workers-per-gpu divides profiler/user/estimator results only
     if [[ -n "$frac" && "$workers_per_gpu" -gt 1 ]]; then
         frac=$(awk -v f="$frac" -v n="$workers_per_gpu" 'BEGIN { printf "%.2f", f / n }')
-    fi
-
-    # --default-frac is a floor for estimator results (prevents under-allocation)
-    # and a fallback for unknown models.  Profiler/user values are never clamped.
-    if [[ -n "$default_frac" ]]; then
-        if [[ -z "$frac" ]] || { [[ "$from_estimator" == true ]] && awk -v f="$frac" -v d="$default_frac" 'BEGIN { exit !(f < d) }'; }; then
-            frac="$default_frac"
-        fi
     fi
 
     echo "$frac"
@@ -537,31 +522,6 @@ _gpu_utils_self_test() {
     _assert "FRACTION empty" "" "$frac"
 
     echo ""
-    echo "=== build_gpu_mem_args: unknown model + --default-frac ==="
-
-    frac=$(build_gpu_mem_args vllm --model "nope/unknown" --default-frac 0.85)
-    _assert "FRACTION = default" "0.85" "$frac"
-
-    echo ""
-    echo "=== build_gpu_mem_args: --default-frac floors estimator ==="
-
-    frac=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --default-frac 0.5)
-    _assert "FRACTION = floor (0.5 > estimator)" "0.5" "$frac"
-
-    echo ""
-    echo "=== build_gpu_mem_args: --default-frac does NOT floor profiler ==="
-
-    frac=$(_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.30 \
-        build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --default-frac 0.5)
-    _assert "FRACTION = profiler (not clamped)" "0.30" "$frac"
-
-    echo ""
-    echo "=== build_gpu_mem_args: --default-frac does NOT floor user flag ==="
-
-    frac=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --gpu-memory-utilization 0.15 --default-frac 0.5)
-    _assert "FRACTION = user flag (not clamped)" "0.15" "$frac"
-
-    echo ""
     echo "=== build_gpu_mem_args: profiler wins over all ==="
 
     frac=$(_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.55 \
@@ -589,12 +549,6 @@ _gpu_utils_self_test() {
     local expected_half
     expected_half=$(awk -v f="$undivided" 'BEGIN { printf "%.2f", f / 2 }')
     _assert "FRACTION halved" "$expected_half" "$frac"
-
-    echo ""
-    echo "=== build_gpu_mem_args: --workers-per-gpu does NOT divide --default-frac ==="
-
-    frac=$(build_gpu_mem_args vllm --model "nope/unknown" --workers-per-gpu 2 --default-frac 0.4)
-    _assert "FRACTION = 0.4 (not divided)" "0.4" "$frac"
 
     echo ""
     echo "=== build_gpu_mem_args: --workers-per-gpu divides profiler ==="
@@ -650,4 +604,45 @@ _gpu_utils_self_test() {
 if [[ "${1:-}" == "--self-test" ]]; then
     _gpu_utils_self_test
     exit $?
+fi
+
+# CLI mode: estimate GPU fraction or show help
+if [[ $# -gt 0 ]]; then
+    build_gpu_mem_args "$@"
+    exit $?
+fi
+
+# No arguments — show help
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    cat <<'HELP'
+gpu_utils.sh — GPU memory fraction estimator
+
+Usage:
+  ./gpu_utils.sh <engine> --model <name> [options...]
+  ./gpu_utils.sh --self-test
+
+Engines: vllm, sglang, trtllm
+
+Examples:
+  ./gpu_utils.sh vllm --model Qwen/Qwen3-0.6B
+  ./gpu_utils.sh vllm --model Qwen/Qwen3-0.6B --max-model-len 4096 --max-num-seqs 2
+  ./gpu_utils.sh vllm --model Qwen/Qwen3-0.6B --workers-per-gpu 2
+  ./gpu_utils.sh sglang --model Qwen/Qwen3-0.6B --context-length 8192
+  ./gpu_utils.sh trtllm --model meta-llama/Meta-Llama-3.1-8B-Instruct --max-seq-len 4096
+
+Options:
+  --model NAME               Model name (required)
+    aliases: --model-path
+  --max-model-len N          Max sequence length (default: 4096)
+    aliases: --context-length, --max-seq-len
+  --max-num-seqs N           Concurrent sequences (default: 2)
+    aliases: --max-running-requests, --max-batch-size
+  --gpu-memory-utilization F Override fraction (vllm flag)
+    aliases: --mem-fraction-static
+  --workers-per-gpu N        Divide fraction by N (shared-GPU disagg)
+  --self-test                Run built-in test suite
+
+Output: prints the fraction to stdout (empty if model is unknown).
+HELP
+    exit 0
 fi

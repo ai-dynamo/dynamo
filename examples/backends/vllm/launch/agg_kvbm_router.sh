@@ -8,7 +8,6 @@ trap 'echo Cleaning up...; kill 0' EXIT
 export PYTHONHASHSEED=0
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Common configuration
@@ -25,8 +24,7 @@ python -m dynamo.frontend \
 # run workers with KVBM enabled
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --default-frac 0.4)
-
+# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56001 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56002 \
 CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
@@ -34,7 +32,7 @@ CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     --model $MODEL \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' \
-    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
+    --gpu-memory-utilization 0.4 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
@@ -45,7 +43,7 @@ CUDA_VISIBLE_DEVICES=1 DYN_KVBM_CPU_CACHE_GB=2 \
     --model $MODEL \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' \
-    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
+    --gpu-memory-utilization 0.4 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
