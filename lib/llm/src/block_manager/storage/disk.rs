@@ -12,7 +12,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Write;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 use std::path::Path;
 
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
@@ -22,7 +22,7 @@ const DISK_DISABLE_O_DIRECT_KEY: &str = "DYN_KVBM_DISK_DISABLE_O_DIRECT";
 
 #[derive(Debug)]
 pub struct DiskStorage {
-    fd: u64,
+    file: File, // Holds the owned descriptor, ensuring it automatically closes on Drop
     file_name: String,
     size: usize,
     handles: RegistrationHandles,
@@ -59,7 +59,7 @@ fn create_aligned_buffer(size: usize) -> anyhow::Result<AVec<u8, Align4096>> {
     Ok(buf)
 }
 
-fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
+fn allocate_file(fd: BorrowedFd<'_>, size: u64) -> anyhow::Result<()> {
     match fallocate(fd, FallocateFlags::empty(), 0, size as i64) {
         Ok(_) => {
             tracing::debug!("Successfully allocated {} bytes using fallocate()", size);
@@ -80,8 +80,15 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                     let buf = create_aligned_buffer(ZERO_BUF_SIZE)
                         .context("Failed to allocate aligned zero buffer")?;
 
-                    let mut file =
-                        unsafe { File::from_raw_fd(nix::unistd::dup(fd).context("dup error")?) };
+                    // Duplicate the raw descriptor and immediately wrap it in an Owned file for safety
+                    let dup_fd = nix::unistd::dup(fd).with_context(|| {
+                        format!(
+                            "Failed to duplicate file descriptor ({}) for the zero-fill fallback. \
+                            This typically occurs if the process has hit its open file descriptor limit (check `ulimit -n`).",
+                            fd.as_raw_fd()
+                        )
+                    })?;
+                    let mut file = std::fs::File::from(dup_fd);
 
                     let mut written: u64 = 0;
                     while written < size {
@@ -236,6 +243,9 @@ impl DiskStorage {
             )));
         }
 
+        // Take ownership immediately. If any errors occur below, the file drops and closes itself.
+        let file = unsafe { File::from_raw_fd(raw_fd) };
+
         // Determine whether to use O_DIRECT based on environment variable.
         // O_DIRECT is required for GPU DirectStorage but has strict alignment requirements.
         // For debugging or when filesystems don't support O_DIRECT alignment, it can be disabled.
@@ -306,7 +316,8 @@ impl DiskStorage {
             .to_string();
 
         // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        allocate_file(raw_fd, size as u64).map_err(|e| {
+        allocate_file(file.as_fd(), size as u64).map_err(|e| {
+            let _ = unlink(file_name.as_str());
             StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
         })?;
 
@@ -318,7 +329,7 @@ impl DiskStorage {
         );
 
         Ok(Self {
-            fd: raw_fd as u64,
+            file,
             file_name,
             size,
             handles: RegistrationHandles::new(),
@@ -376,6 +387,7 @@ impl Drop for DiskStorage {
         self.handles.release();
         let _ = self.unlink();
 
+        // No manual fd closing is needed here because self.file will be dropped automatically.
         tracing::info!(
             "DiskStorage dropped and cleaned up: fd={}, file={}",
             self.fd,
