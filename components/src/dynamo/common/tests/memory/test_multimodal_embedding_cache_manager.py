@@ -57,7 +57,7 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         cache.set("key1", CachedEmbedding(tensor2))
 
         retrieved = cache.get("key1")
-        assert torch.equal(retrieved.tensor, tensor2)
+        assert torch.equal(retrieved.tensor, tensor2)  # type: ignore[union-attr]
         assert cache.stats["entries"] == 1
 
 

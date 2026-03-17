@@ -71,7 +71,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         # Call parent cleanup for any base class cleanup
         super().cleanup()
 
-    async def generate(
+    async def generate(  # type: ignore[override]
         self, request: dict[str, Any], context: Context
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
@@ -103,16 +103,22 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             # Parse size
+            assert req.size is not None
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
             num_frames = nvext.num_frames
             if num_frames is None:
-                num_frames = nvext.fps * req.seconds
+                num_frames = nvext.fps * req.seconds  # type: ignore[operator]
 
             # Generate video
             context_id = context.id()
             assert context_id is not None
+            assert (
+                num_frames is not None
+                and nvext.fps is not None
+                and nvext.num_inference_steps is not None
+            )
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,

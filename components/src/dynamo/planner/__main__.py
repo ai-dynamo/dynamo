@@ -39,6 +39,7 @@ class RequestType(BaseModel):
 
 async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
     mode = config.mode
+    planner: DisaggPlanner | PrefillPlanner | DecodePlanner | AggPlanner
     if mode == "disagg":
         planner = DisaggPlanner(runtime, config)
     elif mode == "prefill":

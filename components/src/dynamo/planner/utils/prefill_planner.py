@@ -94,6 +94,7 @@ class PrefillPlanner(BasePlanner):
         return None
 
     def _update_correction_factor(self) -> bool:
+        assert self.last_metrics.isl is not None and self.last_metrics.ttft is not None
         expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
         self.p_correction_factor = self.last_metrics.ttft / expect_ttft
         logger.info(f"Correction factor (prefill TTFT): {self.p_correction_factor:.3f}")
@@ -118,14 +119,14 @@ class PrefillPlanner(BasePlanner):
             )
             return self.config.min_endpoint
         next_num_p = math.ceil(
-            pred_prefill_throughput
+            pred_prefill_throughput  # type: ignore[operator]
             / p_thpt_per_gpu
             / self.config.prefill_engine_num_gpu
         )
         next_num_p = max(next_num_p, self.config.min_endpoint)
         logger.info(
             f"Prefill calculation: {pred_prefill_throughput:.2f}(p_thpt) / "
-            f"{p_thpt_per_gpu * self.config.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
+            f"{p_thpt_per_gpu * self.config.prefill_engine_num_gpu:.2f}(p_engine_cap) = "  # type: ignore[operator]
             f"{next_num_p}(num_p)"
         )
         return next_num_p

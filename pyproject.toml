@@ -296,17 +296,23 @@ venv = ".venv"
 #   tensorrt_llm and vllm are both named common.
 explicit_package_bases = true
 
-# --ignore-missing-imports: WAR too many errors when developing outside
-#   of container environment with PYTHONPATH set and packages installed.
-#   NOTE: Can possibly move mypy from pre-commit to a github action run only in
-#   a container with the expected environment and PYTHONPATH setup.
-ignore_missing_imports = true
-
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-# Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
+# Skip mypy analysis on backend framework internals.
+# ignore_missing_imports silences import-not-found only when the backend
+# is not installed (e.g. sglang/trtllm missing in the vllm container).
+module = ["vllm", "vllm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sglang", "sglang.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tensorrt_llm", "tensorrt_llm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
@@ -315,6 +321,62 @@ ignore_missing_imports = true
 # "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Third-party libs without type stubs or optional internal deps
+module = [
+    "nvtx",
+    "fsspec",
+    "fsspec.*",
+    "kubernetes",
+    "kubernetes.*",
+    "scipy",
+    "scipy.*",
+    "sklearn",
+    "sklearn.*",
+    "pandas",
+    "pandas.*",
+    "pmdarima",
+    "pmdarima.*",
+    "filterpy",
+    "filterpy.*",
+    "prophet",
+    "prophet.*",
+    "msgpack",
+    "nixl",
+    "nixl.*",
+    "imageio",
+    "imageio.*",
+    "yaml",
+    "prometheus_api_client",
+    "prometheus_api_client.*",
+    "aiohttp",
+    "aiohttp.*",
+    "vllm_omni",
+    "vllm_omni.*",
+    "modelexpress",
+    "modelexpress.*",
+    "kvbm",
+    "kvbm.*",
+    "diffusers",
+    "diffusers.*",
+    "PIL",
+    "PIL.*",
+    "torch",
+    "torch.*",
+    "transformers",
+    "transformers.*",
+    "cupy",
+    "cupy.*",
+    "gpu_memory_service",
+    "gpu_memory_service.*",
+    "pydantic",
+    "pydantic.*",
+    "uvloop",
+    "prometheus_client",
+    "prometheus_client.*",
+]
+ignore_missing_imports = true
 
 [tool.sphinx]
 

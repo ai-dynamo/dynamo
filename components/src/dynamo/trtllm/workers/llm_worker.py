@@ -542,7 +542,7 @@ async def init_llm_worker(
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 await endpoint.serve_endpoint(
-                    handler.generate,
+                    handler.generate,  # type: ignore[arg-type]
                     metrics_labels=metrics_labels,
                     health_check_payload=health_check_payload,
                 )
@@ -553,5 +553,5 @@ async def init_llm_worker(
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
+                handler.generate, health_check_payload=health_check_payload  # type: ignore[arg-type]
             )

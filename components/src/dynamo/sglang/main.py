@@ -36,7 +36,9 @@ async def worker():
     dump_config(config.dynamo_args.dump_config_to, config)
 
     if config.server_args.load_format == "gms":
-        from gpu_memory_service.integrations.sglang import setup_gms
+        from gpu_memory_service.integrations.sglang import (
+            setup_gms,  # type: ignore[import-not-found]
+        )
 
         config.server_args.load_format = setup_gms(config.server_args)
 

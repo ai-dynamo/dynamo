@@ -55,7 +55,7 @@ async def init_multimodal_processor(
     try:
         _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore[arg-type]
                 graceful_shutdown=True,
                 metrics_labels=[
                     (prometheus_names.labels.MODEL, server_args.served_model_name),
@@ -107,7 +107,7 @@ async def init_multimodal_encode_worker(
     await pd_worker_client.wait_for_instances()
 
     try:
-        await generate_endpoint.serve_endpoint(
+        await generate_endpoint.serve_endpoint(  # type: ignore[arg-type]
             handler.generate,
             graceful_shutdown=True,
             metrics_labels=[
@@ -168,7 +168,7 @@ async def init_multimodal_worker(
 
     try:
         await generate_endpoint.serve_endpoint(
-            handler.generate,
+            handler.generate,  # type: ignore[arg-type]
             metrics_labels=[("model", server_args.served_model_name)],
             graceful_shutdown=True,
             health_check_payload=health_check_payload,
@@ -209,7 +209,7 @@ async def init_multimodal_prefill_worker(
 
     try:
         await generate_endpoint.serve_endpoint(
-            handler.generate,
+            handler.generate,  # type: ignore[arg-type]
             graceful_shutdown=True,
             metrics_labels=[("model", server_args.served_model_name)],
             health_check_payload=health_check_payload,

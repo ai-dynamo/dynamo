@@ -85,7 +85,7 @@ async def init_llm_diffusion(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore[arg-type]
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
@@ -178,7 +178,7 @@ async def init_image_diffusion(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore[arg-type]
                 graceful_shutdown=True,
                 metrics_labels=[],
                 health_check_payload=health_check_payload,
@@ -253,7 +253,7 @@ async def init_video_diffusion(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore[arg-type]
                 graceful_shutdown=True,
                 metrics_labels=[],
                 health_check_payload=health_check_payload,

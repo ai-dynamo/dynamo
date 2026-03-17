@@ -113,7 +113,7 @@ async def main(runtime: DistributedRuntime, args):
         }
 
     health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
-    await health_endpoint.serve_endpoint(health_check)
+    await health_endpoint.serve_endpoint(health_check)  # type: ignore[arg-type]
     logger.info("  ✓ health - Health check endpoint")
 
     logger.info("=" * 60)

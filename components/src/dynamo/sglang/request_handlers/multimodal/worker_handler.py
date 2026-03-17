@@ -24,7 +24,7 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 logger = logging.getLogger(__name__)
 
 try:
-    import cupy as array_module
+    import cupy as array_module  # type: ignore[import-untyped]
 
     if not array_module.cuda.is_available():
         raise ImportError("CUDA is not available.")
@@ -309,9 +309,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 request = SglangMultimodalRequest.model_validate(request)
         return request
 
-    async def generate(
+    async def generate(  # type: ignore[override]
         self, request: SglangMultimodalRequest, context: Context
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str]:  # type: ignore[override]
         """
         Generate response using SGLang with multimodal data
         Handles both aggregated and disaggregated modes (following regular SGLang DecodeWorkerHandler pattern)
@@ -471,7 +471,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             DisaggSglangMultimodalRequest(
                 request=request,
                 sampling_params=sampling_params,
-            ).model_dump_json()
+            ).model_dump_json()  # type: ignore[arg-type]
         )
 
         bootstrap_info = None
@@ -522,9 +522,9 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         """Initialize async components like connector"""
         await self.embeddings_processor.initialize()
 
-    async def generate(
+    async def generate(  # type: ignore[override]
         self, disagg_request: DisaggSglangMultimodalRequest, context: Context
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str]:  # type: ignore[override]
         """
         Handle prefill phase: process multimodal input and provide bootstrap info
 

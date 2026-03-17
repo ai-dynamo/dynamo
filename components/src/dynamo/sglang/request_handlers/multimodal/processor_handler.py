@@ -56,7 +56,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def generate(self, raw_request: MultiModalRequest, context: Context):
+    async def generate(self, raw_request: MultiModalRequest, context: Context):  # type: ignore[override]
         """
         Process multimodal request and forward to encode worker.
 
@@ -119,13 +119,13 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
         )
 
         worker_request = SglangMultimodalRequest(
-            request=sglang_request,
+            request=sglang_request,  # type: ignore[arg-type]
             multimodal_inputs=multimodal_groups,
         )
 
         # Send to encoder worker
         response_generator = await self.encode_worker_client.round_robin(
-            worker_request.model_dump_json()
+            worker_request.model_dump_json()  # type: ignore[arg-type]
         )
 
         # Process and yield SGLang responses

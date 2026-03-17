@@ -26,7 +26,7 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 logger = logging.getLogger(__name__)
 
 try:
-    import cupy as array_module
+    import cupy as array_module  # type: ignore[import-untyped]
 
     if not array_module.cuda.is_available():
         raise ImportError("CUDA is not available.")
@@ -221,10 +221,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 zip(multimodal_groups, image_grid_thw_list)
             ):
                 mm_group.image_grid_thw = image_grid_thw
-                mm_group.multimodal_input.image_url = None
+                mm_group.multimodal_input.image_url = None  # type: ignore[union-attr]
 
             # Store shared serialized tensor metadata at request level.
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.embeddings_shape = tuple(precomputed_embeddings.shape)  # type: ignore[assignment]
             request.serialized_request = None
 
             search_start = 0
@@ -252,7 +252,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
                 # Get the response generator from downstream worker
                 response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
+                    request.model_dump_json()  # type: ignore[arg-type]
                 )
                 with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
                     await readable.wait_for_completion()

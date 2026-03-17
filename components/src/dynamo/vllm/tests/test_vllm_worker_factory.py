@@ -80,7 +80,7 @@ class TestCreate:
 
         await factory.create(Mock(), config, shutdown_event, [])
 
-        factory._create_multimodal_encode_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_called_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_routes_to_multimodal_worker(self, factory: WorkerFactory) -> None:
@@ -89,7 +89,7 @@ class TestCreate:
 
         await factory.create(Mock(), config, shutdown_event, [])
 
-        factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_multimodal_worker.assert_called_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_routes_multimodal_decode_worker(
@@ -100,7 +100,7 @@ class TestCreate:
 
         await factory.create(Mock(), config, shutdown_event, [])
 
-        factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_multimodal_worker.assert_called_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
@@ -124,7 +124,7 @@ class TestCreate:
             snapshot_engine=snapshot_engine,
         )
 
-        factory._create_multimodal_worker.assert_called_once_with(  # type: ignore[union-attr]
+        factory._create_multimodal_worker.assert_called_once_with(  # type: ignore[attr-defined]
             runtime,
             config,
             shutdown_event,

@@ -76,7 +76,7 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
 
     config = await parse_args(sys.argv[1:])
 
-    assert "$JINJA_DIR" not in config.dynamo_args.custom_jinja_template
+    assert "$JINJA_DIR" not in config.dynamo_args.custom_jinja_template  # type: ignore[operator]
     assert config.dynamo_args.custom_jinja_template == JINJA_TEMPLATE_PATH, (
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.dynamo_args.custom_jinja_template}"

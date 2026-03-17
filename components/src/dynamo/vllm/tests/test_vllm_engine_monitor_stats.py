@@ -34,8 +34,8 @@ def _make_monitor(engine, shutdown_event=None):
     monitor.runtime = MagicMock()
     monitor.engine_client = engine
     monitor.shutdown_event = shutdown_event
-    monitor._monitor_task = asyncio.get_event_loop().create_future()
-    monitor._stats_task = asyncio.get_event_loop().create_future()
+    monitor._monitor_task = asyncio.get_event_loop().create_future()  # type: ignore[assignment]
+    monitor._stats_task = asyncio.get_event_loop().create_future()  # type: ignore[assignment]
     return monitor
 
 

@@ -53,7 +53,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
 
-    async def generate(
+    async def generate(  # type: ignore[override]
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate prefill output and provide bootstrap info for decode worker.

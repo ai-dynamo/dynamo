@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 from prometheus_client import Gauge, start_http_server
 
@@ -248,7 +248,7 @@ class BasePlanner:
 
     def __init__(
         self,
-        runtime: DistributedRuntime,
+        runtime: Optional[DistributedRuntime],
         config: PlannerConfig,
         dryrun: bool = False,
         shared_state: Optional[PlannerSharedState] = None,
@@ -270,6 +270,7 @@ class BasePlanner:
         self.model_name: Optional[str] = None
 
         if not self.dryrun:
+            assert runtime is not None, "runtime is required when not in dryrun mode"
             self.runtime = runtime
             self.namespace = config.namespace
 
@@ -277,7 +278,9 @@ class BasePlanner:
                 # Initialize connector based on environment
                 if config.environment == "global-planner":
                     assert config.global_planner_namespace is not None
-                    self.connector = GlobalPlannerConnector(
+                    self.connector: Union[
+                        GlobalPlannerConnector, KubernetesConnector, VirtualConnector
+                    ] = GlobalPlannerConnector(
                         runtime,
                         self.namespace,
                         config.global_planner_namespace,
@@ -309,9 +312,9 @@ class BasePlanner:
                 self.prometheus_traffic_client.warn_if_router_not_scraped()
 
         predictor_cls = LOAD_PREDICTORS[config.load_predictor]
-        self.num_req_predictor = predictor_cls(config)
-        self.isl_predictor = predictor_cls(config)
-        self.osl_predictor = predictor_cls(config)
+        self.num_req_predictor = predictor_cls(config)  # type: ignore[abstract]
+        self.isl_predictor = predictor_cls(config)  # type: ignore[abstract]
+        self.osl_predictor = predictor_cls(config)  # type: ignore[abstract]
 
         # Optional warmup: preload predictors with historical observations from a
         # mooncake-style JSONL trace (request_count/avg_isl/avg_osl per interval).
@@ -388,10 +391,10 @@ class BasePlanner:
 
         self.prefill_component_name = WORKER_COMPONENT_NAMES[
             self.config.backend
-        ].prefill_worker_k8s_name
+        ].prefill_worker_k8s_name  # type: ignore[attr-defined]
         self.decode_component_name = WORKER_COMPONENT_NAMES[
             self.config.backend
-        ].decode_worker_k8s_name
+        ].decode_worker_k8s_name  # type: ignore[attr-defined]
 
         self.prometheus_metrics: PlannerPrometheusMetrics | None = None
         if not self.dryrun:
@@ -434,7 +437,7 @@ class BasePlanner:
                     getattr(self, "connector", None), KubernetesConnector
                 ):
                     config.load_router_metrics_url = (
-                        self.connector.get_frontend_metrics_url()
+                        self.connector.get_frontend_metrics_url()  # type: ignore[union-attr]
                     )
                     if not config.load_router_metrics_url:
                         raise ValueError(
@@ -447,6 +450,7 @@ class BasePlanner:
                             f"Auto-discovered frontend metrics URL: {config.load_router_metrics_url}"
                         )
 
+                assert config.load_router_metrics_url is not None
                 self.prometheus_engine_client = DirectRouterMetricsClient(
                     config.load_router_metrics_url, config.namespace
                 )
@@ -494,6 +498,7 @@ class BasePlanner:
 
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         """Create a client for the given component and endpoint, with a brief sleep for state sync."""
+        assert self.runtime is not None
         client = await self.runtime.endpoint(
             f"{self.namespace}.{component_name}.{endpoint_name}"
         ).client()
@@ -544,8 +549,8 @@ class BasePlanner:
             try:
                 if self.prefill_client is None:
                     self.prefill_client = await self._get_or_create_client(
-                        worker_names.prefill_worker_component_name,
-                        worker_names.prefill_worker_endpoint,
+                        worker_names.prefill_worker_component_name,  # type: ignore[attr-defined]
+                        worker_names.prefill_worker_endpoint,  # type: ignore[attr-defined]
                     )
                 num_p_workers = len(self.prefill_client.instance_ids())  # type: ignore
             except Exception:
@@ -558,8 +563,8 @@ class BasePlanner:
             try:
                 if self.workers_client is None:
                     self.workers_client = await self._get_or_create_client(
-                        worker_names.decode_worker_component_name,
-                        worker_names.decode_worker_endpoint,
+                        worker_names.decode_worker_component_name,  # type: ignore[attr-defined]
+                        worker_names.decode_worker_endpoint,  # type: ignore[attr-defined]
                     )
                 num_d_workers = len(self.workers_client.instance_ids())  # type: ignore
             except Exception as e:
@@ -573,6 +578,9 @@ class BasePlanner:
         """
         Observe metrics from Prometheus and update shared state.
         """
+        assert (
+            self.model_name is not None
+        ), "model_name must be set before observing traffic stats"
         num_p_workers, num_d_workers, _ = await self.get_workers_info(
             require_prefill=require_prefill, require_decode=require_decode
         )
@@ -666,6 +674,11 @@ class BasePlanner:
         self.update_predictors_from_metrics(self.last_metrics)
 
     def update_predictors_from_metrics(self, metrics: Metrics) -> None:
+        assert (
+            metrics.num_req is not None
+            and metrics.isl is not None
+            and metrics.osl is not None
+        )
         self.num_req_predictor.add_data_point(metrics.num_req)
         self.isl_predictor.add_data_point(metrics.isl)
         self.osl_predictor.add_data_point(metrics.osl)

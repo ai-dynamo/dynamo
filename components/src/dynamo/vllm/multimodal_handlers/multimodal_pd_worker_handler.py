@@ -99,11 +99,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_receiver = LocalEmbeddingReceiver()
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()  # type: ignore[assignment]
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
             # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
             # to be at matching size, need to overwrite nixl connect library
-            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)  # type: ignore[assignment]
         else:
             raise ValueError(
                 f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
@@ -381,8 +381,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             num_output_tokens_so_far = 0
             async for (
                 decode_response
-            ) in await self.decode_worker_client.round_robin(  # type: ignore
-                request.model_dump_json()
+            ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
+                request.model_dump_json()  # type: ignore[arg-type]
             ):
                 output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore
                 yield self._format_engine_output(output, num_output_tokens_so_far)

@@ -122,7 +122,7 @@ class BaseOmniHandler(BaseWorkerHandler):
 
         return omni_kwargs
 
-    async def generate(
+    async def generate(  # type: ignore[override]
         self, request: Dict[str, Any], context
     ) -> AsyncGenerator[Dict, None]:
         """Generate outputs using AsyncOmni orchestrator with OpenAI-compatible format.

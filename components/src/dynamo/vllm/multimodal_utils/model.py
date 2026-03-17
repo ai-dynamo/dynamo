@@ -235,6 +235,9 @@ def _construct_qwen_image_data(
     }
 
 
+_qwen_decode_counter: int = 0
+
+
 def construct_qwen_decode_mm_data(
     image_grid_thw: Optional[List[Any]],
     embeddings_shape: Optional[Any],
@@ -278,15 +281,14 @@ def construct_qwen_decode_mm_data(
     # This prevents prefix cache from incorrectly matching different images
     # that happen to have the same dimensions (same image_grid_thw).
     # bit ops to convert request ID to somewhat unique value that fits in the dtype range
-    if not hasattr(construct_qwen_decode_mm_data, "_counter"):
-        construct_qwen_decode_mm_data._counter = 0
-    fill_value = construct_qwen_decode_mm_data._counter
-    construct_qwen_decode_mm_data._counter += 1
+    global _qwen_decode_counter
+    fill_value = _qwen_decode_counter
+    _qwen_decode_counter += 1
     max_val = (
         torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
     )
-    if construct_qwen_decode_mm_data._counter > max_val:
-        construct_qwen_decode_mm_data._counter = 0
+    if _qwen_decode_counter > max_val:
+        _qwen_decode_counter = 0
     image_embeds = torch.full(
         embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
     )

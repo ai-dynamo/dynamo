@@ -58,6 +58,8 @@ async def worker(runtime: DistributedRuntime):
     logger.info(f"Namespace: {config.namespace}")
 
     # Create handler
+    assert config.config_path is not None, "config_path is required"
+    assert config.model_name is not None, "model_name is required"
     handler = GlobalRouterHandler(
         runtime=runtime,
         config_path=config.config_path,
@@ -81,12 +83,13 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Registering as prefill worker...")
     # Register as prefill worker - frontend will send prefill requests here
     # Use model_name as model_path since we don't need tokenizer/model files
+    model_name = config.model_name  # already asserted non-None above
     await register_model(
         model_input=ModelInput.Tokens,
         model_type=ModelType.Prefill,
         endpoint=prefill_endpoint,
-        model_path=config.model_name,
-        model_name=config.model_name,
+        model_path=model_name,
+        model_name=model_name,
     )
     logger.info(
         f"Registered prefill endpoint: {config.namespace}.{config.component_name}.prefill_generate"
@@ -98,8 +101,8 @@ async def worker(runtime: DistributedRuntime):
         model_input=ModelInput.Tokens,
         model_type=ModelType.Chat | ModelType.Completions,
         endpoint=decode_endpoint,
-        model_path=config.model_name,
-        model_name=config.model_name,
+        model_path=model_name,
+        model_name=model_name,
     )
     logger.info(
         f"Registered decode endpoint: {config.namespace}.{config.component_name}.decode_generate"
@@ -112,12 +115,12 @@ async def worker(runtime: DistributedRuntime):
     try:
         await asyncio.gather(
             prefill_endpoint.serve_endpoint(
-                handler.handle_prefill,
+                handler.handle_prefill,  # type: ignore[arg-type]
                 graceful_shutdown=True,
                 metrics_labels=[("service", "global_router"), ("type", "prefill")],
             ),
             decode_endpoint.serve_endpoint(
-                handler.handle_decode,
+                handler.handle_decode,  # type: ignore[arg-type]
                 graceful_shutdown=True,
                 metrics_labels=[("service", "global_router"), ("type", "decode")],
             ),
