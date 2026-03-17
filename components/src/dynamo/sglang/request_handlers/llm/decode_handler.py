@@ -113,21 +113,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         priority = (request.get("routing") or {}).get("priority")
 
-        if self.serving_mode == DisaggregationMode.DECODE:
-            # Check if bootstrap_info is pre-computed in the request (from frontend)
-            bootstrap_info = request.get("bootstrap_info")
-
-            if not bootstrap_info:
-                raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided"
-                )
-
+        # Check if bootstrap_info is pre-computed in the request (from frontend)
+        bootstrap_info: Dict[str, Any] | None = request.get("bootstrap_info")
+        
+        if bootstrap_info is not None:
             logging.debug(
                 f"Using bootstrap_info: "
                 f"host={bootstrap_info['bootstrap_host']}, "
                 f"port={bootstrap_info['bootstrap_port']}, "
                 f"room={bootstrap_info['bootstrap_room']}"
             )
+
+        if self.serving_mode == DisaggregationMode.DECODE:
+            if not bootstrap_info:
+                raise RuntimeError(
+                    "bootstrap_info is required for disaggregated decode but was not provided"
+                )
 
             trace_header = (
                 self._get_trace_header(context) if self.enable_trace else None
@@ -142,9 +143,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 return_routed_experts=return_routed_experts,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
+                bootstrap_host=bootstrap_info.get("bootstrap_host"),
+                bootstrap_port=bootstrap_info.get("bootstrap_port"),
+                bootstrap_room=bootstrap_info.get("bootstrap_room"),
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
@@ -179,6 +180,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
+            # 'bootstrap_room' parameter may be not None when it is going from the DP-aware health check task.
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
@@ -187,6 +189,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 return_routed_experts=return_routed_experts,
                 external_trace_header=trace_header,
                 rid=trace_id,
+                bootstrap_room=bootstrap_info.get("bootstrap_room") if bootstrap_info is not None else None,
                 data_parallel_rank=dp_rank,
                 **self._priority_kwargs(priority),
             )
