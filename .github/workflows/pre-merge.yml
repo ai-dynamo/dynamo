@@ -43,9 +43,39 @@ jobs:
         with:
           gh_token: ${{ github.token }}
 
+  mypy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: '3.12'
+    - name: Install mypy and type stubs
+      run: |
+        pip install mypy==1.18.2 \
+          boto3-stubs[s3] types-aiofiles types-PyYAML types-requests types-tabulate
+    - name: Run mypy (components)
+      run: |
+        MYPYPATH=components/src python3 -m mypy --explicit-package-bases \
+          components/src/dynamo/common \
+          components/src/dynamo/frontend \
+          components/src/dynamo/global_planner \
+          components/src/dynamo/global_router \
+          components/src/dynamo/mocker \
+          components/src/dynamo/planner \
+          components/src/dynamo/router \
+          components/src/dynamo/vllm \
+          components/src/dynamo/sglang \
+          components/src/dynamo/trtllm
+    - name: Run mypy (python bindings)
+      run: |
+        MYPYPATH=lib/bindings/python/src python3 -m mypy -p dynamo
+
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, mypy, rust-tests, rust-clippy]
     if: always()
     steps:
       - name: "Check all dependent jobs"
