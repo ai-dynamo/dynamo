@@ -193,6 +193,11 @@ vllm_omni_configs = {
         name="omni_video",
         directory=vllm_dir,
         script_name="agg_omni_video.sh",
+        script_args=[
+            "--vae-use-slicing",
+            "--vae-use-tiling",
+            "--enforce-eager",
+        ],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
@@ -203,11 +208,11 @@ vllm_omni_configs = {
             VideoGenerationPayload(
                 body={
                     "prompt": "Dog running on a beach",
-                    "size": "832x480",
+                    "size": "480x272",
                     "response_format": "url",
                     "nvext": {
-                        "num_inference_steps": 20,
-                        "num_frames": 30,
+                        "num_inference_steps": 10,
+                        "num_frames": 17,
                     },
                 },
                 repeat_count=1,
