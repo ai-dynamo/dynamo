@@ -47,7 +47,7 @@ redirects:
   - source: "/dynamo/resources/examples"
     destination: "/dynamo/dev/resources/examples"
   # Version-scoped getting-started → resources redirects
-  # Only for versions where these pages moved (dev, v1.0.0, latest).
+  # Only for versions where these pages moved (dev, v1.0.0, v1.0.1, latest).
   # Older versions (v0.9.x and below) still have pages under getting-started.
   - source: "/dynamo/dev/getting-started/support-matrix"
     destination: "/dynamo/dev/resources/support-matrix"

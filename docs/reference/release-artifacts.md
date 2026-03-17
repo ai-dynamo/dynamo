@@ -179,11 +179,11 @@ For a complete list of known issues, refer to the release notes for each version
 
 ### GitHub Releases
 
-| Version | Release Date | GitHub | Docs |
-|---------|--------------|--------|------|
-| `v1.1.0-dev.1` | Mar 2026 | [Branch](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.1) | — | Experimental |
-| `v1.0.1` | Mar 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) |
-| `v1.0.0` | Mar 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) |
+| Version | Release Date | GitHub | Docs | Notes |
+|---------|--------------|--------|------|-------|
+| `v1.1.0-dev.1` | Mar 17, 2026 | [Branch](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.1) | — | Experimental |
+| `v1.0.1` | Mar 16, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
+| `v1.0.0` | Mar 12, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v0.9.1` | Mar 4, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) |
 | `v0.9.0` | Feb 11, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo/v-0-9-0/) |
 | `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | [Docs](https://docs.nvidia.com/dynamo/v-0-8-1/) |
