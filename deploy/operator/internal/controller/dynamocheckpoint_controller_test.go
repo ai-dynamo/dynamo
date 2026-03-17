@@ -234,6 +234,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	backoff := int32(5)
 	ttl := int32(600)
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
+	//nolint:staticcheck // Compatibility test: deprecated field must remain ignored by checkpoint Jobs.
 	ckpt.Spec.Job.BackoffLimit = &backoff
 	ckpt.Spec.Job.TTLSecondsAfterFinished = &ttl
 	job = r.buildCheckpointJob(ckpt, "checkpoint-job-"+testHash)
