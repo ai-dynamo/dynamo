@@ -104,6 +104,7 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      copy_timeout_minutes: 20
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
@@ -119,6 +120,7 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      copy_timeout_minutes: 20
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
@@ -134,6 +136,7 @@ jobs:
       cuda_versions: '["13.1"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      copy_timeout_minutes: 20
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
