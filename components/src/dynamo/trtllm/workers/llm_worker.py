@@ -444,6 +444,7 @@ async def init_llm_worker(
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
+            model_max_len=config.max_seq_len,
         )
 
         # Register the model with runtime config

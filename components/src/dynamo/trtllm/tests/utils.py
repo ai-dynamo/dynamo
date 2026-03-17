@@ -33,4 +33,5 @@ def create_mock_request_handler_config(
     config.kv_block_size = 32
     config.shutdown_event = None
     config.encoder_cache_capacity_gb = encoder_cache_capacity_gb
+    config.model_max_len = None
     return config
