@@ -5,7 +5,7 @@
 //! mirroring the block lifecycle state machine:
 //! `MutableBlock<T>` → `CompleteBlock<T>` → `ImmutableBlock<T>`.
 
-use crate::BlockId;
+use crate::{BlockId, SequenceHash};
 use crate::blocks::{BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock};
 use crate::manager::BlockManager;
 use dynamo_tokens::TokenBlock;
@@ -29,6 +29,19 @@ pub enum LogicalBlockAssignmentError<T: BlockMetadata> {
     DuplicateAssignedBlockId {
         /// The first duplicate block_id detected.
         block_id: BlockId,
+        /// All input blocks returned for recovery (no leaks).
+        blocks: Vec<ImmutableBlock<T>>,
+    },
+
+    /// A matched block's sequence hash does not match the expected sequence hash.
+    #[error("sequence hash mismatch at position {position}: expected {expected}, got {actual}")]
+    SequenceHashMismatch {
+        /// The position in the sequence where the mismatch was detected.
+        position: usize,
+        /// The expected hash from the token sequence.
+        expected: SequenceHash,
+        /// The actual hash from the matched block.
+        actual: SequenceHash,
         /// All input blocks returned for recovery (no leaks).
         blocks: Vec<ImmutableBlock<T>>,
     },

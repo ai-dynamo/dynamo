@@ -46,13 +46,11 @@ impl<T: BlockMetadata> RequestSequence<T> {
     /// Creates a `RequestSequence` with token data only. No blocks are
     /// allocated and no manager interaction occurs.
     ///
-    /// The caller must use the individual methods ([`match_prefix`],
-    /// [`add_matched_blocks`], [`allocate_blocks`],
-    /// [`complete_and_register_pending`]) to search, allocate, and register
-    /// blocks.
+    /// The caller must use [`match_and_add_prefix`], [`allocate_blocks`],
+    /// and [`complete_and_register_pending`] to search, allocate, and
+    /// register blocks.
     ///
-    /// [`match_prefix`]: Self::match_prefix
-    /// [`add_matched_blocks`]: Self::add_matched_blocks
+    /// [`match_and_add_prefix`]: Self::match_and_add_prefix
     /// [`allocate_blocks`]: Self::allocate_blocks
     /// [`complete_and_register_pending`]: Self::complete_and_register_pending
     pub fn new(tokens: Vec<Token>, max_output_tokens: usize, block_size: u32) -> Self {
@@ -74,20 +72,48 @@ impl<T: BlockMetadata> RequestSequence<T> {
     // Individual block operations
     // =====================================================================
 
+    /// Search for prefix cache hits and add matched blocks in one step.
+    ///
+    /// This is the standard entry point for prefix matching on a fresh
+    /// sequence. Combines [`match_prefix`](Self::match_prefix) and
+    /// [`add_matched_blocks`](Self::add_matched_blocks).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sequence already has assigned blocks (i.e. this is
+    /// not a fresh sequence).
+    pub fn match_and_add_prefix(
+        &mut self,
+        manager: &BlockManager<T>,
+    ) -> Result<usize, LogicalBlockAssignmentError<T>> {
+        assert!(
+            self.assignments.is_empty(),
+            "match_and_add_prefix called on sequence with existing assignments"
+        );
+        let matched = self.match_prefix(manager);
+        if matched.is_empty() {
+            return Ok(0);
+        }
+        self.add_matched_blocks(matched)
+    }
+
     /// Search for prefix cache hits against the manager's pools.
     ///
     /// Returns matched [`ImmutableBlock`]s in sequence order. Pass the result
     /// to [`add_matched_blocks`](Self::add_matched_blocks).
-    pub fn match_prefix(&self, manager: &BlockManager<T>) -> Vec<ImmutableBlock<T>> {
+    fn match_prefix(&self, manager: &BlockManager<T>) -> Vec<ImmutableBlock<T>> {
         let hashes = self.sequence.all_sequence_hashes();
         manager.match_blocks(&hashes)
     }
 
     /// Add prefix-matched immutable blocks as assigned.
     ///
-    /// Updates the internal `prefix_matched_blocks` counter.
+    /// Accumulates the internal `prefix_matched_blocks` counter so this
+    /// method can be called more than once (e.g. partial prefix matches
+    /// applied in separate batches).
+    ///
     /// Returns the number of blocks added.
-    pub fn add_matched_blocks(
+    fn add_matched_blocks(
         &mut self,
         blocks: Vec<ImmutableBlock<T>>,
     ) -> Result<usize, LogicalBlockAssignmentError<T>> {
@@ -102,15 +128,20 @@ impl<T: BlockMetadata> RequestSequence<T> {
         );
 
         for (i, (block, seq_block)) in blocks.iter().zip(&sequence_blocks[start..end]).enumerate() {
-            debug_assert_eq!(
-                block.sequence_hash(),
-                seq_block.kvbm_sequence_hash(),
-                "matched block hash mismatch at position {}",
-                start + i
-            );
+            let expected = seq_block.kvbm_sequence_hash();
+            let actual = block.sequence_hash();
+            if expected != actual {
+                return Err(LogicalBlockAssignmentError::SequenceHashMismatch {
+                    position: start + i,
+                    expected,
+                    actual,
+                    blocks,
+                });
+            }
         }
+
         self.assignments.extend_assigned(blocks)?;
-        self.prefix_matched_blocks = count;
+        self.prefix_matched_blocks += count;
         Ok(count)
     }
 
@@ -434,11 +465,7 @@ mod tests {
     ) -> Option<RequestSequence<TestMeta>> {
         let mut seq = RequestSequence::new(tokens, max_output_tokens, block_size);
         let completed_blocks = seq.num_blocks();
-        let matched = seq.match_prefix(manager);
-        let matched_count = matched.len();
-        if !matched.is_empty() {
-            seq.add_matched_blocks(matched).ok()?;
-        }
+        let matched_count = seq.match_and_add_prefix(manager).ok()?;
         let remaining_complete = completed_blocks - matched_count;
         let needs_generation = max_output_tokens > 0;
         let total_to_allocate = remaining_complete + usize::from(needs_generation);
@@ -585,10 +612,8 @@ mod tests {
         let _ = seq.add_matched_blocks(matched);
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "matched block hash mismatch at position 0")]
-    fn test_add_matched_blocks_panics_on_hash_mismatch() {
+    fn test_add_matched_blocks_returns_error_on_hash_mismatch() {
         let manager = create_test_manager::<TestMeta>(20);
         let mut seq = RequestSequence::<TestMeta>::new(make_tokens(4), 10, BLOCK_SIZE);
 
@@ -601,7 +626,17 @@ mod tests {
             .unwrap();
         let mismatched = manager.register_block(mutable.complete(&source.blocks()[0]).unwrap());
 
-        let _ = seq.add_matched_blocks(vec![mismatched]);
+        let result = seq.add_matched_blocks(vec![mismatched]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LogicalBlockAssignmentError::SequenceHashMismatch {
+                position, blocks, ..
+            } => {
+                assert_eq!(position, 0);
+                assert_eq!(blocks.len(), 1);
+            }
+            other => panic!("expected SequenceHashMismatch, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -731,12 +766,11 @@ mod tests {
         drop(registered);
 
         let mut seq = RequestSequence::<TestMeta>::new(tokens, 10, BLOCK_SIZE);
-        let matched = seq.match_prefix(&manager);
-        assert_eq!(matched.len(), 1);
-        seq.add_matched_blocks(matched).unwrap();
+        let matched_count = seq.match_and_add_prefix(&manager).unwrap();
+        assert_eq!(matched_count, 1);
         assert_eq!(seq.prefix_matched_blocks(), 1);
 
-        let remaining = seq.num_blocks() - 1;
+        let remaining = seq.num_blocks() - matched_count;
         assert!(seq.allocate_blocks(remaining + 1, &manager));
         seq.complete_and_register_pending(&manager);
 

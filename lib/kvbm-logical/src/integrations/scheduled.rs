@@ -271,13 +271,12 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
     ) -> Result<usize, ScheduleError> {
         self.require_idle()?;
 
-        let matched = self.inner.match_prefix(manager);
-        let count = matched.len();
+        let count = self
+            .inner
+            .match_and_add_prefix(manager)
+            .unwrap_or_else(|_| panic!("prefix match should not produce duplicates"));
 
         if count > 0 {
-            self.inner
-                .add_matched_blocks(matched)
-                .unwrap_or_else(|_| panic!("prefix match should not produce duplicates"));
             self.prefill_position += count * self.inner.block_size();
             self.kv_position = self.prefill_position;
         }

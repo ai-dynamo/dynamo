@@ -39,11 +39,7 @@ let mut seq = RequestSequence::<MyMeta>::new(tokens, 10, 4);
 // total_tokens=8, num_blocks=2, nothing allocated yet
 
 // 2. Prefix match against the cache
-let matched = seq.match_prefix(&manager);
-let matched_count = matched.len();
-if !matched.is_empty() {
-    seq.add_matched_blocks(matched).unwrap();
-}
+let matched_count = seq.match_and_add_prefix(&manager).unwrap();
 
 // 3. Allocate blocks for the rest
 let remaining = seq.num_blocks() - matched_count;
