@@ -115,7 +115,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Check if bootstrap_info is pre-computed in the request (from frontend)
         bootstrap_info: Dict[str, Any] | None = request.get("bootstrap_info")
-        
+
         if bootstrap_info is not None:
             logging.debug(
                 f"Using bootstrap_info: "
@@ -189,7 +189,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 return_routed_experts=return_routed_experts,
                 external_trace_header=trace_header,
                 rid=trace_id,
-                bootstrap_room=bootstrap_info.get("bootstrap_room") if bootstrap_info is not None else None,
+                bootstrap_room=bootstrap_info.get("bootstrap_room")
+                if bootstrap_info is not None
+                else None,
                 data_parallel_rank=dp_rank,
                 **self._priority_kwargs(priority),
             )
