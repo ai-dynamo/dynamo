@@ -45,10 +45,11 @@ class ImageGenerationPayload(BasePayload):
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in image response"
         entry = result["data"][0]
-        assert (
-            "b64_json" in entry or "url" in entry
-        ), f"Expected 'b64_json' or 'url' in data entry. Keys: {list(entry.keys())}"
-        return entry.get("url") or "b64_image_returned"
+        if "url" in entry:
+            assert entry["url"], "Image response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
 
 
 @dataclass
@@ -70,17 +71,20 @@ class VideoGenerationPayload(BasePayload):
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
-        assert (
-            "url" in entry or "b64_json" in entry
-        ), f"Expected 'url' or 'b64_json' in data entry. Keys: {list(entry.keys())}"
-        return entry.get("url") or "b64_video_returned"
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"
 
     def validate(self, response: Any, content: str) -> None:
-        if self.expected_response:
-            for expected in self.expected_response:
-                if expected.lower() in content.lower():
-                    return
         assert content, "Video response content is empty"
+        if self.expected_response and not any(
+            expected.lower() in content.lower() for expected in self.expected_response
+        ):
+            raise AssertionError(
+                f"Expected at least one of {self.expected_response} in {content!r}"
+            )
 
 
 @dataclass
