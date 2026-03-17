@@ -212,6 +212,12 @@ filterwarnings = [
     "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
     # nvidia-modelopt warning about transformers version incompatibility
     "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
+
+    ################################################################################################
+    # SGLang
+    ################################################################################################
+    # Triton emits a UserWarning at import time on CPU-only runners (no GPU driver available)
+    "ignore:Triton is not supported on current platform.*:UserWarning",
 ]
 
 
