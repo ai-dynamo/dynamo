@@ -162,6 +162,8 @@ def configure_checkpoint_transport_env() -> None:
             nccl_ib_disable,
         )
     os.environ["NCCL_IB_DISABLE"] = "1"
+    os.environ.setdefault("TORCH_NCCL_ENABLE_MONITORING", "0")
+
 
 @dataclass
 class EngineSnapshotController(Generic[EngineT]):
