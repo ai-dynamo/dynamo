@@ -601,19 +601,17 @@ _gpu_utils_self_test() {
     [[ "$fail" -eq 0 ]]
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
-    _gpu_utils_self_test
-    exit $?
-fi
-
-# CLI mode: estimate GPU fraction or show help
-if [[ $# -gt 0 ]]; then
-    build_gpu_mem_args "$@"
-    exit $?
-fi
-
-# No arguments — show help
+# CLI mode: only when executed directly (not sourced by another script)
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    if [[ "${1:-}" == "--self-test" ]]; then
+        _gpu_utils_self_test
+        exit $?
+    fi
+    if [[ $# -gt 0 ]]; then
+        build_gpu_mem_args "$@"
+        exit $?
+    fi
+
     cat <<'HELP'
 gpu_utils.sh — GPU memory fraction estimator
 
