@@ -7,11 +7,8 @@ pub use dynamo_kv_router::scheduling::{
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 
-use super::KvRouterConfig;
-use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::metrics::ROUTER_QUEUE_METRICS;
-use super::protocols::{OverlapScores, WorkerId};
 use super::queue::SchedulerQueue;
 use super::sequence::{
     ActiveSequencesMulti, SequenceError, SequenceRequest, create_multi_worker_sequences,
@@ -19,6 +16,10 @@ use super::sequence::{
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::{OverlapScores, WorkerId},
+};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use std::collections::{HashMap, HashSet};

@@ -5,12 +5,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_kv_router::{
+    config::RouterConfigOverride,
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
-use crate::kv_router::protocols::{BlockExtraInfo, WorkerId};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
