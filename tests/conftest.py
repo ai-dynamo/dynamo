@@ -326,12 +326,24 @@ def pytest_collection_modifyitems(config, items):
             vram_mark = item.get_closest_marker("max_vram_gib")
             vram_val = vram_mark.args[0] if vram_mark and vram_mark.args else None
             name = item.nodeid.split("::", 1)[1] if "::" in item.nodeid else item.nodeid
-            if (
+
+            skip_reasons = []
+            for marker in item.iter_markers("skip"):
+                reason = marker.kwargs.get("reason", "")
+                if not reason and marker.args:
+                    reason = marker.args[0]
+                skip_reasons.append(reason or "no reason given")
+
+            vram_skipped = (
                 vram_limit is not None
                 and vram_val is not None
                 and vram_val > vram_limit
-            ):
-                would_skip.append((name, vram_val))
+            )
+            if vram_skipped:
+                skip_reasons.insert(0, f"{vram_val} GiB > {vram_limit} GiB VRAM limit")
+
+            if skip_reasons:
+                would_skip.append((name, vram_val, skip_reasons))
             elif vram_val is not None:
                 would_run.append((name, vram_val))
             else:
@@ -348,8 +360,9 @@ def pytest_collection_modifyitems(config, items):
                 print(f"  {name}  ({gib} GiB)")
         if would_skip:
             print(f"\nWould SKIP ({len(would_skip)}):")
-            for name, gib in would_skip:
-                print(f"  {name}  ({gib} GiB > {vram_limit})")
+            for name, vram_val, reasons in would_skip:
+                vram_str = f"  ({vram_val} GiB)" if vram_val is not None else ""
+                print(f"  {name}{vram_str}  -- {'; '.join(reasons)}")
         if unmarked:
             print(f"\nNo VRAM marker — always run ({len(unmarked)}):")
             for name in unmarked:
