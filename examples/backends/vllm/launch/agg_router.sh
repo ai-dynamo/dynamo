@@ -29,6 +29,7 @@ python -m dynamo.frontend \
 #
 # If multiple workers are launched, they must not share the same system/metrics port.
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
+# TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 #
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \

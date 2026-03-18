@@ -21,6 +21,7 @@ from safetensors import torch as safetensors_torch
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -826,19 +827,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.aggregated_op_wait_time = 0
         self.warmedup_descriptors: Queue[nixl_connect.Descriptor] = Queue()
         self.inuse_descriptors: dict[int, tuple[nixl_connect.Descriptor, bool]] = {}
-        # Handle both sync and async contexts
-        try:
-            asyncio.get_running_loop()  # Check if we're in async context
-            # If we're in an async context, we need to run the connection creation in a separate thread to avoid blocking the event loop
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                connection = pool.submit(
-                    asyncio.run, self.connector._create_connection()
-                ).result(timeout=10)
-        except RuntimeError:
-            # No running loop - safe to use asyncio.run()
-            connection = asyncio.run(self.connector._create_connection())
+        connection = run_async(self.connector._create_connection)
         # Create descriptor for our allocated tensor
         for _ in range(max_items):
             encodings_tensor = torch.zeros(
