@@ -174,12 +174,12 @@ navigation:
             path: ../pages-v0.8.1/kubernetes/api-reference.md
       - section: Multimodal Details
         contents:
-          - page: vLLM
-            path: ../pages-v0.8.1/multimodal/vllm.md
           - page: SGLang
             path: ../pages-v0.8.1/multimodal/sglang.md
           - page: TensorRT-LLM
             path: ../pages-v0.8.1/multimodal/trtllm.md
+          - page: vLLM
+            path: ../pages-v0.8.1/multimodal/vllm.md
       - section: Router Details
         contents:
           - page: KV Cache Routing
