@@ -162,7 +162,16 @@ def configure_checkpoint_transport_env() -> None:
             nccl_ib_disable,
         )
     os.environ["NCCL_IB_DISABLE"] = "1"
-    os.environ.setdefault("TORCH_NCCL_ENABLE_MONITORING", "0")
+
+    torch_nccl_monitoring = os.environ.get("TORCH_NCCL_ENABLE_MONITORING")
+    if torch_nccl_monitoring and torch_nccl_monitoring != "0":
+        logger.warning(
+            "Overriding TORCH_NCCL_ENABLE_MONITORING=%r with '0' for checkpoint mode "
+            "because ProcessGroupNCCL monitoring can terminate restored processes",
+            torch_nccl_monitoring,
+        )
+    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
+    os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
 
 
 @dataclass
