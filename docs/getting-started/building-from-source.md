@@ -1,8 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Building from Source
+sidebar-title: Building from Source
+description: Build Dynamo from source for development and contributions
 ---
+
+# Building from Source
 
 Build Dynamo from source when you want to contribute code, test features on the development branch, or customize the build. If you just want to run Dynamo, the [Local Installation](local-installation.md) guide is faster.
 
