@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
+      - "test-sglang-epd-nixl-write"
   workflow_dispatch:
 
 concurrency:
