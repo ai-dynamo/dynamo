@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Deploy Operator
+
+on:
+  workflow_call:
+    inputs:
+      operator_tag:
+        description: 'Operator image tag to deploy'
+        type: string
+        required: true
+    outputs:
+      namespace:
+        description: 'Host namespace where the vCluster was created'
+        value: ${{ jobs.deploy-operator.outputs.NAMESPACE }}
+      operator_tag:
+        description: 'Resolved operator tag'
+        value: ${{ jobs.deploy-operator.outputs.OPERATOR_TAG }}
+      vcluster_name:
+        description: 'Name of the created vCluster'
+        value: ${{ jobs.deploy-operator.outputs.VCLUSTER_NAME }}
+
+jobs:
+  deploy-operator:
+    runs-on: prod-default-small-v2
+    outputs:
+      NAMESPACE: ${{ steps.namespace.outputs.namespace }}
+      OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
+      VCLUSTER_NAME: ${{ steps.vcluster-name.outputs.name }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Determine operator tag
+      id: operator-tag
+      run: |
+        TAG="${{ inputs.operator_tag }}"
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "Using operator tag: ${TAG}"
+    - name: Generate namespace name
+      id: namespace
+      env:
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+    - name: Generate vCluster name
+      id: vcluster-name
+      run: |
+        echo "name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+    - name: Setup vCluster and operator
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ steps.vcluster-name.outputs.name }}
+        vcluster_namespace: ${{ steps.namespace.outputs.namespace }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ steps.operator-tag.outputs.tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
