@@ -21,6 +21,7 @@ pub struct WorkHandlerMetrics {
     pub request_bytes: IntCounter,
     pub response_bytes: IntCounter,
     pub error_counter: IntCounterVec,
+    pub cancellation_total: IntCounter,
 }
 
 impl WorkHandlerMetrics {
@@ -31,6 +32,7 @@ impl WorkHandlerMetrics {
         request_bytes: IntCounter,
         response_bytes: IntCounter,
         error_counter: IntCounterVec,
+        cancellation_total: IntCounter,
     ) -> Self {
         Self {
             request_counter,
@@ -39,6 +41,7 @@ impl WorkHandlerMetrics {
             request_bytes,
             response_bytes,
             error_counter,
+            cancellation_total,
         }
     }
 
@@ -87,6 +90,12 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        let cancellation_total = metrics.create_intcounter(
+            work_handler::CANCELLATION_TOTAL,
+            "Total number of requests cancelled by work handler",
+            metrics_labels,
+        )?;
+
         Ok(Self::new(
             request_counter,
             request_duration,
@@ -94,6 +103,7 @@ impl WorkHandlerMetrics {
             request_bytes,
             response_bytes,
             error_counter,
+            cancellation_total,
         ))
     }
 }
@@ -205,6 +215,7 @@ where
         let mut publisher = tcp::client::TcpClient::create_response_stream(
             request.context(),
             control_msg.connection_info,
+            self.metrics().map(|m| m.cancellation_total.clone()),
         )
         .await
         .map_err(|e| {
