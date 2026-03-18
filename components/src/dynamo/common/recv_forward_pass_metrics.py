@@ -74,7 +74,6 @@ async def run(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
 
-    seq = 0
     try:
         while True:
             data = await asyncio.to_thread(subscriber.recv)
@@ -82,9 +81,15 @@ async def run(args: argparse.Namespace) -> None:
                 print("Stream closed.", file=sys.stderr)
                 break
             metrics = decode(data)
+            if metrics is None:
+                continue
             pretty = json.loads(json_encoder.encode(metrics))
-            print(f"[seq={seq}] {json.dumps(pretty, indent=2)}", flush=True)
-            seq += 1
+            print(
+                f"[worker={metrics.worker_id} dp={metrics.dp_rank} "
+                f"counter={metrics.counter_id}] "
+                f"{json.dumps(pretty, indent=2)}",
+                flush=True,
+            )
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
     finally:

@@ -25,6 +25,7 @@ import time
 from itertools import count
 from typing import TYPE_CHECKING
 
+import msgspec.structs
 import zmq
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -128,8 +129,10 @@ class _FpmPublisherThread:
                     continue
 
             try:
+                seq = next(self._seq)
+                metrics = msgspec.structs.replace(metrics, counter_id=seq)
                 payload = encode(metrics)
-                seq_bytes = next(self._seq).to_bytes(8, "big")
+                seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)
                 last_publish = time.monotonic()
             except zmq.Again:
