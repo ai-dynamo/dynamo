@@ -51,7 +51,7 @@ def parse_args():
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "xpu"],
+        choices=["cuda", "xpu", "cpu"],
         help="Dockerfile device to use",
     )
 
@@ -99,7 +99,7 @@ def parse_args():
 def validate_args(args):
     valid_inputs = {
         "vllm": {
-            "device": ["cuda", "xpu"],
+            "device": ["cuda", "xpu", "cpu"],
             "target": [
                 "runtime",
                 "dev",
