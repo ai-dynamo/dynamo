@@ -468,51 +468,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Setup Kubeconfig
-        shell: bash
-        env:
-          NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-        run: |
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
-          chmod 600 ${{ github.workspace }}/.kubeconfig
-          echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
-          export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-          kubectl config set-context --current --namespace=${NAMESPACE}
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: "container/deps/requirements.test.txt"
-      - name: Install test dependencies
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r container/deps/requirements.test.txt
       - name: Run GAIE Deploy Test
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-          NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          FRONTEND_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
-          VLLM_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
-        run: |
-          mkdir -p test-results
-          pytest tests/deploy/test_gaie_deploy.py \
-            --frontend-image="${FRONTEND_IMAGE}" \
-            --vllm-image="${VLLM_IMAGE}" \
-            --namespace="${NAMESPACE}" \
-            -v -s \
-            --durations=10 \
-            --junitxml=test-results/pytest_deploy_gaie_${{ github.run_id }}_${{ job.check_run_id }}.xml \
-            --log-cli-level=INFO
-      - name: Upload Test Results
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
-        if: always()
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
         with:
-          name: test-results-gaie-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/pytest_deploy_gaie_${{ github.run_id }}_${{ job.check_run_id }}.xml
-          retention-days: 7
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          extra_pytest_args: >-
+            -m gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
+            --vllm-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
 
   deploy-status-check:
     runs-on: ubuntu-latest
