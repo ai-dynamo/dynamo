@@ -299,16 +299,58 @@ jobs:
   # Deploy operator and run end-to-end tests on Kubernetes cluster
   # ============================================================================
 
+  deploy-operator:
+    needs: [operator]
+    runs-on: prod-default-small-v2
+    outputs:
+      NAMESPACE: ${{ steps.namespace.outputs.namespace }}
+      OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
+      VCLUSTER_NAME: ${{ steps.vcluster-name.outputs.name }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Determine operator tag
+      id: operator-tag
+      run: |
+        TAG="${{ needs.operator.outputs.operator_default_tag }}"
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "Using operator tag: ${TAG}"
+    - name: Generate namespace name
+      id: namespace
+      env:
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+    - name: Generate vCluster name
+      id: vcluster-name
+      run: |
+        echo "name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+    - name: Setup vCluster and operator
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ steps.vcluster-name.outputs.name }}
+        vcluster_namespace: ${{ steps.namespace.outputs.namespace }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ steps.operator-tag.outputs.tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+
   deploy-tests:
-    needs: [operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    needs: [deploy-operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
     uses: ./.github/workflows/deploy-tests.yml
     with:
-      operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+      operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+      namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
     secrets: inherit
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-tests]
+    needs: [deploy-operator, deploy-tests]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -344,7 +386,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-tests ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-tests ]
     permissions:
       contents: read
     steps:
