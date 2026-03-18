@@ -11,6 +11,7 @@ pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     SequenceSubscriber,
 };
+use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
@@ -21,7 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::metrics::WORKER_LOAD_METRICS;
-use super::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -132,6 +132,9 @@ pub async fn create_multi_worker_sequences(
         let cancel_token = component.drt().runtime().child_token();
         arc.start_replica_sync(subscriber, cancel_token);
     }
+
+    let expiry_cancel = component.drt().runtime().child_token();
+    arc.start_periodic_force_expiry_across_all_workers(expiry_cancel);
 
     Ok(arc)
 }

@@ -133,6 +133,94 @@ impl WorkerWithDpRank {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageTier {
+    #[default]
+    Device,
+    HostPinned,
+    Disk,
+    External,
+}
+
+impl StorageTier {
+    pub fn from_kv_medium(medium: &str) -> Option<Self> {
+        match medium {
+            "GPU" | "DEVICE" => Some(Self::Device),
+            "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
+            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
+            _ => None,
+        }
+    }
+
+    pub fn from_kv_medium_or_default(medium: Option<&str>) -> Self {
+        medium
+            .and_then(Self::from_kv_medium)
+            .unwrap_or(Self::Device)
+    }
+
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Self::Device)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PlacementOwner {
+    LocalWorker(WorkerWithDpRank),
+    Shared,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Placement {
+    pub owner: PlacementOwner,
+    pub tier: StorageTier,
+}
+
+impl Placement {
+    pub fn local_worker(worker_id: WorkerId, dp_rank: DpRank, tier: StorageTier) -> Self {
+        Self {
+            owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
+            tier,
+        }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, dp_rank: DpRank) -> Self {
+        Self::local_worker(worker_id, dp_rank, StorageTier::Device)
+    }
+
+    pub fn is_local_gpu(&self) -> bool {
+        matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_gpu()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlacementEvent {
+    pub placement: Placement,
+    pub event: KvCacheEvent,
+}
+
+impl PlacementEvent {
+    pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
+        Self { placement, event }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
+        Self::new(Placement::local_gpu(worker_id, event.dp_rank), event)
+    }
+
+    pub fn into_router_event(self) -> Option<RouterEvent> {
+        let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
+            return None;
+        };
+        Some(RouterEvent::with_storage_tier(
+            worker.worker_id,
+            self.event,
+            self.placement.tier,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterRequest {
@@ -512,6 +600,9 @@ pub enum KvCacheEventError {
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     pub worker_id: WorkerId,
+    /// The storage tier associated with the event.
+    #[serde(default)]
+    pub storage_tier: StorageTier,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
 }
@@ -528,7 +619,19 @@ impl RouterEvent {
     ///
     /// A new `RouterEvent`.
     pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
-        Self { worker_id, event }
+        Self::with_storage_tier(worker_id, event, StorageTier::Device)
+    }
+
+    pub fn with_storage_tier(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Self {
+        Self {
+            worker_id,
+            storage_tier,
+            event,
+        }
     }
 }
 
