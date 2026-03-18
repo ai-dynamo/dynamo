@@ -287,7 +287,7 @@ The `DynamoCheckpoint` (shortname: `dckpt`) is a Kubernetes Custom Resource that
 - **Pre-warming:** Create checkpoints before deploying DGDs for instant startup
 - **Explicit control:** Manage checkpoint lifecycle independently from DGDs
 
-The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set checkpoint-control plumbing manually; the operator injects the checkpoint-ready signal path for checkpoint jobs and adds the restore metadata that restored pods and the snapshot-agent use.
+The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set checkpoint-control plumbing manually; the operator injects the checkpoint-ready signal path for checkpoint Jobs and adds the restore metadata consumed by restored pods and the node-local controller inside the `snapshot-agent` DaemonSet.
 `spec.job.backoffLimit` is deprecated and ignored. Checkpoint Jobs are always single-attempt.
 
 **Create a checkpoint:**

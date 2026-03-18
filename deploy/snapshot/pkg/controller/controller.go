@@ -1,7 +1,8 @@
-// Package watcher provides Kubernetes pod watching for automatic checkpoint/restore.
-// The watcher is the sole entry point for snapshot operations — it detects pods with
-// checkpoint/restore labels and calls the orchestrators directly.
-package watcher
+// Package controller implements the node-local control loop inside snapshot-agent.
+// It does not own CRDs or replace the operator. Instead it watches pod, job, and
+// lease state on the current node and delegates CRIU/CUDA execution to the
+// snapshot executor workflows.
+package controller
 
 import (
 	"context"
@@ -26,7 +27,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/orchestrate"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
 )
 
@@ -41,8 +42,9 @@ const (
 	kubeAnnotationRestoreContainerID    = "nvidia.com/snapshot-restore-container-id"
 )
 
-// Watcher watches for pods with checkpoint/restore labels and triggers operations.
-type Watcher struct {
+// NodeController watches local-node pods with checkpoint metadata and reconciles
+// snapshot execution for checkpoint and restore requests.
+type NodeController struct {
 	config     *types.AgentConfig
 	clientset  kubernetes.Interface
 	containerd *containerd.Client
@@ -55,12 +57,12 @@ type Watcher struct {
 	stopCh chan struct{}
 }
 
-// NewWatcher creates a new pod watcher.
-func NewWatcher(
+// NewNodeController creates the node-local controller that runs inside snapshot-agent.
+func NewNodeController(
 	cfg *types.AgentConfig,
 	containerd *containerd.Client,
 	log logr.Logger,
-) (*Watcher, error) {
+) (*NodeController, error) {
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
@@ -71,7 +73,7 @@ func NewWatcher(
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
-	return &Watcher{
+	return &NodeController{
 		config:     cfg,
 		clientset:  clientset,
 		containerd: containerd,
@@ -82,9 +84,9 @@ func NewWatcher(
 	}, nil
 }
 
-// Start begins watching for pods and processing checkpoint/restore events.
-func (w *Watcher) Start(ctx context.Context) error {
-	w.log.Info("Starting pod watcher",
+// Run starts the local pod informers and processes checkpoint/restore events.
+func (w *NodeController) Run(ctx context.Context) error {
+	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
 		"checkpoint", kubeLabelIsCheckpointSource,
 		"restore", kubeLabelIsRestoreTarget,
@@ -122,14 +124,14 @@ func (w *Watcher) Start(ctx context.Context) error {
 			if !ok {
 				return
 			}
-			w.handleCheckpointPodEvent(ctx, pod)
+			w.reconcileCheckpointPod(ctx, pod)
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			pod, ok := podFromInformerObj(newObj)
 			if !ok {
 				return
 			}
-			w.handleCheckpointPodEvent(ctx, pod)
+			w.reconcileCheckpointPod(ctx, pod)
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to add checkpoint informer handler: %w", err)
@@ -159,14 +161,14 @@ func (w *Watcher) Start(ctx context.Context) error {
 			if !ok {
 				return
 			}
-			w.handleRestorePodEvent(ctx, pod)
+			w.reconcileRestorePod(ctx, pod)
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			pod, ok := podFromInformerObj(newObj)
 			if !ok {
 				return
 			}
-			w.handleRestorePodEvent(ctx, pod)
+			w.reconcileRestorePod(ctx, pod)
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to add restore informer handler: %w", err)
@@ -178,13 +180,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to sync informer caches")
 	}
 
-	w.log.Info("Pod watcher started and caches synced")
+	w.log.Info("Snapshot node controller started and caches synced")
 	<-ctx.Done()
 	close(w.stopCh)
 	return nil
 }
 
-func (w *Watcher) handleCheckpointPodEvent(ctx context.Context, pod *corev1.Pod) {
+func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName != w.config.NodeName {
 		return
 	}
@@ -237,15 +239,15 @@ func (w *Watcher) handleCheckpointPodEvent(ctx context.Context, pod *corev1.Pod)
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointHash))
 
 	go func() {
-		if err := w.doCheckpoint(ctx, pod, job, checkpointHash, checkpointLocation, checkpointStorageType, podKey); err != nil {
+		if err := w.runCheckpoint(ctx, pod, job, checkpointHash, checkpointLocation, checkpointStorageType, podKey); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
-			opLog.Error(err, "Checkpoint worker failed")
+			opLog.Error(err, "Checkpoint controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointWorkerFailed", err.Error())
 		}
 	}()
 }
 
-func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
+func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName != w.config.NodeName {
 		return
 	}
@@ -315,21 +317,21 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointHash))
 
 	go func() {
-		if err := w.doRestore(ctx, pod, containerName, containerID, checkpointHash, checkpointLocation, checkpointStorageType, restoreAttemptKey); err != nil {
+		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointHash, checkpointLocation, checkpointStorageType, restoreAttemptKey); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
-			opLog.Error(err, "Restore worker failed")
+			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		}
 	}()
 }
 
-// doCheckpoint runs the full checkpoint workflow for a pod:
+// runCheckpoint runs the full checkpoint workflow for a pod:
 //  1. Hold and renew the checkpoint lease
 //  2. Resolve the container ID and host PID
-//  3. Call orchestrate.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
+//  3. Call executor.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
 //  4. SIGUSR1 the process on success (notify workload), SIGKILL on failure (terminate immediately)
 //  5. Mark job as completed or failed
-func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointHash, checkpointLocation, checkpointStorageType, podKey string) error {
+func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointHash, checkpointLocation, checkpointStorageType, podKey string) error {
 	releasePodOnExit := true
 	defer func() {
 		if releasePodOnExit {
@@ -403,7 +405,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv
 	}
 
 	// Step 1: Run the checkpoint orchestrator
-	req := orchestrate.CheckpointRequest{
+	req := executor.CheckpointRequest{
 		ContainerID:           containerID,
 		ContainerName:         containerName,
 		CheckpointHash:        checkpointHash,
@@ -413,7 +415,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv
 		PodName:               pod.Name,
 		PodNamespace:          pod.Namespace,
 	}
-	if err := orchestrate.Checkpoint(leaseCtx, w.containerd, log, req, w.config); err != nil {
+	if err := executor.Checkpoint(leaseCtx, w.containerd, log, req, w.config); err != nil {
 		if cause := context.Cause(leaseCtx); cause != nil && cause != context.Canceled {
 			err = fmt.Errorf("checkpoint lease lost: %w", cause)
 		}
@@ -464,13 +466,13 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv
 	return nil
 }
 
-// doRestore runs the full restore workflow for a pod:
+// runRestore runs the full restore workflow for a pod:
 //  1. Mark the current container instance as in_progress
-//  2. Call orchestrate.Restore (inspect placeholder → nsrestore inside namespace)
+//  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
 //  3. SIGCONT the restored process to wake it up
 //  4. Wait for the pod to become Ready
 //  5. Mark the container instance as completed
-func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointHash, checkpointLocation, checkpointStorageType, restoreAttemptKey string) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointHash, checkpointLocation, checkpointStorageType, restoreAttemptKey string) error {
 	releaseOnExit := true
 	defer func() {
 		if releaseOnExit {
@@ -502,7 +504,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, containerName,
 	}
 
 	// Step 1: Run the restore orchestrator (inspect + nsrestore)
-	req := orchestrate.RestoreRequest{
+	req := executor.RestoreRequest{
 		CheckpointHash:        checkpointHash,
 		CheckpointLocation:    checkpointLocation,
 		CheckpointStorageType: checkpointStorageType,
@@ -511,7 +513,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, containerName,
 		PodNamespace:          pod.Namespace,
 		ContainerName:         containerName,
 	}
-	restoredPID, err := orchestrate.Restore(ctx, w.containerd, log, req)
+	restoredPID, err := executor.Restore(ctx, w.containerd, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -569,7 +571,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, containerName,
 	return nil
 }
 
-func (w *Watcher) tryAcquire(podKey string) bool {
+func (w *NodeController) tryAcquire(podKey string) bool {
 	w.inFlightMu.Lock()
 	defer w.inFlightMu.Unlock()
 	if _, held := w.inFlight[podKey]; held {
@@ -579,7 +581,7 @@ func (w *Watcher) tryAcquire(podKey string) bool {
 	return true
 }
 
-func (w *Watcher) release(podKey string) {
+func (w *NodeController) release(podKey string) {
 	w.inFlightMu.Lock()
 	defer w.inFlightMu.Unlock()
 	delete(w.inFlight, podKey)

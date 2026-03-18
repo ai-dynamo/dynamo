@@ -1,4 +1,4 @@
-package watcher
+package controller
 
 import (
 	"context"
@@ -213,7 +213,7 @@ func releaseCheckpointLease(ctx context.Context, clientset kubernetes.Interface,
 	return nil
 }
 
-func (w *Watcher) renewCheckpointLease(ctx context.Context, log logr.Logger, job *batchv1.Job, stopLease context.CancelCauseFunc) {
+func (w *NodeController) renewCheckpointLease(ctx context.Context, log logr.Logger, job *batchv1.Job, stopLease context.CancelCauseFunc) {
 	ticker := time.NewTicker(checkpointLeaseRenewInterval)
 	defer ticker.Stop()
 

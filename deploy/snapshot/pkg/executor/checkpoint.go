@@ -1,6 +1,6 @@
-// Package orchestrate provides the top-level checkpoint and restore orchestrators.
+// Package executor provides the top-level checkpoint and restore executors.
 // These wire together the lib packages (criu, cuda, etc.) into multi-step workflows.
-package orchestrate
+package executor
 
 import (
 	"context"

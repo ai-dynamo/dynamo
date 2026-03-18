@@ -1,4 +1,4 @@
-package watcher
+package controller
 
 import (
 	"context"
@@ -23,12 +23,12 @@ import (
 const testNodeName = "test-node"
 const testContainerID = "test-container"
 
-// makeTestWatcher creates a Watcher with a fake k8s client and nil orchestrators.
-// The fake clientset is empty so any goroutine launched by doCheckpoint/doRestore
+// makeTestController creates a NodeController with a fake k8s client and nil executors.
+// The fake clientset is empty so any goroutine launched by runCheckpoint/runRestore
 // will fail on the first annotatePod call and exit cleanly.
-func makeTestWatcher(t *testing.T, objs ...runtime.Object) *Watcher {
+func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 	t.Helper()
-	return &Watcher{
+	return &NodeController{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 		},
@@ -85,7 +85,7 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 	}
 }
 
-func TestHandleCheckpointPodEvent(t *testing.T) {
+func TestReconcileCheckpointPod(t *testing.T) {
 	tests := []struct {
 		name       string
 		nodeName   string
@@ -219,14 +219,14 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 				objs = append(objs, tc.lease)
 			}
 
-			w := makeTestWatcher(t, objs...)
+			w := makeTestController(t, objs...)
 			ctx := context.Background()
 
 			if tc.preSeed {
 				w.inFlight["default/test-pod"] = struct{}{}
 			}
 
-			w.handleCheckpointPodEvent(ctx, pod)
+			w.reconcileCheckpointPod(ctx, pod)
 
 			// tryAcquire adds to inFlight synchronously before launching the goroutine.
 			// For filtered pods, inFlight stays at its original size.
@@ -248,7 +248,7 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 	}
 }
 
-func TestHandleRestorePodEvent(t *testing.T) {
+func TestReconcileRestorePod(t *testing.T) {
 	tests := []struct {
 		name                  string
 		nodeName              string
@@ -388,7 +388,7 @@ func TestHandleRestorePodEvent(t *testing.T) {
 				labels[kubeLabelCheckpointHash] = tc.hash
 			}
 
-			w := makeTestWatcher(t)
+			w := makeTestController(t)
 			checkpointDir := t.TempDir()
 
 			var annotations map[string]string
@@ -426,7 +426,7 @@ func TestHandleRestorePodEvent(t *testing.T) {
 				w.inFlight["default/test-pod/"+testContainerID] = struct{}{}
 			}
 
-			w.handleRestorePodEvent(ctx, pod)
+			w.reconcileRestorePod(ctx, pod)
 
 			triggered := len(w.inFlight) > 0 && !tc.preSeed
 			if tc.preSeed {
@@ -445,7 +445,7 @@ func TestHandleRestorePodEvent(t *testing.T) {
 	}
 }
 
-func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testing.T) {
+func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
@@ -470,7 +470,7 @@ func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testin
 		return true, nil, errors.New("terminal patch failed")
 	})
 
-	w := &Watcher{
+	w := &NodeController{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 		},
@@ -483,7 +483,7 @@ func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testin
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.doCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "pvc", "default/test-pod")
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "pvc", "default/test-pod")
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}
