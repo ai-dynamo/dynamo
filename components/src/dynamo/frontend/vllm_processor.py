@@ -6,6 +6,8 @@
 #
 
 import asyncio
+import concurrent.futures
+import functools
 import logging
 import os
 import time
@@ -91,6 +93,11 @@ class VllmProcessor:
         self.router = router
         self.is_kv_router = isinstance(router, KvRouter)
         self.output_processor = output_processor
+        # Thread pool for offloading CPU-bound process_inputs() so it doesn't
+        # block the asyncio event loop under concurrent requests.
+        self._preproc_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=64, thread_name_prefix="vllm_preproc"
+        )
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
         self.block_size = block_size
@@ -211,11 +218,16 @@ class VllmProcessor:
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
 
-        vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
-            request_id,
-            prompt_inputs,
-            sampling_params,
-            GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
+        loop = asyncio.get_running_loop()
+        vllm_preproc: EngineCoreRequest = await loop.run_in_executor(
+            self._preproc_executor,
+            functools.partial(
+                self.input_processor.process_inputs,
+                request_id,
+                prompt_inputs,
+                sampling_params,
+                GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
+            ),
         )
 
         InputProcessor.assign_request_id(vllm_preproc)
