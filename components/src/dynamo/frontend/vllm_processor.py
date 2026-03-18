@@ -27,6 +27,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
     KvRouter,
@@ -132,6 +133,7 @@ class VllmProcessor:
         async for item in self._generator_inner(request):
             yield item
 
+    @_nvtx.range_decorator("frontend:_generator_inner", color="green")
     async def _generator_inner(
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -148,11 +150,17 @@ class VllmProcessor:
                     if img_url.get("detail") is None:
                         img_url["detail"] = "auto"
 
-        pre = await preprocess_chat_request(
-            request,
-            tokenizer=self.tokenizer,
-            renderer=self.input_processor.renderer,
-            tool_parser_class=self.tool_parser_class,
+        _t_pre0 = time.perf_counter()
+        with _nvtx.annotate("frontend:preprocess_chat_request", color="blue"):
+            pre = await preprocess_chat_request(
+                request,
+                tokenizer=self.tokenizer,
+                renderer=self.input_processor.renderer,
+                tool_parser_class=self.tool_parser_class,
+            )
+        logger.info(
+            "[timing] preprocess_chat_request took %.1f ms",
+            (time.perf_counter() - _t_pre0) * 1000,
         )
 
         request_for_sampling = pre.request_for_sampling
@@ -219,15 +227,20 @@ class VllmProcessor:
             ] = request_for_sampling.mm_processor_kwargs
 
         loop = asyncio.get_running_loop()
-        vllm_preproc: EngineCoreRequest = await loop.run_in_executor(
-            self._preproc_executor,
-            functools.partial(
-                self.input_processor.process_inputs,
-                request_id,
-                prompt_inputs,
-                sampling_params,
-                GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
-            ),
+        _t0 = time.perf_counter()
+        with _nvtx.annotate("frontend:process_inputs", color="yellow"):
+            vllm_preproc: EngineCoreRequest = await loop.run_in_executor(
+                self._preproc_executor,
+                functools.partial(
+                    self.input_processor.process_inputs,
+                    request_id,
+                    prompt_inputs,
+                    sampling_params,
+                    GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
+                ),
+            )
+        logger.info(
+            "[timing] process_inputs took %.1f ms", (time.perf_counter() - _t0) * 1000
         )
 
         InputProcessor.assign_request_id(vllm_preproc)
@@ -330,9 +343,10 @@ class VllmProcessor:
             # Must match the backend's hash path (handlers.py _compute_mm_uuids):
             # hash unwrapped PIL img.tobytes(), NOT mm_features.mm_hash which may
             # be derived from MediaWithBytes.original_bytes (raw JPEG).
-            mm_hashes = [
-                int(u[:16], 16) for u in compute_mm_uuids_from_images(pil_images)
-            ]
+            with _nvtx.annotate("frontend:compute_mm_uuids", color="cyan"):
+                mm_hashes = [
+                    int(u[:16], 16) for u in compute_mm_uuids_from_images(pil_images)
+                ]
             image_ranges = find_image_token_ranges(
                 expanded_tokens, self.mm_image_token_id
             )
