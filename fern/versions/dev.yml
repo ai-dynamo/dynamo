@@ -90,6 +90,10 @@ navigation:
         path: ../pages-dev/components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: ../pages-dev/benchmarks/benchmarking.md
+      - section: Testing
+        contents:
+          - page: Mocker
+            path: ../pages-dev/mocker/mocker.md
       - section: Multimodal
         path: ../pages-dev/features/multimodal/README.md
         contents:
