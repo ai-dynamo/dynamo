@@ -1717,6 +1717,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
+ "rmp",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
