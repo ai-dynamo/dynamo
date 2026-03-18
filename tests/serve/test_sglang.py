@@ -184,6 +184,7 @@ sglang_configs = {
             "DYN_WORKER_GPU": "0",
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
+            "UCX_TLS": "^mm",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
