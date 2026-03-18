@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -13,13 +13,12 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: agg-8xtp2
       envs:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace
           command:
             - python3
@@ -36,7 +35,6 @@ spec:
       subComponentType: null
     VllmDecodeWorker:
       componentType: worker
-      dynamoNamespace: agg-8xtp2
       envFromSecret: hf-token-secret
       volumeMounts:
       - name: model-cache
@@ -65,7 +63,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Parallelization: Hermetic test (xdist-safe via dynamic ports).
@@ -16,7 +16,11 @@ import shutil
 
 import numpy as np
 import pytest
-import tritonclient.grpc as grpcclient
+
+try:
+    import tritonclient.grpc as grpcclient
+except ImportError:
+    grpcclient = None
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -54,7 +58,7 @@ class EchoTensorWorkerProcess(ManagedProcess):
             timeout=300,
             display_output=True,
             log_dir=log_dir,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
 
 

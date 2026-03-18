@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #![allow(dead_code)]
@@ -9,8 +9,6 @@ use bytemuck::cast_slice;
 use derive_getters::Dissolve;
 use rayon::prelude::*;
 use std::ops::Range;
-
-pub mod blocks;
 
 /// A token is represented as a 32-bit unsigned integer.
 pub type Token = u32;

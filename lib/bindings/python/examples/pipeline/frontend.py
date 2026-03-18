@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,17 +35,10 @@ class RequestHandler:
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # client to the next component - in this case the middle component
-    next = (
-        await runtime.namespace("examples/pipeline")
-        .component("middle")
-        .endpoint("generate")
-        .client()
-    )
+    next = await runtime.endpoint("examples/pipeline.middle.generate").client()
 
     # create endpoint service for frontend component
-    component = runtime.namespace("examples/pipeline").component("frontend")
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("examples/pipeline.frontend.generate")
 
     handler = RequestHandler(next)
     await endpoint.serve_endpoint(handler.generate)

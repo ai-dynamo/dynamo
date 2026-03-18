@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 MISSING_PROFILING_DATA_ERROR_MESSAGE = (
     "SLA-Planner requires pre-deployment profiling results to run.\n"
-    "Please follow /docs/benchmarks/sla_driven_profiling.md to run the profiling first,\n"
+    "Please follow /docs/components/profiler/profiler-guide.md to run the profiling first,\n"
     "and make sure the profiling results are present in --profile-results-dir."
 )
 

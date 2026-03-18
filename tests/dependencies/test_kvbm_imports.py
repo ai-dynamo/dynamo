@@ -1,11 +1,23 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests to verify KVBM package and wheels are properly installed."""
 
+import importlib.util
 import subprocess
 
 import pytest
+
+
+def _is_sglang_installed() -> bool:
+    """Check if sglang is installed (KVBM is not available in sglang images)."""
+    return importlib.util.find_spec("sglang") is not None
+
+
+# Skip all KVBM tests if running in sglang environment (sglang doesn't have KVBM)
+pytestmark = pytest.mark.skipif(
+    _is_sglang_installed(), reason="KVBM is not available in sglang images"
+)
 
 
 # Helper functions for KVBM verification
@@ -42,7 +54,7 @@ def _check_kvbm_imports():
 
 
 # Base tests (no framework markers) - run in main job with --framework none --enable-kvbm
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
 def test_kvbm_wheel_exists():
@@ -50,7 +62,7 @@ def test_kvbm_wheel_exists():
     _check_kvbm_wheel_exists()
 
 
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
 def test_kvbm_imports():
@@ -59,7 +71,7 @@ def test_kvbm_imports():
 
 
 # vLLM-specific tests - run in vLLM job (vLLM auto-enables KVBM)
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -68,7 +80,7 @@ def test_kvbm_wheel_exists_vllm():
     _check_kvbm_wheel_exists()
 
 
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -78,7 +90,7 @@ def test_kvbm_imports_vllm():
 
 
 # TRT-LLM-specific tests - run in TRT-LLM job (TRT-LLM auto-enables KVBM)
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.trtllm
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -87,7 +99,7 @@ def test_kvbm_wheel_exists_trtllm():
     _check_kvbm_wheel_exists()
 
 
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.trtllm
 @pytest.mark.unit
 @pytest.mark.gpu_0

@@ -1,0 +1,40 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// CPU run queue latency histogram.
+// Proves OS-level CPU contention. Healthy: <10us p99.
+//
+// Usage: sudo bpftrace runqlat.bt
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+    @qtime[args.pid] = nsecs;
+}
+
+tracepoint:sched:sched_switch
+{
+    if (args.prev_state == 0) {
+        // voluntary context switch (prev was TASK_RUNNING)
+        @qtime[args.prev_pid] = nsecs;
+    }
+
+    $ns = @qtime[args.next_pid];
+    if ($ns) {
+        @usecs = hist((nsecs - $ns) / 1000);
+        delete(@qtime[args.next_pid]);
+    }
+}
+
+interval:s:5
+{
+    printf("\n--- Run Queue Latency (us) ---\n");
+    print(@usecs);
+    clear(@usecs);
+}
+
+END
+{
+    clear(@qtime);
+}

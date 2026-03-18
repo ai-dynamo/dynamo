@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Custom Resource Definition for DynamoWorkerMetadata
@@ -7,7 +7,7 @@
 //! which stores discovery metadata for Dynamo worker pods in Kubernetes.
 //!
 //! The CRD schema is defined in the Helm chart at:
-//! `deploy/cloud/helm/crds/templates/nvidia.com_dynamoworkermetadatas.yaml`
+//! `deploy/helm/charts/crds/templates/nvidia.com_dynamoworkermetadatas.yaml`
 
 use anyhow::Result;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;

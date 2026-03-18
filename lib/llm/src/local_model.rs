@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::discovery::DiscoverySpec;
@@ -12,10 +13,9 @@ use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::entrypoint::RouterConfig;
-use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
-use crate::preprocessor::media::{ImageDecoder, MediaDecoder, MediaFetcher};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -35,6 +35,7 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
+    source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
@@ -53,8 +54,7 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
+    namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
 }
@@ -69,6 +69,7 @@ impl Default for LocalModelBuilder {
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
+            source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
             context_length: Default::default(),
@@ -81,8 +82,7 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
-            custom_backend_metrics_endpoint: Default::default(),
-            custom_backend_metrics_polling_interval: Default::default(),
+            namespace_prefix: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
         }
@@ -90,9 +90,17 @@ impl Default for LocalModelBuilder {
 }
 
 impl LocalModelBuilder {
-    /// The path must exist
+    /// The path must exist, the model is already downloaded
     pub fn model_path(&mut self, model_path: PathBuf) -> &mut Self {
         self.model_path = Some(model_path);
+        self
+    }
+
+    /// The HF name of the model before we downloaded it, or a local path if
+    /// that was given on the cmd line. We need this because `model_path` is always
+    /// a local path.
+    pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
+        self.source_path = Some(source_path);
         self
     }
 
@@ -152,6 +160,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn namespace_prefix(&mut self, namespace_prefix: Option<String>) -> &mut Self {
+        self.namespace_prefix = namespace_prefix;
+        self
+    }
+
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
         self
@@ -184,16 +197,6 @@ impl LocalModelBuilder {
 
     pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
         self.user_data = user_data;
-        self
-    }
-
-    pub fn custom_backend_metrics_endpoint(&mut self, endpoint: Option<String>) -> &mut Self {
-        self.custom_backend_metrics_endpoint = endpoint;
-        self
-    }
-
-    pub fn custom_backend_metrics_polling_interval(&mut self, interval: Option<f64>) -> &mut Self {
-        self.custom_backend_metrics_polling_interval = interval;
         self
     }
 
@@ -230,27 +233,6 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
-        // Override runtime configs with mocker engine args (applies to both paths)
-        if self.is_mocker
-            && let Some(path) = &self.extra_engine_args
-        {
-            let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                .expect("Failed to load mocker engine args for runtime config overriding.");
-            self.kv_cache_block_size = mocker_engine_args.block_size as u32;
-            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
-            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
-            self.runtime_config.max_num_batched_tokens =
-                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
-            self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
-            self.media_decoder = Some(MediaDecoder {
-                image: Some(ImageDecoder::default()),
-                #[cfg(feature = "media-ffmpeg")]
-                video: None,
-            });
-            self.media_fetcher = Some(MediaFetcher::default());
-        }
-
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
             let mut card = ModelDeploymentCard::with_name_only(
@@ -276,9 +258,8 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
-                custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
-                custom_backend_metrics_polling_interval: self
-                    .custom_backend_metrics_polling_interval,
+                namespace_prefix: self.namespace_prefix.clone(),
+                migration_limit: self.migration_limit,
             });
         }
 
@@ -294,14 +275,15 @@ impl LocalModelBuilder {
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
+        // Source path is the `--model-path` the user passed. By now our `model_path` is the local
+        // path of the downloaded model.
+        if let Some(source_path) = self.source_path.take() {
+            card.set_source_path(source_path);
+        }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
-        card.set_name(
-            &self
-                .model_name
-                .clone()
-                .unwrap_or_else(|| model_path.display().to_string()),
-        );
+        let alt = card.source_path().to_string();
+        card.set_name(self.model_name.as_deref().unwrap_or(&alt));
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
@@ -329,8 +311,8 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
-            custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
-            custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
+            namespace_prefix: self.namespace_prefix.clone(),
+            migration_limit: self.migration_limit,
         })
     }
 }
@@ -349,8 +331,8 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
+    namespace_prefix: Option<String>,
+    migration_limit: u32,
 }
 
 impl LocalModel {
@@ -414,22 +396,16 @@ impl LocalModel {
         &self.runtime_config
     }
 
+    pub fn migration_limit(&self) -> u32 {
+        self.migration_limit
+    }
+
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
     }
 
-    pub fn custom_backend_metrics_endpoint(&self) -> Option<&str> {
-        self.custom_backend_metrics_endpoint.as_deref()
-    }
-
-    pub fn custom_backend_metrics_polling_interval(&self) -> Option<f64> {
-        self.custom_backend_metrics_polling_interval
-    }
-
-    pub fn is_gguf(&self) -> bool {
-        // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
-        // We will error when we come to parse it
-        self.full_path.is_file()
+    pub fn namespace_prefix(&self) -> Option<&str> {
+        self.namespace_prefix.as_deref()
     }
 
     /// An endpoint to identify this model by.
@@ -453,13 +429,16 @@ impl LocalModel {
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
-        lora_name: Option<&str>,
+        lora_info: Option<crate::model_card::LoraInfo>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = lora_info
+            .as_ref()
+            .map(|info| Slug::slugify(&info.name).to_string());
 
         let suffix_for_log = model_suffix
             .as_ref()
@@ -473,6 +452,23 @@ impl LocalModel {
             endpoint.drt().connection_id(),
             suffix_for_log
         );
+
+        let source_path = PathBuf::from(self.card.source_path());
+        if !source_path.exists() {
+            // The consumers of MDC (frontend) might not have the same local path as us, so
+            // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
+            //
+            // We can't do this if the model came from disk, as it might not be the same version
+            // as on Hugging Face (if it exists there at all).
+            //
+            // The URL is not used by anything. Frontend will download the repo and edit these
+            // paths to be local, so only the filename part matters currently.
+            // Possibly we should just use the filenames here. The URL feels nicer to me, it makes
+            // each field fully identified and fetchable independently.
+            self.card
+                .move_to_url(&format!("hf://{}/", self.card.source_path()))
+                .context("move_to_url")?;
+        }
 
         // Register the Model Deployment Card via discovery interface
         // The model_suffix (for LoRA) will be appended AFTER the instance_id

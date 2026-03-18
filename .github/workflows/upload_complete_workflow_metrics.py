@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
 Enhanced script to upload complete GitHub Actions workflow and job metrics.
@@ -824,11 +824,6 @@ class WorkflowMetricsUploader:
 
         job_name = job_data.get("name", "")
         job_id = str(job_data["id"])
-
-        # Skip deployment test jobs (No pytest metadata files are created)
-        if job_name.lower().startswith("deploy"):
-            print(f"⏭️  Skipping test metrics for deployment job '{job_name}'")
-            return
 
         print(f"🧪 Looking for test results for job '{job_name}'")
 

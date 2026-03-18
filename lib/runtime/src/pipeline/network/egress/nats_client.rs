@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! NATS Request Plane Client
@@ -7,6 +7,7 @@
 //! providing a consistent interface across all transport types.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::error::{DynamoError, ErrorType};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -47,9 +48,17 @@ impl RequestPlaneClient for NatsRequestClient {
         // Send request with headers
         let response = self
             .client
-            .request_with_headers(address, nats_headers, payload)
+            .request_with_headers(address.clone(), nats_headers, payload)
             .await
-            .map_err(|e| anyhow::anyhow!("NATS request failed: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!("NATS request to {address} failed"))
+                        .cause(e)
+                        .build()
+                )
+            })?;
 
         Ok(response.payload)
     }

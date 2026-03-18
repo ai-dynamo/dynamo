@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
@@ -89,9 +89,13 @@ class vLLMGenerateRequest(BaseModel):
             return SamplingParams(**v)
         return v
 
+    @field_serializer("sampling_params")
+    def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
+        """Serialize SamplingParams using msgspec and return as dict."""
+        return json.loads(msgspec.json.encode(value))
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)},
     )
 
 
@@ -142,6 +146,7 @@ class MultiModalRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = True
+    stream_options: Optional[dict] = None
 
 
 class MultiModalInput(BaseModel):
@@ -152,6 +157,8 @@ class MultiModalInput(BaseModel):
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    # LoRA adapter name (matches the name used in load_lora)
+    model: Optional[str] = None
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[

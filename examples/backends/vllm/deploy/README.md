@@ -24,7 +24,7 @@ High-performance deployment with separated prefill and decode workers.
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -33,7 +33,10 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+
+### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
+Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
 
 ## CRD Structure
 
@@ -75,14 +78,24 @@ extraPodSpec:
       - "python3"
       - "-m"
       - "dynamo.vllm"
-      # Model-specific arguments
+      - "--model"
+      - "Qwen/Qwen3-0.6B"
+      # Optional: Enable prompt embeddings feature
+      # - "--enable-prompt-embeds"
+      # Other model-specific arguments
 ```
+
+**Common vLLM Flags:**
+- `--enable-prompt-embeds`: Enable prompt embeddings feature
+- `--enable-multimodal`: Enable multimodal (vision) support
+- `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
 
 ## Prerequisites
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -92,14 +105,15 @@ Before using these templates, ensure you have:
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework=vllm --output-short-filename
+docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/benchmarks/sla_driven_profiling.md) to run pre-deployment profiling.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) to run pre-deployment profiling.
 
 ## Usage
 
@@ -110,6 +124,7 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_router.yaml` for high-performance with KV cache routing
 - Use `disagg_planner.yaml` for SLA-optimized performance
+- Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
@@ -138,7 +153,7 @@ kubectl create secret generic hf-token-secret \
 
 Then, deploy the model using the deployment file.
 
-Export the NAMESPACE you used in your Dynamo Cloud Installation.
+Export the NAMESPACE you used in your Dynamo Kubernetes Platform Installation.
 
 ```bash
 cd <dynamo-source-root>/examples/backends/vllm/deploy
@@ -187,7 +202,7 @@ spec:
 vLLM workers are configured through command-line arguments. Key parameters include:
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
-- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--disaggregation-mode prefill`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 
 See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the full list of configuration options.
@@ -224,7 +239,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -234,12 +249,13 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/planner/sla_planner_quickstart.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
+- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 
 ## Troubleshooting
 

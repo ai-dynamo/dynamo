@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The Preprocessor consists of the following modules
@@ -13,26 +13,30 @@
 
 pub mod media;
 pub mod prompt;
+pub mod speculative_prefill;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
+
 use dynamo_async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
 };
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
+use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -54,7 +58,7 @@ use crate::protocols::{
         nvext::NvExtProvider,
     },
 };
-use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
+use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -72,6 +76,32 @@ pub struct LLMMetricAnnotation {
     pub output_tokens: usize,
     pub chunk_tokens: usize,
     pub cached_tokens: Option<usize>,
+    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+    /// Prefill worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_type: Option<String>,
+    /// Decode worker ID (for ITL attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+    /// Decode worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_dp_rank: Option<u32>,
+    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenize_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_total_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_count: Option<u64>,
 }
 
 impl LLMMetricAnnotation {
@@ -113,17 +143,19 @@ pub struct OpenAIPreprocessor {
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
     model_info: Arc<dyn ModelInfo>,
+    lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
-    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
+    /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
+    context_length: u32,
 }
 
 impl OpenAIPreprocessor {
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
-        let tokenizer = mdc.tokenizer_hf()?;
+        let tokenizer = mdc.tokenizer()?;
         match formatter {
             PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
         }
@@ -132,11 +164,12 @@ impl OpenAIPreprocessor {
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
-        hf_tokenizer: tokenizers::Tokenizer,
+        tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
-        let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
-        let Some(model_info) = mdc.model_info else {
+        let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
+        let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
+        let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
@@ -144,24 +177,30 @@ impl OpenAIPreprocessor {
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
 
+        if let Some(ref lora_name) = lora_name {
+            tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
+        }
+
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
 
-        #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
         };
+
+        let context_length = mdc.context_length;
 
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
             model_info,
             mdcsum,
+            lora_name,
             runtime_config,
             tool_call_parser,
-            #[cfg(feature = "media-nixl")]
             media_loader,
+            context_length,
         }))
     }
     /// Encode a string to it's tokens
@@ -170,7 +209,9 @@ impl OpenAIPreprocessor {
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
-    /// Returns both the common completion request and a hashmap of annotations.
+    /// Returns the common completion request, a hashmap of annotations, and a boolean
+    /// indicating whether the rendered prompt ends with a reasoning start token (e.g.,
+    /// `<think>`), meaning the model's completion will begin mid-reasoning.
     ///
     /// Annotations evaluated by this method include:
     /// - `formatted_prompt`
@@ -185,19 +226,29 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-    ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
+        tracker: Option<&RequestTracker>,
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let mut builder = self.builder(request)?;
         let formatted_prompt = self
             .apply_template(request)
             .with_context(|| "Failed to apply prompt template")?;
+
+        // Check if the chat template injected a reasoning start token at the end
+        // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
+        // is not explicitly false). If so, the model's completion starts
+        // mid-reasoning and the parser should begin in reasoning mode.
+        let prompt_injected_reasoning = formatted_prompt
+            .as_ref()
+            .is_some_and(|p| p.trim_end().ends_with("<think>"));
+
         let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt)
+            .gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
             .with_context(|| "Failed to gather tokens")?;
-        self.gather_multi_modal_data(request, &mut builder)
+        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        Ok((builder.build()?, annotations))
+        Ok((builder.build()?, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -237,16 +288,36 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
+        let lora_name = self.lora_name.clone();
+
+        // Extract cache_control TTL from either nvext or top-level field
+        let cache_control_ttl = request.effective_cache_control().map(|cc| cc.ttl_seconds());
+
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
+            let hints = nvext.agent_hints.as_ref();
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
+                expected_output_tokens: hints.and_then(|h| h.osl),
+                priority_jump: hints.and_then(|h| h.latency_sensitivity),
+                priority: hints.and_then(|h| h.priority),
+                lora_name,
+                cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
+                allowed_worker_ids: None,
             };
             builder.routing(Some(routing));
+        } else if lora_name.is_some() || cache_control_ttl.is_some() {
+            // Ensure routing hints exist when we have LoRA or cache_control,
+            // even when nvext is absent (e.g. Anthropic endpoint requests).
+            builder.routing(Some(RoutingHints {
+                lora_name,
+                cache_control_ttl,
+                ..Default::default()
+            }));
         }
 
         Ok(builder)
@@ -291,32 +362,25 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<String>,
     ) -> Result<()> {
-        let messages = request.messages();
-        let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
-        #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
-        for idx in 0..message_count {
-            let msg = messages
-                .get_item_by_index(idx)
-                .map_err(|_| anyhow::Error::msg(format!("Cannot get message at index {idx}")))?;
-
-            let msg_json: serde_json::Value = serde_json::to_value(&msg)?;
-            let message: ChatCompletionRequestMessage = serde_json::from_value(msg_json)?;
-
-            let content_parts = match &message {
+        let Some(messages) = request.typed_messages() else {
+            return Ok(());
+        };
+        for message in messages.iter() {
+            let content_parts = match message {
                 ChatCompletionRequestMessage::User(u) => match &u.content {
                     ChatCompletionRequestUserMessageContent::Array(parts) => parts,
                     _ => continue,
                 },
                 _ => continue,
             };
-
             // Iterate over content parts
-            for content_part in content_parts {
+            for content_part in content_parts.iter() {
                 let (type_str, url) = match content_part {
                     ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
                         ("image_url".to_string(), image_part.image_url.url.clone())
@@ -330,7 +394,6 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
                     continue;
@@ -345,7 +408,6 @@ impl OpenAIPreprocessor {
         }
 
         // Execute all fetch tasks
-        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
@@ -367,12 +429,16 @@ impl OpenAIPreprocessor {
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
-            // Preserve original messages in extra_args for multimodal workers that need them
-            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
-            let messages_json = serde_json::to_value(&messages)?;
-            let extra_args = serde_json::json!({
+            // Preserve original messages and formatted prompt in extra_args for multimodal
+            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
+            // <image> placeholders for embedding-path / NIXL flows).
+            let messages_json = serde_json::to_value(request.messages())?;
+            let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+            if let Some(ref prompt) = formatted_prompt {
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
             builder.extra_args(Some(extra_args));
         }
 
@@ -391,18 +457,22 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
+        tracker: Option<&RequestTracker>,
     ) -> Result<HashMap<String, String>> {
         let mut annotations = HashMap::new();
+        let mut token_count: Option<usize> = None;
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
+                            token_count = Some(tokens.len());
                             builder.token_ids(tokens);
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
+                                token_count = Some(token_batches[0].len());
                                 builder.token_ids(token_batches[0].clone());
                             } else {
                                 bail!(
@@ -449,12 +519,12 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encoding = self.tokenizer.encode(&prompt)?;
+                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.tokenizer.encode(&prompt)?;
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -467,12 +537,15 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
+                            token_count = Some(tokens_vec.len());
                             builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.tokenizer.encode(&texts[0])?;
-                                builder.token_ids(encoding.token_ids().to_vec());
+                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
+                                let tokens = encoding.token_ids().to_vec();
+                                token_count = Some(tokens.len());
+                                builder.token_ids(tokens);
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
@@ -484,7 +557,49 @@ impl OpenAIPreprocessor {
                 }
             }
         }
+
+        // Validate prompt token count against model's context length
+        if let Some(count) = token_count {
+            Self::validate_token_count(count, self.context_length)?;
+        }
+
         Ok(annotations)
+    }
+
+    /// Validate that the prompt token count does not consume the model's entire context length.
+    /// Returns an error if the prompt leaves no room for output tokens.
+    fn validate_token_count(token_count: usize, context_length: u32) -> Result<()> {
+        let max_len = context_length as usize;
+        // max_len == 0 means context_length was not configured (model_card.rs defaults
+        // to 0 when max_position_embeddings is absent), so skip validation.
+        // Use >= because context_length is the total budget (input + output): if the
+        // prompt alone fills it, there is zero room for output tokens.
+        if max_len > 0 && token_count >= max_len {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model's maximum context length is {} tokens. \
+                     However, your messages resulted in {} tokens. \
+                     Please reduce the length of the messages.",
+                    max_len, token_count,
+                ))
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
+    fn encode_with_timing(
+        &self,
+        prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let encode_start = Instant::now();
+        let encoding = self.tokenizer.encode(prompt)?;
+        if let Some(t) = tracker {
+            t.record_tokenize_latency(encode_start.elapsed());
+        }
+        Ok(encoding)
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
@@ -551,6 +666,81 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
+    pub fn postprocessor_parsing_stream<S>(
+        &self,
+        stream: S,
+        request: &NvCreateChatCompletionRequest,
+        prompt_injected_reasoning: bool,
+    ) -> anyhow::Result<
+        impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    >
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        // Try to parse reasoning content only if parser is configured
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
+            && !Self::is_reasoning_disabled_by_request(
+                self.runtime_config.reasoning_parser.as_deref(),
+                request.chat_template_args.as_ref(),
+            );
+
+        // Reasoning Content Parsing Transformation Step
+        // Current Solution:
+        // This step operates on Deltas created by the transform_postprocessor_stream function
+        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
+        // Future Solution:
+        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
+        // Use backend_output.reasoning_content field to fill out the deltas.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(Self::parse_reasoning_content_from_stream(
+                stream,
+                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
+                prompt_injected_reasoning,
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
+        // Check if tools are present and if we should apply jail
+        let has_tools = request
+            .inner
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+
+        // Determine if we should apply jail (do this before moving request)
+        let should_jail = Self::should_apply_tool_jail(
+            self.tool_call_parser.as_ref(),
+            request.inner.tool_choice.as_ref(),
+            has_tools,
+        )?;
+
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+
+        // Apply jail conditionally
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                tool_definitions,
+                stream,
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
+        Ok(transformed_stream)
+    }
+
     pub fn transform_postprocessor_stream<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -600,7 +790,7 @@ impl OpenAIPreprocessor {
                             request_id = inner.context.id(),
                             "Cancellation issued last message; closing stream"
                         );
-                        inner.finished = true; // Mark as finished
+                        // inner.finished = true; // Mark as finished
                         return None;
                     }
 
@@ -646,12 +836,35 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    // Create LLM metrics annotation
+                    // Create LLM metrics annotation with prefill/decode worker info from tracker.
+                    // Worker types are stored at routing time to avoid expensive MDC lookup.
+                    let tracker = inner.response_generator.tracker();
+                    let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                    let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                    let prefill_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.prefill_worker_type())
+                        .map(String::from);
+                    let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                    let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                    let decode_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.decode_worker_type())
+                        .map(String::from);
                     let llm_metrics = LLMMetricAnnotation {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
+                        prefill_worker_id,
+                        prefill_dp_rank,
+                        prefill_worker_type,
+                        decode_worker_id,
+                        decode_dp_rank,
+                        decode_worker_type,
+                        tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                        detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -684,6 +897,20 @@ impl OpenAIPreprocessor {
 
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
+                        let tracker = inner.response_generator.tracker();
+                        let prefill_worker_id =
+                            tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                        let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                        let prefill_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.prefill_worker_type())
+                            .map(String::from);
+                        let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                        let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                        let decode_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.decode_worker_type())
+                            .map(String::from);
                         let llm_metrics = LLMMetricAnnotation {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
@@ -692,6 +919,17 @@ impl OpenAIPreprocessor {
                                 .prompt_tokens_details
                                 .as_ref()
                                 .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            prefill_worker_id,
+                            prefill_dp_rank,
+                            prefill_worker_type,
+                            decode_worker_id,
+                            decode_dp_rank,
+                            decode_worker_type,
+                            tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                            detokenize_total_latency: tracker
+                                .as_ref()
+                                .and_then(|t| t.detokenize_total_latency()),
+                            detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
 
                         // Create annotation string
@@ -712,6 +950,7 @@ impl OpenAIPreprocessor {
                             data,
                             event: Some(ANNOTATION_LLM_METRICS.to_string()),
                             comment: annotation.comment,
+                            error: None,
                         };
 
                         tracing::trace!(
@@ -728,6 +967,7 @@ impl OpenAIPreprocessor {
                 }
             }
         })
+        .fuse()
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
@@ -846,20 +1086,81 @@ impl OpenAIPreprocessor {
         jail.apply_with_finish_reason(stream)
     }
 
+    /// Check if reasoning parsing should be disabled based on per-request parameters.
+    /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
+    ///   or "force_nonempty_content": true.
+    /// For deepseek_r1: disabled when chat_template_args contains "thinking": false
+    ///   or "thinking_mode": "chat".
+    fn is_reasoning_disabled_by_request(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        match reasoning_parser {
+            Some("kimi_k25") => {
+                if let Some(args) = chat_template_args
+                    && let Some(thinking) = args.get("thinking")
+                {
+                    return thinking == &serde_json::Value::Bool(false);
+                }
+                false
+            }
+            Some("nemotron_nano") | Some("nemotron3") => {
+                if let Some(args) = chat_template_args {
+                    if let Some(enable_thinking) = args.get("enable_thinking")
+                        && enable_thinking == &serde_json::Value::Bool(false)
+                    {
+                        return true;
+                    }
+                    if let Some(force_nonempty) = args.get("force_nonempty_content")
+                        && force_nonempty == &serde_json::Value::Bool(true)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            Some("deepseek_r1") => {
+                if let Some(args) = chat_template_args {
+                    if let Some(thinking) = args.get("thinking") {
+                        return thinking == &serde_json::Value::Bool(false);
+                    }
+                    if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
+                        return mode == "chat";
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
     // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
+    /// Apply reasoning parsing to the output stream, splitting content into
+    /// `reasoning_content` and normal `content` based on think tags.
+    ///
+    /// When `prompt_injected_reasoning` is `true`, the parser starts in reasoning
+    /// mode immediately — use this when the chat template already appended the
+    /// reasoning start token (e.g., `<think>`) to the prompt, so the model's
+    /// completion begins with thinking content without an explicit start tag.
     pub fn parse_reasoning_content_from_stream<S>(
         stream: S,
         parser_name: String,
+        prompt_injected_reasoning: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         // Initialize reasoning parser from parser_name
-        let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+        let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
         )) as Box<dyn ReasoningParser>;
+
+        if prompt_injected_reasoning {
+            reasoning_parser.set_in_reasoning(true);
+        }
 
         let state = ReasoningState {
             stream: Box::pin(stream),
@@ -873,14 +1174,23 @@ impl OpenAIPreprocessor {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.choices.iter_mut() {
-                            if let Some(text) = choice.delta.content.as_ref() {
+                            // Reasoning parsing only applies to text content
+                            if let Some(
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                                    text,
+                                ),
+                            ) = choice.delta.content.as_ref()
+                            {
                                 let parser_result =
                                     parser.parse_reasoning_streaming_incremental(text, &[]);
 
                                 // Update this specific choice with parsed content
-                                choice.delta.content = parser_result.get_some_normal_text();
+                                choice.delta.content = parser_result.get_some_normal_text().map(
+                                    dynamo_async_openai::types::ChatCompletionMessageContent::Text,
+                                );
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
+                            // For multimodal content, pass through unchanged
                         }
                         Ok(data)
                     })
@@ -894,6 +1204,7 @@ impl OpenAIPreprocessor {
                 None
             }
         })
+        .fuse()
     }
 }
 
@@ -942,17 +1253,24 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
+        let tracker = response_generator.tracker();
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations, prompt_injected_reasoning) = self
+            .preprocess_request(&request, tracker.as_deref())
+            .await?;
+        tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = response_generator.tracker();
+        common_request.tracker = tracker;
 
         let mut response_generator = Box::new(response_generator);
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -969,67 +1287,19 @@ impl
         // Extract context once
         let context = response_stream.context();
 
-        // transform the postprocessor stream (no boxing yet)
+        // transform the postprocessor stream (no boxing yet) - detokenize
         let stream = Self::transform_postprocessor_stream(
             response_stream,
             response_generator,
             context.clone(),
         );
 
-        // Try to parse reasoning content only if parser is configured
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+        let transformed_stream =
+            self.postprocessor_parsing_stream(stream, &request, prompt_injected_reasoning)?;
 
-        // Reasoning Content Parsing Transformation Step
-        // Current Solution:
-        // This step operates on Deltas created by the transform_postprocessor_stream function
-        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
-        // Future Solution:
-        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
-        // Use backend_output.reasoning_content field to fill out the deltas.
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
-            Box::pin(Self::parse_reasoning_content_from_stream(
-                stream,
-                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
-            ))
-        } else {
-            Box::pin(stream)
-        };
-
-        // Check if tools are present and if we should apply jail
-        let has_tools =
-            request.inner.tools.is_some() && !request.inner.tools.as_ref().unwrap().is_empty();
-
-        // Determine if we should apply jail (do this before moving request)
-        let should_jail = Self::should_apply_tool_jail(
-            self.tool_call_parser.as_ref(),
-            request.inner.tool_choice.as_ref(),
-            has_tools,
-        )?;
-
-        // Convert OpenAI tools to parser ToolDefinition format before applying jail
-        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-            tools
-                .iter()
-                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                    name: tool.function.name.clone(),
-                    parameters: tool.function.parameters.clone(),
-                })
-                .collect()
-        });
-
-        // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
-
-        // Step 4: Apply audit aggregation strategy
+        // Apply audit aggregation strategy.
+        // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
+        // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
         let final_stream = if let Some(mut audit) = audit_handle {
             let (stream, agg_fut) = if audit.streaming() {
                 // Streaming: apply scan (pass-through + parallel aggregation)
@@ -1046,10 +1316,19 @@ impl
                 audit.emit();
             });
 
-            Box::pin(stream)
+            stream
         } else {
-            transformed_stream
+            Box::pin(transformed_stream)
         };
+
+        // Step 5: Speculative next-turn prefill
+        let final_stream = speculative_prefill::maybe_wrap_stream(
+            final_stream,
+            &request,
+            &next,
+            &self.formatter,
+            &self.tokenizer,
+        );
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -1091,18 +1370,36 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
+        let tracker = response_generator.tracker();
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
-        let annotations = self.gather_tokens(&request, &mut builder, None)?;
-        self.gather_multi_modal_data(&request, &mut builder).await?;
+
+        // Check if embeddings are provided - skip tokenization path
+        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
+            // Skip tokenization for embeddings
+            builder.token_ids(vec![]); // Empty token IDs
+            builder.prompt_embeds(Some(prompt_embeds.clone()));
+            // No token annotations
+            HashMap::new()
+        } else {
+            // Normal path: tokenize the prompt
+            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?
+        };
+
+        // Gather multimodal data (works with both embeddings and text prompts)
+        self.gather_multi_modal_data(&request, &mut builder, None)
+            .await?;
 
         let mut common_request = builder.build()?;
 
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = response_generator.tracker();
+        common_request.tracker = tracker;
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -1186,3 +1483,162 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_reasoning_disabled_by_request() {
+        let thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            m
+        };
+        let enable_thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let enable_thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            m
+        };
+        let thinking_mode_chat = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("chat".to_string()),
+            );
+            m
+        };
+        let thinking_mode_thinking = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("thinking".to_string()),
+            );
+            m
+        };
+        let empty_args = std::collections::HashMap::new();
+
+        // (parser, args, expected_disabled, description)
+        let cases = [
+            (
+                Some("kimi_k25"),
+                Some(&thinking_false),
+                true,
+                "kimi_k25 + thinking=false → disabled",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(&thinking_true),
+                false,
+                "kimi_k25 + thinking=true → enabled",
+            ),
+            (
+                Some("kimi_k25"),
+                None,
+                false,
+                "kimi_k25 + no args → enabled",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(&empty_args),
+                false,
+                "kimi_k25 + empty args → enabled",
+            ),
+            // deepseek_r1 uses "thinking" bool or "thinking_mode" string
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_false),
+                true,
+                "deepseek_r1 + thinking=false → disabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_true),
+                false,
+                "deepseek_r1 + thinking=true → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseek_r1 + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_mode_thinking),
+                false,
+                "deepseek_r1 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                None,
+                false,
+                "deepseek_r1 + no args → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&empty_args),
+                false,
+                "deepseek_r1 + empty args → enabled",
+            ),
+            (
+                Some("basic"),
+                Some(&thinking_false),
+                false,
+                "basic → never disabled",
+            ),
+            (
+                None,
+                Some(&thinking_false),
+                false,
+                "no parser → never disabled",
+            ),
+            // nemotron_nano uses "enable_thinking" key
+            (
+                Some("nemotron_nano"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_nano + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(&enable_thinking_true),
+                false,
+                "nemotron_nano + enable_thinking=true → enabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                None,
+                false,
+                "nemotron_nano + no args → enabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(&empty_args),
+                false,
+                "nemotron_nano + empty args → enabled",
+            ),
+        ];
+
+        for (parser, args, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+}

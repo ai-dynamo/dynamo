@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,8 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+import torch
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
@@ -28,7 +29,7 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 
 
 class Request(BaseModel):
@@ -86,12 +87,35 @@ class vLLMGenerateRequest(BaseModel):
         if isinstance(v, str):
             v = json.loads(v)
         if isinstance(v, dict):
+            # Workaround for vLLM SamplingParams serialization/deserialization issue.
+            #
+            # Problem: When SamplingParams is serialized via msgspec.json.encode(),
+            # Python sets are converted to JSON arrays (lists). The serialized dict
+            # includes private fields like _all_stop_token_ids. Upon deserialization,
+            # passing this dict to SamplingParams(**dict) causes __post_init__ to fail
+            # because it expects _all_stop_token_ids to be a set (to call .update()),
+            # but it's now a list.
+            #
+            # Solution: Filter out private fields (starting with '_') which are
+            # internal state that should be computed by __post_init__, not passed
+            # from serialized data. Public fields like stop_token_ids are preserved.
+            v = {k: val for k, val in v.items() if not k.startswith("_")}
             return SamplingParams(**v)
         return v
 
+    @field_serializer("sampling_params")
+    def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
+        """Serialize SamplingParams, filtering out private fields.
+
+        This is the primary fix for the set→list serialization issue.
+        Private fields like _all_stop_token_ids are filtered out here
+        so they never get sent over the wire.
+        """
+        serialized = json.loads(msgspec.json.encode(value))
+        return {k: v for k, v in serialized.items() if not k.startswith("_")}
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        json_encoders={SamplingParams: lambda v: json.loads(msgspec.json.encode(v))},
     )
 
 
@@ -133,6 +157,7 @@ class MultiModalRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = True
+    stream_options: Optional[dict] = None
 
 
 class MultiModalInput(BaseModel):
@@ -140,14 +165,26 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
-class vLLMMultimodalRequest(vLLMGenerateRequest):
+class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata] = None
+    serialized_request: Optional[TransferRequest] = None
+    loaded_embedding: Optional[torch.Tensor] = Field(default=None, exclude=True)
+
+
+class vLLMMultimodalRequest(vLLMGenerateRequest):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # LoRA adapter name (matches the name used in load_lora)
+    model: Optional[str] = None
+    # Decode-only worker can have None for multimodal_inputs
+    multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
+    # Add these fields for Qwen VL (mRoPE) decode-only worker
+    image_grid_thw: Optional[List[List[int]]] = None
+    embeddings_shape: Optional[List[int]] = None
 
 
 class MyRequestOutput(BaseModel):

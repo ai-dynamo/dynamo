@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Based on https://github.com/64bit/async-openai/ by Himanshu Neema
 // Original Copyright (c) 2022 Himanshu Neema
 // Licensed under MIT License (see ATTRIBUTIONS-Rust.md)
 //
-// Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+// Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
 use std::{collections::HashMap, pin::Pin};
@@ -105,6 +105,13 @@ pub struct CreateCompletionRequest {
     /// Note that <|endoftext|> is the document separator that the model sees during training, so if a prompt is not specified the model will generate as if from the beginning of a new document.
     pub prompt: Prompt,
 
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings.
+    /// At least one of prompt or prompt_embeds is required.
+    /// If both are provided, prompt_embeds takes precedence.
+    /// Maximum size: 10MB decoded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
+
     /// The suffix that comes after a completion of inserted text.
     ///
     /// This parameter is only supported for `gpt-3.5-turbo-instruct`.
@@ -155,7 +162,7 @@ pub struct CreateCompletionRequest {
     #[serde(default, deserialize_with = "deserialize_echo_bool")]
     pub echo: Option<bool>,
 
-    ///  Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
+    ///  Up to 32 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
 

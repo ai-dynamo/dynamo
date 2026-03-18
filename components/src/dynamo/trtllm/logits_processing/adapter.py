@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -31,9 +31,9 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
         req_ids: int,
         logits: torch.Tensor,
         ids: List[List[int]],
-        stream_ptr,
+        stream_ptr: Optional[int],
         client_id: Optional[int] = None,
-    ):
+    ) -> None:
         """
         TensorRT-LLM logits processor interface.
 

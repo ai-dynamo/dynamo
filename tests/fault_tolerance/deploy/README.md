@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -655,7 +655,7 @@ graph LR
 
 ### Install Dynamo Platform
 
-Follow the [instructions](../../../docs/kubernetes/installation_guide.md) to install `Dynamo` in your Kubernetes cluster.
+Follow the [instructions](../../../docs/kubernetes/installation-guide.md) to install `Dynamo` in your Kubernetes cluster.
 
 ### Mount Workspace and Kube Config
 

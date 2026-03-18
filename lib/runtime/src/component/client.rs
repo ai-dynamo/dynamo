@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use arc_swap::ArcSwap;
 use futures::StreamExt;
 use tokio::net::unix::pipe::Receiver;
 
-use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
+use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::{
     component::{Endpoint, Instance},
     pipeline::async_trait,
@@ -62,12 +62,21 @@ impl Client {
         );
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
-        let (avail_tx, avail_rx) = tokio::sync::watch::channel(vec![]);
+        // Seed instance_avail from the current instance_source snapshot so that
+        // callers who proceed immediately after wait_for_instances (which reads
+        // instance_source directly) will also find instances in instance_avail
+        // (which is read by the routing methods like random/round_robin).
+        let initial_ids: Vec<u64> = instance_source
+            .borrow()
+            .iter()
+            .map(|instance| instance.id())
+            .collect();
+        let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
+            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
@@ -255,8 +264,8 @@ impl Client {
                                 map.insert(instance.instance_id, instance);
                         }
                     }
-                    DiscoveryEvent::Removed(instance_id) => {
-                        map.remove(&instance_id);
+                    DiscoveryEvent::Removed(id) => {
+                        map.remove(&id.instance_id());
                     }
                 }
 

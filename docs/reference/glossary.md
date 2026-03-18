@@ -1,4 +1,8 @@
-# NVIDIA Dynamo Glossary
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Glossary
+---
 
 ## B
 **Block** - A fixed-size chunk of tokens (typically 16 or 64 tokens) used for efficient KV cache management and memory allocation, serving as the fundamental unit for techniques like PagedAttention.
@@ -17,7 +21,7 @@
 
 **Dynamo** - NVIDIA's high-performance distributed inference framework for Large Language Models (LLMs) and generative AI models, designed for multinode environments with disaggregated serving and cache-aware routing.
 
-**Dynamo Cloud** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
+**Dynamo Kubernetes Platform** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
 
 ## E
 **Endpoint** - A specific network-accessible API within a Dynamo component, such as `generate` or `load_metrics`.

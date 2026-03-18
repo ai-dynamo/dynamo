@@ -1,6 +1,7 @@
 name: 'Docker Build'
 description: 'Build Dynamo container images'
 inputs:
+  # --- Common Docker Inputs
   framework:
     description: 'Framework to build'
     required: true
@@ -13,9 +14,14 @@ inputs:
     description: 'Docker platform to build on, ie. linux/amd64'
     required: false
     default: 'linux/amd64'
+  cuda_version:
+    description: 'CUDA version to use'
+    required: true
   image_tag:
     description: 'Custom image tag (optional, defaults to framework:latest)'
     required: false
+
+  # --- Secret Inputs
   ci_token:
     description: 'CI Token'
     required: false
@@ -34,24 +40,6 @@ inputs:
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
     required: false
-  base_image_tag:
-    description: 'Optional override for base image tag passed to build.sh'
-    required: false
-  runtime_image_tag:
-    description: 'Optional override for RUNTIME_IMAGE_TAG build-arg'
-    required: false
-  cuda_version:
-    description: 'Optional override for CUDA_VERSION build-arg'
-    required: false
-  torch_backend:
-    description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
-    required: false
-  enable_kvbm:
-    description: 'Enable KVBM support (optional)'
-    required: false
-  dynamo_base_image:
-    description: 'Pre-built Dynamo base image to use instead of building from scratch'
-    required: false
 
 outputs:
   image_tag:
@@ -67,11 +55,50 @@ runs:
         driver: docker-container
         # Enable BuildKit for enhanced metadata
         buildkitd-flags: --debug
+        version: v0.14.1
     - name: Cleanup
       if: always()
       shell: bash
       run: |
         docker system prune -af
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+      with:
+        python-version: '3.12'
+        pip-install: jinja2 pyyaml
+    - name: Generate Dockerfile
+      shell: bash
+      run: |
+        echo "::group::Generating Dockerfile"
+        echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+        python ./container/render.py \
+            --target=${{ inputs.target }} \
+            --framework=${{ inputs.framework }} \
+            --platform=${{ inputs.platform }} \
+            --cuda-version=${{ inputs.cuda_version }} \
+            --show-result \
+            --output-short-filename
+        echo "::endgroup::"
+    - name: Build EPP image
+      if: ${{ inputs.target == 'frontend' }}
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
+        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+        . "$HOME/.cargo/env"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        cargo install cbindgen
+
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        pushd deploy/inference-gateway/epp
+        make all DOCKER_PROXY=${DOCKER_PROXY}
+        popd
+
+        EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+        EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
+        echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
     - name: Build image
       id: build
       shell: bash
@@ -86,6 +113,7 @@ runs:
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+        CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
         # Determine image tag
@@ -94,6 +122,8 @@ runs:
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
+
+        CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
@@ -106,46 +136,34 @@ runs:
         echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
-        # Collect optional overrides provided by the workflow
         # Set base cache args and set --cache-to if this is a main commit
-        EXTRA_ARGS=""
-        EXTRA_ARGS="--cache-to type=inline "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
-        if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
+        # TODO: Fix this - Skip cache for frontend target - a different docker driver is used for the EPP build, which causes issues with cache export
+        CACHE_ARGS=""
+        if [[ "${{ inputs.target }}" != "frontend" ]]; then
+          CACHE_ARGS="--cache-to type=inline "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/} "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+          if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+            # Release branches also use release cache
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+          fi
         fi
 
-        echo "$EXTRA_ARGS"
-        # Collect optional overrides provided by the workflow
-        if [ -n "${{ inputs.base_image_tag }}" ]; then
-          EXTRA_ARGS+="--base-image-tag ${{ inputs.base_image_tag }} "
-        fi
-        if [ -n "${{ inputs.runtime_image_tag }}" ]; then
-          EXTRA_ARGS+="--build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }} "
-        fi
-        if [ -n "${{ inputs.cuda_version }}" ]; then
-          EXTRA_ARGS+="--build-arg CUDA_VERSION=${{ inputs.cuda_version }} "
-        fi
-        if [ -n "${{ inputs.torch_backend }}" ]; then
-          EXTRA_ARGS+="--build-arg TORCH_BACKEND=${{ inputs.torch_backend }} "
-        fi
-        if [ -n "${{ inputs.dynamo_base_image }}" ]; then
-          EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
-        fi
-        if [ -n "${{ inputs.enable_kvbm }}" ]; then
-          EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
+        EPP_IMAGE_ARG=""
+        if [[ ${{ inputs.target }} == "frontend" ]]; then
+          EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
         fi
 
-        # Execute build and capture output (show on console AND save to file)
-        ./container/build.sh --tag "$IMAGE_TAG" \
-          --target ${{ inputs.target }} \
-          --vllm-max-jobs 10 \
-          --framework ${{ inputs.framework }} \
-          --platform ${{ inputs.platform }} \
-          --use-sccache \
-          --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+        docker buildx build \
+          --progress=plain \
+          --tag "$IMAGE_TAG" \
+          --load \
+          -f ./container/rendered.Dockerfile \
+          $CACHE_ARGS \
+          $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -317,4 +335,3 @@ runs:
         name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
-

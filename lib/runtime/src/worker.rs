@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The [Worker] class is a convenience wrapper around the construction of the [Runtime]
@@ -155,7 +155,7 @@ impl Worker {
 
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    tracing::debug!("{}", SHUTDOWN_MESSAGE);
+                    tracing::debug!("{SHUTDOWN_MESSAGE}");
                     tracing::debug!("{} {} seconds", SHUTDOWN_TIMEOUT_MESSAGE, timeout);
                 }
 

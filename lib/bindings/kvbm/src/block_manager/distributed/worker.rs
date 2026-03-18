@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -118,11 +118,11 @@ impl TorchTensor for VllmTensor {
 #[pyclass]
 #[derive(Clone)]
 pub struct BlockTransferHandler {
-    _impl: Arc<dyn RustBlockTransferHandler>,
+    _impl: Arc<RustBlockTransferHandler>,
 }
 
 impl BlockTransferHandler {
-    pub fn get_handler(&self) -> Arc<dyn RustBlockTransferHandler> {
+    pub fn get_handler(&self) -> Arc<RustBlockTransferHandler> {
         self._impl.clone()
     }
 }
@@ -143,6 +143,7 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     fn new(
         num_device_blocks: usize,

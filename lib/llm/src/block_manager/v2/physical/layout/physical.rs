@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Physical layout types that combine abstract layouts with storage location metadata.
@@ -286,5 +286,9 @@ impl MemoryRegion for RemoteMemoryDescriptor {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn nixl_descriptor(&self) -> Option<crate::block_manager::v2::memory::NixlDescriptor> {
+        None
     }
 }

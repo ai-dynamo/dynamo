@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use futures::{Stream, StreamExt};
@@ -12,7 +12,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_async_openai::types::StopReason;
+use dynamo_async_openai::types::{ChatCompletionMessageContent, StopReason};
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -59,6 +59,9 @@ struct DeltaChoice {
 
     /// Optional reasoning content for the chat choice.
     reasoning_content: Option<String>,
+
+    /// Accumulated content parts for multimodal responses
+    content_parts: Vec<dynamo_async_openai::types::ChatCompletionResponseContentPart>,
 }
 
 impl Default for DeltaAggregator {
@@ -130,9 +133,9 @@ impl DeltaAggregator {
                     }
                 };
 
-                if aggregator.error.is_none() && delta.data.is_some() {
-                    // Extract the data payload from the delta.
-                    let delta = delta.data.unwrap();
+                if aggregator.error.is_none()
+                    && let Some(delta) = delta.data
+                {
                     aggregator.id = delta.id;
                     aggregator.model = delta.model;
                     aggregator.created = delta.created;
@@ -166,10 +169,18 @@ impl DeltaAggregator {
                                     logprobs: None,
                                     tool_calls: None,
                                     reasoning_content: None,
+                                    content_parts: Vec::new(),
                                 });
-                        // Append content if available.
+                        // Handle content based on type
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content);
+                            match content {
+                                ChatCompletionMessageContent::Text(text) => {
+                                    state_choice.text.push_str(text);
+                                }
+                                ChatCompletionMessageContent::Parts(parts) => {
+                                    state_choice.content_parts.extend(parts.clone());
+                                }
+                            }
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -289,14 +300,21 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             delta.finish_reason
         };
 
+        // Determine content format based on what we accumulated
+        let content = if !delta.content_parts.is_empty() {
+            // Multimodal response with content parts
+            Some(ChatCompletionMessageContent::Parts(delta.content_parts))
+        } else if !delta.text.is_empty() {
+            // Text-only response (backward compatible)
+            Some(ChatCompletionMessageContent::Text(delta.text))
+        } else {
+            None
+        };
+
         dynamo_async_openai::types::ChatChoice {
             message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
-                content: if delta.text.is_empty() {
-                    None
-                } else {
-                    Some(delta.text)
-                },
+                content,
                 tool_calls: delta.tool_calls,
                 refusal: None,
                 function_call: None,
@@ -363,6 +381,7 @@ impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompleti
 mod tests {
 
     use super::*;
+    use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
 
     #[allow(deprecated)]
@@ -396,23 +415,26 @@ mod tests {
         };
 
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: Some(text.to_string()),
+            content: Some(ChatCompletionMessageContent::Text(text.to_string())),
             function_call: None,
             tool_calls: tool_call_chunks,
             role,
             refusal: None,
             reasoning_content: None,
         };
-        let logprobs = logprob.map(|lp| dynamo_async_openai::types::ChatChoiceLogprobs {
-            content: Some(vec![
-                dynamo_async_openai::types::ChatCompletionTokenLogprob {
-                    token: text.to_string(),
-                    logprob: lp,
-                    bytes: None,
-                    top_logprobs: vec![],
-                },
-            ]),
-            refusal: None,
+        let logprobs = logprob.map(|lp| {
+            let token = text.to_string();
+            dynamo_async_openai::types::ChatChoiceLogprobs {
+                content: Some(vec![
+                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                        token: token.clone(),
+                        logprob: lp,
+                        bytes: token_to_utf8_bytes(&token),
+                        top_logprobs: vec![],
+                    },
+                ]),
+                refusal: None,
+            }
         });
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
@@ -439,6 +461,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -496,7 +519,10 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         let choice = &response.choices[0];
         assert_eq!(choice.index, 0);
-        assert_eq!(choice.message.content.as_ref().unwrap(), "Hello,");
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello,".to_string())
+        );
         assert!(choice.finish_reason.is_none());
         assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
         assert!(response.service_tier.is_none());
@@ -539,7 +565,10 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         let choice = &response.choices[0];
         assert_eq!(choice.index, 0);
-        assert_eq!(choice.message.content.as_ref().unwrap(), "Hello, world!");
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello, world!".to_string())
+        );
         assert_eq!(
             choice.finish_reason,
             Some(dynamo_async_openai::types::FinishReason::Stop)
@@ -605,7 +634,12 @@ mod tests {
         let choice = &response.choices[0];
 
         assert_eq!(choice.index, 0);
-        assert_eq!(choice.message.content.as_deref(), Some("Hello world"));
+        assert_eq!(
+            choice.message.content.as_ref(),
+            Some(&ChatCompletionMessageContent::Text(
+                "Hello world".to_string()
+            ))
+        );
         assert_eq!(
             choice.finish_reason,
             Some(dynamo_async_openai::types::FinishReason::Stop)
@@ -630,7 +664,7 @@ mod tests {
                     index: 0,
                     delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
                         role: Some(dynamo_async_openai::types::Role::Assistant),
-                        content: Some("Choice 0".to_string()),
+                        content: Some(ChatCompletionMessageContent::Text("Choice 0".to_string())),
                         function_call: None,
                         tool_calls: None,
                         refusal: None,
@@ -644,7 +678,7 @@ mod tests {
                     index: 1,
                     delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
                         role: Some(dynamo_async_openai::types::Role::Assistant),
-                        content: Some("Choice 1".to_string()),
+                        content: Some(ChatCompletionMessageContent::Text("Choice 1".to_string())),
                         function_call: None,
                         tool_calls: None,
                         refusal: None,
@@ -665,6 +699,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -680,7 +715,10 @@ mod tests {
         response.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
         let choice0 = &response.choices[0];
         assert_eq!(choice0.index, 0);
-        assert_eq!(choice0.message.content.as_ref().unwrap(), "Choice 0");
+        assert_eq!(
+            choice0.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Choice 0".to_string())
+        );
         assert_eq!(
             choice0.finish_reason,
             Some(dynamo_async_openai::types::FinishReason::Stop)
@@ -692,7 +730,10 @@ mod tests {
 
         let choice1 = &response.choices[1];
         assert_eq!(choice1.index, 1);
-        assert_eq!(choice1.message.content.as_ref().unwrap(), "Choice 1");
+        assert_eq!(
+            choice1.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Choice 1".to_string())
+        );
         assert_eq!(
             choice1.finish_reason,
             Some(dynamo_async_openai::types::FinishReason::Stop)
@@ -724,6 +765,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -766,6 +808,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -808,6 +851,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -848,6 +892,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -892,6 +937,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -934,6 +980,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -962,7 +1009,9 @@ mod tests {
 
         assert_eq!(
             choice.message.content.as_ref().unwrap(),
-            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?"
+            &ChatCompletionMessageContent::Text(
+                "Hey Dude ! What's the weather in San Francisco in Fahrenheit?".to_string()
+            )
         );
 
         // The finish_reason should be ToolCalls

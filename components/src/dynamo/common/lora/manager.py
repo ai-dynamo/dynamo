@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -49,7 +49,7 @@ class LoRAManager:
         # Extension point: custom sources
         self._custom_sources: Dict[str, LoRASourceProtocol] = {}
 
-    def register_custom_source(self, scheme: str, source: LoRASourceProtocol):
+    def register_custom_source(self, scheme: str, source: LoRASourceProtocol) -> None:
         """
         Register a custom Python source for a URI scheme.
 

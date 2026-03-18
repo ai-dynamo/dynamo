@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! HTTP Service for Dynamo LLM
@@ -18,10 +18,10 @@
 //!
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
+mod anthropic;
 mod openai;
 
 pub mod busy_threshold;
-pub mod custom_backend_metrics;
 pub mod disconnect;
 pub mod error;
 pub mod health;

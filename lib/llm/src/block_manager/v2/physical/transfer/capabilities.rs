@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transfer capability flags for controlling direct path enablement.
@@ -39,7 +39,7 @@ use crate::block_manager::v2::physical::{
 /// # Example
 ///
 /// ```
-/// # use dynamo_kvbm::v2::physical::transfer::TransferCapabilities;
+/// # use dynamo_llm::block_manager::v2::physical::transfer::TransferCapabilities;
 /// // Default conservative policy
 /// let caps = TransferCapabilities::default();
 /// assert!(!caps.allow_gds);

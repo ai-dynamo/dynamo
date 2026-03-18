@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -26,6 +26,65 @@ from tests.fault_tolerance.deploy.scenarios import (
     scenarios,
 )
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.test_output import resolve_test_output_path
+
+
+def get_model_from_deployment(
+    deployment_spec: DeploymentSpec,
+    scenario: Optional[Scenario] = None,
+    service_name: Optional[str] = None,
+) -> str:
+    """Get model name from deployment spec.
+
+    Args:
+        deployment_spec: Deployment specification
+        scenario: Optional Scenario object with backend and model info
+        service_name: Optional specific service to get model from
+
+    Returns:
+        Model name (never None, falls back to default)
+    """
+    # If scenario specifies a model, use that
+    if scenario and scenario.model:
+        return scenario.model
+
+    # Try to get model from specified service
+    if service_name:
+        try:
+            service_spec = deployment_spec[service_name]
+            if service_spec and service_spec.model:
+                return service_spec.model
+        except (KeyError, AttributeError):
+            pass
+
+    # Get model from backend-specific worker (if scenario provided)
+    if scenario:
+        try:
+            model: Optional[str] = None
+            if scenario.backend == "vllm":
+                model = deployment_spec["VllmDecodeWorker"].model
+            elif scenario.backend == "sglang":
+                model = deployment_spec["decode"].model
+            elif scenario.backend == "trtllm":
+                # Determine deployment type from scenario deployment name
+                if (
+                    "agg" in deployment_spec.name
+                    and "disagg" not in deployment_spec.name
+                ):
+                    model = deployment_spec["TRTLLMWorker"].model
+                else:
+                    model = deployment_spec["TRTLLMDecodeWorker"].model
+            if model:
+                return model
+        except (KeyError, AttributeError) as e:
+            logging.warning(
+                f"Could not get model from backend-specific worker "
+                f"(backend={scenario.backend}): {e}"
+            )
+
+    # Fallback to default
+    logging.info("Using default model: Qwen/Qwen3-0.6B")
+    return "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture
@@ -86,13 +145,8 @@ def _clients(
     procs: list[SpawnProcess] = []
     ctx = multiprocessing.get_context("spawn")
 
-    # Determine retry_delay_or_rate based on client type
-    if load_config.client_type == "legacy":
-        # Legacy client uses max_request_rate for rate limiting
-        retry_delay_or_rate = load_config.max_request_rate
-    else:
-        # AI-Perf client uses retry_delay between attempts (default 5s)
-        retry_delay_or_rate = 5
+    # Both client types use max_request_rate for rate limiting (requests/sec)
+    max_request_rate = load_config.max_request_rate
 
     # Check if this is a continuous load test (rolling upgrade scenarios)
     continuous_load = getattr(load_config, "continuous_load", False)
@@ -121,7 +175,7 @@ def _clients(
                     load_config.overflow_token_length,  # 2x max_seq_len tokens
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                     continuous_load,
                 ),
             )
@@ -150,7 +204,7 @@ def _clients(
                     load_config.input_token_length,  # Normal token count
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                 ),
             )
             proc_normal.start()
@@ -175,7 +229,7 @@ def _clients(
                         load_config.input_token_length,
                         load_config.output_token_length,
                         load_config.max_retries,
-                        retry_delay_or_rate,
+                        max_request_rate,
                         continuous_load,  # Pass continuous_load flag
                     ),
                 )
@@ -239,6 +293,8 @@ async def _inject_failures(
     return affected_pods
 
 
+# TODO: These globals might not work in parallel testing. FIXME
+
 global_result_list = []
 # Global storage for test results (used by validation fixture)
 test_results_cache = {}
@@ -271,8 +327,8 @@ def validation_context(request, scenario):  # noqa: F811
 
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
-        overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
-        recovery_dir = f"{request.node.name}{RECOVERY_SUFFIX}"
+        overflow_dir = resolve_test_output_path(f"{request.node.name}{OVERFLOW_SUFFIX}")
+        recovery_dir = resolve_test_output_path(f"{request.node.name}{RECOVERY_SUFFIX}")
         log_paths = [overflow_dir, recovery_dir]
 
         logging.info("Mixed token test detected. Looking for results in:")
@@ -280,7 +336,7 @@ def validation_context(request, scenario):  # noqa: F811
         logging.info(f"  - Recovery phase: {recovery_dir}")
     else:
         # Standard test with single directory
-        log_paths = [request.node.name]
+        log_paths = [resolve_test_output_path(request.node.name)]
 
     # Use factory to auto-detect and parse results
     try:
@@ -321,7 +377,7 @@ def validation_context(request, scenario):  # noqa: F811
                     # Create ValidationContext for all checkers
                     validation_ctx = ValidationContext(
                         scenario=scenario,
-                        log_dir=test_name,
+                        log_dir=resolve_test_output_path(test_name),
                         metrics=metrics,
                         deployment=context.get("deployment"),
                         namespace=context.get("namespace"),
@@ -438,6 +494,7 @@ def results_summary():
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.slow
+@pytest.mark.gpu_0
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_fault_scenario(
     scenario: Scenario,  # noqa: F811
@@ -464,32 +521,9 @@ async def test_fault_scenario(
     if image:
         scenario.deployment.set_image(image)
 
-    model: Optional[str] = None
-    if scenario.model:
-        scenario.deployment.set_model(scenario.model)
-        model = scenario.model
-    else:
-        # Get model from the appropriate worker based on backend
-        try:
-            if scenario.backend == "vllm":
-                model = scenario.deployment["VllmDecodeWorker"].model
-            elif scenario.backend == "sglang":
-                model = scenario.deployment["decode"].model
-            elif scenario.backend == "trtllm":
-                # Determine deployment type from scenario deployment name
-                if (
-                    "agg" in scenario.deployment.name
-                    and "disagg" not in scenario.deployment.name
-                ):
-                    model = scenario.deployment["TRTLLMWorker"].model
-                else:
-                    model = scenario.deployment["TRTLLMDecodeWorker"].model
-            else:
-                model = None
-        except (KeyError, AttributeError):
-            model = None
-    # Fallback to default if still None
-    model = model or "Qwen/Qwen3-0.6B"
+    # Get model using helper function and ensure it's set on all services
+    model = get_model_from_deployment(scenario.deployment, scenario)
+    scenario.deployment.set_model(model)  # Set model on all services including Frontend
 
     scenario.deployment.set_logging(True, "info")
 
@@ -505,7 +539,7 @@ async def test_fault_scenario(
 
         with _clients(
             logger,
-            request.node.name,
+            resolve_test_output_path(request.node.name),
             scenario.deployment,
             namespace,
             model,

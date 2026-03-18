@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # LMCache Dynamo One-Click Test Script
@@ -17,12 +17,8 @@ echo ""
 cleanup() {
     echo "🧹 Cleaning up running processes..."
 
-    # Kill any remaining dynamo processes
-    pkill -f "dynamo-run" || true
-    pkill -f "components/main.py" || true
-
     # Stop docker services
-    docker compose -f ../../deploy/metrics/docker-compose.yml down 2>/dev/null || true
+    docker compose -f ../../deploy/docker-compose.yml down 2>/dev/null || true
 
     # Wait a moment for cleanup
     sleep 2

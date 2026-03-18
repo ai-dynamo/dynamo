@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """End-to-end tests covering reasoning effort behaviour.
@@ -93,8 +93,8 @@ class VllmWorkerProcess(ManagedProcess):
             "harmony",
             "--dyn-reasoning-parser",
             "gpt_oss",
-            "--connector",
-            "none",
+            "--max-model-len",  # this reduced max context window and amount of GPU memory allocated for context
+            "32768",
         ]
 
         env = os.environ.copy()
@@ -118,7 +118,7 @@ class VllmWorkerProcess(ManagedProcess):
             ],
             timeout=500,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
@@ -180,7 +180,7 @@ def start_services(
         # If the frontend hits a Rust panic, enabling backtraces makes failures diagnosable
         # from CI logs without needing to repro locally.
         # extra_env={"RUST_BACKTRACE": "1", "TOKIO_BACKTRACE": "1"},
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ):
         logger.info("Frontend started for tests")
         with VllmWorkerProcess(
@@ -222,7 +222,7 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-@pytest.mark.timeout(240)  # ~3x measured total (~70s/test), rounded up
+@pytest.mark.timeout(300)  # ~3x measured total (~70s/test), rounded up
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models

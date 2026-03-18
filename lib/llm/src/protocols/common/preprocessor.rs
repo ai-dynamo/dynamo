@@ -1,15 +1,18 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_kv_router::{
+    config::RouterConfigOverride,
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -34,6 +37,35 @@ pub struct RoutingHints {
     /// Data parallel rank for the request
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
+
+    /// Expected number of output tokens for this request.
+    /// Used as a hint for routing decisions to estimate resource requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_output_tokens: Option<u32>,
+
+    /// LORA adapter name for this request.
+    /// Used for LORA-aware routing and tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+
+    /// Priority jump in seconds for queue ordering.
+    /// A positive value decreases the effective arrival time, moving the request
+    /// ahead in the scheduler queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_jump: Option<f64>,
+
+    /// Backend engine scheduling priority forwarded to the generate call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+
+    /// TTL in seconds for cache control pinning. None = no pinning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_ttl: Option<u64>,
+
+    /// Worker IDs provided externally and not discovered by the router.
+    /// When set, only workers in this set are considered during scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -57,10 +89,25 @@ pub struct PrefillResult {
     pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
 }
 
+/// Optional multimodal routing-only data.
+/// This is used by the router to compute overlaps on an alternate token sequence
+/// (for example, MM-expanded tokens) without changing execution token_ids.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(default)]
+pub struct MmRoutingInfo {
+    /// Token IDs to use for routing overlap computation.
+    pub routing_token_ids: Vec<TokenIdType>,
+
+    /// Block-level multimodal metadata aligned with routing_token_ids blocks.
+    /// Use `None` entries for blocks without multimodal objects.
+    pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
-    #[cfg(feature = "media-nixl")]
+    #[serde(rename(serialize = "Url"))]
+    RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
 }
 
@@ -77,10 +124,21 @@ pub struct PreprocessedRequest {
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings
+    /// If provided, this takes precedence over token_ids for inference
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
+
     // Multimodal data
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// Optional multimodal routing-only fields (separate from execution payload).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_routing_info: Option<MmRoutingInfo>,
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
@@ -160,6 +218,19 @@ impl PreprocessedRequest {
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)
+    }
+
+    /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
+    /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
+    pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        let Some(mm) = self.mm_routing_info.as_ref() else {
+            return (&self.token_ids, None);
+        };
+        let tokens = mm.routing_token_ids.as_slice();
+        if tokens.is_empty() {
+            return (&self.token_ids, None);
+        }
+        (tokens, Some(mm.block_mm_infos.as_slice()))
     }
 }
 

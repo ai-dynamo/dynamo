@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -86,9 +86,6 @@ impl EndpointConfigBuilder {
 
         let system_health = endpoint.drt().system_health();
 
-        let request_plane_mode = endpoint.drt().request_plane();
-        tracing::info!("Endpoint starting with request plane mode: {request_plane_mode}",);
-
         // Register with graceful shutdown tracker if needed
         if graceful_shutdown {
             tracing::debug!(
@@ -140,7 +137,7 @@ impl EndpointConfigBuilder {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             endpoint = %endpoint_name_for_task,
             transport = server.transport_name(),
             "Registering endpoint with request plane server"
@@ -230,7 +227,7 @@ impl EndpointConfigBuilder {
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
 /// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
-/// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
+/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -243,10 +240,13 @@ fn build_transport_type_inner(
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
+            // If a fixed port is explicitly configured, use it directly.
+            // Otherwise, use the actual bound port (set by HTTP server after binding when port 0 is used).
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8888);
+                .filter(|&p| p != 0)
+                .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
@@ -264,11 +264,17 @@ fn build_transport_type_inner(
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
-            // Include endpoint name for proper TCP routing
-            // TCP client parses this format and adds x-endpoint-path header for server-side routing
-            let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_id.name);
+            // Include instance_id and endpoint name for proper TCP routing.
+            // Format: host:port/instance_id_hex/endpoint_name
+            // This ensures each worker has a unique routing key when multiple workers
+            // share the same TCP server (e.g., --num-workers > 1).
+            let tcp_endpoint = format!(
+                "{}:{}/{:x}/{}",
+                tcp_host, tcp_port, connection_id, endpoint_id.name
+            );
 
             Ok(TransportType::Tcp(tcp_endpoint))
         }
@@ -291,18 +297,111 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    if mode == RequestPlaneMode::Tcp {
-        // Only force server init when we *don't* have a valid explicit port.
-        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
+    // For TCP and HTTP with OS-assigned ports, we must ensure the server is initialized
+    // (bound to a port) before we can construct a correct transport address.
+    let has_fixed_port = match mode {
+        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .is_some();
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Http => std::env::var("DYN_HTTP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Nats => true, // NATS doesn't need port init
+    };
 
-        if !has_fixed_port {
-            // Ensure request plane server is initialized before building transport.
-            let _ = endpoint.drt().request_plane_server().await?;
-        }
+    if !has_fixed_port {
+        // Ensure request plane server is initialized before building transport.
+        let _ = endpoint.drt().request_plane_server().await?;
     }
 
     build_transport_type_inner(mode, endpoint_id, connection_id)
+}
+
+impl Endpoint {
+    /// Unregister this endpoint instance from discovery.
+    ///
+    /// This removes the endpoint from the instances bucket, preventing the router
+    /// from sending requests to this worker. Use this when a worker is sleeping
+    /// and should not receive any requests.
+    pub async fn unregister_endpoint_instance(&self) -> anyhow::Result<()> {
+        let drt = self.drt();
+        let instance_id = drt.connection_id();
+        let endpoint_id = self.id();
+
+        // Get the transport type for the endpoint
+        let transport = build_transport_type(self, &endpoint_id, instance_id).await?;
+
+        let instance = crate::discovery::DiscoveryInstance::Endpoint(Instance {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            instance_id,
+            transport,
+        });
+
+        let discovery = drt.discovery();
+        if let Err(e) = discovery.unregister(instance).await {
+            let endpoint_id = self.id();
+            tracing::error!(
+                %endpoint_id,
+                error = %e,
+                "Unable to unregister endpoint instance from discovery"
+            );
+            anyhow::bail!(
+                "Unable to unregister endpoint instance from discovery. Check discovery service status"
+            );
+        }
+
+        tracing::info!(
+            instance_id = instance_id,
+            "Successfully unregistered endpoint instance from discovery - worker removed from routing pool"
+        );
+
+        Ok(())
+    }
+
+    /// Re-register this endpoint instance to discovery.
+    ///
+    /// This adds the endpoint back to the instances bucket, allowing the router
+    /// to send requests to this worker again. Use this when a worker wakes up
+    /// and should start receiving requests.
+    pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
+        let drt = self.drt();
+        let instance_id = drt.connection_id();
+        let endpoint_id = self.id();
+
+        // Get the transport type for the endpoint
+        let transport = build_transport_type(self, &endpoint_id, instance_id).await?;
+
+        let spec = crate::discovery::DiscoverySpec::Endpoint {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            transport,
+        };
+
+        let discovery = drt.discovery();
+        if let Err(e) = discovery.register(spec).await {
+            let endpoint_id = self.id();
+            tracing::error!(
+                %endpoint_id,
+                error = %e,
+                "Unable to re-register endpoint instance to discovery"
+            );
+            anyhow::bail!(
+                "Unable to re-register endpoint instance to discovery. Check discovery service status"
+            );
+        }
+
+        tracing::info!(
+            instance_id = instance_id,
+            "Successfully re-registered endpoint instance to discovery - worker added back to routing pool"
+        );
+
+        Ok(())
+    }
 }

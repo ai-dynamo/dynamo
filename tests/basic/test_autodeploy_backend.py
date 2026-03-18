@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Integration test for the autodeploy backend in TRTLLM."""
@@ -47,6 +47,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # TODO: Replace hardcoded port with allocate_ports() for xdist-safe parallel execution
         env["DYN_SYSTEM_PORT"] = "9345"
         env["DYN_KVBM_CPU_CACHE_GB"] = "20"
         env["DYN_KVBM_DISK_CACHE_GB"] = "60"
@@ -73,7 +74,7 @@ class DynamoWorkerProcess(ManagedProcess):
             ],
             timeout=360,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             log_dir=log_dir,
         )
 

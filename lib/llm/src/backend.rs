@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Backend
@@ -15,11 +15,10 @@
 //! Further post-processing can happen in the response stream. One example is the jailing mechanism for partial
 //! hidden stop condition matches, which can be handled in the response stream rather than the backend.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
-use tracing as log;
 
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
@@ -39,11 +38,11 @@ use crate::protocols::{
             PreprocessedRequest,
         },
         preprocessor::PreprocessedEmbeddingRequest,
+        timing::RequestTracker,
     },
 };
-use crate::tokenizers::{DecodeStream, HuggingFaceTokenizer, Tokenizer};
+use crate::tokenizers::{DecodeStream, Tokenizer};
 use dynamo_async_openai::types::StopReason;
-use tokenizers::Tokenizer as HfTokenizer;
 
 /// Represents the output stream from the execution engine
 pub type ExecutionOutputStream = Annotated<LLMEngineOutput>;
@@ -69,10 +68,7 @@ struct DecoderUnfoldState {
 }
 
 impl Backend {
-    pub fn from_tokenizer(tokenizer: HfTokenizer) -> Arc<Self> {
-        let tokenizer = HuggingFaceTokenizer::from_tokenizer(tokenizer);
-        let tokenizer = Tokenizer::from(Arc::new(tokenizer));
-
+    pub fn from_tokenizer(tokenizer: Tokenizer) -> Arc<Self> {
         Arc::new(Self {
             tokenizer: Some(tokenizer),
             validate_engine_decode: false,
@@ -80,10 +76,10 @@ impl Backend {
     }
 
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
-        match mdc.tokenizer_hf() {
+        match mdc.tokenizer() {
             Ok(tokenizer) => Self::from_tokenizer(tokenizer),
             Err(err) => {
-                tracing::warn!(%err, "tokenizer_hf error converting ModelDeploymentCard to HF tokenizer");
+                tracing::warn!(%err, "error loading tokenizer from ModelDeploymentCard");
                 Arc::new(Self {
                     tokenizer: None,
                     validate_engine_decode: false,
@@ -99,6 +95,7 @@ impl Backend {
         stop_conditions: StopConditions,
         skip_special_tokens: bool,
         include_stop_str_in_output: bool,
+        tracker: Option<Arc<RequestTracker>>,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
@@ -107,6 +104,7 @@ impl Backend {
             tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
             stop_conditions,
             include_stop_str_in_output,
+            tracker,
         );
 
         Ok(DecoderUnfoldState {
@@ -144,6 +142,7 @@ impl
             .sampling_options
             .include_stop_str_in_output
             .unwrap_or(false);
+        let tracker = request.tracker.clone();
 
         let next_stream = next.generate(request).await?;
 
@@ -154,6 +153,7 @@ impl
             stop_conditions,
             skip_special_tokens,
             include_stop_str_in_output,
+            tracker,
         )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
@@ -182,7 +182,20 @@ impl
 
                     let data = output.data.as_ref().unwrap();
 
-                    let result = state.decoder.process_token_ids(&data.token_ids).unwrap();
+                    let result = match state.decoder.process_token_ids(&data.token_ids) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::error!("Failed to process token_ids: {e}");
+                            state.stream.context().stop_generating();
+                            state.finished = true;
+                            let mut output = output;
+                            if let Some(data) = &mut output.data {
+                                data.finish_reason =
+                                    Some(FinishReason::Error(format!("decode error: {e}")));
+                            }
+                            return Some((output, state));
+                        }
+                    };
 
                     // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
                     // The `data` field can have a `finish_reason` set, coming from the underlying
@@ -226,7 +239,7 @@ impl
 
                     if state.validate_engine_decode {
                         if data.finish_reason != finish_reason {
-                            log::warn!(
+                            tracing::warn!(
                                 "finish reason mismatch: expected {:?}, got {:?}",
                                 data.finish_reason,
                                 finish_reason
@@ -234,7 +247,11 @@ impl
                         }
 
                         if data.text.is_some() && data.text != text {
-                            log::warn!("text mismatch: expected {:?}, got {:?}", data.text, text);
+                            tracing::warn!(
+                                "text mismatch: expected {:?}, got {:?}",
+                                data.text,
+                                text
+                            );
                         }
                     }
 
@@ -262,7 +279,8 @@ impl
 
                 None => None,
             }
-        });
+        })
+        .fuse();
 
         // convert stream of processed Annotated<LLMEngineOutput> to Annotated<BackendOutput>
         //let mdcsum = self.mdcsum.clone();
@@ -325,6 +343,7 @@ impl
 #[allow(dead_code)]
 pub struct Decoder {
     decode_stream: DecodeStream,
+    tracker: Option<Arc<RequestTracker>>,
 
     // do not trigger stop conditions until at least this many tokens have been generated
     min_tokens: u32,
@@ -397,6 +416,7 @@ impl Decoder {
         decode_stream: DecodeStream,
         stop_condition: StopConditions,
         include_stop_str_in_output: bool,
+        tracker: Option<Arc<RequestTracker>>,
     ) -> Self {
         let hidden_stop_ids: HashSet<TokenIdType> = stop_condition
             .stop_token_ids_hidden
@@ -424,6 +444,7 @@ impl Decoder {
 
         Self {
             decode_stream,
+            tracker,
             hidden_stop_ids,
             hidden_stop_sequences,
             visible_stop_sequences,
@@ -446,7 +467,11 @@ impl Decoder {
         self.generated_tokens += 1;
 
         // decode the token
+        let detokenize_start = Instant::now();
         let token = self.decode_stream.step(token_id)?;
+        if let Some(tracker) = &self.tracker {
+            tracker.record_detokenize_latency(detokenize_start.elapsed());
+        }
 
         // stop conditions to not apply until the minimum number of tokens have been generated
         if self.generated_tokens < self.min_tokens {
@@ -456,7 +481,7 @@ impl Decoder {
         // check for hidden stop tokens - eos takes precedence
         if self.hidden_stop_ids.contains(&token_id) {
             return Ok(StepResult::with_stop_trigger(
-                token,
+                None,
                 StopTrigger::HiddenStopTokenDetected(token_id),
             ));
         }
@@ -467,18 +492,12 @@ impl Decoder {
             && let Some(token) = &token
         {
             let pre_append = self.jail.len();
-            log::debug!("pre_append: {}", pre_append);
-            log::debug!("jail: {}", self.jail);
             self.jail.push_str(token);
-            log::debug!("post_append: {}", self.jail.len());
-            log::debug!("jail: {}", self.jail);
 
             // Check hidden stop sequences first (excluded from output)
             for seq in &self.hidden_stop_sequences {
-                log::debug!("stop seq: {}", seq);
                 if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
                 {
-                    log::debug!("offset: {}", offset);
                     // return only new bytes after pre_append .. offset (excluding stop sequence)
                     // example: seq = "ox", token = "boxes", return "b"
                     // note: this changes when we start jailing tokens for partial matches
@@ -577,16 +596,103 @@ impl Decoder {
     }
 }
 
+#[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::tokenizers::traits;
+    use std::sync::Arc;
 
     #[test]
     fn test_char_boundary_drain() {
-        use super::Decoder;
         let mut s = String::from("helloñworld"); // 12 bytes total ñ is 2 bytes
         let max_bytes = 6; // 12 - 6 = 6 which is inside ñ
         assert!(!s.is_char_boundary(s.len() - max_bytes)); // initially we are not on a char boundary
         Decoder::maybe_drain_to_max_bytes(&mut s, max_bytes);
         assert!(s.is_char_boundary(0)); // front of jail string on valid char boundary
         assert_eq!(s, "ñworld");
+    }
+
+    /// A mock tokenizer that always returns Err from decode().
+    /// Used to test the error propagation path in Decoder::process_token_ids().
+    struct FailingDecoder;
+
+    impl traits::Encoder for FailingDecoder {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl traits::Decoder for FailingDecoder {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!(
+                "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
+            ))
+        }
+    }
+
+    impl traits::Tokenizer for FailingDecoder {}
+
+    /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
+    /// should propagate the error. In the backend unfold closure, this error
+    /// gets caught and converted to FinishReason::Error.
+    #[test]
+    fn test_decoder_process_token_ids_propagates_decode_error() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
+        let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
+        let stop_conditions = StopConditions::default();
+
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+
+        let result = decoder.process_token_ids(&[42]);
+        assert!(
+            result.is_err(),
+            "process_token_ids should propagate decode errors"
+        );
+
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("incomplete utf-8 byte sequence"),
+            "error should contain the original decode error message, got: {err_msg}"
+        );
+    }
+
+    /// Verify that the error message format matches what the backend unfold
+    /// closure would wrap into FinishReason::Error.
+    #[test]
+    fn test_decoder_error_message_format_for_finish_reason() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
+        let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
+        let stop_conditions = StopConditions::default();
+
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+
+        let result = decoder.process_token_ids(&[42]);
+        let err = result.err().expect("should be Err");
+
+        // This is what the backend unfold closure does:
+        let finish_reason = FinishReason::Error(format!("decode error: {err}"));
+        match &finish_reason {
+            FinishReason::Error(msg) => {
+                assert!(
+                    msg.starts_with("decode error:"),
+                    "FinishReason::Error should have 'decode error:' prefix, got: {msg}"
+                );
+                assert!(
+                    msg.contains("incomplete utf-8 byte sequence"),
+                    "FinishReason::Error should contain original error, got: {msg}"
+                );
+            }
+            other => panic!("Expected FinishReason::Error, got: {:?}", other),
+        }
     }
 }

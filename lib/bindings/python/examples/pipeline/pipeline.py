@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,12 +31,7 @@ async def worker(runtime: DistributedRuntime):
     - `frontend` call `middle` which calls `backend`
     - each component transforms the request before passing it to the backend
     """
-    pipeline = (
-        await runtime.namespace("examples/pipeline")
-        .component("frontend")
-        .endpoint("generate")
-        .client()
-    )
+    pipeline = await runtime.endpoint("examples/pipeline.frontend.generate").client()
 
     async for char in await pipeline.round_robin("hello from"):
         print(char)

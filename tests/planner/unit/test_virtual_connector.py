@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 #
@@ -18,6 +18,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.planner,
+    pytest.mark.sglang,
 ]
 logger = logging.getLogger(__name__)
 
