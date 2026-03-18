@@ -369,6 +369,13 @@ async def test_gaie_deployment(
                 min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
             )
 
-            logger.info("GAIE deployment test PASSED")
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            logger.info(
+                f"GAIE deployment test PASSED | "
+                f"model={data['model']}, status={response.status_code}, "
+                f"response_length={len(content)} chars\n"
+                f"Model response: {content}"
+            )
         finally:
             gateway_pf.stop()

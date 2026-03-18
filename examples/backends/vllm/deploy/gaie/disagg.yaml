@@ -20,6 +20,8 @@ spec:
               value: "16"
             - name: DYN_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
+            - name: DYN_ENFORCE_DISAGG
+              value: "true"
       eppConfig:
         config:
           plugins:
