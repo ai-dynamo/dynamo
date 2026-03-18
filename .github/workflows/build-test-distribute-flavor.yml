@@ -284,6 +284,14 @@ jobs:
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
+      - name: Refresh BuildKit builder
+        if: ${{ inputs.target != 'dev' }}
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ inputs.framework }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
         shell: bash
@@ -524,7 +532,7 @@ jobs:
     if: inputs.build_image && inputs.push_image
     needs: [build]
     name: Compliance cuda${{ inputs.cuda_version }}
-    runs-on: prod-builder-amd-v1
+    runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -550,6 +558,7 @@ jobs:
         with:
           image: ${{ steps.images.outputs.runtime_image }}
           artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}
+          arch: linux/amd64
           framework: ${{ inputs.framework }}
           cuda_version: ${{ inputs.cuda_version }}
 

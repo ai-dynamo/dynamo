@@ -11,6 +11,13 @@
 #    kubectl apply -f deploy.yaml -n <namespace>
 # 4. To benchmark the service, run:
 #    kubectl apply -f perf.yaml -n <namespace>
+#
+# NOTE (empty /v1/models): If the frontend returns "data": [] from /v1/models, check frontend logs.
+#    The frontend discovery watcher may treat the workers' --model-path (a local path like
+#    /model-cache/deepseek-r1-fp4) as a HuggingFace model ID and fail with 404. Mounting the
+#    model-cache on the Frontend with HF_HOME allows the frontend to resolve local paths when
+#    the runtime supports it. Otherwise use a HuggingFace model ID for --model-path and HF_HOME
+#    on workers (with model downloaded in HF cache layout).
 
 # ConfigMap for prefill engine configuration
 # This configuration sets up a DEP 4 prefill worker
@@ -122,11 +129,17 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
       extraPodSpec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+          env:
+            - name: HF_HOME
+              value: /model-cache
           args:
           - |
             python3 -m dynamo.frontend --http-port 8000
@@ -158,7 +171,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
           workingDir: /workspace/components/backends/trtllm
           # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
           #       you might need to increase 'failureThreshold' below to allow more time for startup
@@ -216,7 +229,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
           workingDir: /workspace/components/backends/trtllm
           # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
           #       you might need to increase 'failureThreshold' below to allow more time for startup

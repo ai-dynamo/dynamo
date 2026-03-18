@@ -18,7 +18,8 @@ use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::protocols::{
     BlockExtraInfo, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, compute_block_hash_for_seq,
+    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement, PlacementEvent,
+    StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
 // -------------------------------------------------------------------------
@@ -335,16 +336,22 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 // Event conversion --------------------------------------------------------
 // -------------------------------------------------------------------------
 
-/// Convert a raw event coming from the ZMQ channel into the internal
-/// [`KvCacheEvent`] representation used by the router.
+/// Convert a raw event coming from the ZMQ channel into a placement-aware worker event.
 pub fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: u32,
-    dp_rank: u32,
+    worker: WorkerWithDpRank,
     warning_count: &Arc<AtomicU32>,
-) -> KvCacheEvent {
-    match raw {
+) -> PlacementEvent {
+    let storage_tier = match &raw {
+        RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
+            StorageTier::from_kv_medium_or_default(medium.as_deref())
+        }
+        RawKvEvent::AllBlocksCleared => StorageTier::Device,
+    };
+    let dp_rank = worker.dp_rank;
+    let event = match raw {
         RawKvEvent::BlockStored {
             block_hashes,
             parent_block_hash,
@@ -369,13 +376,16 @@ pub fn convert_event(
                     // Return an empty Removed instead of Cleared to avoid nuking
                     // the worker's entire index state. An empty Removed is a no-op
                     // in the radix tree (zero iterations, returns Ok(())).
-                    return KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Removed(KvCacheRemoveData {
-                            block_hashes: vec![],
-                        }),
-                        dp_rank,
-                    };
+                    return PlacementEvent::new(
+                        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                        KvCacheEvent {
+                            event_id,
+                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                block_hashes: vec![],
+                            }),
+                            dp_rank,
+                        },
+                    );
                 }
             }
 
@@ -422,7 +432,12 @@ pub fn convert_event(
             data: KvCacheEventData::Cleared,
             dp_rank,
         },
-    }
+    };
+
+    PlacementEvent::new(
+        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+        event,
+    )
 }
 
 pub fn create_stored_block_from_parts(

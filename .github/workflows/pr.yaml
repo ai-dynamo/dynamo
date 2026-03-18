@@ -222,7 +222,9 @@ jobs:
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
-      run_multi_gpu_tests: false  # all sglang multi-GPU tests are currently skipped; re-enable when fixed
+      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
+      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
   # ============================================================================
