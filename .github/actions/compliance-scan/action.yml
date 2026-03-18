@@ -6,11 +6,15 @@ description: 'Generate attribution CSVs (dpkg + Python) for a container image an
 
 inputs:
   image:
-    description: 'Full container image URI to scan (must be pullable)'
+    description: 'Full container image URI to scan (must be accessible to the BuildKit worker)'
     required: true
   artifact_name:
     description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda12-amd64)'
     required: true
+  arch:
+    description: 'Target architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
   framework:
     description: 'Framework name for base image resolution (vllm, sglang, trtllm, dynamo)'
     required: false
@@ -35,49 +39,74 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+    - name: Initialize builder
+      uses: ./.github/actions/init-dynamo-builder
       with:
-        driver: docker-container
-        # Enable BuildKit for enhanced metadata
-        buildkitd-flags: --debug
-        version: v0.14.1
-    - name: Cleanup
-      if: always()
-      shell: bash
-      run: |
-        docker system prune -af
+        builder_name: compliance-${{ github.run_id }}-${{ github.run_attempt }}
+        flavor: general
+        arch: ${{ inputs.arch }}
+
     - name: Set up Python
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
       with:
         python-version: '3.12'
         pip-install: pyyaml
 
-    - name: Pull container image
+    - name: Resolve base image
+      id: resolve-base
       shell: bash
       run: |
-        source ./.github/scripts/retry_docker.sh
-        retry_pull ${{ inputs.image }}
+        BASE_IMAGE=""
+        if [ -n "${{ inputs.base_image }}" ]; then
+          BASE_IMAGE="${{ inputs.base_image }}"
+        elif [ -n "${{ inputs.framework }}" ]; then
+          RESOLVE_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }}"
+          if [ -n "${{ inputs.cuda_version }}" ]; then
+            RESOLVE_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+          fi
+          BASE_IMAGE=$(python3 container/compliance/resolve_base_image.py ${RESOLVE_ARGS})
+        fi
+        echo "base_image=${BASE_IMAGE}" >> $GITHUB_OUTPUT
+
+    - name: Extract target image packages
+      shell: bash
+      run: |
+        mkdir -p /tmp/compliance-target
+        docker buildx build \
+          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --platform linux/${{ inputs.arch }} \
+          --build-arg TARGET_IMAGE="${{ inputs.image }}" \
+          --output "type=local,dest=/tmp/compliance-target" \
+          --pull \
+          --no-cache-filter extractor \
+          --progress=plain \
+          -f container/compliance/Dockerfile.extract \
+          container/compliance/
+
+    - name: Extract base image packages
+      if: steps.resolve-base.outputs.base_image != ''
+      shell: bash
+      run: |
+        mkdir -p /tmp/compliance-base
+        docker buildx build \
+          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --platform linux/${{ inputs.arch }} \
+          --build-arg TARGET_IMAGE="${{ steps.resolve-base.outputs.base_image }}" \
+          --output "type=local,dest=/tmp/compliance-base" \
+          --pull \
+          --no-cache-filter extractor \
+          --progress=plain \
+          -f container/compliance/Dockerfile.extract \
+          container/compliance/
 
     - name: Generate attribution CSVs
       shell: bash
       run: |
-        ARGS=""
-        if [ -n "${{ inputs.base_image }}" ]; then
-          ARGS+=" --base-image ${{ inputs.base_image }}"
-        elif [ -n "${{ inputs.framework }}" ]; then
-          ARGS+=" --framework ${{ inputs.framework }}"
-          ARGS+=" --target ${{ inputs.target }}"
-          if [ -n "${{ inputs.cuda_version }}" ]; then
-            ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
-          fi
+        ARGS=(--target-dir /tmp/compliance-target --output "${{ inputs.artifact_name }}.csv")
+        if [ -n "${{ steps.resolve-base.outputs.base_image }}" ]; then
+          ARGS+=(--base-dir /tmp/compliance-base)
         fi
-
-        python container/compliance/generate_attributions.py \
-          "${{ inputs.image }}" \
-          --output "${{ inputs.artifact_name }}.csv" \
-          --verbose \
-          ${ARGS}
+        python3 container/compliance/process_results.py "${ARGS[@]}"
 
     - name: Upload attribution artifacts
       if: always()
@@ -86,3 +115,9 @@ runs:
         name: ${{ inputs.artifact_name }}
         path: ${{ inputs.artifact_name }}*.csv
         retention-days: ${{ inputs.retention_days }}
+
+    - name: Cleanup compliance builder
+      if: always()
+      shell: bash
+      run: |
+        docker buildx rm compliance-${{ github.run_id }}-${{ github.run_attempt }} || true

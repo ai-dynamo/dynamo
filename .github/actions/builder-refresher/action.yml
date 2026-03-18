@@ -1,0 +1,101 @@
+name: 'Refresh BuildKit Builder'
+description: 'Ensure a BuildKit builder is healthy; re-initialize it if the connection has been lost'
+
+# This action guards against the remote BuildKit connection going stale between
+# build steps in the same job (e.g. after a long primary build the TCP connection
+# to the remote daemon can time out before the test-image build starts).
+#
+# How it works:
+#   1. Runs `docker buildx inspect --bootstrap` to check whether the builder is
+#      still reachable.  If it succeeds the action exits immediately — no extra
+#      work is done.
+#   2. If the inspect/bootstrap fails the builder is considered stale and
+#      init-dynamo-builder is called with the same flavor/arch/cuda_version that
+#      were used when the builder was first created, effectively re-routing
+#      workers and re-registering the builder from scratch.
+
+inputs:
+  builder_name:
+    description: 'Name of the buildx builder to check'
+    required: true
+  flavor:
+    description: 'Buildkit flavor used to route workers on re-init (vllm, sglang, trtllm, general)'
+    required: true
+  arch:
+    description: 'Target architecture used on re-init (amd64, arm64)'
+    required: false
+    default: 'amd64'
+  cuda_version:
+    description: 'CUDA version used on re-init (e.g. 12.9, 13.0). Leave empty for general flavor.'
+    required: false
+    default: ''
+  all_arch:
+    description: 'If true, re-initialize builder for both amd64 and arm64 architectures'
+    required: false
+    default: 'false'
+
+  # Kubernetes fallback passthrough inputs (forwarded to init-dynamo-builder)
+  ephemeral_storage:
+    description: 'Ephemeral storage request for Kubernetes fallback driver'
+    required: false
+    default: '400Gi'
+  namespace:
+    description: 'Kubernetes namespace for buildkit fallback pods'
+    required: false
+    default: 'buildkit'
+  replicas:
+    description: 'Number of buildkit fallback replicas'
+    required: false
+    default: '1'
+  requests_cpu:
+    description: 'CPU requests for buildkit fallback pods'
+    required: false
+    default: '12'
+  requests_memory:
+    description: 'Memory requests for buildkit fallback pods'
+    required: false
+    default: '26Gi'
+  limits_memory:
+    description: 'Memory limits for buildkit fallback pods'
+    required: false
+    default: '29Gi'
+  tolerations:
+    description: 'Tolerations for buildkit fallback pods'
+    required: false
+    default: "key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check builder health
+      id: check-health
+      continue-on-error: true
+      shell: bash
+      run: |
+        echo "Checking BuildKit builder '${{ inputs.builder_name }}'..."
+        docker buildx inspect "${{ inputs.builder_name }}" --bootstrap
+        echo "Builder is healthy."
+
+    - name: Remove stale builder (if unhealthy)
+      if: steps.check-health.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::Builder '${{ inputs.builder_name }}' is unhealthy. Removing and re-initializing..."
+        docker buildx rm "${{ inputs.builder_name }}" || true
+
+    - name: Re-initialize builder (if unhealthy)
+      if: steps.check-health.outcome == 'failure'
+      uses: ./.github/actions/init-dynamo-builder
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        flavor: ${{ inputs.flavor }}
+        arch: ${{ inputs.arch }}
+        all_arch: ${{ inputs.all_arch }}
+        cuda_version: ${{ inputs.cuda_version }}
+        ephemeral_storage: ${{ inputs.ephemeral_storage }}
+        namespace: ${{ inputs.namespace }}
+        replicas: ${{ inputs.replicas }}
+        requests_cpu: ${{ inputs.requests_cpu }}
+        requests_memory: ${{ inputs.requests_memory }}
+        limits_memory: ${{ inputs.limits_memory }}
+        tolerations: ${{ inputs.tolerations }}

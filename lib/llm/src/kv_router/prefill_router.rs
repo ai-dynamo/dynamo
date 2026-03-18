@@ -10,6 +10,10 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
@@ -21,8 +25,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::protocols::WorkerId,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
+    kv_router::KvPushRouter,
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},

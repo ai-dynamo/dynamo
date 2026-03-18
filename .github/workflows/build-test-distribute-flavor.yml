@@ -193,6 +193,31 @@ jobs:
           build_only: ${{ inputs.build_only }}
           sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
+          extra_build_args: |
+            DYNAMO_COMMIT_SHA=${{ github.sha }}
+      - name: Refresh BuildKit builder
+        if: ${{ inputs.target != 'dev' }}
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ inputs.framework }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
+      - name: Build and Push Test Image
+        if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
+        timeout-minutes: ${{ inputs.build_timeout_minutes }}
+        uses: ./.github/actions/docker-test-image-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
+          base_image: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
+          framework: ${{ inputs.framework }}
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          push_image: ${{ inputs.push_image }}
+          no_load: ${{ inputs.no_load }}
+          no_cache: ${{ inputs.no_cache }}
 
 
   # ============================================================================
@@ -367,7 +392,7 @@ jobs:
     if: inputs.build_image && inputs.push_image
     needs: [build]
     name: Compliance cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
-    runs-on: ${{ inputs.platform == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
+    runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -393,6 +418,7 @@ jobs:
         with:
           image: ${{ steps.images.outputs.runtime_image }}
           artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}-${{ inputs.platform }}
+          arch: ${{ inputs.platform }}
           framework: ${{ inputs.framework }}
           cuda_version: ${{ inputs.cuda_version }}
 

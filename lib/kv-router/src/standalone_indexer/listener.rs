@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, SubSocket};
 
-use crate::protocols::{RouterEvent, WorkerId};
+use crate::protocols::{RouterEvent, WorkerId, WorkerWithDpRank};
 use crate::zmq_wire::{KvEventBatch, convert_event};
 
 use super::indexer::Indexer;
@@ -111,9 +111,19 @@ async fn replay_gap(
             .data_parallel_rank
             .map_or(dp_rank, |rank| rank.cast_unsigned());
         for raw_event in batch.events {
-            let kv_event =
-                convert_event(raw_event, seq, block_size, effective_dp_rank, warning_count);
-            let router_event = RouterEvent::new(worker_id, kv_event);
+            let placement_event = convert_event(
+                raw_event,
+                seq,
+                block_size,
+                WorkerWithDpRank::new(worker_id, effective_dp_rank),
+                warning_count,
+            );
+            if !placement_event.placement.is_local_gpu() {
+                continue;
+            }
+            let router_event = placement_event
+                .into_router_event()
+                .expect("local worker placement must convert to router event");
             indexer.apply_event(router_event).await;
         }
         watermark.store(seq, Ordering::Release);
@@ -381,9 +391,19 @@ async fn zmq_recv_loop(
                     .data_parallel_rank
                     .map_or(dp_rank, |rank| rank.cast_unsigned());
                 for raw_event in batch.events {
-                    let kv_event =
-                        convert_event(raw_event, seq, block_size, effective_dp_rank, &warning_count);
-                    let router_event = RouterEvent::new(worker_id, kv_event);
+                    let placement_event = convert_event(
+                        raw_event,
+                        seq,
+                        block_size,
+                        WorkerWithDpRank::new(worker_id, effective_dp_rank),
+                        &warning_count,
+                    );
+                    if !placement_event.placement.is_local_gpu() {
+                        continue;
+                    }
+                    let router_event = placement_event
+                        .into_router_event()
+                        .expect("local worker placement must convert to router event");
                     indexer.apply_event(router_event).await;
                     messages_processed += 1;
                 }

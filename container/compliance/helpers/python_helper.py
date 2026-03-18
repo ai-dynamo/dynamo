@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This script runs INSIDE the container. It must be fully self-contained
-# with zero external dependencies (only Python stdlib).
+# This script runs INSIDE the container (local mode) or against a mounted
+# filesystem root (--root /target mode for BuildKit extraction).
+# It must be fully self-contained with zero external dependencies (only Python stdlib).
 
+import argparse
+import glob
 import importlib.metadata
+import sys
 
 # Conservative classifier -> SPDX mapping
 _CLASSIFIER_MAP = {
@@ -96,8 +100,46 @@ def get_license(dist):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Extract Python package info (stdlib only)"
+    )
+    parser.add_argument(
+        "--root",
+        default="/",
+        help="Filesystem root to inspect (default: /, i.e. running system)",
+    )
+    args = parser.parse_args()
+    root = args.root.rstrip("/") or "/"
+
+    if root != "/":
+        # BuildKit mode: scan site-packages directories in the mounted target filesystem
+        _patterns = [
+            "/usr/lib/python*/dist-packages",
+            "/usr/lib/python*/site-packages",
+            "/usr/local/lib/python*/dist-packages",
+            "/usr/local/lib/python*/site-packages",
+            # conda / virtualenv layouts common in ML containers (e.g. /opt/conda)
+            "/opt/*/lib/python*/site-packages",
+            "/opt/*/lib/python*/dist-packages",
+            # virtualenv one level deeper (e.g. /opt/dynamo/venv/lib/python*/site-packages)
+            "/opt/*/*/lib/python*/site-packages",
+            "/opt/*/*/lib/python*/dist-packages",
+        ]
+        search_paths = []
+        print(f"[python] search paths ({len(_patterns)} patterns):", file=sys.stderr)
+        for pattern in _patterns:
+            matches = glob.glob(f"{root}{pattern}")
+            marker = "+" if matches else "-"
+            label = f"({len(matches)} match)" if matches else "(no match)"
+            print(f"[python]   {marker} {root}{pattern}  {label}", file=sys.stderr)
+            search_paths.extend(matches)
+        dists = importlib.metadata.distributions(path=search_paths)
+    else:
+        # Local mode: enumerate distributions in the running Python environment
+        dists = importlib.metadata.distributions()
+
     seen = set()
-    for dist in importlib.metadata.distributions():
+    for dist in dists:
         name = dist.metadata["Name"]
         if not name:
             continue
@@ -110,6 +152,10 @@ def main():
         version = dist.metadata["Version"] or "UNKNOWN"
         spdx = get_license(dist)
         print(f"{name}\t{version}\t{spdx}")
+
+    count = len(seen)
+    icon = "✅" if count > 0 else "⚠️"
+    print(f"{icon} [python] extracted {count} package(s)", file=sys.stderr)
 
 
 if __name__ == "__main__":

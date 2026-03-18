@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::kv_router::protocols::RouterEvent;
 use crate::recorder::Recorder;
+use dynamo_kv_router::protocols::RouterEvent;
 
 // Type alias for backward compatibility
 pub type KvRecorder = Recorder<RouterEvent>;
@@ -10,9 +10,8 @@ pub type KvRecorder = Recorder<RouterEvent>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::indexer::KvIndexer;
-    use crate::kv_router::indexer::KvIndexerMetrics;
-    use crate::kv_router::protocols::*;
+    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
+    use dynamo_kv_router::protocols::*;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::fs;
