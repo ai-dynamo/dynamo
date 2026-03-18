@@ -87,8 +87,10 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 	return flags, needsShell
 }
 
+// Match a string representing a shell variable, such as $ABC
 var shellVarRe = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
 
+// convertIfShellVar convert shell variable $ABC to $(ABC)
 func convertIfShellVar(s string) string {
 	if strings.HasPrefix(s, "$(") && strings.HasSuffix(s, ")") {
 		return s
