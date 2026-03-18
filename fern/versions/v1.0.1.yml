@@ -24,6 +24,10 @@ navigation:
         path: ../pages-v1.0.1/getting-started/quickstart.md
       - page: Introduction
         path: ../pages-v1.0.1/getting-started/introduction.md
+      - page: Local Installation
+        path: ../pages-v1.0.1/getting-started/local-installation.md
+      - page: Building from Source
+        path: ../pages-v1.0.1/getting-started/building-from-source.md
       - page: Contribution Guide
         path: ../pages-v1.0.1/contribution-guide.md
   # ==================== Resources ====================
