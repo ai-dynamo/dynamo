@@ -17,6 +17,7 @@ import os
 import subprocess
 import time
 
+import kr8s
 import pytest
 import requests
 import yaml
@@ -115,27 +116,15 @@ async def test_gaie_deployment(
         assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
         logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
 
-        gateway_pf = subprocess.Popen(
-            [
-                "kubectl",
-                "port-forward",
-                "svc/inference-gateway",
-                "8000:80",
-                "-n",
-                "kgateway-system",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        gateway_svc = kr8s.get(
+            "services", "inference-gateway", namespace="kgateway-system"
         )
+        gateway_pf = gateway_svc.portforward(remote_port=80, local_port=0)
+        gateway_pf.start()
+        time.sleep(2)
 
         try:
-            time.sleep(3)
-            assert gateway_pf.poll() is None, (
-                "Gateway port-forward exited unexpectedly: "
-                f"{gateway_pf.stderr.read().decode() if gateway_pf.stderr else ''}"
-            )
-
-            gateway_url = "http://localhost:8000"
+            gateway_url = f"http://localhost:{gateway_pf.local_port}"
             logger.info(f"Gateway port-forward established: {gateway_url}")
 
             endpoint = deployment_spec.endpoint
@@ -198,5 +187,4 @@ async def test_gaie_deployment(
 
             logger.info("GAIE deployment test PASSED")
         finally:
-            gateway_pf.terminate()
-            gateway_pf.wait(timeout=5)
+            gateway_pf.stop()
