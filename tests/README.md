@@ -116,7 +116,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
-| VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). Filter with `--max-vram-gib=N`. Use `profile_pytest.py` to measure. |
+| VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). The pytest invocation can use `--max-vram-gib=N` to select only tests that fit on the available GPU. Does not prevent running on smaller GPUs (that will OOM). Use `profile_pytest.py` to measure. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
@@ -135,17 +135,19 @@ def test_kv_cache_behavior():
 
 ### Filtering by VRAM
 
-Use `--max-vram-gib` to skip tests that exceed a given GPU memory budget.
-Tests without a `max_vram_gib` marker always run (no constraint assumed).
+The `max_vram_gib(N)` marker records how much GPU memory a test needs. The pytest invocation can use `--max-vram-gib=N` as a **selector** to run only tests that fit on the available GPU. Tests that exceed the budget are skipped at collection time (before any test starts). Tests without a `max_vram_gib` marker always run (no constraint assumed).
+
+Nothing prevents you from running without this flag — but if a test needs more VRAM than is physically available, it will OOM at runtime (e.g., vLLM raises `ValueError: No available memory for the cache blocks`).
 
 ```bash
-# Run tests that fit on an L4 (24 GiB)
-python3 -m pytest --max-vram-gib=24 tests/
+# Run only tests that fit on a 48 GiB GPU — tests needing >48 GiB are skipped
+python3 -m pytest --max-vram-gib=48 tests/
 
-# Run tests that fit on a T4 (16 GiB)
-python3 -m pytest --max-vram-gib=16 tests/
+# GPU tests that have no max_vram_gib marker yet — need profiling
+# TODO: profile these tests and add max_vram_gib markers
+python3 -m pytest -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/
 
-# No filter — run everything regardless of VRAM
+# No filter — run everything regardless of VRAM (tests that exceed available memory will OOM)
 python3 -m pytest tests/
 ```
 
@@ -519,10 +521,14 @@ Recommended markers to add to your pytest. You can copy-paste this:
 ### How to use the recommendations
 
 1. **Copy the `@pytest.mark.*` lines** into your test function or `pytestmark` list.
-2. **VRAM marker** `max_vram_gib(N)` tells CI the peak GiB (with 10% safety) the test needs. Run tests on a specific GPU tier with `--max-vram-gib=N` to skip tests that exceed N GiB. Pay attention to the WARNING lines — they tell you which GPUs would OOM.
-3. **Lifecycle markers** — the profiler only recommends `pre_merge` for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
-4. **Timeout** — the recommended value is 3x the observed wall time. Adjust if your test has high variance (e.g., model download on first run).
-5. **Test type** (`unit`, `integration`, `e2e`) — based on wall time and whether a real model was loaded. Override if you know better (e.g., a fast test that uses a mock engine is `integration`, not `e2e`).
+
+2. **VRAM marker** — `max_vram_gib(N)` records the peak GPU memory the test needs (with 10% safety margin). This marker does **not** skip tests on its own — if a test runs on a GPU that is too small, it will OOM and fail hard. Use `--max-vram-gib=N` to select only tests that fit on the available GPU (see [Filtering by VRAM](#filtering-by-vram) for examples). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
+
+3. **Lifecycle markers** — the profiler recommends `pre_merge` only for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
+
+4. **Timeout** — the recommended value is 3x the observed wall time. Adjust upward if your test has high variance (e.g., first-run model download, flaky network).
+
+5. **Test type** (`unit`, `integration`, `e2e`) — inferred from wall time and whether a real model was loaded. Override if you know better (e.g., a fast test that uses a mock engine is `integration`, not `e2e`).
 
 ### Options
 
