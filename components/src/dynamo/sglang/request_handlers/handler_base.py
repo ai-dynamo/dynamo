@@ -19,9 +19,57 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
-# Keep default tags minimal and safe for general use.
-# "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
-DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
+
+class SGLangEngineQuiesceController:
+    def __init__(self, engine: sgl.Engine):
+        self._engine = engine
+        self._quiesced_tags: Optional[list[str]] = None
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
+        if self._is_quiesced:
+            return False
+
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
+        await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
+        await self._engine.tokenizer_manager.release_memory_occupation(
+            ReleaseMemoryOccupationReqInput(tags=tags),
+            None,
+        )
+        self._quiesced_tags = None if tags is None else list(tags)
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: Optional[list[str]] = None) -> bool:
+        if not self._is_quiesced:
+            return False
+
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
+        request_tags = self._quiesced_tags if tags is None else list(tags)
+        await self._engine.tokenizer_manager.resume_memory_occupation(
+            ResumeMemoryOccupationReqInput(tags=request_tags),
+            None,
+        )
+        await self._engine.tokenizer_manager.continue_generation(
+            ContinueGenerationReqInput()
+        )
+        return True
+
+    def mark_resumed(self) -> None:
+        self._quiesced_tags = None
+        self._is_quiesced = False
 
 
 class BaseGenerativeHandler(ABC):
@@ -148,8 +196,10 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._memory_occupation_lock = asyncio.Lock()
-        self._memory_released = False
+        self._quiesce_controller = (
+            SGLangEngineQuiesceController(engine) if engine is not None else None
+        )
+        self._quiesce_lock = asyncio.Lock()
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
@@ -160,32 +210,23 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Release GPU memory occupation and unregister from discovery.
 
         Args:
-            body: Unused. Release always targets default tags.
+            body: Optional dict with "tags" to target specific memory regions.
 
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
-        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
-        tokenizer_manager = (
-            getattr(self.engine, "tokenizer_manager", None)
-            if self.engine is not None
-            else None
-        )
-        if tokenizer_manager is None:
+        if self._quiesce_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
             }
 
-        async with self._memory_occupation_lock:
-            if self._memory_released:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Memory already released",
@@ -196,16 +237,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
 
-                pause_req = PauseGenerationReqInput()
-                await tokenizer_manager.pause_generation(pause_req)
-
-                release_req = ReleaseMemoryOccupationReqInput(tags=tags)
-                await tokenizer_manager.release_memory_occupation(release_req, None)
-                self._memory_released = True
+                await self._quiesce_controller.quiesce(tags)
 
                 return {
                     "status": "ok",
-                    "message": f"Memory released for tags: {tags}",
+                    "message": (
+                        f"Memory released for tags: {tags}"
+                        if tags is not None
+                        else "Memory released"
+                    ),
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
@@ -215,51 +255,42 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Resume GPU memory occupation and re-register to discovery.
 
         Args:
-            body: Unused. Resume always targets default tags.
+            body: Optional dict with "tags" to target specific memory regions.
 
         Order of operations:
         1. Resume memory - restore GPU allocations
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
-        tokenizer_manager = (
-            getattr(self.engine, "tokenizer_manager", None)
-            if self.engine is not None
-            else None
-        )
-        if tokenizer_manager is None:
+        if self._quiesce_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
             }
 
-        async with self._memory_occupation_lock:
-            if not self._memory_released:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
                 }
 
             try:
-                resume_req = ResumeMemoryOccupationReqInput(tags=tags)
-                await tokenizer_manager.resume_memory_occupation(resume_req, None)
-                continue_req = ContinueGenerationReqInput()
-                await tokenizer_manager.continue_generation(continue_req)
+                await self._quiesce_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
-
-                self._memory_released = False
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
-                    "message": f"Memory resumed for tags: {tags}",
+                    "message": (
+                        f"Memory resumed for tags: {tags}"
+                        if tags is not None
+                        else "Memory resumed"
+                    ),
                 }
             except Exception as e:
                 logging.error(f"Failed to resume memory occupation: {e}")
