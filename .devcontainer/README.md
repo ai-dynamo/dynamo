@@ -417,9 +417,9 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first, then build local-dev
-   export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
+   export FRAMEWORK=vllm  # Replace with vllm, sglang, or trtllm
    python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
-   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
+   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:latest-${FRAMEWORK}-local-dev -f container/rendered.Dockerfile .
    ```
 
 2. **Container startup failure:**
