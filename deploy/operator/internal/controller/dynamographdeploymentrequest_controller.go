@@ -476,9 +476,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
 	}
 
-	// Update to Profiling phase — show DiscoveringHardware until the job is confirmed running.
+	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
-	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "DiscoveringHardware", MessageDiscoveringHardware)
+	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, nvidiacomv1beta1.ProfilingReasonInitializing, MessageDiscoveringHardware)
 }
 
 // updateProfilingSubPhase reads the output ConfigMap and updates status.profilingPhase
@@ -588,9 +588,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 
 	if !completed {
 		logger.Info("Profiling job still running", "name", dgdr.Name)
-		// Transition from DiscoveringHardware to ProfilingRunning once the job is confirmed active.
+		// Transition from Initializing to ProfilingRunning once the job is confirmed active.
 		cond := meta.FindStatusCondition(dgdr.Status.Conditions, nvidiacomv1beta1.ConditionTypeProfiling)
-		if cond != nil && cond.Reason == "DiscoveringHardware" {
+		if cond != nil && cond.Reason == nvidiacomv1beta1.ProfilingReasonInitializing {
 			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
 		}
 		// Don't requeue - we'll be triggered when the Job completes/fails

@@ -1395,7 +1395,7 @@ spec:
 					Name: "gpu-worker-1",
 					Labels: map[string]string{
 						"nvidia.com/gpu.count":   "8",
-						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.product": "h100_sxm",
 						"nvidia.com/gpu.memory":  "81920",
 					},
 				},
@@ -1426,7 +1426,7 @@ spec:
 			mockGPU := &gpu.GPUInfo{
 				GPUsPerNode:   8,
 				VRAMPerGPU:    81920,
-				System:        "H100-SXM5-80GB",
+				System:        "h100_sxm",
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
@@ -1461,7 +1461,7 @@ spec:
 					Name: "gpu-worker-h100",
 					Labels: map[string]string{
 						"nvidia.com/gpu.count":   "8",
-						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.product": "h100_sxm",
 						"nvidia.com/gpu.memory":  "81920",
 					},
 				},
@@ -1520,7 +1520,7 @@ spec:
 					Name: "gpu-worker-autodiscovery",
 					Labels: map[string]string{
 						"nvidia.com/gpu.count":   "8",
-						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.product": "h100_sxm",
 						"nvidia.com/gpu.memory":  "81920",
 					},
 				},
@@ -1551,7 +1551,7 @@ spec:
 			mockGPU := &gpu.GPUInfo{
 				GPUsPerNode:   8,
 				VRAMPerGPU:    81920,
-				System:        "H100-SXM5-80GB",
+				System:        "h100_sxm",
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
@@ -1640,7 +1640,7 @@ spec:
 					Name: "gpu-worker-h100",
 					Labels: map[string]string{
 						"nvidia.com/gpu.count":   "8",
-						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.product": "h100_sxm",
 						"nvidia.com/gpu.memory":  "81920",
 					},
 				},
@@ -1675,7 +1675,7 @@ spec:
 			mockGPU := &gpu.GPUInfo{
 				GPUsPerNode:   8,
 				VRAMPerGPU:    81920,
-				System:        "H100-SXM5-80GB",
+				System:        "h100_sxm",
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
@@ -2443,7 +2443,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2531,7 +2531,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2613,7 +2613,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2674,7 +2674,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2739,7 +2739,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2783,7 +2783,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2841,7 +2841,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         "h100_sxm",
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
