@@ -31,6 +31,7 @@ type CheckpointRequest struct {
 	NodeName              string
 	PodName               string
 	PodNamespace          string
+	Clientset             kubernetes.Interface
 }
 
 // Checkpoint performs a CRIU dump of a container.
