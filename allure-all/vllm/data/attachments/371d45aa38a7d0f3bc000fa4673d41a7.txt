@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    dynamo.common.utils.time_section:time_section.py:99 [PREFILL] request: req-1 accumulate embeddings - total elapsed 0.0004 seconds

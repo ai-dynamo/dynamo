@@ -1,0 +1,1 @@
+INFO     dynamo.planner.utils.planner_core:planner_core.py:222 Detected GPU counts from DGD: prefill=2, decode=0

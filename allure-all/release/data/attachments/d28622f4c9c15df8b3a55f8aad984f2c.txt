@@ -1,0 +1,4 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:57 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:84 Image diffusion request: {'prompt': 'A blue square', 'model': 'test-model', 'size': '256x256', 'response_format': 'b64_json', 'user': 'test-user', 'nvext': {'num_inference_steps': 10, 'guidance_scale': 7.5, 'seed': 42, 'negative_prompt': None}}
+DEBUG    dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:89 Image diffusion request with trace: {'traceparent': '00-test-trace-id-test-span-id-01'}

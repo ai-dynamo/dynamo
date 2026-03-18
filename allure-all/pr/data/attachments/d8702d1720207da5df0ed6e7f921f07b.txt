@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+ERROR    dynamo.vllm.handlers:handlers.py:424 Failed to wake up engine: discovery write timeout

@@ -1,0 +1,5 @@
+INFO     dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:63 MultimodalEmbeddingCacheManager initialized: capacity=0.01GB
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:149 Cached key=53517f6774ca85d1, size=0.01MB, total=0.000GB
+DEBUG    dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:149 Cached key=2dd7f99a96f64141, size=0.01MB, total=0.000GB
