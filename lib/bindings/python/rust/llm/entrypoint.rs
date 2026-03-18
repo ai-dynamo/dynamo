@@ -22,6 +22,8 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_mocker::common::perf_model::AicCallback;
+use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
@@ -174,6 +176,63 @@ impl std::fmt::Debug for PyEngineFactory {
             .field("callback", &"<PyObject>")
             .finish()
     }
+}
+
+/// Wraps a Python AIC InferenceSession for direct calls from Rust.
+/// The Python object must have `predict_prefill(batch_size, isl, prefix, osl) -> float`
+/// and `predict_decode(batch_size, isl, osl) -> float` methods.
+struct PyAicCallback {
+    /// Python object with predict_prefill and predict_decode methods
+    session: PyObject,
+}
+
+// Safety: PyAicCallback is only called via Python::with_gil which acquires the GIL
+unsafe impl Send for PyAicCallback {}
+unsafe impl Sync for PyAicCallback {}
+
+impl AicCallback for PyAicCallback {
+    fn predict_prefill(&self, batch_size: usize, isl: usize, prefix: usize, osl: usize) -> f64 {
+        Python::with_gil(|py| {
+            self.session
+                .call_method1(py, "predict_prefill", (batch_size, isl, prefix, osl))
+                .and_then(|r| r.extract::<f64>(py))
+                .unwrap_or_else(|e| {
+                    tracing::error!("AIC predict_prefill failed: {}", e);
+                    0.0
+                })
+        })
+    }
+
+    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> f64 {
+        Python::with_gil(|py| {
+            self.session
+                .call_method1(py, "predict_decode", (batch_size, isl, osl))
+                .and_then(|r| r.extract::<f64>(py))
+                .unwrap_or_else(|e| {
+                    tracing::error!("AIC predict_decode failed: {}", e);
+                    0.0
+                })
+        })
+    }
+}
+
+/// Initialize AIC direct callback by importing and calling Python setup function.
+fn create_aic_callback(
+    py: Python<'_>,
+    backend_name: &str,
+    system: &str,
+    model_path: &str,
+    tp_size: usize,
+    backend_version: Option<&str>,
+) -> PyResult<Arc<dyn AicCallback>> {
+    let module = py.import("dynamo.mocker.aic_session")?;
+    let session = module.call_method1(
+        "create_session",
+        (backend_name, system, model_path, tp_size, backend_version),
+    )?;
+    Ok(Arc::new(PyAicCallback {
+        session: session.into(),
+    }))
 }
 
 #[pyclass]
@@ -416,7 +475,7 @@ async fn select_engine(
             }
         }
         EngineType::Mocker => {
-            let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
+            let mut mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to load mocker args from {:?}: {}",
@@ -430,6 +489,35 @@ async fn select_engine(
                 );
                 MockEngineArgs::default()
             };
+
+            // If aic_backend is set, create Python AIC callback and override perf_model
+            if let Some(ref backend_name) = mocker_args.aic_backend {
+                let backend = backend_name.clone();
+                let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
+                let model_name = local_model.card().source_path();
+                let backend_version = mocker_args.aic_backend_version.as_deref();
+                let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
+                match Python::with_gil(|py| {
+                    create_aic_callback(py, &backend, system, model_name, tp_size, backend_version)
+                }) {
+                    Ok(callback) => {
+                        tracing::info!(
+                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+                            backend,
+                            system,
+                            model_name,
+                            backend_version
+                        );
+                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
+                            e
+                        ));
+                    }
+                }
+            }
 
             let endpoint = local_model.endpoint_id().clone();
 

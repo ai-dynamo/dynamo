@@ -208,7 +208,18 @@ impl SglangScheduler {
                 }
 
                 // 4. Simulate prefill
-                simulate_prefill(admit.total_new_tokens, admit.can_run.len(), &config).await;
+                let batch_size = admit.can_run.len();
+                let mean_isl = if batch_size > 0 {
+                    admit.total_isl / batch_size
+                } else {
+                    0
+                };
+                let mean_prefix = if batch_size > 0 {
+                    admit.total_prefix / batch_size
+                } else {
+                    0
+                };
+                simulate_prefill(batch_size, mean_isl, mean_prefix, &config).await;
 
                 // Separate fully-prefilled from chunked requests
                 for mut req in admit.can_run {
@@ -348,8 +359,10 @@ fn apply_schedule_policy(
 
 struct AdmitResult {
     can_run: Vec<SglangRequest>,
-    /// Total new tokens to prefill (computed before prefilled_tokens is updated).
-    total_new_tokens: usize,
+    /// Sum of ISL values across admitted requests (for computing mean).
+    total_isl: usize,
+    /// Sum of prefix (cached tokens) across admitted requests (for computing mean).
+    total_prefix: usize,
     oom: bool,
 }
 
@@ -378,7 +391,8 @@ fn get_new_batch_prefill(
     let mut can_run = Vec::new();
     let mut rejected = VecDeque::new();
     let mut oom = false;
-    let mut total_new_tokens: usize = 0;
+    let mut total_isl: usize = 0;
+    let mut total_prefix: usize = 0;
 
     while let Some(mut req) = waiting.pop_front() {
         let extend_input = req.extend_input_len() as f64;
@@ -435,9 +449,8 @@ fn get_new_batch_prefill(
         req.prefilled_tokens = chunk_end;
 
         let actual_prefilled = (chunk_end - (req.token_ids.len() - extend_input as usize)) as f64;
-        // Only count cache-miss tokens for prefill timing (prefix hits skip compute)
-        let new_compute_tokens = chunk_end.saturating_sub(alloc.prefix_len);
-        total_new_tokens += new_compute_tokens;
+        total_isl += chunk_end;
+        total_prefix += alloc.prefix_len;
         rem_total_tokens -= total_needed;
         rem_input_tokens -= actual_prefilled;
         rem_chunk_tokens -= actual_prefilled;
@@ -455,22 +468,26 @@ fn get_new_batch_prefill(
 
     AdmitResult {
         can_run,
-        total_new_tokens,
+        total_isl,
+        total_prefix,
         oom,
     }
 }
 
-async fn simulate_prefill(total_new_tokens: usize, num_reqs: usize, config: &SglangConfig) {
-    if num_reqs == 0 {
-        return;
-    }
-
-    if config.worker_type == WorkerType::Decode {
+async fn simulate_prefill(
+    batch_size: usize,
+    mean_isl: usize,
+    mean_prefix: usize,
+    config: &SglangConfig,
+) {
+    if batch_size == 0 || config.worker_type == WorkerType::Decode {
         return;
     }
 
     let start = Instant::now();
-    let prefill_time = config.perf_model.predict_prefill_time(total_new_tokens);
+    let prefill_time = config
+        .perf_model
+        .predict_prefill_time(batch_size, mean_isl, mean_prefix);
     let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
 
     if config.speedup_ratio > 0.0 && total_time > Duration::ZERO {
@@ -580,9 +597,10 @@ async fn simulate_decode(
         .sum();
     let avg_context = total_context / running.len();
 
-    let decode_time = config
-        .perf_model
-        .predict_decode_time(total_context, avg_context);
+    let decode_time =
+        config
+            .perf_model
+            .predict_decode_time(running.len(), total_context, avg_context);
 
     let total_time = Duration::from_secs_f64(decode_time / 1000.0);
 

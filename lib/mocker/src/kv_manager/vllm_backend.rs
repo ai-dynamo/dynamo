@@ -376,6 +376,7 @@ impl KvManager {
         PrefillCost {
             new_blocks,
             new_tokens,
+            cached_tokens,
         }
     }
 }
