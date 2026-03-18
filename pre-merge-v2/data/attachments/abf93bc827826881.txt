@@ -1,3 +1,0 @@
-[2m2026-03-17T21:45:08.119276Z[0m [32m INFO[0m [2mmultimodal_embedding_cache_manager.__init__[0m[2m:[0m MultimodalEmbeddingCacheManager initialized: capacity=0.10GB
-[2m2026-03-17T21:45:08.119375Z[0m [32m INFO[0m [2mmultimodal_pd_worker_handler.__init__[0m[2m:[0m Multimodal PD Worker startup started.
-[2m2026-03-17T21:45:08.119429Z[0m [32m INFO[0m [2mmultimodal_pd_worker_handler.__init__[0m[2m:[0m Multimodal PD Worker has been initialized

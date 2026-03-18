@@ -1,1 +1,1 @@
-{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[disaggregated_same_gpu-2]","status":"passed","testResultsByEnv":{"default":"b35f07ceb7f95b127223bf4db32356fa"}}
+{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[aggregated_router-2]","status":"passed","testResultsByEnv":{"default":"597386db7eb2ca6b065e8f82084df439"}}

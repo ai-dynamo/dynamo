@@ -48,6 +48,14 @@ allure.api.addTranslation('he', {
     }
 });
 
+allure.api.addTranslation('hu', {
+    tab: {
+        packages: {
+            name: 'Modulok'
+        }
+    }
+});
+
 allure.api.addTranslation('br', {
     tab: {
         packages: {

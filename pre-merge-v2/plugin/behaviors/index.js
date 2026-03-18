@@ -84,6 +84,20 @@ allure.api.addTranslation('he', {
     }
 });
 
+allure.api.addTranslation('hu', {
+    tab: {
+        behaviors: {
+            name: 'Viselkedés'
+        }
+    },
+    widget: {
+        behaviors: {
+            name: 'Funkció rendezése sztorinként',
+            showAll: 'összes mutatása'
+        }
+    }
+});
+
 allure.api.addTranslation('br', {
     tab: {
         behaviors: {

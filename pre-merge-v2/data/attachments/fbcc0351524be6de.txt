@@ -1,6 +1,0 @@
-[2m2026-03-17T21:39:06.654491Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 1 models needed for collected tests
-Models: {'Qwen/Qwen3-0.6B'}
-[2m2026-03-17T21:39:06.654600Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-03-17T21:39:06.654647Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:02,  3.17it/s]Fetching 10 files:  70%|███████   | 7/10 [00:02<00:01,  2.43it/s]Fetching 10 files: 100%|██████████| 10/10 [00:02<00:00,  3.51it/s]
-[2m2026-03-17T21:39:09.677544Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
