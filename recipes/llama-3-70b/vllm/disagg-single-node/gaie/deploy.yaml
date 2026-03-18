@@ -16,7 +16,8 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:race
+          imagePullPolicy: Always
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -75,7 +76,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: docker.io/lambda108/dynamo:post-rebase
         args:
           - -m
           - dynamo.frontend
@@ -83,6 +84,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -108,7 +113,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:post-rebase
           workingDir: /workspace/examples/backends/vllm
       replicas: 2
       resources:
@@ -126,7 +131,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: docker.io/lambda108/dynamo:post-rebase
         args:
           - -m
           - dynamo.frontend
@@ -134,6 +139,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -159,7 +168,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:post-rebase
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
