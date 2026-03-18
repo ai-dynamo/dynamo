@@ -299,6 +299,11 @@ explicit_package_bases = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
+# _version.py is generated at build time and does not exist in the source tree.
+module = ["dynamo.*._version"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Skip type checking for test files.
 module = ["dynamo.*.tests.*", "dynamo.*.tests"]
 ignore_errors = true
