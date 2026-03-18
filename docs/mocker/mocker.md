@@ -71,7 +71,7 @@ python -m dynamo.mocker \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
-| `--endpoint` | `dyn://dynamo.backend.generate` | Dynamo endpoint string |
+| `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 | Tokens per KV cache block |
@@ -89,7 +89,7 @@ python -m dynamo.mocker \
 | `--startup-time` | None | Simulated startup delay (seconds) |
 | `--planner-profile-data` | None | Path to either a mocker-format `.npz` file or a profiler results directory |
 | `--num-workers` | 1 | Workers per process |
-| `--reasoning` | None | JSON config for emitting reasoning token spans in responses |
+| `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
 | `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
 | `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens |
@@ -97,6 +97,7 @@ python -m dynamo.mocker \
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
+| `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
 | `--durable-kv-events` | False | Deprecated JetStream KV-event mode; prefer the local indexer / event-plane subscriber path |
@@ -106,9 +107,9 @@ python -m dynamo.mocker \
 | `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
-| `--discovery-backend` | `etcd` | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
-| `--request-plane` | `tcp` | Request transport: `nats`, `http`, or `tcp` |
-| `--event-plane` | `nats` | Event transport: `nats` or `zmq` |
+| `--discovery-backend` | Env-driven (`etcd`) | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
+| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `http`, or `tcp` |
+| `--event-plane` | Env-driven (`nats`) | Event transport: `nats` or `zmq` |
 
 ## Environment Variables
 
@@ -127,11 +128,24 @@ By default, the mocker uses hardcoded polynomial formulas to estimate prefill an
 
 The mocker automatically accepts profiler-style results directories and converts them internally.
 
+It also accepts older raw-data directories containing:
+
+- `prefill_raw_data.json`
+- `decode_raw_data.json`
+
 ```bash
 python -m dynamo.mocker \
     --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
     --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
     --speedup-ratio 1.0
+```
+
+Example `--reasoning` configuration:
+
+```bash
+python -m dynamo.mocker \
+    --model-path Qwen/Qwen3-0.6B \
+    --reasoning '{"start_thinking_token_id":123,"end_thinking_token_id":456,"thinking_ratio":0.6}'
 ```
 
 The profile results directory should contain:
