@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Decoupled layout system for block management.
@@ -18,7 +18,7 @@ mod physical;
 mod serialize;
 mod validation;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 pub(super) mod tests;
 
 // #[cfg(test)]

@@ -1,26 +1,27 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::context::{Context, callable_accepts_kwarg};
-use dynamo_runtime::logging::get_distributed_tracing_context;
+use std::sync::Arc;
+
+use anyhow::{Error, Result};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
-use std::sync::Arc;
+pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_util::sync::CancellationToken;
 
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
-    CancellationToken, Error, Result,
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn,
-        async_trait,
-    },
-    protocols::annotated::Annotated,
+    pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
+    protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
-pub use serde::{Deserialize, Serialize};
+
+use super::context::{Context, callable_accepts_kwarg};
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -87,7 +88,7 @@ impl PythonAsyncEngine {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for PythonAsyncEngine
 where
     Req: Data + Serialize,
@@ -141,7 +142,7 @@ enum ResponseProcessingError {
     OffloadError(String),
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
     for PythonServerStreamingEngine
 where
@@ -237,38 +238,36 @@ where
                     Err(e) => {
                         done = true;
 
-                        let msg = match &e {
+                        match e {
                             ResponseProcessingError::DeserializeError(e) => {
                                 // tell the python async generator to stop generating
                                 // right now, this is impossible as we are not passing the context to the python async generator
                                 // todo: add task-local context to the python async generator
                                 ctx.stop_generating();
-                                let msg = format!(
+                                Annotated::from_error(format!(
                                     "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
                                     e
-                                );
-                                msg
+                                ))
                             }
-                            ResponseProcessingError::PyGeneratorExit(_) => {
-                                "Stream ended before generation completed".to_string()
-                            }
+                            ResponseProcessingError::PyGeneratorExit(_) => Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                                    .message("engine shutting down")
+                                    .build(),
+                            ),
                             ResponseProcessingError::PythonException(e) => {
-                                let msg = format!(
+                                Annotated::from_error(format!(
                                     "a python exception was caught while processing the async generator: {}",
                                     e
-                                );
-                                msg
+                                ))
                             }
                             ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!(
+                                Annotated::from_error(format!(
                                     "critical error: failed to offload the python async generator to a new thread: {}",
                                     e
-                                );
-                                msg
+                                ))
                             }
-                        };
-
-                        Annotated::from_error(msg)
+                        }
                     }
                 };
 

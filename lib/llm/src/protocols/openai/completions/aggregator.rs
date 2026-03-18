@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
     error: Option<String>,
+    nvext: Option<serde_json::Value>,
 }
 
 struct DeltaChoice {
@@ -49,6 +50,7 @@ impl DeltaAggregator {
             system_fingerprint: None,
             choices: HashMap::new(),
             error: None,
+            nvext: None,
         }
     }
 
@@ -68,13 +70,12 @@ impl DeltaAggregator {
                     }
                 };
 
-                if aggregator.error.is_none() && delta.data.is_some() {
-                    // note: we could extract annotations here and add them to the aggregator
-                    // to be return as part of the NIM Response Extension
+                if aggregator.error.is_none()
+                    && let Some(delta) = delta.data
+                {
                     // TODO(#14) - Aggregate Annotation
 
                     // these are cheap to move so we do it every time since we are consuming the delta
-                    let delta = delta.data.unwrap();
                     aggregator.id = delta.inner.id;
                     aggregator.model = delta.inner.model;
                     aggregator.created = delta.inner.created;
@@ -83,6 +84,10 @@ impl DeltaAggregator {
                     }
                     if let Some(system_fingerprint) = delta.inner.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
+                    }
+                    // Aggregate nvext field (take the last non-None value)
+                    if delta.inner.nvext.is_some() {
+                        aggregator.nvext = delta.inner.nvext;
                     }
 
                     // handle the choices
@@ -163,6 +168,7 @@ impl DeltaAggregator {
             object: "text_completion".to_string(),
             system_fingerprint: aggregator.system_fingerprint,
             choices,
+            nvext: aggregator.nvext,
         };
 
         let response = NvCreateCompletionResponse { inner };
@@ -250,6 +256,7 @@ mod tests {
                 logprobs,
             }],
             object: "text_completion".to_string(),
+            nvext: None,
         };
 
         let response = NvCreateCompletionResponse { inner };
@@ -259,6 +266,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -379,6 +387,7 @@ mod tests {
                 },
             ],
             object: "text_completion".to_string(),
+            nvext: None,
         };
 
         let response = NvCreateCompletionResponse { inner };
@@ -388,6 +397,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
 
         // Create a stream

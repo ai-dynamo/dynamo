@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Example cli using the Python bindings, similar to `dynamo-run`.
+# Example cli using the Python bindings.
 #
 # Usage: `python cli.py in=text out=echo <your-model>`.
 # `in` can be:
@@ -115,7 +115,7 @@ def parse_args():
 
 async def run():
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, False)
+    runtime = DistributedRuntime(loop, "etcd", "nats")
 
     args = parse_args()
 

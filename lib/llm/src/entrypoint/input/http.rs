@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -7,22 +7,22 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig, input::common},
+    entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
-    kv_router::KvRouterConfig,
-    model_card,
-    namespace::is_global_namespace,
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
-use dynamo_runtime::{DistributedRuntime, Runtime};
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Build and run an HTTP service
-pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+pub async fn run(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
         (Some(tls_cert_path), Some(tls_key_path)) => {
@@ -50,126 +50,52 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         http_service_builder = http_service_builder.host(http_host);
     }
     http_service_builder =
+        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    // Pass the custom backend metrics endpoint as-is (already in namespace.component.endpoint format)
-    http_service_builder = http_service_builder.with_custom_backend_config(
-        local_model
-            .custom_backend_metrics_endpoint()
-            .map(|s| s.to_string()),
-        local_model.custom_backend_metrics_polling_interval(),
-    );
+    // Inject the DRT's metrics registry so that component-scoped metrics
+    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    http_service_builder =
+        http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
+
+    // Wire DRT discovery so that router metrics (dynamo_router_*) are registered
+    // with the instance_id as the router_id label.
+    http_service_builder =
+        http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
 
     let http_service = match engine_config {
-        EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            // This allows the /health endpoint to query store for active instances
-            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
+        EngineConfig::Dynamic {
+            ref model,
+            ref chat_engine_factory,
+        } => {
+            // Pass the discovery client so the /health endpoint can query active instances
+            http_service_builder =
+                http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
-            let store = Arc::new(distributed_runtime.store().clone());
 
-            let router_config = engine_config.local_model().router_config();
+            let router_config = model.router_config();
+            let migration_limit = model.migration_limit();
             // Listen for models registering themselves, add them to HTTP service
-            // Check if we should filter by namespace (based on the local model's namespace)
-            // Get namespace from the model, fallback to endpoint_id namespace if not set
-            let namespace = engine_config.local_model().namespace().unwrap_or("");
-            let target_namespace = if is_global_namespace(namespace) {
-                None
-            } else {
-                Some(namespace.to_string())
-            };
+            // Create namespace filter from model configuration
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                model.namespace(),
+                model.namespace_prefix(),
+            );
             run_watcher(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 http_service.state().manager_clone(),
-                store,
-                router_config.router_mode,
-                Some(router_config.kv_router_config),
-                router_config.busy_threshold,
-                target_namespace,
+                router_config.clone(),
+                migration_limit,
+                namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
+                chat_engine_factory.clone(),
             )
             .await?;
             http_service
         }
-        EngineConfig::StaticRemote(local_model) => {
-            let card = local_model.card();
-            let checksum = card.mdcsum();
-
-            let router_mode = local_model.router_config().router_mode;
-
-            let dst_config = DistributedConfig::from_settings(true); // true means static
-            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
-            let http_service = http_service_builder.build()?;
-            let manager = http_service.model_manager();
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                Some(
-                    manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let tokenizer_hf = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                tokenizer_hf.clone(),
-                None, // No prefill chooser in http static mode
-            )
-            .await?;
-            manager.add_chat_completions_model(
-                local_model.display_name(),
-                checksum,
-                chat_engine,
-            )?;
-
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser,
-                tokenizer_hf,
-                None, // No prefill chooser in http static mode
-            )
-            .await?;
-            manager.add_completions_model(
-                local_model.display_name(),
-                checksum,
-                completions_engine,
-            )?;
-
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
-
-            http_service
-        }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
@@ -183,7 +109,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             }
             http_service
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..
@@ -192,19 +118,18 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
 
-            let tokenizer_hf = model.card().tokenizer_hf()?;
-            let chat_pipeline =
-                common::build_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
-                .await?;
+            let tokenizer = model.card().tokenizer()?;
+            let chat_pipeline = common::build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer_hf)
+            >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
@@ -223,47 +148,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             .collect::<Vec<String>>()
     );
 
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    // Start custom backend metrics polling if configured
-    let polling_task =
-        if let (Some(namespace_component_endpoint), Some(polling_interval), Some(registry)) = (
-            http_service
-                .custom_backend_namespace_component_endpoint
-                .as_ref(),
-            http_service.custom_backend_metrics_polling_interval,
-            http_service.custom_backend_registry.as_ref(),
-        ) {
-            // Create DistributedRuntime for polling, matching the engine's mode
-            let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
-            tracing::info!(
-                namespace_component_endpoint=%namespace_component_endpoint,
-                polling_interval_secs=polling_interval,
-                "Starting custom backend metrics polling task"
-            );
-            // Spawn the polling task and keep the JoinHandle alive so it can be aborted during
-            // shutdown. While graceful shutdown is not strictly necessary for this non-critical
-            // metrics polling, explicitly aborting it prevents the task from running during the
-            // shutdown phase.
-            Some(
-                crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
-                    drt,
-                    namespace_component_endpoint.clone(),
-                    polling_interval,
-                    registry.clone(),
-                ),
-            )
-        } else {
-            None
-        };
+    http_service
+        .run(distributed_runtime.primary_token())
+        .await?;
 
-    http_service.run(runtime.primary_token()).await?;
-
-    // Abort the polling task if it was started
-    if let Some(task) = polling_task {
-        task.abort();
-    }
-
-    runtime.shutdown(); // Cancel primary token
+    distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
 
@@ -273,24 +162,29 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    store: Arc<KeyValueStoreManager>,
-    router_mode: RouterMode,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
-    target_namespace: Option<String>,
+    router_config: RouterConfig,
+    migration_limit: u32,
+    namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
+    chat_engine_factory: Option<ChatEngineFactoryCallback>,
 ) -> anyhow::Result<()> {
-    let cancellation_token = runtime.primary_token();
     let mut watch_obj = ModelWatcher::new(
-        runtime,
+        runtime.clone(),
         model_manager,
-        router_mode,
-        kv_router_config,
-        busy_threshold,
+        router_config,
+        migration_limit,
+        chat_engine_factory,
+        metrics.clone(),
     );
     tracing::debug!("Waiting for remote model");
-    let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
+    let discovery = runtime.discovery();
+    let discovery_stream = discovery
+        .list_and_watch(
+            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            Some(runtime.primary_token()),
+        )
+        .await?;
 
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
@@ -304,9 +198,9 @@ async fn run_watcher(
         }
     });
 
-    // Pass the sender to the watcher
+    // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver, target_namespace.as_deref()).await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())

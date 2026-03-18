@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -23,7 +22,6 @@ spec:
             - --http-port
             - "8000"
     decode:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -41,12 +39,15 @@ spec:
           - -m
           - dynamo.vllm
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --tensor-parallel-size
-            - "2"
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --is-decode-worker
+          - --kv-transfer-config
+          - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
+            "vllm-disagg-decode-engine-0abc123"}'
     prefill:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -64,8 +65,12 @@ spec:
           - -m
           - dynamo.vllm
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
-            - --tensor-parallel-size
-            - "2"
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
+            "vllm-disagg-prefill-engine-0abc123"}'

@@ -1,11 +1,17 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! TODO - we need to reconcile what is in this crate with distributed::transports
+//! Network layer for distributed communication
+//!
+//! Provides request distribution across multiple transport protocols:
+//! - HTTP/2 for standard deployments
+//! - TCP with length-prefixed protocol for high-performance scenarios
+//! - NATS for legacy/messaging-based deployments
 
 pub mod codec;
 pub mod egress;
 pub mod ingress;
+pub mod manager;
 pub mod tcp;
 
 use crate::SystemHealth;
@@ -26,9 +32,6 @@ use super::{
     ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use ingress::push_handler::WorkHandlerMetrics;
-
-// Define stream error message constant
-pub const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
 
 // Add Prometheus metrics types
 use crate::metrics::MetricsHierarchy;
@@ -160,8 +163,12 @@ impl StreamSender {
 
     #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        if let Some(prologue) = self.prologue.take() {
-            let prologue = ResponseStreamPrologue { error, ..prologue };
+        // leaving the original logic in place for now
+        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
+        // so the second argument can never be used, and the value of error passed by the caller would always be used
+        if let Some(_prologue) = self.prologue.take() {
+            // let prologue = ResponseStreamPrologue { error, ..prologue };
+            let prologue = ResponseStreamPrologue { error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
                 Err(err) => {

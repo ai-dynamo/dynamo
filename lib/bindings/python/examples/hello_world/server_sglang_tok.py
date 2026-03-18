@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 #
@@ -9,7 +9,7 @@
 # do the pre/post-processing.
 #
 # The key differences between this and `server_sglang.py` are:
-# - The `register_llm` function registers us a `Chat` and `Completions` model that accepts `Text` input
+# - The `register_model` function registers us a `Chat` and `Completions` model that accepts `Text` input
 # - The `generate` function receives a chat completion request and must return matching response
 #
 # Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
@@ -17,8 +17,7 @@
 # Start nats and etcd:
 #  - nats-server -js
 #
-# Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn
+# `python server_sglang.py`. Wait for log "Starting endpoint".
 
 import argparse
 import asyncio
@@ -32,7 +31,7 @@ from sglang.srt.openai_api.adapter import v1_chat_generate_request
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
@@ -93,7 +92,7 @@ class RequestHandler:
             count = next_count
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 
@@ -102,11 +101,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    await register_model(
         ModelInput.Text, ModelType.Chat | ModelType.Completions, endpoint, config.model
     )
 

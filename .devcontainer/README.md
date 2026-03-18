@@ -1,23 +1,27 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # NVIDIA Dynamo Development Environment
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
+
+## Known Issues
+
+### Docker Version Compatibility
+
+**Docker 29.x had a known incompatibility with Dev Containers extension at and before v1.0.26 (CLI v0.75.0):**
+
+- **Symptom:** Container builds and starts successfully (prints "Container started"), but the IDE hangs indefinitely and never connects. The `postCreateCommand` never runs.
+- **Root cause:** The bundled devcontainers CLI spawns `docker events --format {{json .}} --filter event=start` to detect when a container starts. It checks `i.status || i.Status` in the parsed JSON. However, Docker 29.x emits the event type under the field name `"Action"` (e.g., `{"Action":"start",...}`), not `"status"`. The start event is received but silently discarded because the field name doesn't match, so the CLI waits forever.
+- **Affected:** Docker Engine 29.0.0+ with Dev Containers extension v1.0.26 (CLI v0.75.0)
+- **Fixed in:** Dev Containers extension **v1.0.32+**
+- **Confirmed working combinations:**
+  - Docker 27.x / 28.x with any extension version
+  - Docker 29.x with Dev Containers extension v1.0.32+
+
+**Recommended fix:** If you are using Docker 29.x, update the Dev Containers extension to **v1.0.32 or later**. Docker Engine 28.5.2 or earlier have been stable with all extension versions.
 
 ## Framework-Specific Devcontainers
 
@@ -79,16 +83,16 @@ graph TB
         HFCACHE["~/.cache/huggingface<br/>(host cache)"]
         GITCONFIG["~/.gitconfig<br/>(host git config)"]
 
-        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: ubuntu user"]
-            MOUNT["/home/ubuntu/dynamo<br/>(mounted directory)"]
-            HFMOUNT["/home/ubuntu/.cache/huggingface<br/>(mounted cache)"]
-            GITCONFIGCOPY["/home/ubuntu/.gitconfig<br/>(via Dev Container setting)"]
+        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: dynamo user"]
+            MOUNT["/home/dynamo/dynamo<br/>(mounted directory)"]
+            HFMOUNT["/home/dynamo/.cache/huggingface<br/>(mounted cache)"]
+            GITCONFIGCOPY["/home/dynamo/.gitconfig<br/>(via Dev Container setting)"]
             TOOLS["rust-analyzer<br/>cargo<br/>etc."]
         end
 
         IMAGE["Docker Image<br/>dynamo:latest-{framework}-local-dev<br/>(vllm/sglang/trtllm)"]
 
-        IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
+        IMAGE -->|"docker run<br/>as dynamo user"| CONTAINER
     end
 
     TERM -->|"SSH Connection"| DIR
@@ -140,22 +144,11 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 
 ```bash
 # Single command approach (recommended)
-export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
-./container/build.sh --framework $FRAMEWORK --target local-dev
+export FRAMEWORK=vllm         # Note: any of vllm, sglang, trtllm can be used
+python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:latest-${FRAMEWORK}-local-dev -f container/rendered.Dockerfile .
 
-# Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
-```
-
-Alternatively, you can build a development container, then build local-dev:
-
-```bash
-export FRAMEWORK=VLLM
-
-./container/build.sh --framework $FRAMEWORK
-# Now you have a development image dynamo:latest-vllm
-
-./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
-# Now you have a local-dev image dynamo:latest-vllm-local-dev
+# Now you've created dynamo:latest-vllm-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
@@ -220,7 +213,7 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 
 ### Building Rust Code
 
-If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
+If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries.
 
 ```bash
 cd /workspace && cargo build --locked --profile dev
@@ -260,9 +253,9 @@ File Structure:
 - Local dynamo repo mounts to `/workspace`
 - Python venv in `/opt/dynamo/venv`
 - Build artifacts in `/workspace/target`
-- Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/ubuntu/.cache/huggingface`)
-- Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
-- Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
+- Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/dynamo/.cache/huggingface`)
+- Bash memory preserved between sessions at `/home/dynamo/.commandhistory` using docker volume `dynamo-bashhistory`
+- Precommit preserved between sessions at `/home/dynamo/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
 ## Documentation
 
@@ -397,8 +390,8 @@ docker volume prune -f
 **Note:** This resets bash history and pre-commit cache.
 
 **Volume Mounts in devcontainer.json:**
-- `dynamo-bashhistory` → `/home/ubuntu/.commandhistory` (bash history)
-- `dynamo-precommit-cache` → `/home/ubuntu/.cache/pre-commit` (pre-commit cache)
+- `dynamo-bashhistory` → `/home/dynamo/.commandhistory` (bash history)
+- `dynamo-precommit-cache` → `/home/dynamo/.cache/pre-commit` (pre-commit cache)
 
 ### Permission Issues
 
@@ -424,11 +417,9 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first, then build local-dev
-   export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
-   ./container/build.sh --framework $FRAMEWORK
-   # change to lower case portable way across shells
-   ./container/build.sh --dev-image dynamo:latest-$(echo "$FRAMEWORK" | tr '[:upper:]' '[:lower:]') --framework "$FRAMEWORK"
-   # Now you have dynamo:latest-vllm-local-dev
+   export FRAMEWORK=vllm  # Replace with vllm, sglang, or trtllm
+   python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
+   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:latest-${FRAMEWORK}-local-dev -f container/rendered.Dockerfile .
    ```
 
 2. **Container startup failure:**

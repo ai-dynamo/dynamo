@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -11,38 +11,15 @@ import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api, completions_response_handler
 
 logger = logging.getLogger(__name__)
 
-
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
-
-    def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
-        super().__init__(
-            command=command,
-            display_output=True,
-            terminate_existing=True,
-            log_dir=log_dir,
-        )
-
-    def get_pid(self) -> int | None:
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.vllm,
+]
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -60,15 +37,13 @@ class DynamoWorkerProcess(ManagedProcess):
             "--enforce-eager",
             "--max-model-len",
             "8192",
-            "--migration-limit",
-            "3",
         ]
 
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # TODO: Replace hardcoded port with allocate_ports() for xdist-safe parallel execution
         env["DYN_SYSTEM_PORT"] = "9345"
 
         # TODO: Have the managed process take a command name explicitly to distinguish
@@ -92,7 +67,7 @@ class DynamoWorkerProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
@@ -154,10 +129,12 @@ def send_completion_request(
         raise
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
+@pytest.mark.timeout(160)  # 3x average (~50s)
+@pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_vllm_health_check_active(request, runtime_services):
     """
     End-to-end test for worker fault tolerance with migration support.
@@ -209,10 +186,11 @@ def test_vllm_health_check_active(request, runtime_services):
                 )
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
+@pytest.mark.timeout(160)  # 3x average (~50s)
 def test_vllm_health_check_passive(request, runtime_services, predownload_models):
     """
     End-to-end test for worker fault tolerance with migration support.

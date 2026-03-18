@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,6 +45,8 @@ USE_NIXL_GDS=
 RUNTIME=nvidia
 WORKDIR=/workspace
 NETWORK=host
+USER=
+GROUP_ADD_STRING=
 
 get_options() {
     while :; do
@@ -183,6 +185,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --user)
+            if [ "$2" ]; then
+                USER=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --dry-run)
             RUN_PREFIX="echo"
             echo ""
@@ -254,10 +264,6 @@ get_options() {
             HF_HOME=$DEFAULT_HF_HOME
         fi
 
-        if [ -z "${PRIVILEGED}" ]; then
-            PRIVILEGED="TRUE"
-        fi
-
         ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
     fi
 
@@ -267,11 +273,10 @@ get_options() {
 
     if [ -n "$HF_HOME" ]; then
         mkdir -p "$HF_HOME"
-        # Use /home/ubuntu for local-dev target, /root for dev target.
-        if [ "$TARGET" = "local-dev" ] || [[ "$IMAGE" == *"local-dev"* ]]; then
-            HF_HOME_TARGET="/home/ubuntu/.cache/huggingface"
-        else
+        if [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
             HF_HOME_TARGET="/root/.cache/huggingface"
+        else
+            HF_HOME_TARGET="/home/dynamo/.cache/huggingface"
         fi
         VOLUME_MOUNTS+=" -v $HF_HOME:$HF_HOME_TARGET"
     fi
@@ -313,6 +318,24 @@ get_options() {
             RUNTIME=""
     fi
 
+    if [[ ${USER} == "" ]]; then
+        USER_STRING=""
+    else
+        USER_STRING="--user ${USER}"
+    fi
+
+    # If we override the user, Docker drops supplementary groups from the image.
+    # Add root group (GID 0) back so group-writable directories owned by root remain writable,
+    # avoiding expensive `chown -R ...` fixes on large mounted workspaces.
+    GROUP_ADD_STRING=""
+    if [[ -n "${USER}" ]]; then
+        # Extract just the UID part (before any colon)
+        USER_UID="${USER%%:*}"
+        if [[ "${USER_UID}" != "root" && "${USER_UID}" != "0" ]]; then
+            GROUP_ADD_STRING="--group-add 0"
+        fi
+    fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -321,7 +344,7 @@ show_help() {
     echo "  [--image image]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--name name for launched container, default NONE]"
-    echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
+    echo "  [--privileged whether to launch in privileged mode, default FALSE]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
@@ -330,6 +353,8 @@ show_help() {
     echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"
     echo "           Examples: --network bridge (isolated), --network none (no network - WARNING: breaks most functionality)"
     echo "                    --network container:redis (share network with 'redis' container)"
+    echo "  [--user <name|uid>[:<group|gid>] specify user to run container as]"
+    echo "           Format: username or numeric UID, optionally with group/GID (e.g., 'root', '0', '1000:0')"
     echo "  [-v add volume mount]"
     echo "  [-p|--port add port mapping (host_port:container_port)]"
     echo "  [-e add environment variable]"
@@ -376,6 +401,8 @@ ${RUN_PREFIX} docker run \
     ${NIXL_GDS_CAPS} \
     --ipc host \
     ${PRIVILEGED_STRING} \
+    ${USER_STRING} \
+    ${GROUP_ADD_STRING} \
     ${NAME_STRING} \
     ${ENTRYPOINT_STRING} \
     ${IMAGE} \

@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Simple ZMQ Subscriber for vLLM KV Events
 //!
-//! This is a simplified subscriber that deserializes raw vLLM events.
+//! This is a simplified subscriber that deserializes raw vLLM/TensorRT-LLM events.
 
 use anyhow::{Context, Result};
 use rmp_serde::Deserializer;
@@ -14,18 +14,20 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use super::tracker::{CacheStatusTracker, StorageTier};
+use dynamo_kv_router::zmq_wire::RawKvEvent;
 
-/// Event batch received from vLLM (array format)
+use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
+
+/// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
 ///
 /// Note: This uses a tuple struct to deserialize from array [ts, events, rank]
-/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM compatibility.
+/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM/TensorRT-LLM compatibility.
 #[derive(Debug, Deserialize)]
 struct VllmEventBatch(
-    f64,               // ts
-    Vec<VllmRawEvent>, // events
-    Option<i32>,       // data_parallel_rank
+    f64,             // ts
+    Vec<RawKvEvent>, // events — reuses the same custom deserializer as the router publisher
+    Option<i32>,     // data_parallel_rank
 );
 
 impl VllmEventBatch {
@@ -33,7 +35,7 @@ impl VllmEventBatch {
         self.0
     }
 
-    fn events(&self) -> &Vec<VllmRawEvent> {
+    fn events(&self) -> &Vec<RawKvEvent> {
         &self.1
     }
 
@@ -42,55 +44,17 @@ impl VllmEventBatch {
     }
 }
 
-/// Block hash can be either an integer or a string (bytes hex-encoded)
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum BlockHash {
-    Int(u64),
-    Str(String),
-}
-
-impl std::fmt::Display for BlockHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BlockHash::Int(n) => write!(f, "{}", n),
-            BlockHash::Str(s) => write!(f, "{}", s),
-        }
-    }
-}
-
-/// Raw vLLM event format (preserves all data including token_ids)
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-enum VllmRawEvent {
-    #[serde(rename = "BlockStored")]
-    BlockStored {
-        block_hashes: Vec<BlockHash>,
-        parent_block_hash: Option<BlockHash>,
-        token_ids: Vec<i32>,
-        block_size: i32,
-        lora_id: Option<i32>,
-        #[serde(default)]
-        medium: Option<String>,
-    },
-    #[serde(rename = "BlockRemoved")]
-    BlockRemoved {
-        block_hashes: Vec<BlockHash>,
-        #[serde(default)]
-        medium: Option<String>,
-    },
-    #[serde(rename = "AllBlocksCleared")]
-    AllBlocksCleared {},
-}
-
 /// Start ZMQ listener and process events into tracker
 pub async fn start_simple_zmq_listener(
     endpoint: String,
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
+    engine_source: EventSource,
 ) -> Result<JoinHandle<()>> {
     let handle = tokio::spawn(async move {
-        if let Err(e) = run_listener_loop(endpoint, tracker, cancellation_token).await {
+        if let Err(e) =
+            run_listener_loop(endpoint, tracker, cancellation_token, engine_source).await
+        {
             tracing::error!("ZMQ listener task failed: {}", e);
         }
     });
@@ -102,6 +66,7 @@ async fn run_listener_loop(
     endpoint: String,
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
+    engine_source: EventSource,
 ) -> Result<()> {
     tracing::info!(
         "KV event consolidator ZMQ listener connecting to {}",
@@ -174,7 +139,7 @@ async fn run_listener_loop(
                 // Process events
                 let mut tracker_guard = tracker.write().await;
                 for event in batch.events() {
-                    process_event(&mut tracker_guard, event.clone(), dp_rank);
+                    process_event(&mut tracker_guard, event.clone(), dp_rank, engine_source);
                 }
             }
         }
@@ -185,17 +150,19 @@ async fn run_listener_loop(
 
 fn process_event(
     tracker: &mut CacheStatusTracker,
-    event: VllmRawEvent,
+    event: RawKvEvent,
     data_parallel_rank: Option<i32>,
+    engine_source: EventSource,
 ) {
     match event {
-        VllmRawEvent::BlockStored {
+        RawKvEvent::BlockStored {
             block_hashes,
             parent_block_hash,
             token_ids,
             block_size,
-            lora_id,
             medium,
+            lora_name,
+            .. // block_mm_infos not used in consolidator
         } => {
             let storage_tier = medium
                 .as_ref()
@@ -212,32 +179,15 @@ fn process_event(
                 data_parallel_rank
             );
 
-            // Convert block_size from i32 to usize for chunking
-            // SAFETY: Must validate block_size > 0 to prevent panic in chunks()
-            let block_size_usize = match usize::try_from(block_size) {
-                Ok(size) if size > 0 => size,
-                _ => {
-                    tracing::warn!(
-                        "Invalid block_size {} (must be positive), skipping event to avoid chunks() panic",
-                        block_size
-                    );
-                    return;
-                }
-            };
+            // block_size is already usize; guard against 0 to avoid chunks() panic
+            if block_size == 0 {
+                tracing::warn!("Invalid block_size 0 (must be positive), skipping event to avoid chunks() panic");
+                return;
+            }
 
-            // Convert token_ids from i32 to u32 and split into chunks
-            let token_ids_u32: Vec<u32> = token_ids
-                .into_iter()
-                .filter_map(|t| {
-                    u32::try_from(t).ok().or_else(|| {
-                        tracing::warn!("Invalid token ID {}, skipping", t);
-                        None
-                    })
-                })
-                .collect();
-
-            let token_chunks: Vec<Vec<u32>> = token_ids_u32
-                .chunks(block_size_usize)
+            // token_ids is already Vec<u32>; split directly into per-block chunks
+            let token_chunks: Vec<Vec<u32>> = token_ids
+                .chunks(block_size)
                 .map(|chunk| chunk.to_vec())
                 .collect();
 
@@ -250,33 +200,30 @@ fn process_event(
                 return;
             }
 
-            // Process each block with its corresponding token chunk
-            // For batches, chain the blocks: each block's parent is the previous block in the batch
-            let mut current_parent = parent_block_hash.as_ref().map(|h| h.to_string());
+            // For batches, chain the blocks: each block's parent is the previous block
+            let mut current_parent = parent_block_hash.map(|h| h.into_u64().to_string());
 
-            for (i, block_hash) in block_hashes.iter().enumerate() {
+            for (i, block_hash) in block_hashes.into_iter().enumerate() {
                 let block_tokens = token_chunks[i].clone();
+                let block_hash_u64 = block_hash.into_u64();
 
                 tracker.handle_store(
-                    block_hash.to_string(),
-                    crate::block_manager::kv_consolidator::EventSource::Vllm,
+                    block_hash_u64.to_string(),
+                    engine_source,
                     block_tokens,
                     current_parent.clone(),
-                    block_size_usize,
-                    lora_id,
+                    block_size,
+                    lora_name.clone(),
                     Some(storage_tier),
                     data_parallel_rank,
                 );
 
-                // Next block's parent is this block
-                current_parent = Some(block_hash.to_string());
+                // Next block's parent is this block (only if hash was valid)
+                current_parent = Some(block_hash_u64.to_string());
             }
         }
 
-        VllmRawEvent::BlockRemoved {
-            block_hashes,
-            medium,
-        } => {
+        RawKvEvent::BlockRemoved { block_hashes, medium } => {
             let storage_tier = medium
                 .as_ref()
                 .and_then(|m| StorageTier::from_vllm_medium(m))
@@ -289,14 +236,11 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(
-                    &block_hash.to_string(),
-                    crate::block_manager::kv_consolidator::EventSource::Vllm,
-                );
+                tracker.handle_remove(&block_hash.into_u64().to_string(), engine_source);
             }
         }
 
-        VllmRawEvent::AllBlocksCleared {} => {
+        RawKvEvent::AllBlocksCleared => {
             tracing::debug!("Processing AllBlocksCleared");
             tracker.handle_clear_all();
         }

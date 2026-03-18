@@ -1,13 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -18,23 +18,25 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize prefill worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: The SGLang publisher instance.
+            generate_endpoint: The endpoint handle for discovery registration.
+            shutdown_event: Optional event to signal shutdown.
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, publisher)
-        self._consume_tasks = set()
+        super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
+        self._consume_tasks: set[asyncio.Task[Any]] = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
@@ -47,9 +49,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 task.cancel()
         self._consume_tasks.clear()
 
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
-        super().cleanup()
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -57,37 +59,97 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """Generate prefill output and provide bootstrap info for decode worker.
 
         Args:
-            request: Request dict with 'request' and 'sampling_params' keys.
+            request: Request dict with 'request', 'sampling_params', and possibly 'bootstrap_room' keys.
             context: Context object for cancellation handling.
 
         Yields:
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        bootstrap_room = self._generate_bootstrap_room()
+        trace_id = context.trace_id
+
+        if "request" in request:
+            # DisaggPreprocessedRequest format
+            inner_request = request["request"]
+            sampling_params = request.get("sampling_params", {})
+        else:
+            inner_request = request
+            sampling_opts = request.get("sampling_options", {})
+            stop_conditions = request.get("stop_conditions", {})
+            sampling_params = {
+                "temperature": sampling_opts.get("temperature"),
+                "top_p": sampling_opts.get("top_p"),
+                "top_k": sampling_opts.get("top_k"),
+                "max_new_tokens": stop_conditions.get("max_tokens"),
+            }
+            sampling_params = {
+                k: v for k, v in sampling_params.items() if v is not None
+            }
+
+        # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
+        # Otherwise use real bootstrap host/port from engine and generate room locally
+        bootstrap_host = self.bootstrap_host
+        bootstrap_port = self.bootstrap_port
+        bootstrap_room = None
+
+        bootstrap_info_from_req = inner_request.get("bootstrap_info")
+        if isinstance(bootstrap_info_from_req, dict):
+            # Allow overriding bootstrap_host for fake-transfer mode (health checks)
+            if "bootstrap_host" in bootstrap_info_from_req:
+                bootstrap_host = bootstrap_info_from_req["bootstrap_host"]
+                logging.debug(
+                    f"Using request-provided bootstrap_host: {bootstrap_host}"
+                )
+            if "bootstrap_port" in bootstrap_info_from_req:
+                bootstrap_port = bootstrap_info_from_req["bootstrap_port"]
+                logging.debug(
+                    f"Using request-provided bootstrap_port: {bootstrap_port}"
+                )
+            bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
+            if bootstrap_room is not None:
+                logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
+
+        if bootstrap_room is None:
+            bootstrap_room = self._generate_bootstrap_room()
+            logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
         bootstrap_info = {
-            "bootstrap_host": self.bootstrap_host,
-            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_host": bootstrap_host,
+            "bootstrap_port": bootstrap_port,
             "bootstrap_room": bootstrap_room,
         }
 
-        yield bootstrap_info
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
+        yield {
+            "token_ids": [],
+            "text": None,
+            "finish_reason": None,
+            "disaggregated_params": bootstrap_info,
+        }
 
-        input_param = self._get_input_param(request["request"])
+        input_param = self._get_input_param(inner_request)
+        priority = (inner_request.get("routing") or {}).get("priority")
+
+        trace_header = self._get_trace_header(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
             **input_param,
-            sampling_params=request["sampling_params"],
+            sampling_params=sampling_params,
             stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
+            bootstrap_host=bootstrap_host,
+            bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
+            external_trace_header=trace_header,
+            rid=trace_id,
+            **self._priority_kwargs(priority),
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
+
+        await task
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
@@ -99,7 +161,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
         """
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in results:
                 # Extract SGLang request ID from the first response and set the future

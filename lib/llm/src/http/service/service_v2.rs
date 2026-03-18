@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
@@ -9,18 +9,26 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::Response;
+
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
+use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
+use crate::kv_router::metrics::{
+    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
+};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::config::env_is_truthy;
+use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::metrics::prometheus_names::name_prefix;
-use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -30,8 +38,9 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    store: KeyValueStoreManager,
+    discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Default, Debug)]
@@ -39,7 +48,10 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    images_endpoints_enabled: AtomicBool,
+    videos_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
+    anthropic_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -48,7 +60,14 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
+            // TODO: add audios_endpoints_enabled flag
+            EndpointType::Audios => false,
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::AnthropicMessages => {
+                self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
+            }
         }
     }
 
@@ -63,25 +82,44 @@ impl StateFlags {
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Images => self
+                .images_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Videos => self
+                .videos_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            // TODO: add audios_endpoints_enabled flag
+            EndpointType::Audios => {}
             EndpointType::Responses => self
                 .responses_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::AnthropicMessages => self
+                .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
         }
     }
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>, store: KeyValueStoreManager) -> Self {
+    pub fn new(
+        manager: Arc<ModelManager>,
+        discovery_client: Arc<dyn Discovery>,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            store,
+            discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                images_endpoints_enabled: AtomicBool::new(false),
+                videos_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
+                anthropic_endpoints_enabled: AtomicBool::new(false),
             },
+            cancel_token,
         }
     }
 
@@ -98,13 +136,43 @@ impl State {
         self.manager.clone()
     }
 
-    pub fn store(&self) -> &KeyValueStoreManager {
-        &self.store
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
+    }
+
+    /// Check if the service is shutting down
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.is_cancelled()
+    }
+
+    /// Get the cancellation token
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
     }
 
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
+    }
+
+    /// Returns true if streaming tool call dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
+    /// SSE events for each complete tool call, letting clients start processing tool calls
+    /// before `finish_reason="tool_calls"` arrives.
+    pub fn streaming_tool_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+    }
+
+    /// Returns true if streaming reasoning dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path accumulates reasoning tokens and
+    /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
+    /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
+    pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
     }
 }
 
@@ -120,12 +188,6 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
-
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    pub(crate) custom_backend_namespace_component_endpoint: Option<String>,
-    pub(crate) custom_backend_metrics_polling_interval: Option<f64>,
-    pub(crate) custom_backend_registry:
-        Option<Arc<super::custom_backend_metrics::CustomBackendMetricsRegistry>>,
 }
 
 #[derive(Clone, Builder)]
@@ -160,18 +222,27 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    #[builder(default = "false")]
+    enable_anthropic_endpoints: bool,
+
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default)]
-    store: KeyValueStoreManager,
-
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     #[builder(default = "None")]
-    custom_backend_namespace_component_endpoint: Option<String>,
+    discovery: Option<Arc<dyn Discovery>>,
 
     #[builder(default = "None")]
-    custom_backend_metrics_polling_interval: Option<f64>,
+    cancel_token: Option<CancellationToken>,
+
+    /// When set, the `/metrics` endpoint will also expose metrics from the
+    /// DRT's registry tree (anything created via `metrics().create*()`).
+    #[builder(default = "None")]
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+
+    /// When set (e.g. DRT discovery), router metrics (dynamo_router_* with router_id label)
+    /// are registered using discovery.instance_id() and exposed on /metrics.
+    #[builder(default = "None")]
+    drt_discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl HttpService {
@@ -203,6 +274,8 @@ impl HttpService {
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
+
+        let state_cancel = self.state.cancel_token().clone();
 
         let addr: SocketAddr = address
             .parse()
@@ -238,9 +311,11 @@ impl HttpService {
                     result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
                 }
                 _ = observer.cancelled() => {
+                    state_cancel.cancel();
                     tracing::info!("HTTPS server shutdown requested");
-                    handle.graceful_shutdown(Some(Duration::from_secs(5)));
-                    // TODO: Do we need to wait?
+                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
+                    handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
+                    // no longer accepting requests, draining all existing connections
                 }
             }
         } else {
@@ -267,7 +342,15 @@ impl HttpService {
             })?;
 
             axum::serve(listener, router)
-                .with_graceful_shutdown(observer.cancelled_owned())
+                .with_graceful_shutdown(async move {
+                    observer.cancelled_owned().await;
+                    state_cancel.cancel();
+                    tracing::info!("HTTP server shutdown requested");
+                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
+                    tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64))
+                        .await;
+                    // no longer accepting requests, draining all existing connections
+                })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
         }
@@ -290,6 +373,13 @@ impl HttpService {
     }
 }
 
+fn get_graceful_shutdown_timeout() -> usize {
+    std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(5)
+}
+
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
 static HTTP_SVC_METRICS_PATH_ENV: &str = "DYN_HTTP_SVC_METRICS_PATH";
 /// Environment variable to set the models endpoint path (default: `/v1/models`)
@@ -306,13 +396,25 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
+static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager, config.store));
+        let cancel_token = config.cancel_token.unwrap_or_default();
+        // Use the provided discovery client, or fall back to a no-op memory-backed one
+        // (for in-process modes that don't need discovery)
+        let discovery_client = config.discovery.unwrap_or_else(|| {
+            use dynamo_runtime::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
+                dynamo_runtime::storage::kv::Manager::memory(),
+                cancel_token.child_token(),
+            )) as Arc<dyn Discovery>
+        });
+        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -325,36 +427,54 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state.flags.set(
+            &EndpointType::AnthropicMessages,
+            config.enable_anthropic_endpoints,
+        );
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
 
-        // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-        // Setup custom backend metrics if configured
-        let custom_backend_registry =
-            if config.custom_backend_namespace_component_endpoint.is_some()
-                && config.custom_backend_metrics_polling_interval.is_some()
-            {
-                Some(Arc::new(
-                    super::custom_backend_metrics::CustomBackendMetricsRegistry::new(
-                        name_prefix::COMPONENT.to_string(),
-                        registry.clone(),
-                    ),
-                ))
-            } else {
-                None
-            };
+        // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
+        // These are updated by KvWorkerMonitor when receiving ActiveLoad events
+        if let Err(e) = register_worker_load_metrics(&registry) {
+            tracing::warn!("Failed to register worker load metrics: {}", e);
+        }
+
+        // Register worker timing metrics (last_ttft, last_itl per worker)
+        // These are updated by ResponseMetricCollector when observing TTFT/ITL
+        if let Err(e) = register_worker_timing_metrics(&registry) {
+            tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
+        // Register router queue metrics (pending requests per worker_type)
+        // These are updated by KvScheduler on enqueue/update/free
+        if let Err(e) = register_router_queue_metrics(&registry) {
+            tracing::warn!("Failed to register router queue metrics: {}", e);
+        }
+
+        if let Some(ref discovery) = config.drt_discovery {
+            let instance_id = discovery.instance_id();
+            if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
+                tracing::warn!("Failed to register routing overhead metrics: {}", e);
+            }
+        }
 
         let mut router = axum::Router::new();
 
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
-            metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
+            metrics::router(
+                registry,
+                var(HTTP_SVC_METRICS_PATH_ENV).ok(),
+                config.drt_metrics,
+            ),
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
+            super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
 
         let endpoint_routes =
@@ -373,7 +493,37 @@ impl HttpServiceConfigBuilder {
         all_docs.extend(openapi_docs);
 
         // Add span for tracing
-        router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+        // Add on_response callback for logging response status code
+        router = router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_request_span)
+                .on_response(
+                    |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+                        let status = response.status();
+                        let latency_ms = latency.as_millis();
+
+                        if status.is_server_error() {
+                            tracing::error!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with server error"
+                            );
+                        } else if status.is_client_error() {
+                            tracing::warn!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with client request error"
+                            );
+                        } else {
+                            tracing::debug!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed"
+                            );
+                        }
+                    },
+                ),
+        );
 
         Ok(HttpService {
             state,
@@ -384,26 +534,11 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
-            custom_backend_namespace_component_endpoint: config
-                .custom_backend_namespace_component_endpoint,
-            custom_backend_metrics_polling_interval: config.custom_backend_metrics_polling_interval,
-            custom_backend_registry,
         })
     }
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
-        self
-    }
-
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    pub fn with_custom_backend_config(
-        mut self,
-        namespace_component_endpoint: Option<String>,
-        polling_interval: Option<f64>,
-    ) -> Self {
-        self.custom_backend_namespace_component_endpoint = Some(namespace_component_endpoint);
-        self.custom_backend_metrics_polling_interval = Some(polling_interval);
         self
     }
 
@@ -422,17 +557,33 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
+        let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
-
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
+        endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+
+        if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+            tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
+            let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
+                state.clone(),
+                request_template.clone(),
+                var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
+            );
+            endpoint_routes.insert(
+                EndpointType::AnthropicMessages,
+                (anthropic_docs, anthropic_route),
+            );
+        }
 
         for endpoint_type in EndpointType::all() {
             let state_route = state.clone();
@@ -451,7 +602,7 @@ impl HttpServiceConfigBuilder {
                             Ok(next.run(req).await)
                         } else {
                             tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
-                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                            Err(axum::http::StatusCode::NOT_FOUND)
                         }
                     }
                 },
@@ -459,5 +610,50 @@ impl HttpServiceConfigBuilder {
             routes.push((docs, route));
         }
         routes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_liveness_endpoint_reflects_cancellation() {
+        // 1. Setup service & token
+        let cancel_token = Arc::new(CancellationToken::new());
+        let service = HttpService::builder().build().unwrap();
+        let port = service.port;
+
+        // 2. Spawn service with shared token
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service.run((*service_token).clone()).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        // 3. Cancel the token
+        cancel_token.cancel();
+
+        // 4. Wait a tiny bit for propagation
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // 5. Hit the endpoint
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://localhost:{}/live", port))
+            .send()
+            .await
+            .expect("Request failed");
+
+        // 6. ASSERTION: Should be 503 Service Unavailable
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        // Clean up
+        handle.abort();
     }
 }

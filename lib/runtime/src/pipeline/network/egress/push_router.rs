@@ -1,9 +1,21 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
+use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::error::{BackendError, ErrorType, match_error_chain};
+
+/// Check if an error chain indicates the worker should be reported as down.
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
+}
 use crate::{
-    component::{Client, Endpoint, InstanceSource},
+    component::{Client, Endpoint},
     engine::{AsyncEngine, Data},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
@@ -11,9 +23,6 @@ use crate::{
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
-};
-use async_nats::client::{
-    RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
 use async_trait::async_trait;
 use rand::Rng;
@@ -27,6 +36,7 @@ use std::{
     },
 };
 use tokio_stream::StreamExt;
+use tracing::Instrument;
 
 /// Trait for monitoring worker load and determining busy state.
 /// Implementations can define custom load metrics and busy thresholds.
@@ -66,6 +76,12 @@ where
     /// If None, busy detection is disabled
     busy_threshold: Option<f64>,
 
+    /// When false, `generate_with_fault_detection` skips fault detection logic:
+    /// it won't call `report_instance_down` on errors, and it uses the raw discovery
+    /// instance list instead of the filtered avail list. Use for recovery/query paths
+    /// where transient failures are expected.
+    fault_detection_enabled: bool,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -77,25 +93,32 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
-    Direct(u64),
-    // Marker value, KV routing itself is in dynamo-llm
     KV,
+    Direct,
 }
 
 impl RouterMode {
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
     }
+
+    pub fn is_direct_routing(&self) -> bool {
+        *self == RouterMode::Direct
+    }
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    let Some(nats_client) = endpoint.drt().nats_client() else {
-        anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
-    };
-    AddressedPushRouter::new(
-        nats_client.client().clone(),
-        endpoint.drt().tcp_server().await?,
-    )
+    // Get network manager and create client (no mode checks!)
+    let manager = endpoint.drt().network_manager();
+    let req_client = manager.create_client()?;
+    let resp_transport = endpoint.drt().tcp_server().await?;
+
+    tracing::debug!(
+        transport = req_client.transport_name(),
+        "Creating AddressedPushRouter with request plane client"
+    );
+
+    AddressedPushRouter::new(req_client, resp_transport)
 }
 
 impl<T, U> PushRouter<T, U>
@@ -108,6 +131,28 @@ where
         Self::from_client_with_threshold(client, router_mode, None, None).await
     }
 
+    /// Create a new PushRouter with fault detection disabled.
+    ///
+    /// Unlike `from_client`, this router will not call `report_instance_down` on
+    /// transient errors, and `direct()` uses the raw discovery instance list instead
+    /// of the filtered avail list. Use for recovery/query paths.
+    pub async fn from_client_no_fault_detection(
+        client: Client,
+        router_mode: RouterMode,
+    ) -> anyhow::Result<Self> {
+        let addressed = addressed_router(&client.endpoint).await?;
+
+        Ok(PushRouter {
+            client: client.clone(),
+            addressed,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            busy_threshold: None,
+            fault_detection_enabled: false,
+            _phantom: PhantomData,
+        })
+    }
+
     /// Create a new PushRouter with optional busy threshold and worker load monitor
     pub async fn from_client_with_threshold(
         client: Client,
@@ -118,9 +163,7 @@ where
         let addressed = addressed_router(&client.endpoint).await?;
 
         // Start worker monitor if provided and in dynamic mode
-        if let Some(monitor) = worker_monitor.as_ref()
-            && matches!(client.instance_source.as_ref(), InstanceSource::Dynamic(_))
-        {
+        if let Some(monitor) = worker_monitor.as_ref() {
             monitor.start_monitoring().await?;
         }
 
@@ -130,6 +173,7 @@ where
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold,
+            fault_detection_enabled: true,
             _phantom: PhantomData,
         };
 
@@ -145,8 +189,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -164,8 +208,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -183,12 +227,19 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        let found = self.client.instance_ids_avail().contains(&instance_id);
+        // When fault detection is disabled, check the raw discovery list
+        // (not filtered by report_instance_down) so transient failures
+        // don't poison the instance for subsequent retries.
+        let found = if self.fault_detection_enabled {
+            self.client.instance_ids_avail().contains(&instance_id)
+        } else {
+            self.client.instance_ids().contains(&instance_id)
+        };
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
             ));
         }
 
@@ -196,6 +247,69 @@ where
             .await
     }
 
+    /// Select the next worker according to the routing mode.
+    /// Increments round-robin counter if applicable.
+    /// Returns None for Direct mode - requires explicit worker IDs via routing hints
+    /// Panics for KV mode which has its own selection via find_best_match.
+    pub fn select_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Direct => None,
+            _ => {
+                panic!(
+                    "select_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
+    /// Peek the next worker according to the routing mode without incrementing the counter.
+    /// Useful for checking if a worker is suitable before committing to it.
+    /// Returns None for Direct mode - requires explicit worker IDs via routing hints.
+    pub fn peek_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                // Just peek at the current counter value without incrementing
+                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                // For random, peeking implies a fresh random selection since it's stateless.
+                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Direct => None,
+            _ => {
+                panic!(
+                    "peek_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
+    /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject();
         tracing::debug!("static got subject: {subject}");
@@ -203,19 +317,37 @@ where
         tracing::debug!("router generate");
         self.addressed.generate(request).await
     }
+    */
 
     async fn generate_with_fault_detection(
         &self,
         instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
-        // Check if all workers are busy (only if busy threshold is set)
-        if self.busy_threshold.is_some() {
+        let request_id = request.id().to_string();
+        let route_span = if matches!(self.router_mode, RouterMode::KV) {
+            tracing::Span::none()
+        } else {
+            tracing::info_span!(
+                "router.route_request",
+                request_id = %request_id,
+                worker_id = instance_id,
+                router_mode = ?self.router_mode,
+            )
+        };
+
+        // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
+        if self.fault_detection_enabled && self.busy_threshold.is_some() {
             let free_instances = self.client.instance_ids_free();
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
                 let all_instances = self.client.instance_ids();
                 if !all_instances.is_empty() {
+                    tracing::warn!(
+                        instance_id,
+                        total_workers = all_instances.len(),
+                        "Rejecting request: all workers are busy"
+                    );
                     return Err(PipelineError::ServiceOverloaded(
                         "All workers are busy, please retry later".to_string(),
                     )
@@ -224,21 +356,68 @@ where
             }
         }
 
-        let subject = self.client.endpoint.subject_to(instance_id);
-        let request = request.map(|req| AddressedRequest::new(req, subject));
+        // Get the address based on discovered transport type
+        let address = {
+            use crate::component::TransportType;
 
-        let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
+            // Get the instance and use its actual transport type
+            let instances = self.client.instances();
+            let instance = instances
+                .iter()
+                .find(|i| i.instance_id == instance_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Instance {} not found in available instances", instance_id)
+                })?;
+
+            match &instance.transport {
+                TransportType::Http(http_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        http_endpoint = %http_endpoint,
+                        "Using HTTP transport for instance"
+                    );
+                    http_endpoint.clone()
+                }
+                TransportType::Tcp(tcp_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        tcp_endpoint = %tcp_endpoint,
+                        "Using TCP transport for instance"
+                    );
+                    tcp_endpoint.clone()
+                }
+                TransportType::Nats(subject) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        subject = %subject,
+                        "Using NATS transport for instance"
+                    );
+                    subject.clone()
+                }
+            }
+        };
+
+        let request = request.map(|req| AddressedRequest::new(req, address));
+
+        let stream: anyhow::Result<ManyOut<U>> = self
+            .addressed
+            .generate(request)
+            .instrument(route_span)
+            .await;
         match stream {
             Ok(stream) => {
+                if !self.fault_detection_enabled {
+                    return Ok(stream);
+                }
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
-                    // TODO: Standardize error type to avoid using string matching DIS-364
+                    // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
-                        && format!("{:?}", err) == STREAM_ERR_MSG
+                        && is_inhibited(&err)
                     {
                         tracing::debug!(
-                            "Reporting instance {instance_id} down due to stream error: {err}"
+                            "Reporting instance {instance_id} down due to migratable error: {err}"
                         );
                         client.report_instance_down(instance_id);
                     }
@@ -247,12 +426,8 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
-                    && matches!(req_err.kind(), NatsNoResponders)
-                {
-                    tracing::debug!(
-                        "Reporting instance {instance_id} down due to request error: {req_err}"
-                    );
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
                     self.client.report_instance_down(instance_id);
                 }
                 Err(err)
@@ -268,16 +443,17 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        match self.client.instance_source.as_ref() {
-            InstanceSource::Static => self.r#static(request).await,
-            InstanceSource::Dynamic(_) => match self.router_mode {
-                RouterMode::Random => self.random(request).await,
-                RouterMode::RoundRobin => self.round_robin(request).await,
-                RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
-                RouterMode::KV => {
-                    anyhow::bail!("KV routing should not call generate on PushRouter");
-                }
-            },
+        match self.router_mode {
+            RouterMode::Random => self.random(request).await,
+            RouterMode::RoundRobin => self.round_robin(request).await,
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
+            RouterMode::Direct => {
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
+            }
         }
     }
 }

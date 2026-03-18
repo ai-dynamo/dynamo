@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Runnable Module.
@@ -11,7 +11,7 @@ use std::{
     task::{Context, Poll},
 };
 
-pub use crate::{Error, Result};
+pub use anyhow::{Error, Result};
 pub use async_trait::async_trait;
 pub use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;

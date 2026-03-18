@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -50,14 +50,14 @@ async def main():
             return
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
+    runtime = DistributedRuntime(loop, "file", "nats")
 
     # Connect to middle server or direct server based on argument
     if use_middle_server:
-        endpoint = runtime.namespace("demo").component("middle").endpoint("generate")
+        endpoint = runtime.endpoint("demo.middle.generate")
         print("Client connecting to middle server...")
     else:
-        endpoint = runtime.namespace("demo").component("server").endpoint("generate")
+        endpoint = runtime.endpoint("demo.server.generate")
         print("Client connecting directly to backend server...")
 
     client = await endpoint.client()

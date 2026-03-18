@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [project]
 name = "ai-dynamo"
-version = "0.6.1"
+version = "1.0.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,18 +13,13 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.6.1",
-    "pytest>=8.3.4",
-    "types-psutil>=7.0.0.20250218",
+    "ai-dynamo-runtime==1.0.0",
+    "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
-    "fastapi>=0.115.0",
-    "distro",
-    # filelock: required by planner
-    "filelock",
-    "typer",
-    "click<8.2.0",
-    "setuptools",
     "prometheus_client>=0.23.1,<1.0",
+    "msgspec>=0.19.0",
+    "pyzmq>=26.0.0",
+    "msgpack==1.1.2",
 ]
 
 classifiers = [
@@ -49,20 +44,31 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.1.0rc5",
+    "tensorrt-llm==1.3.0rc7",
 ]
 
 vllm = [
     "uvloop",
-    "nixl<=0.7.0",
-    "vllm[flashinfer]==0.10.2",
+    "nixl[cu12]<=0.10.1",
+    "vllm[flashinfer,runai]==0.17.1",
+    # vllm-omni 0.16.0 is now on PyPI; install only future rc builds from source in container builds
+    # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
+    # not include vllm-omni — install it separately from source if needed.
+    "vllm-omni==0.16.0",
+    "blake3>=1.0.0,<2.0.0",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.7.0",
-    "sglang[all]==0.5.3.post2",
+    "sglang[diffusion]==0.5.9",
+    "nixl[cu12]<=0.10.1",
+    "cupy-cuda12x>=13.0.0",
 ]
+
+[project.entry-points.pytest11]
+vllm_tests = "dynamo.vllm.tests.conftest"
+trtllm_tests = "dynamo.trtllm.tests.conftest"
+sglang_tests = "dynamo.sglang.tests.conftest"
 
 [dependency-groups]
 docs = [
@@ -129,14 +135,21 @@ line_length = 88
 balanced_wrapping = true
 indent = "    "
 skip = ["build"]
-known_first_party = ["dynamo"]
+known_first_party = ["dynamo", "deploy"]
+# isort may confuse what is 1st or 3rd library. e.g.
+# when dynamo/vllm/omni/xx.py import vllm, local isort may treat this `vllm` as first
+# party heuristically. This causes local sort differs from GitHub sort and pre-commit
+# failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
+# 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
+# as the last resort.
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "aiconfigurator"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
-# We ignore model.py explcitly here to avoid mypy errors with duplicate modules
+# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
 # pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
     "-ra",
@@ -154,7 +167,6 @@ addopts = [
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
-    "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
     "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
@@ -171,19 +183,52 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
     "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
+    "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning", # pandas 2.x concat deprecation in AIC SDK TODO: fix in AIC
+    "ignore:Automatic KV events configuration is deprecated.*:FutureWarning", # Ignore Dynamo's own KV events deprecation warning in tests
+    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning", # Python 3.12 SWIG extension warning from third-party tokenizer deps
     # Pydantic V2 deprecation warnings from TRTLLM dependencies (raised at import time during collection)
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # Pydantic warning about field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
+    'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
+    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
+
+    ################################################################################################
+    # vLLM
+    ################################################################################################
+    # vLLM tokenizer deprecation warning (AnyTokenizer moved to vllm.tokenizers.TokenizerLike)
+    "ignore:.*vllm\\.transformers_utils\\.tokenizer\\.AnyTokenizer.*has been moved.*:DeprecationWarning",
+
+    ################################################################################################
+    # TRT-LLM
+    ################################################################################################
+    # torchao sometimes emits SyntaxWarning from docstrings (e.g. invalid escape sequences) at import
+    # time; our global `error` policy would otherwise fail test collection. Do not rely on module=
+    # matching here because these can be raised during compilation where the module field may not
+    # match as expected.
+    "ignore:.*invalid escape sequence.*:SyntaxWarning",
+    # torchao deprecation warnings for import path changes (see https://github.com/pytorch/ao/issues/2752)
+    "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
+    # nvidia-modelopt warning about transformers version incompatibility
+    "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
 ]
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
+# IMPORTANT: tests/conftest.py also registers a subset of these markers for
+# environments where pyproject.toml is not available (e.g. some CI containers).
+# Keep the marker definitions here and in tests/conftest.py synchronized.
 markers = [
     "pre_merge: marks tests to run before merging",
+    "post_merge: marks tests to run after merge",
+    "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
+    "release: marks tests to run on release pipelines",
+    "gpu_0: marks tests that don't require GPU",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
     "gpu_4: marks tests to run on 4GPUs",
@@ -192,15 +237,34 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
+    "performance: marks tests as performance tests",
+    "benchmark: marks tests as benchmark tests",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
-    "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
+    "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
+    "router: marks tests for router component",
+    "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",
+    "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
     "model: model id used by a test or parameter",
-    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)"
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+    "k8s: marks tests as requiring Kubernetes",
+    "fault_tolerance: marks tests as fault tolerance tests",
+    "deploy: marks tests as deployment tests",
+    # Built-in markers
+    "skip: skip this test",
+    "skipif: skip if condition is true",
+    "xfail: expected failure",
+    "usefixtures: use fixtures",
+    "parametrize: parameterized test",
+    "filterwarnings: filter warnings",
+    "asyncio: asyncio test marker",
+    # Third-party plugin markers
+    "timeout: test timeout in seconds (pytest-timeout plugin)",
 ]
 
 # Linting/formatting
@@ -212,6 +276,15 @@ indent-width = 4
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]
 "*_inc.py" = ["F821"]
+
+# This is IDE (e.g. Cursor's default Python language server)
+# Configure it so that developers can use "go-to-definition", "hover types" and other
+# features.
+[tool.basedpyright]
+extraPaths = ["components/src", "lib/bindings/python/src"]
+# This is for external dependencies.
+venvPath = "."
+venv = ".venv"
 
 [tool.mypy]
 
@@ -238,6 +311,12 @@ module = ["vllm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# WAR mypy 1.18.x crash with numpy 1.26.x stubs:
+# "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+
 [tool.sphinx]
 
 # extra-content-head
@@ -253,4 +332,3 @@ extra_content_footer = [
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
    ''',
 ]
-

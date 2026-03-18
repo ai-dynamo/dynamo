@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,8 +22,9 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
-from tensorrt_llm.inputs import default_multimodal_input_loader
+from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -37,7 +38,12 @@ class TokenizerProtocol(Protocol):
     the tokenizer's decode method not being found on a generic 'object' type.
     """
 
-    def decode(self, token_ids: List[int]) -> str:
+    def decode(
+        self,
+        token_ids: List[int],
+        skip_special_tokens: bool = True,
+        clean_up_tokenization_spaces: bool = True,
+    ) -> str:
         ...
 
 
@@ -54,15 +60,27 @@ class MultimodalRequestProcessor:
     ):
         self.model_type = model_type
         self.model_dir = model_dir
-        self.tokenizer = tokenizer
         self.modality = ""
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        # Used for streaming delta computation in create_response_chunk()
+        self.previous_decoded_text = ""
+
+        # Initialize tokenizer ONCE at startup to avoid per-request overhead
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+        else:
+            self.tokenizer = tokenizer_factory(model_dir)
+
+        self.image_loader = ImageLoader()
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
         parsed = urlparse(path)
+        # file:// URLs have scheme but no netloc, treat them as local paths
+        if parsed.scheme == "file":
+            return False
         return bool(parsed.scheme and parsed.netloc)
 
     def load_tensor_from_path_or_url(self, path: str) -> torch.Tensor:
@@ -97,7 +115,10 @@ class MultimodalRequestProcessor:
                     )
                     raise RuntimeError("Failed to load tensor")
 
-                resolved_path = Path(path).resolve()
+                # Strip file:// prefix if present
+                local_path = path.removeprefix("file://")
+
+                resolved_path = Path(local_path).resolve()
                 allowed_path = Path(self.allowed_local_media_path).resolve()
 
                 # Secure path validation: Check if the resolved path is actually within allowed directory
@@ -133,79 +154,194 @@ class MultimodalRequestProcessor:
 
         for message in messages:
             for content in message.get("content", []):
-                if content.get("type") == "text":
-                    text_parts.append(content.get("text", ""))
-                elif content.get("type") == "image_url":
-                    url = content.get("image_url", {}).get("url", "")
-                    if not url:
+                if isinstance(content, str):
+                    text_parts.append(content)
+                else:
+                    if content.get("type") == "text":
+                        text_parts.append(content.get("text", ""))
+                    elif content.get("type") == "image_url":
+                        url = content.get("image_url", {}).get("url", "")
+                        if not url:
+                            continue
+                        self.modality = "image"
+                        if url.endswith((".pt", ".pth", ".bin")):
+                            embedding_paths.append(url)
+                        else:
+                            image_urls.append(url)
+
+        return "".join(text_parts), image_urls, embedding_paths
+
+    async def process_openai_request(
+        self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
+    ) -> Optional[Any]:
+        """
+        Process OpenAI request and return multimodal data in TokensPrompt format.
+
+        Supports three flows:
+        1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
+        2. EPD Case 2: NIXL embeddings (embeddings parameter is not None)
+        3. PD Flow: Rust pre-tokenized with direct media loading
+
+        Returns dict compatible with TRT-LLM's generate_async:
+        {
+            "prompt_token_ids": List[int],
+            "multi_modal_data": Dict[str, List[torch.Tensor]]
+        }
+        or for EPD Case 1:
+        {
+            "prompt": str,
+            "prompt_token_ids": List[int]
+        }
+
+        """
+        self.previous_decoded_text = ""
+
+        # EPD Flow Case 1: Encoder has fully processed the prompt
+        # The encode worker has done everything: vision encoding, prompt processing, tokenization
+        # Return the encoder's processed prompt and tokens directly
+        processed_prompt_from_encoder = request.get("_epd_processed_prompt")
+        if processed_prompt_from_encoder is not None:
+            logging.info("MM: Using fully processed prompt from encoder")
+            result = {"prompt": processed_prompt_from_encoder}
+            prompt_token_ids = request.get("_epd_prompt_token_ids")
+            if prompt_token_ids:
+                result["prompt_token_ids"] = prompt_token_ids
+            else:
+                logging.warning("MM: No prompt_token_ids from encoder")
+            return result
+
+        # Initialize result in TokensPrompt format
+        # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
+        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
+
+        # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
+        # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
+        # are not processed correctly.
+        extra_args = request.get("extra_args") or {}
+        formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
+
+        # EPD Flow Case 2: Embeddings received via NIXL from encode worker
+        # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
+        # We need to pass these embeddings directly to TRT-LLM's generate_async
+        if embeddings is not None:
+            logging.info(
+                f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+            )
+
+            # Same structure as PD flow (TRT-LLM expects dict with "image" key)
+            image_embeddings = (
+                embeddings if isinstance(embeddings, list) else [embeddings]
+            )
+            processed_inputs["multi_modal_embeddings"] = {"image": image_embeddings}
+            if formatted_prompt_from_frontend:
+                processed_inputs["prompt"] = formatted_prompt_from_frontend
+            else:
+                logging.warning("No formatted prompt from frontend")
+                return None
+            return processed_inputs
+
+        # PD Flow: Pre-tokenized by Rust frontend with direct media loading
+        # TODO: Add frontend decoding support
+
+        # Handle multimodal data if present
+        multi_modal_data = request.get("multi_modal_data")
+        if multi_modal_data and isinstance(multi_modal_data, dict):
+            processed_mm_data = {}
+            loaded_embeddings = []
+
+            # Process images and embedding paths from image_url field
+            image_items = multi_modal_data.get("image_url", [])
+            if image_items and isinstance(image_items, list):
+                # Separate embedding paths from regular image URLs
+                # Items come from Rust in format: {"Url": "..."} or {"Decoded": ...}
+                embedding_paths = []
+                image_urls = []
+
+                for item in image_items:
+                    # Extract URL from item (Rust enum serialization uses "Url" with capital U)
+                    if isinstance(item, dict) and "Url" in item:
+                        url = item["Url"]
+                    elif isinstance(item, dict) and "Decoded" in item:
+                        # Already decoded data (NIXL) - always treat as image
+                        image_urls.append(item)
                         continue
-                    self.modality = "image"
+                    elif isinstance(item, str):
+                        # Fallback for string URLs (backward compatibility)
+                        url = item
+                    else:
+                        logging.warning(
+                            f"Unexpected item format in image_items: {item}"
+                        )
+                        continue
+
+                    # Check if this is an embedding file based on extension
                     if url.endswith((".pt", ".pth", ".bin")):
                         embedding_paths.append(url)
                     else:
-                        image_urls.append(url)
+                        # Keep original item format for load_image_batch
+                        image_urls.append(
+                            item if isinstance(item, dict) else {"Url": item}
+                        )
 
-        return " ".join(text_parts), image_urls, embedding_paths
+                # Load regular images as PIL Images for TRT-LLM's input processor
+                # TRT-LLM will auto-detect this and compute mrope_config
+                if image_urls:
+                    try:
+                        pil_images = await self.image_loader.load_image_batch(
+                            image_urls
+                        )
+                        if pil_images:
+                            processed_mm_data["image"] = pil_images
+                            logging.info(
+                                f"Loaded {len(pil_images)} image(s) as PIL Images"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load images: {e}")
+                        return None
 
-    async def process_openai_request(
-        self, request: Dict, embeddings: Any
-    ) -> Optional[Any]:
-        """Process OpenAI request and return with multimodal data."""
-        # Normalize the request to handle OpenAI format
-        if "stop_conditions" not in request:
-            request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+                # Load embedding files (.pt, .pth, .bin) for PD flow
+                # These are pre-computed vision encoder outputs
+                if embedding_paths:
+                    try:
+                        loaded_embeddings = [
+                            self.load_tensor_from_path_or_url(path)
+                            for path in embedding_paths
+                        ]
+                        if loaded_embeddings:
+                            logging.info(
+                                f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load embeddings: {e}")
+                        return None
 
-        if "sampling_options" not in request:
-            request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
+            # TODO: Add support for video_url, audio_url
 
-        messages = request.get("messages", [])
-        text_prompt, image_urls, embedding_paths = self.extract_prompt_and_media(
-            messages
-        )
+            if loaded_embeddings:
+                # For TRT-LLM MM embeddings, the currently
+                # supported modality is "image".
+                if formatted_prompt_from_frontend:
+                    processed_inputs["prompt"] = formatted_prompt_from_frontend
+                else:
+                    logging.warning("No formatted prompt from frontend")
+                    return None
 
-        if not image_urls and not embedding_paths:
-            logging.warning("No multimodal content, returning None")
+                processed_inputs["multi_modal_embeddings"] = {
+                    "image": loaded_embeddings
+                }
+                return processed_inputs
+
+            if processed_mm_data:
+                processed_inputs["multi_modal_data"] = processed_mm_data
+
+        # Get token_ids from request (already tokenized by Rust frontend)
+        token_ids = request.get("token_ids")
+        if not token_ids:
+            logging.warning("No token_ids in request")
             return None
+        processed_inputs["prompt_token_ids"] = token_ids
 
-        loader_kwargs = {}
-        if embeddings is not None:
-            # EPD flow
-            loader_kwargs["mm_embeddings"] = [embeddings]
-            logging.debug(f"Using NIXL embeddings in prefill worker: {embeddings}")
-        elif image_urls:
-            # Image-only flow
-            loader_kwargs["media"] = [image_urls]
-        elif embedding_paths:
-            # PD flow with no NIXL and no encoder
-            loader_kwargs["mm_embeddings"] = [
-                self.load_tensor_from_path_or_url(path) for path in embedding_paths
-            ]
-            logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
-
-        # Process with default_multimodal_input_loader
-        processed_inputs = default_multimodal_input_loader(
-            tokenizer=None,
-            model_dir=self.model_dir,
-            model_type=self.model_type,
-            modality=self.modality,
-            prompts=[text_prompt],
-            image_data_format="pt",
-            device="cuda",
-            **loader_kwargs,
-        )
-
-        # Return the first processed input if available
-        if processed_inputs:
-            return processed_inputs[0]
-
-        return None
+        return processed_inputs
 
     def create_response_chunk(
         self,
@@ -218,10 +354,20 @@ class MultimodalRequestProcessor:
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided for creating response chunks.")
 
-        new_tokens = output.token_ids[num_output_tokens_so_far:]
-        # Decode the new token IDs into a string. This is the incremental piece
-        # of text to be sent to the client.
-        delta_text = self.tokenizer.decode(new_tokens)
+        all_tokens = output.token_ids
+        current_text = self.tokenizer.decode(
+            all_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True
+        )
+        if num_output_tokens_so_far == 0:
+            # First chunk: use all decoded text
+            delta_text = current_text
+            # Store for next iteration
+            self.previous_decoded_text = current_text
+        else:
+            # Incremental chunk: extract delta using cached previous text
+            delta_text = current_text[len(self.previous_decoded_text) :]
+            # Update cache for next iteration
+            self.previous_decoded_text = current_text
         # Assemble the delta payload for the response chunk.
         delta = {"content": delta_text if delta_text else ""}
         if num_output_tokens_so_far == 0:
@@ -240,20 +386,4 @@ class MultimodalRequestProcessor:
             "created": int(time.time()),
             "object": "chat.completion.chunk",
             "choices": [choice],
-        }
-
-    def get_stop_response(self, request_id: str, model_name: str) -> Dict[str, Any]:
-        """Creates the final stop response chunk for multimodal streaming."""
-        final_choice = {
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop",
-        }
-        return {
-            "id": request_id,
-            "model": model_name,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "choices": [final_choice],
-            "finish_reason": "stop",
         }

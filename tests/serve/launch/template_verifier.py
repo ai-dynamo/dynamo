@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import os
@@ -9,7 +9,7 @@ import uvloop
 from transformers import AutoTokenizer
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
@@ -38,14 +38,12 @@ class TemplateVerificationHandler:
         yield {"token_ids": response_tokens}
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def main(runtime: DistributedRuntime):
     """Main worker function for template verification."""
 
     # Create service
-    component = runtime.namespace("test").component("backend")
-    await component.create_service()
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("test.backend.generate")
 
     # Use the existing custom template from fixtures
     template_path = Path(SERVE_TEST_DIR) / "fixtures" / "custom_template.jinja"
@@ -55,7 +53,7 @@ async def main(runtime: DistributedRuntime):
 
     # Register model with custom template
     model_name = "Qwen/Qwen3-0.6B"
-    await register_llm(
+    await register_model(
         ModelInput.Tokens,
         ModelType.Chat,
         endpoint,

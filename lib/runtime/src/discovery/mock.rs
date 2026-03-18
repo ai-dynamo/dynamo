@@ -1,13 +1,14 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    DiscoveryClient, DiscoveryEvent, DiscoveryInstance, DiscoveryKey, DiscoverySpec,
-    DiscoveryStream,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    DiscoverySpec, DiscoveryStream,
 };
-use crate::Result;
+use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// Shared in-memory registry for mock discovery
 #[derive(Clone, Default)]
@@ -21,14 +22,14 @@ impl SharedMockRegistry {
     }
 }
 
-/// Mock implementation of DiscoveryClient for testing
-/// We can potentially remove this once we have KeyValueDiscoveryClient implemented
-pub struct MockDiscoveryClient {
+/// Mock implementation of Discovery for testing
+/// We can potentially remove this once we have KVStoreDiscovery fully tested
+pub struct MockDiscovery {
     instance_id: u64,
     registry: SharedMockRegistry,
 }
 
-impl MockDiscoveryClient {
+impl MockDiscovery {
     pub fn new(instance_id: Option<u64>, registry: SharedMockRegistry) -> Self {
         let instance_id = instance_id.unwrap_or_else(|| {
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,45 +44,115 @@ impl MockDiscoveryClient {
     }
 }
 
-/// Helper function to check if an instance matches a discovery key query
-fn matches_key(instance: &DiscoveryInstance, key: &DiscoveryKey) -> bool {
-    match (instance, key) {
-        (DiscoveryInstance::Endpoint { .. }, DiscoveryKey::AllEndpoints) => true,
+/// Helper function to check if an instance matches a discovery query
+fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
+    match (instance, query) {
+        // Endpoint matching
+        (DiscoveryInstance::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
+        (DiscoveryInstance::Endpoint(inst), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
+            &inst.namespace == namespace
+        }
         (
-            DiscoveryInstance::Endpoint {
-                namespace: ins_ns, ..
-            },
-            DiscoveryKey::NamespacedEndpoints { namespace },
-        ) => ins_ns == namespace,
-        (
-            DiscoveryInstance::Endpoint {
-                namespace: ins_ns,
-                component: ins_comp,
-                ..
-            },
-            DiscoveryKey::ComponentEndpoints {
+            DiscoveryInstance::Endpoint(inst),
+            DiscoveryQuery::ComponentEndpoints {
                 namespace,
                 component,
             },
-        ) => ins_ns == namespace && ins_comp == component,
+        ) => &inst.namespace == namespace && &inst.component == component,
         (
-            DiscoveryInstance::Endpoint {
-                namespace: ins_ns,
-                component: ins_comp,
-                endpoint: ins_ep,
-                ..
-            },
-            DiscoveryKey::Endpoint {
+            DiscoveryInstance::Endpoint(inst),
+            DiscoveryQuery::Endpoint {
                 namespace,
                 component,
                 endpoint,
             },
-        ) => ins_ns == namespace && ins_comp == component && ins_ep == endpoint,
+        ) => {
+            &inst.namespace == namespace
+                && &inst.component == component
+                && &inst.endpoint == endpoint
+        }
+
+        // Model matching
+        (DiscoveryInstance::Model { .. }, DiscoveryQuery::AllModels) => true,
+        (
+            DiscoveryInstance::Model {
+                namespace: inst_ns, ..
+            },
+            DiscoveryQuery::NamespacedModels { namespace },
+        ) => inst_ns == namespace,
+        (
+            DiscoveryInstance::Model {
+                namespace: inst_ns,
+                component: inst_comp,
+                ..
+            },
+            DiscoveryQuery::ComponentModels {
+                namespace,
+                component,
+            },
+        ) => inst_ns == namespace && inst_comp == component,
+        (
+            DiscoveryInstance::Model {
+                namespace: inst_ns,
+                component: inst_comp,
+                endpoint: inst_ep,
+                ..
+            },
+            DiscoveryQuery::EndpointModels {
+                namespace,
+                component,
+                endpoint,
+            },
+        ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
+
+        // EventChannel matching - unified query
+        (
+            DiscoveryInstance::EventChannel {
+                namespace: inst_ns,
+                component: inst_comp,
+                topic: inst_topic,
+                ..
+            },
+            DiscoveryQuery::EventChannels(query),
+        ) => {
+            query.namespace.as_ref().is_none_or(|ns| ns == inst_ns)
+                && query.component.as_ref().is_none_or(|c| c == inst_comp)
+                && query.topic.as_ref().is_none_or(|t| t == inst_topic)
+        }
+
+        // Cross-type matches return false
+        (
+            DiscoveryInstance::Endpoint(_),
+            DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::EventChannels(_),
+        ) => false,
+        (
+            DiscoveryInstance::Model { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::EventChannels(_),
+        ) => false,
+        (
+            DiscoveryInstance::EventChannel { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. },
+        ) => false,
     }
 }
 
 #[async_trait]
-impl DiscoveryClient for MockDiscoveryClient {
+impl Discovery for MockDiscovery {
     fn instance_id(&self) -> u64 {
         self.instance_id
     }
@@ -98,35 +169,54 @@ impl DiscoveryClient for MockDiscoveryClient {
         Ok(instance)
     }
 
-    async fn list_and_watch(&self, key: DiscoveryKey) -> Result<DiscoveryStream> {
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let instance_id = instance.instance_id();
+
+        self.registry
+            .instances
+            .lock()
+            .unwrap()
+            .retain(|i| i.instance_id() != instance_id);
+
+        Ok(())
+    }
+
+    async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+        let instances = self.registry.instances.lock().unwrap();
+        Ok(instances
+            .iter()
+            .filter(|instance| matches_query(instance, &query))
+            .cloned()
+            .collect())
+    }
+
+    async fn list_and_watch(
+        &self,
+        query: DiscoveryQuery,
+        _cancel_token: Option<CancellationToken>,
+    ) -> Result<DiscoveryStream> {
         use std::collections::HashSet;
 
         let registry = self.registry.clone();
 
         let stream = async_stream::stream! {
-            let mut known_instances = HashSet::new();
+            let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
 
             loop {
                 let current: Vec<_> = {
                     let instances = registry.instances.lock().unwrap();
                     instances
                         .iter()
-                        .filter(|instance| matches_key(instance, &key))
+                        .filter(|instance| matches_query(instance, &query))
                         .cloned()
                         .collect()
                 };
 
-                let current_ids: HashSet<_> = current.iter().map(|i| {
-                    match i {
-                        DiscoveryInstance::Endpoint { instance_id, .. } => *instance_id,
-                    }
-                }).collect();
+                let current_ids: HashSet<DiscoveryInstanceId> = current.iter().map(|i| i.id()).collect();
 
                 // Emit Added events for new instances
                 for instance in current {
-                    let id = match &instance {
-                        DiscoveryInstance::Endpoint { instance_id, .. } => *instance_id,
-                    };
+                    let id = instance.id();
                     if known_instances.insert(id) {
                         yield Ok(DiscoveryEvent::Added(instance));
                     }
@@ -134,8 +224,8 @@ impl DiscoveryClient for MockDiscoveryClient {
 
                 // Emit Removed events for instances that are gone
                 for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
-                    yield Ok(DiscoveryEvent::Removed(id));
                     known_instances.remove(&id);
+                    yield Ok(DiscoveryEvent::Removed(id));
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -154,31 +244,32 @@ mod tests {
     #[tokio::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
-        let client1 = MockDiscoveryClient::new(Some(1), registry.clone());
-        let client2 = MockDiscoveryClient::new(Some(2), registry.clone());
+        let client1 = MockDiscovery::new(Some(1), registry.clone());
+        let client2 = MockDiscovery::new(Some(2), registry.clone());
 
         let spec = DiscoverySpec::Endpoint {
             namespace: "test-ns".to_string(),
             component: "test-comp".to_string(),
             endpoint: "test-ep".to_string(),
+            transport: crate::component::TransportType::Nats("test-subject".to_string()),
         };
 
-        let key = DiscoveryKey::Endpoint {
+        let query = DiscoveryQuery::Endpoint {
             namespace: "test-ns".to_string(),
             component: "test-comp".to_string(),
             endpoint: "test-ep".to_string(),
         };
 
         // Start watching
-        let mut stream = client1.list_and_watch(key.clone()).await.unwrap();
+        let mut stream = client1.list_and_watch(query.clone(), None).await.unwrap();
 
         // Add first instance
         client1.register(spec.clone()).await.unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
-            DiscoveryEvent::Added(DiscoveryInstance::Endpoint { instance_id, .. }) => {
-                assert_eq!(instance_id, 1);
+            DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)) => {
+                assert_eq!(inst.instance_id, 1);
             }
             _ => panic!("Expected Added event for instance-1"),
         }
@@ -188,21 +279,24 @@ mod tests {
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
-            DiscoveryEvent::Added(DiscoveryInstance::Endpoint { instance_id, .. }) => {
-                assert_eq!(instance_id, 2);
+            DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)) => {
+                assert_eq!(inst.instance_id, 2);
             }
             _ => panic!("Expected Added event for instance-2"),
         }
 
         // Remove first instance
         registry.instances.lock().unwrap().retain(|i| match i {
-            DiscoveryInstance::Endpoint { instance_id, .. } => *instance_id != 1,
+            DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
+            DiscoveryInstance::Model { instance_id, .. } => *instance_id != 1,
+            DiscoveryInstance::EventChannel { instance_id, .. } => *instance_id != 1,
         });
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
-            DiscoveryEvent::Removed(instance_id) => {
-                assert_eq!(instance_id, 1);
+            DiscoveryEvent::Removed(id) => {
+                let endpoint_id = id.extract_endpoint_id().expect("Expected endpoint removal");
+                assert_eq!(endpoint_id.instance_id, 1);
             }
             _ => panic!("Expected Removed event for instance-1"),
         }

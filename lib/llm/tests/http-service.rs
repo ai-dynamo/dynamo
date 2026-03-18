@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Error;
@@ -22,7 +22,7 @@ use dynamo_llm::{
         service::{
             Metrics,
             error::HttpError,
-            metrics::{Endpoint, RequestType, Status},
+            metrics::{Endpoint, ErrorType, RequestType, Status},
             service_v2::HttpService,
         },
     },
@@ -93,7 +93,7 @@ impl
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None);
+                let output = generator.create_choice(i, Some(format!("choice {i}")), None, None, None);
 
                 yield Annotated::from_data(output);
             }
@@ -197,16 +197,18 @@ fn compare_counter(
     endpoint: &Endpoint,
     request_type: &RequestType,
     status: &Status,
+    error_type: &ErrorType,
     expected: u64,
 ) {
     assert_eq!(
-        metrics.get_request_counter(model, endpoint, request_type, status),
+        metrics.get_request_counter(model, endpoint, request_type, status, error_type),
         expected,
-        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}",
+        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}, error_type: {:?}",
         model,
         endpoint.as_str(),
         request_type.as_str(),
-        status.as_str()
+        status.as_str(),
+        error_type.as_str()
     );
 }
 
@@ -216,7 +218,10 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
         Endpoint::Responses => todo!(),
+        Endpoint::AnthropicMessages => todo!(),
         Endpoint::Tensor => todo!(),
+        Endpoint::Images => todo!(),
+        Endpoint::Videos => todo!(),
     };
 
     let request_type = match request_type {
@@ -237,12 +242,17 @@ fn compare_counters(metrics: &Metrics, model: &str, expected: &[u64; 8]) {
         for request_type in &[RequestType::Unary, RequestType::Stream] {
             for status in &[Status::Success, Status::Error] {
                 let index = compute_index(endpoint, request_type, status);
+                let error_type = match status {
+                    Status::Success => &ErrorType::None,
+                    Status::Error => &ErrorType::Validation, // Test engines return 4xx errors
+                };
                 compare_counter(
                     metrics,
                     model,
                     endpoint,
                     request_type,
                     status,
+                    error_type,
                     expected[index],
                 );
             }
@@ -276,6 +286,9 @@ async fn test_http_service() {
     let token = CancellationToken::new();
     let cancel_token = token.clone();
     let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+    // Wait for the service to be ready before proceeding
+    wait_for_service_ready(port).await;
 
     let registry = Registry::new();
 
@@ -770,6 +783,8 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -810,6 +825,8 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -851,6 +868,8 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client

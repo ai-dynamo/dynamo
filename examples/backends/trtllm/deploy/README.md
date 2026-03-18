@@ -53,7 +53,7 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
+> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
 
 ## CRD Structure
 
@@ -89,7 +89,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: my-registry/trtllm-runtime:my-tag
+    image: my-registry/tensorrtllm-runtime:my-tag
     workingDir: /workspace/examples/backends/trtllm
     args:
       - "python3"
@@ -102,17 +102,18 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
 
-The deployment files currently require access to `my-registry/trtllm-runtime`. If you don't have access, build and push your own image:
+The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
-./container/build.sh --framework tensorrtllm
+python container/render.py --framework=trtllm --output-short-filename --cuda-version=13.1
+docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```
@@ -124,7 +125,8 @@ apt-get update && apt-get -y install git git-lfs
 
 For ARM machines, use:
 ```bash
-./container/build.sh --framework tensorrtllm --platform linux/arm64
+python container/render.py --framework=vllm --platform arm64 --output-short-filename
+docker build -f container/rendered.Dockerfile .
 ```
 
 ## Usage
@@ -141,7 +143,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: my-registry/trtllm-runtime:my-tag
+image: my-registry/tensorrtllm-runtime:my-tag
 
 # Configure your model and deployment settings
 args:
@@ -153,7 +155,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create_deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create-deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -165,7 +167,7 @@ kubectl create secret generic hf-token-secret \
 
 Then, deploy the model using the deployment file.
 
-Export the NAMESPACE you used in your Dynamo Cloud Installation.
+Export the NAMESPACE you used in your Dynamo Kubernetes Platform Installation.
 
 ```bash
 cd dynamo/examples/backends/trtllm/deploy
@@ -212,23 +214,8 @@ spec:
 
 TensorRT-LLM workers are configured through command-line arguments in the deployment YAML. Key configuration areas include:
 
-- **Disaggregation Strategy**: Control request flow with `DISAGGREGATION_STRATEGY` environment variable
 - **KV Cache Transfer**: Choose between UCX (default) or NIXL for disaggregated serving
 - **Request Migration**: Enable graceful failure handling with `--migration-limit`
-
-### Disaggregation Strategy
-
-The disaggregation strategy controls how requests are distributed between prefill and decode workers:
-
-- **`decode_first`** (default): Requests routed to decode worker first, then forwarded to prefill worker
-- **`prefill_first`**: Requests routed directly to prefill worker (used with KV routing)
-
-Set via environment variable:
-```yaml
-envs:
-  - name: DISAGGREGATION_STRATEGY
-    value: "prefill_first"
-```
 
 ## Testing the Deployment
 
@@ -254,11 +241,11 @@ TensorRT-LLM supports two methods for KV cache transfer in disaggregated serving
 - **UCX** (default): Standard method for KV cache transfer
 - **NIXL** (experimental): Alternative transfer method
 
-For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/kv-cache-transfer.md).
+For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/trtllm-kv-cache-transfer.md).
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -277,13 +264,13 @@ Configure the `model` name and `host` based on your deployment.
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
-- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)
-- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/llama4_plus_eagle.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
+- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
+- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/trtllm-multinode-examples.md)
+- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/trtllm-llama4-plus-eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting

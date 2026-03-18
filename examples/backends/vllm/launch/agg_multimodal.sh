@@ -1,72 +1,80 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated multimodal serving with standard Dynamo preprocessing
+#
+# Architecture: Single-worker PD (Prefill-Decode)
+# - Frontend: Rust OpenAIPreprocessor handles image URLs (HTTP and data:// base64)
+# - Worker: Standard vLLM worker with vision model support
+#
+# For EPD (Encode-Prefill-Decode) architecture with dedicated encoding worker,
+# see agg_multimodal_epd.sh
+
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
-MODEL_NAME="llava-hf/llava-1.5-7b-hf"
-PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
-PROVIDED_PROMPT_TEMPLATE=""
+MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
 # Parse command line arguments
+# Extra arguments are passed through to the vLLM worker
+EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
             MODEL_NAME=$2
             shift 2
             ;;
-        --prompt-template)
-            PROVIDED_PROMPT_TEMPLATE=$2
-            shift 2
-            ;;
         -h|--help)
-            echo "Usage: $0 [OPTIONS]"
+            echo "Usage: $0 [OPTIONS] [-- EXTRA_VLLM_ARGS]"
             echo "Options:"
-            echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
-            echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
-            echo "  -h, --help           Show this help message"
+            echo "  --model <model_name>   Specify the VLM model to use (default: $MODEL_NAME)"
+            echo "  -h, --help             Show this help message"
+            echo ""
+            echo "Any additional arguments are passed through to the vLLM worker."
+            echo "Example: $0 --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 --dyn-tool-call-parser hermes"
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
     esac
 done
 
-# Set PROMPT_TEMPLATE based on the MODEL_NAME
-if [[ -n "$PROVIDED_PROMPT_TEMPLATE" ]]; then
-    PROMPT_TEMPLATE="$PROVIDED_PROMPT_TEMPLATE"
-elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
-elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
-    PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
-else
-    echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
-    echo "Please provide a prompt template using --prompt-template option."
-    echo "Example: --prompt-template 'USER: <image>\n<prompt> ASSISTANT:'"
-    exit 1
-fi
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT"
 
-# run ingress
-python -m dynamo.frontend --http-port=8000 &
+# Use TCP transport (instead of default NATS)
+# TCP is preferred for multimodal workloads because it overcomes:
+# - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
+export DYN_REQUEST_PLANE=tcp
 
-# To make Qwen2.5-VL fit in A100 40GB, set the following extra arguments
-EXTRA_ARGS=""
+# Start frontend with Rust OpenAIPreprocessor
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
+
+# Configure GPU memory optimization for specific models (if no extra args override)
+MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+elif [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --gpu-memory-utilization 0.85 --max-model-len=108960"
 fi
 
-# run processor
-python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
+# Start vLLM worker with vision model
+# Multimodal data (images) are decoded in the backend worker using ImageLoader
+# --enforce-eager: Quick deployment (remove for production)
+# Extra args from command line come last to allow overrides
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
-# run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --model $MODEL_NAME $EXTRA_ARGS &
-
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

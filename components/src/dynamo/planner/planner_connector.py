@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,15 +15,21 @@
 
 from abc import ABC, abstractmethod
 
+from dynamo.planner.defaults import SubComponentType
+
 
 # TODO: add ability to scale component to X replicas
 class PlannerConnector(ABC):
     @abstractmethod
-    async def add_component(self, component_name):
+    async def add_component(
+        self, sub_component_type: SubComponentType, blocking: bool = True
+    ) -> None:
         """Add a component to the planner"""
         pass
 
     @abstractmethod
-    async def remove_component(self, component_name):
+    async def remove_component(
+        self, sub_component_type: SubComponentType, blocking: bool = True
+    ) -> None:
         """Remove a component from the planner"""
         pass

@@ -1,16 +1,20 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{ModelManager, ModelWatcher},
+    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig},
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
+    entrypoint::{EngineConfig, RouterConfig},
+    http::service::metrics::Metrics,
+    kv_router::{
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+    },
     migration::Migration,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
+    namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -23,10 +27,10 @@ use crate::{
     },
 };
 
+use anyhow::Context as _;
 use dynamo_runtime::{
-    DistributedRuntime, Runtime,
+    DistributedRuntime,
     component::Client,
-    distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
@@ -55,26 +59,40 @@ impl PreparedEngine {
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
-        EngineConfig::Dynamic(local_model) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-            let store = Arc::new(distributed_runtime.store().clone());
+        EngineConfig::Dynamic {
+            model: local_model, ..
+        } => {
             let model_manager = Arc::new(ModelManager::new());
+            // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
+            let metrics = Arc::new(Metrics::new());
             let watch_obj = Arc::new(ModelWatcher::new(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 model_manager.clone(),
-                dynamo_runtime::pipeline::RouterMode::RoundRobin,
+                RouterConfig::default(),
+                local_model.migration_limit(),
                 None,
-                None,
+                metrics,
             ));
-            let (_, receiver) = store.watch(model_card::ROOT_PATH, None, runtime.primary_token());
+            let discovery = distributed_runtime.discovery();
+            let discovery_stream = discovery
+                .list_and_watch(
+                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+                    Some(distributed_runtime.primary_token().clone()),
+                )
+                .await?;
             let inner_watch_obj = watch_obj.clone();
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                local_model.namespace(),
+                local_model.namespace_prefix(),
+            );
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(receiver, None).await;
+                inner_watch_obj
+                    .watch(discovery_stream, namespace_filter)
+                    .await;
             });
             tracing::info!("Waiting for remote model..");
 
@@ -93,62 +111,7 @@ pub async fn prepare_engine(
                 request_template: local_model.request_template(),
             })
         }
-        EngineConfig::StaticRemote(local_model) => {
-            // The card should have been loaded at 'build' phase earlier
-            let card = local_model.card();
-            let router_mode = local_model.router_config().router_mode;
-
-            let dst_config = DistributedConfig::from_settings(true);
-            let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                let model_manager = Arc::new(ModelManager::new());
-                Some(
-                    model_manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let hf_tokenizer = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                hf_tokenizer,
-                None, // No prefill chooser in static mode
-            )
-            .await?;
-
-            let service_name = local_model.service_name().to_string();
-            tracing::info!("Static connecting to {service_name}");
-            Ok(PreparedEngine {
-                service_name,
-                engine: chat_engine,
-                inspect_template: false,
-                request_template: local_model.request_template(),
-                card: Some(local_model.into_card()),
-            })
-        }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
@@ -160,7 +123,7 @@ pub async fn prepare_engine(
                 card: Some(model.into_card()),
             })
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..
@@ -168,7 +131,7 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer_hf()?)
+            >(model.card(), inner_engine, model.card().tokenizer()?)
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -187,7 +150,7 @@ pub async fn prepare_engine(
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -202,9 +165,9 @@ where
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
             .into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
     Ok(frontend
@@ -216,14 +179,19 @@ where
         .link(frontend)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    busy_threshold: Option<f64>,
+    worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
+    migration_limit: u32,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -235,18 +203,24 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,
+        model_manager,
         router_mode,
-        busy_threshold,
+        worker_monitor,
         chooser,
         preprocessor,
-        hf_tokenizer,
+        tokenizer,
         prefill_chooser,
+        enforce_disagg,
+        migration_limit,
+        metrics,
     )
     .await
 }
@@ -255,12 +229,16 @@ where
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    busy_threshold: Option<f64>,
+    worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
+    migration_limit: u32,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -274,53 +252,72 @@ where
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
+    let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
 
-    // Create worker monitor only if busy_threshold is set
-    let worker_monitor = busy_threshold.map(|threshold| {
-        Arc::new(crate::discovery::KvWorkerMonitor::new(
-            Arc::new(client.clone()),
-            threshold,
-        )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
-    });
+    // For KV routing, use the client from the chooser to ensure shared state
+    let router_client = if router_mode == RouterMode::KV {
+        let Some(ref chooser) = chooser else {
+            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+        };
+        chooser.client().clone()
+    } else {
+        client.clone()
+    };
+
+    // Get threshold value and wrap monitor for PushRouter
+    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
+    let threshold_value = worker_monitor
+        .as_ref()
+        .map(|m| m.active_decode_blocks_threshold());
+    let monitor_arc =
+        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-            client.clone(),
+            router_client,
             router_mode,
-            busy_threshold,
-            worker_monitor,
+            threshold_value,
+            monitor_arc,
         )
         .await?;
 
+    // Eagerly register router request metrics so they appear as zeros even in
+    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
+    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
+    // OnceLock), which covers the standalone router path as well.
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
     let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+        RouterMode::Direct => {
+            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
+        }
+        RouterMode::Random | RouterMode::RoundRobin => {
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
-            ServiceBackend::from_engine(Arc::new(kv_push_router))
+            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
         }
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser = prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode));
+    let prefill_chooser = prefill_chooser
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow
     let engine = frontend
         .link(preprocessor_op.forward_edge())?
-        .link(backend.forward_edge())?
         .link(migration.forward_edge())?
+        .link(backend.forward_edge())?
         .link(prefill_op.forward_edge())?
         .link(service_backend)?
         .link(prefill_op.backward_edge())?
-        .link(migration.backward_edge())?
         .link(backend.backward_edge())?
+        .link(migration.backward_edge())?
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
 

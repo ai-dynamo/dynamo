@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,11 +17,10 @@ import logging
 import os
 import shlex
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-from dynamo.planner.kube import get_current_k8s_namespace
 from dynamo.planner.utils.exceptions import (
     DuplicateSubComponentError,
     SubComponentNotFoundError,
@@ -32,68 +31,63 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-def _get_prometheus_port_from_env():
-    """
-    Get prometheus port from environment variables if set.
-    Otherwise, return 0, which means not reporting metrics using prometheus.
-    """
-    return os.environ.get("PLANNER_PROMETHEUS_PORT", 0)
-
-
 # Source of truth for planner defaults
 class BasePlannerDefaults:
-    namespace = "dynamo"
-    environment = "kubernetes"
-    backend = "vllm"
+    # Namespace from DYN_NAMESPACE env var (injected by operator as "{k8s_namespace}-{dgd_name}")
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    environment: Literal["kubernetes", "virtual", "global-planner"] = "kubernetes"
+    backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
     no_operation = False
     log_dir = None
-    adjustment_interval = 180  # in seconds
+    throughput_adjustment_interval = 180  # in seconds
     max_gpu_budget = 8
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
-    prometheus_port = _get_prometheus_port_from_env()
-
-
-class LoadPlannerDefaults(BasePlannerDefaults):
-    metric_pulling_interval = 10  # in seconds
-    decode_kv_scale_up_threshold = 0.9
-    decode_kv_scale_down_threshold = 0.5
-    prefill_queue_scale_up_threshold = 5.0
-    prefill_queue_scale_down_threshold = 0.2
-
-
-def _get_default_prometheus_endpoint(port: str, namespace: str):
-    """Compute default prometheus endpoint using environment variables and Kubernetes service discovery"""
-    prometheus_endpoint = os.environ.get("PROMETHEUS_ENDPOINT", "").strip()
-    if prometheus_endpoint:
-        logger.debug("Using PROMETHEUS_ENDPOINT override: %s", prometheus_endpoint)
-        return prometheus_endpoint
-
-    k8s_namespace = get_current_k8s_namespace()
-    if k8s_namespace and k8s_namespace != "default":
-        prometheus_service = f"{namespace}-prometheus"
-        return f"http://{prometheus_service}.{k8s_namespace}.svc.cluster.local:{port}"
-    else:
-        logger.warning(
-            f"Cannot determine Prometheus endpoint. Running in namespace '{k8s_namespace}'. "
-            "Ensure the planner is deployed in a Kubernetes cluster with proper namespace configuration."
-        )
-        return f"{namespace}-prometheus"
+    # Port for exposing planner's own metrics (0 means disabled)
+    metric_reporting_prometheus_port = int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
-    port = os.environ.get("PROMETHEUS_PORT", "9090")
-    namespace = os.environ.get("DYN_NAMESPACE", "vllm-disagg-planner")
-    prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
+    # Prometheus endpoint URL for pulling/querying metrics
+    metric_pulling_prometheus_endpoint = os.environ.get(
+        "PROMETHEUS_ENDPOINT",
+        "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
+    )
     profile_results_dir = "profiling_results"
+
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens
     ttft = 500.0  # in milliseconds
     itl = 50.0  # in milliseconds
-    load_predictor = "arima"  # ["constant", "arima", "prophet"]
-    load_prediction_window_size = 50  # predict load using how many recent load samples
-    no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
+
+    # for load predictor
+    load_predictor = "arima"  # ["constant", "arima", "kalman", "prophet"]
+    prophet_window_size = 50
+    load_predictor_log1p = False
+    kalman_q_level = 1.0
+    kalman_q_trend = 0.1
+    kalman_r = 10.0
+    kalman_min_points = 5
+
+    no_correction = True
+    mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
+
+    throughput_metrics_source = "frontend"  # "frontend" | "router"
+
+    # Scaling mode flags
+    enable_throughput_scaling = True
+    enable_load_scaling = False
+
+    # Load-based scaling settings
+    load_router_metrics_url: Optional[
+        str
+    ] = None  # will be auto-discovered from the DGD in kubernetes mode if not provided
+    load_adjustment_interval = 5  # in seconds, must be < throughput_adjustment_interval
+    load_learning_window = 50  # sliding window size for regression
+    load_scaling_down_sensitivity = 80  # 0-100
+    load_metric_samples = 10  # number of samples per interval
+    load_min_observations = 5  # cold start threshold
 
 
 class VllmComponentName:
@@ -119,16 +113,24 @@ class SGLangComponentName:
 
 
 class TrtllmComponentName:
-    # Note: Planner only supports DECODE_FIRST strategy in TRT-LLM:
-    # - Decode worker is the first worker (tensorrt_llm)
-    # - Prefill worker is the next worker (tensorrt_llm_next)
+    # Unified frontend architecture (consistent with vLLM/SGLang):
+    # - Prefill workers use "prefill" component
+    # - Decode workers use "tensorrt_llm" component
     prefill_worker_k8s_name = "TRTLLMPrefillWorker"
-    prefill_worker_component_name = (
-        "tensorrt_llm_next"  # Prefill is "next" with DECODE_FIRST
-    )
+    prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
     decode_worker_k8s_name = "TRTLLMDecodeWorker"
-    decode_worker_component_name = "tensorrt_llm"  # Decode is "first" with DECODE_FIRST
+    decode_worker_component_name = "tensorrt_llm"
+    decode_worker_endpoint = "generate"
+
+
+class MockerComponentName:
+    # Mocker backend for testing/simulation purposes
+    prefill_worker_k8s_name = "prefill"
+    prefill_worker_component_name = "prefill"
+    prefill_worker_endpoint = "generate"
+    decode_worker_k8s_name = "decode"
+    decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
 
 
@@ -136,6 +138,7 @@ WORKER_COMPONENT_NAMES = {
     "vllm": VllmComponentName,
     "sglang": SGLangComponentName,
     "trtllm": TrtllmComponentName,
+    "mocker": MockerComponentName,
 }
 
 
@@ -179,10 +182,49 @@ class Service(BaseModel):
             and len(args) > args.index("--served-model-name") + 1
         ):
             return args[args.index("--served-model-name") + 1]
+        if (
+            "--model-name" in args and len(args) > args.index("--model-name") + 1
+        ):  # mocker use --model-name
+            return args[args.index("--model-name") + 1]
         if "--model" in args and len(args) > args.index("--model") + 1:
             return args[args.index("--model") + 1]
 
         return None
+
+    def get_gpu_count(self) -> int:
+        """Get the GPU count from the service's resource specification.
+
+        GPU count is read from spec.services.[ServiceName].resources.limits.gpu,
+        falling back to requests.gpu if limits is not specified.
+
+        Returns:
+            The number of GPUs configured for this service
+
+        Raises:
+            ValueError: If GPU count is not specified or invalid
+        """
+        resources = self.service.get("resources", {})
+        limits = resources.get("limits", {})
+        requests = resources.get("requests", {})
+
+        # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
+        # typically treat requests and limits as equivalent since GPUs are
+        # non-compressible and allocated exclusively (no fractional sharing).
+        gpu_str = limits.get("gpu") or requests.get("gpu")
+
+        if gpu_str is None:
+            raise ValueError(
+                f"No GPU count specified for service '{self.name}'. "
+                f"Please set resources.limits.gpu or resources.requests.gpu in the DGD."
+            )
+
+        try:
+            return int(gpu_str)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Invalid GPU count '{gpu_str}' for service '{self.name}'. "
+                f"GPU count must be an integer."
+            )
 
 
 # TODO: still supporting framework component names for backwards compatibility

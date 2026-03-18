@@ -1,11 +1,15 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+import os
+
+if "PYTHONHASHSEED" not in os.environ:
+    os.environ["PYTHONHASHSEED"] = "0"
 
 import argparse
 import asyncio
 import copy
 import logging
-import os
 import signal
 import sys
 from typing import Tuple
@@ -15,12 +19,12 @@ import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs.data import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
-from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
+from dynamo.llm import KvEventPublisher
+from dynamo.runtime import DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -100,7 +104,6 @@ class VllmBaseWorker:
     def __init__(
         self,
         args: argparse.Namespace,
-        component: Component,
         endpoint: Endpoint,
         config: Config,
     ):
@@ -109,15 +112,15 @@ class VllmBaseWorker:
         self.downstream_endpoint = args.downstream_endpoint
         self.engine_args = config.engine_args
         self.config = config
-        self.setup_vllm_engine(component, endpoint)
+        self.setup_vllm_engine(endpoint)
 
     async def async_init(self, runtime: DistributedRuntime):
         pass
 
-    def setup_vllm_engine(self, component: Component, endpoint: Endpoint):
+    def setup_vllm_engine(self, endpoint: Endpoint):
         """Initialize the vLLM engine.
         This method sets up the vLLM engine client, and configures the dynamo-aware KV
-        event publisher and metrics stats logger based on component and endpoint.
+        event publisher and metrics stats logger based on endpoint.
         """
 
         os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
@@ -134,24 +137,20 @@ class VllmBaseWorker:
 
         # Create vLLM engine with metrics logger and KV event publisher attached
         self.stats_logger = StatLoggerFactory(
-            component,
-            self.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", self.config.model)],
+            endpoint=endpoint,
+            dp_rank=self.engine_args.data_parallel_rank or 0,
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
             stat_loggers=[self.stats_logger],
-            disable_log_requests=self.engine_args.disable_log_requests,
+            enable_log_requests=self.engine_args.enable_log_requests,
             disable_log_stats=self.engine_args.disable_log_stats,
         )
 
         # TODO Hack to get data, move this to registering in ETCD
         self.stats_logger.set_num_gpu_blocks_all(
             vllm_config.cache_config.num_gpu_blocks
-        )
-        self.stats_logger.set_request_total_slots_all(
-            vllm_config.scheduler_config.max_num_seqs
         )
         self.stats_logger.init_publish()
 
@@ -162,12 +161,11 @@ class VllmBaseWorker:
             data_parallel_rank=self.engine_args.data_parallel_rank or 0,
         ).replace("*", "127.0.0.1")
 
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=endpoint.connection_id(),
+        self.kv_publisher = KvEventPublisher(
+            endpoint=endpoint,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
-        self.kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
 
         logger.info(f"Reading Events from {zmq_endpoint}")
 
@@ -233,12 +231,9 @@ class VllmPDWorker(VllmBaseWorker):
                 parsed_component_name,
                 parsed_endpoint_name,
             ) = parse_endpoint(self.downstream_endpoint)
-            self.decode_worker_client = (
-                await runtime.namespace(parsed_namespace)
-                .component(parsed_component_name)
-                .endpoint(parsed_endpoint_name)
-                .client()
-            )
+            self.decode_worker_client = await runtime.endpoint(
+                f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+            ).client()
 
         if "video" in self.engine_args.model.lower():
             self.EMBEDDINGS_DTYPE = torch.uint8
@@ -251,7 +246,6 @@ class VllmPDWorker(VllmBaseWorker):
         # We'll needs this to move data between this worker and remote workers efficiently.
         parsed_namespace, _, _ = parse_endpoint(self.endpoint)
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         self.image_loader = ImageLoader()
 
@@ -269,6 +263,7 @@ class VllmPDWorker(VllmBaseWorker):
         if (
             request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
+            and request.multimodal_input.audio_url is None
         ):
             # Process embeddings using the connector
             # Create a descriptor based on the embedding shape.
@@ -295,6 +290,12 @@ class VllmPDWorker(VllmBaseWorker):
                     self.EMBEDDINGS_DTYPE,
                     video_numpy=video_numpy,
                 )
+            elif "audio" in self.engine_args.model.lower():
+                multi_modal_data = construct_mm_data(
+                    self.engine_args.model,
+                    self.EMBEDDINGS_DTYPE,
+                    audio_embeds=embeddings,
+                )
             else:
                 multi_modal_data = construct_mm_data(
                     self.engine_args.model,
@@ -313,6 +314,7 @@ class VllmPDWorker(VllmBaseWorker):
         # Remove the image features from the request as they are not required
         request.multimodal_input.image_url = None
         request.multimodal_input.video_url = None
+        request.multimodal_input.audio_url = None
         request.serialized_request = None
 
         pd_request = copy.deepcopy(request)
@@ -400,7 +402,7 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Runtime setup
     # Set up signal handler for graceful shutdown
@@ -418,7 +420,7 @@ async def worker(runtime: DistributedRuntime):
     args, config = VllmBaseWorker.parse_args()
 
     # vLLM config overwrites
-    await configure_ports(runtime, config)
+    configure_ports(config)
     overwrite_args(config)
     await init(runtime, args, config)
 
@@ -428,18 +430,17 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    generate_endpoint = component.endpoint(config.endpoint)
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
 
     if args.worker_type in ["prefill", "encode_prefill"]:
-        handler: VllmBaseWorker = VllmPDWorker(
-            args, component, generate_endpoint, config
-        )
+        handler: VllmBaseWorker = VllmPDWorker(args, generate_endpoint, config)
     elif args.worker_type == "decode":
-        handler = VllmDecodeWorker(args, component, generate_endpoint, config)
+        handler = VllmDecodeWorker(args, generate_endpoint, config)
     await handler.async_init(runtime)
 
     logger.info(f"Starting to serve the {args.endpoint} endpoint...")

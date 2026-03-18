@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Based on https://github.com/64bit/async-openai/ by Himanshu Neema
 // Original Copyright (c) 2022 Himanshu Neema
 // Licensed under MIT License (see ATTRIBUTIONS-Rust.md)
 //
-// Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+// Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
 //! Types used in OpenAI API requests and responses.
@@ -24,6 +24,7 @@ mod file;
 mod fine_tuning;
 mod image;
 mod invites;
+pub mod mcp;
 mod message;
 mod model;
 mod moderation;
@@ -36,6 +37,7 @@ mod projects;
 pub mod realtime;
 pub mod responses;
 mod run;
+pub mod shared;
 mod step;
 mod thread;
 mod upload;

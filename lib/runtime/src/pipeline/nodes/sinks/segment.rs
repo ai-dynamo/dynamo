@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::Error;
+use anyhow::Error;
 
 impl<Req: PipelineIO, Resp: PipelineIO> SegmentSink<Req, Resp> {
     pub fn new() -> Arc<Self> {

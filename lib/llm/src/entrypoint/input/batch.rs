@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::preprocessor::OpenAIPreprocessor;
@@ -7,8 +7,8 @@ use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
 use anyhow::Context as _;
-use dynamo_async_openai::types::FinishReason;
-use dynamo_runtime::{Runtime, pipeline::Context, runtime::CancellationToken};
+use dynamo_async_openai::types::{ChatCompletionMessageContent, FinishReason};
+use dynamo_runtime::{DistributedRuntime, pipeline::Context, runtime::CancellationToken};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp;
@@ -51,11 +51,11 @@ struct Entry {
 }
 
 pub async fn run(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     input_jsonl: PathBuf,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    let cancel_token = runtime.primary_token();
+    let cancel_token = distributed_runtime.primary_token();
     // Check if the path exists and is a directory
     if !input_jsonl.exists() || !input_jsonl.is_file() {
         anyhow::bail!(
@@ -64,7 +64,7 @@ pub async fn run(
         );
     }
 
-    let mut prepared_engine = common::prepare_engine(runtime, engine_config).await?;
+    let mut prepared_engine = common::prepare_engine(distributed_runtime, engine_config).await?;
 
     let pre_processor = if prepared_engine.has_tokenizer() {
         Some(OpenAIPreprocessor::new(
@@ -229,6 +229,8 @@ async fn evaluate(
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
     let mut stream = engine.generate(Context::new(req)).await?;
     let mut output = String::new();
@@ -239,15 +241,19 @@ async fn evaluate(
                 let choice = data.choices.first();
                 let chat_comp = choice.as_ref().unwrap();
                 if let Some(c) = &chat_comp.delta.content {
-                    output += c;
+                    match c {
+                        ChatCompletionMessageContent::Text(text) => {
+                            output += text;
+                        }
+                        ChatCompletionMessageContent::Parts(_) => {
+                            // Multimodal content - skip for now in batch processing
+                            // (ayushag) TODO: Handle multimodal content in batch mode
+                        }
+                    }
                 }
                 entry.finish_reason = chat_comp.finish_reason;
-                if chat_comp.finish_reason.is_some() {
-                    tracing::trace!(
-                        request_id,
-                        "finish reason: {:?}",
-                        chat_comp.finish_reason.unwrap()
-                    );
+                if let Some(finish_reason) = chat_comp.finish_reason.as_ref() {
+                    tracing::trace!(request_id, "finish reason: {:?}", finish_reason);
                     break;
                 }
             }

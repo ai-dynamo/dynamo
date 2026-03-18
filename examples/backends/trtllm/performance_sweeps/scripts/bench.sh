@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Add error handling
@@ -108,13 +108,13 @@ for ((i=1; i<=50; i++)); do
 
     if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
         if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"tensorrt_llm_next"'; then
+            if echo "$body" | grep -q '"prefill"'; then
                 echo "Health check succeeded on attempt $i"
                 echo "$body"
                 failed=false
                 break
             else
-                echo "Attempt $i: tensorrt_llm_next key not found in etcd."
+                echo "Attempt $i: prefill endpoint not found in health check."
             fi
         else
             echo "Health check succeeded on attempt $i"
@@ -174,7 +174,6 @@ for concurrency in ${concurrency_list}; do
 	    --num-dataset-entries ${num_prompts} \
     	--random-seed 100 \
     	--artifact-dir ${artifacts_dir} \
-    	-v \
     	-H 'Authorization: Bearer NOT USED' \
     	-H 'Accept: text/event-stream'
     echo "Benchmark with concurrency ${concurrency} done"

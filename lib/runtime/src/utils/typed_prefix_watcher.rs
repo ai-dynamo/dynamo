@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Generic etcd watcher utilities for maintaining collated state from etcd prefixes.
@@ -6,8 +6,8 @@
 //! This module provides reusable patterns for watching etcd prefixes and maintaining
 //! HashMap-based state that automatically updates based on etcd events.
 
-use crate::Result;
 use crate::transports::etcd::{Client as EtcdClient, WatchEvent};
+use anyhow::Result;
 use etcd_client::KeyValue;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -92,7 +92,7 @@ where
     let prefix = prefix.into();
 
     let prefix_watcher = client.kv_get_and_watch_prefix(&prefix).await?;
-    let (prefix_str, _watcher, mut events_rx) = prefix_watcher.dissolve();
+    let (prefix_str, mut events_rx) = prefix_watcher.dissolve();
 
     tokio::spawn(async move {
         let mut state: HashMap<K, V> = HashMap::new();
@@ -100,12 +100,12 @@ where
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    tracing::debug!("TypedPrefixWatcher for prefix '{}' cancelled", prefix_str);
+                    tracing::debug!("TypedPrefixWatcher for prefix '{prefix_str}' cancelled");
                     break;
                 }
                 event = events_rx.recv() => {
                     let Some(event) = event else {
-                        tracing::debug!("TypedPrefixWatcher watch stream closed for prefix '{}'", prefix_str);
+                        tracing::debug!("TypedPrefixWatcher watch stream closed for prefix '{prefix_str}'");
                         break;
                     };
 
@@ -163,7 +163,7 @@ where
             }
         }
 
-        tracing::debug!("TypedPrefixWatcher for prefix '{}' stopped", prefix_str);
+        tracing::debug!("TypedPrefixWatcher for prefix '{prefix_str}' stopped");
     });
 
     Ok(TypedPrefixWatcher { rx: watch_rx })
