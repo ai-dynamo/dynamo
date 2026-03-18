@@ -287,6 +287,8 @@ navigation:
     contents:
       - page: Dynamo Docs Guide
         path: README.md
+      - page: Building and Publishing Docs
+        path: development/fern-website.md
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
