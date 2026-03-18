@@ -74,8 +74,6 @@ type Autoscaling struct {
 // +kubebuilder:validation:XValidation:rule="!(self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
 type SharedMemorySpec struct {
 	Disabled bool `json:"disabled,omitempty"`
-	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:validation:Pattern=^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
 	Size resource.Quantity `json:"size,omitempty"`
 }
 
