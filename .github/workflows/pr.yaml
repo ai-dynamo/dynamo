@@ -577,6 +577,28 @@ jobs:
           # Allure 3 uses --cwd to find allure-results/ and has no --clean flag
           allure generate --cwd allure-v3-workspace -o allure-report-v3
 
+      - name: Generate unified dashboard
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          # Combine this workflow's results with stored results from other workflows
+          mkdir -p unified-workspace/allure-results
+
+          # Copy this workflow's results
+          cp -r allure-results/* unified-workspace/allure-results/
+
+          # Fetch stored results from other workflows on gh-pages
+          git fetch origin gh-pages:gh-pages 2>/dev/null || true
+          for subdir in post-merge nightly release; do
+            if git show "gh-pages:dashboard-results/${subdir}" 2>/dev/null; then
+              mkdir -p "unified-workspace/allure-results/${subdir}-imported"
+              git archive gh-pages "dashboard-results/${subdir}" | tar -x -C /tmp/
+              cp -r "/tmp/dashboard-results/${subdir}/"* "unified-workspace/allure-results/${subdir}-imported/" 2>/dev/null || true
+            fi
+          done
+
+          # Generate unified dashboard using allurerc.mjs
+          allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
+
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'
         run: |
@@ -608,6 +630,16 @@ jobs:
           rm -rf pre-merge-v2/*
           cp -r "${GITHUB_WORKSPACE}/allure-report/"* pre-merge-v2/
 
+          # Store raw results for unified dashboard aggregation
+          mkdir -p dashboard-results/pre-merge
+          rm -rf dashboard-results/pre-merge/*
+          cp -r "${GITHUB_WORKSPACE}/allure-results/"* dashboard-results/pre-merge/
+
+          # Deploy unified dashboard
+          mkdir -p allure-all
+          rm -rf allure-all/*
+          cp -r "${GITHUB_WORKSPACE}/allure-all-report/"* allure-all/
+
           # Commit and push
           git add -A
           if git diff --cached --quiet; then
@@ -624,6 +656,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- [Allure Report](https://ai-dynamo.github.io/dynamo/pre-merge/)" >> $GITHUB_STEP_SUMMARY
           echo "- [Allure 2 Report](https://ai-dynamo.github.io/dynamo/pre-merge-v2/)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Unified Dashboard](https://ai-dynamo.github.io/dynamo/allure-all/)" >> $GITHUB_STEP_SUMMARY
 
   # ============================================================================
   # CLEANUP JOBS

@@ -104,7 +104,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_runtest_setup(item):
-    """Add Allure parameters from CI environment to differentiate matrix entries."""
+    """Add Allure labels and parameters from CI environment."""
     try:
         import allure
     except ImportError:
@@ -118,6 +118,17 @@ def pytest_runtest_setup(item):
     for name, value in env_params.items():
         if value:
             allure.dynamic.parameter(name, value)
+
+    # Labels used by allurerc.mjs plugin filters for the unified dashboard
+    env_labels = {
+        "workflow": os.environ.get("DYNAMO_TEST_WORKFLOW"),
+        "framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "testType": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_labels.items():
+        if value:
+            allure.dynamic.label(name, value)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"

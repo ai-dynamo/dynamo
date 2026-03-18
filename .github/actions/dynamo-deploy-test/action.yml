@@ -114,6 +114,7 @@ runs:
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
         DYNAMO_TEST_TYPE: deploy_${{ inputs.profile }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
       run: |
         mkdir -p test-results
         pytest tests/deploy/test_deploy.py \

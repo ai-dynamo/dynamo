@@ -133,6 +133,31 @@ jobs:
           fi
           allure generate --cwd allure-v3-workspace -o allure-report-v3
 
+      - name: Generate unified dashboard
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          SUBDIR="${{ steps.params.outputs.subdir }}"
+
+          # Combine this workflow's results with stored results from other workflows
+          mkdir -p unified-workspace/allure-results
+
+          # Copy this workflow's results
+          cp -r allure-results/* unified-workspace/allure-results/
+
+          # Fetch stored results from other workflows on gh-pages
+          git fetch origin gh-pages:gh-pages 2>/dev/null || true
+          for dir in pre-merge post-merge nightly release; do
+            if [ "$dir" = "$SUBDIR" ]; then continue; fi
+            if git show "gh-pages:dashboard-results/${dir}" 2>/dev/null; then
+              mkdir -p "unified-workspace/allure-results/${dir}-imported"
+              git archive gh-pages "dashboard-results/${dir}" | tar -x -C /tmp/
+              cp -r "/tmp/dashboard-results/${dir}/"* "unified-workspace/allure-results/${dir}-imported/" 2>/dev/null || true
+            fi
+          done
+
+          # Generate unified dashboard using allurerc.mjs
+          allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
+
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'
         run: |
@@ -165,6 +190,16 @@ jobs:
           rm -rf "${SUBDIR}-v2/"*
           cp -r "${GITHUB_WORKSPACE}/allure-report/"* "${SUBDIR}-v2/"
 
+          # Store raw results for unified dashboard aggregation
+          mkdir -p "dashboard-results/${SUBDIR}"
+          rm -rf "dashboard-results/${SUBDIR}/"*
+          cp -r "${GITHUB_WORKSPACE}/allure-results/"* "dashboard-results/${SUBDIR}/"
+
+          # Deploy unified dashboard
+          mkdir -p allure-all
+          rm -rf allure-all/*
+          cp -r "${GITHUB_WORKSPACE}/allure-all-report/"* allure-all/
+
           # Commit and push
           git add -A
           if git diff --cached --quiet; then
@@ -182,3 +217,4 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- [Allure Report](https://ai-dynamo.github.io/dynamo/${SUBDIR}/)" >> $GITHUB_STEP_SUMMARY
           echo "- [Allure 2 Report](https://ai-dynamo.github.io/dynamo/${SUBDIR}-v2/)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Unified Dashboard](https://ai-dynamo.github.io/dynamo/allure-all/)" >> $GITHUB_STEP_SUMMARY
