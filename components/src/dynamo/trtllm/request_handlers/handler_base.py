@@ -81,6 +81,7 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
+    model_max_len: Optional[int] = None  # Max sequence length for dynamic max_tokens default
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -111,6 +112,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
+        self.model_max_len = config.model_max_len
 
     def check_error(self, result: dict) -> bool:
         """
@@ -749,8 +751,11 @@ class HandlerBase(BaseGenerativeHandler):
                     )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
+        if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
+        elif self.model_max_len is not None:
+            input_length = len(request.get("token_ids", []))
+            sampling_params.max_tokens = max(1, self.model_max_len - input_length)
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:

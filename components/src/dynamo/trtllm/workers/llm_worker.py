@@ -475,6 +475,7 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
+            model_max_len=engine_args.get("max_seq_len"),
         )
 
         # Register the model with runtime config

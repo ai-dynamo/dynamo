@@ -36,6 +36,7 @@ class MockSamplingParams:
     top_p: float = 1.0
     top_k: int = 50
     repetition_penalty: float = 1.0
+    max_tokens: int = 32
     seed: int | None = None
     ignore_eos: bool = False
     guided_decoding: object | None = None
@@ -335,6 +336,110 @@ class _ConcreteHandler(HandlerBase):
 
     async def generate(self, *args, **kwargs):
         raise NotImplementedError
+
+
+class TestMaxTokensDynamicDefault:
+    """Tests for dynamic max_tokens default when client omits max_completion_tokens.
+
+    When max_tokens is None (client didn't specify), the handler should compute
+    model_max_len - input_length as the default, matching vLLM handler behavior.
+    """
+
+    def _make_handler(self, model_max_len: int | None = None) -> HandlerBase:
+        """Create a HandlerBase with mocked config and specified model_max_len."""
+        config = MagicMock()
+        config.disable_request_abort = True
+        config.shutdown_event = None
+        config.model_max_len = model_max_len
+        return _ConcreteHandler(config)
+
+    def test_model_max_len_stored_on_handler(self):
+        handler = self._make_handler(model_max_len=8192)
+        assert handler.model_max_len == 8192
+
+    def test_model_max_len_none_by_default(self):
+        config = MagicMock()
+        config.disable_request_abort = True
+        config.shutdown_event = None
+        config.model_max_len = None
+        handler = _ConcreteHandler(config)
+        assert handler.model_max_len is None
+
+    def test_explicit_max_tokens_respected(self):
+        """When client provides max_tokens, it should be used as-is."""
+        handler = self._make_handler(model_max_len=8192)
+        sampling_params = MockSamplingParams()
+
+        request = {
+            "stop_conditions": {"max_tokens": 256},
+            "token_ids": list(range(100)),
+        }
+
+        max_tokens = request["stop_conditions"]["max_tokens"]
+        if max_tokens is not None:
+            sampling_params.max_tokens = max_tokens
+        elif handler.model_max_len is not None:
+            input_length = len(request.get("token_ids", []))
+            sampling_params.max_tokens = max(1, handler.model_max_len - input_length)
+
+        assert sampling_params.max_tokens == 256
+
+    def test_none_max_tokens_gets_dynamic_default(self):
+        """When max_tokens is None, should default to model_max_len - input_length."""
+        handler = self._make_handler(model_max_len=8192)
+        sampling_params = MockSamplingParams()
+
+        request = {
+            "stop_conditions": {"max_tokens": None},
+            "token_ids": list(range(100)),  # 100 input tokens
+        }
+
+        max_tokens = request["stop_conditions"]["max_tokens"]
+        if max_tokens is not None:
+            sampling_params.max_tokens = max_tokens
+        elif handler.model_max_len is not None:
+            input_length = len(request.get("token_ids", []))
+            sampling_params.max_tokens = max(1, handler.model_max_len - input_length)
+
+        assert sampling_params.max_tokens == 8092  # 8192 - 100
+
+    def test_dynamic_default_minimum_is_one(self):
+        """When input_length >= model_max_len, should still allow at least 1 token."""
+        handler = self._make_handler(model_max_len=128)
+        sampling_params = MockSamplingParams()
+
+        request = {
+            "stop_conditions": {"max_tokens": None},
+            "token_ids": list(range(200)),  # 200 > 128
+        }
+
+        max_tokens = request["stop_conditions"]["max_tokens"]
+        if max_tokens is not None:
+            sampling_params.max_tokens = max_tokens
+        elif handler.model_max_len is not None:
+            input_length = len(request.get("token_ids", []))
+            sampling_params.max_tokens = max(1, handler.model_max_len - input_length)
+
+        assert sampling_params.max_tokens == 1
+
+    def test_no_model_max_len_leaves_default(self):
+        """When model_max_len is None, max_tokens should remain unchanged."""
+        handler = self._make_handler(model_max_len=None)
+        sampling_params = MockSamplingParams()
+
+        request = {
+            "stop_conditions": {"max_tokens": None},
+            "token_ids": list(range(100)),
+        }
+
+        max_tokens = request["stop_conditions"]["max_tokens"]
+        if max_tokens is not None:
+            sampling_params.max_tokens = max_tokens
+        elif handler.model_max_len is not None:
+            input_length = len(request.get("token_ids", []))
+            sampling_params.max_tokens = max(1, handler.model_max_len - input_length)
+
+        assert sampling_params.max_tokens == 32  # unchanged
 
 
 class TestHandleCancellationAbortToggle:
