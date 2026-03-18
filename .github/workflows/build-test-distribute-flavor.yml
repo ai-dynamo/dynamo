@@ -159,6 +159,7 @@ jobs:
     outputs:
       target_tag_plain: ${{ steps.build.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.build.outputs.test_tag_plain }}
+      compliance_arches: ${{ steps.compliance-arches.outputs.arches }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
@@ -166,6 +167,16 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
+      - name: Compute compliance arches
+        id: compliance-arches
+        shell: bash
+        run: |
+          PLATFORM="${{ inputs.platform }}"
+          # Convert comma-separated Docker platform string to JSON array
+          # "linux/amd64,linux/arm64" -> ["linux/amd64","linux/arm64"]
+          # "linux/amd64"             -> ["linux/amd64"]
+          JSON=$(printf '%s\n' ${PLATFORM//,/ } | jq -Rsc '[splits("\n") | select(length>0)]')
+          echo "arches=${JSON}" >> $GITHUB_OUTPUT
       - name: Build
         id: build
         uses: ./.github/actions/build-flavor
@@ -373,7 +384,11 @@ jobs:
   compliance:
     if: inputs.build_image && inputs.push_image
     needs: [build]
-    name: Compliance cuda${{ inputs.cuda_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJson(needs.build.outputs.compliance_arches) }}
+    name: Compliance cuda${{ inputs.cuda_version }}-${{ matrix.arch }}
     runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
@@ -386,7 +401,7 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Calculate image URI
+      - name: Calculate image URI and arch suffix
         id: images
         shell: bash
         run: |
@@ -395,12 +410,15 @@ jobs:
           echo "cuda_major=${CUDA_VERSION}" >> $GITHUB_OUTPUT
           RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}
           echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          # Sanitize arch for artifact name: linux/amd64 -> amd64 (artifact names can't contain /)
+          ARCH="${{ matrix.arch }}"
+          echo "arch_suffix=${ARCH#linux/}" >> $GITHUB_OUTPUT
       - name: Compliance scan
         uses: ./.github/actions/compliance-scan
         with:
           image: ${{ steps.images.outputs.runtime_image }}
-          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}
-          arch: linux/amd64
+          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}-${{ steps.images.outputs.arch_suffix }}
+          arch: ${{ matrix.arch }}
           framework: ${{ inputs.framework }}
           cuda_version: ${{ inputs.cuda_version }}
 
