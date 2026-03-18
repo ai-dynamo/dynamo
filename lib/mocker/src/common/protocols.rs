@@ -90,6 +90,16 @@ pub enum PreemptionMode {
     Fifo,
 }
 
+/// Engine type for selecting scheduling and KV cache simulation behavior
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EngineType {
+    /// vLLM-style scheduling with hash-based block KV cache
+    #[default]
+    Vllm,
+    /// SGLang-style scheduling with radix-tree KV cache
+    Sglang,
+}
+
 /// Worker type for disaggregated serving configurations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WorkerType {
@@ -134,10 +144,39 @@ impl ReasoningConfig {
     }
 }
 
-/// Configuration arguments for MockVllmEngine
+/// SGLang-specific configuration parameters.
+///
+/// Grouped into a nested struct to keep the `MockEngineArgs` namespace clean,
+/// following the same pattern as [`ReasoningConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
+pub struct SglangArgs {
+    /// Scheduling policy: "fifo"/"fcfs" or "lpm". Default: "fifo".
+    pub schedule_policy: Option<String>,
+    /// Radix cache page size in tokens. Default: 1.
+    #[validate(range(min = 1))]
+    pub page_size: Option<usize>,
+    /// Maximum prefill tokens budget per batch. Default: 16384.
+    #[validate(range(min = 1))]
+    pub max_prefill_tokens: Option<usize>,
+    /// Chunked prefill size (max tokens per chunk). Default: 8192.
+    #[validate(range(min = 1))]
+    pub chunked_prefill_size: Option<usize>,
+    /// Clip max new tokens for admission budget. Default: 4096.
+    #[validate(range(min = 1))]
+    pub clip_max_new_tokens: Option<usize>,
+    /// Schedule conservativeness factor (0.0–1.0). Default: 1.0.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub schedule_conservativeness: Option<f64>,
+}
+
+/// Configuration arguments for MockEngine
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, Validate)]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
+    /// Engine type: vLLM or SGLang simulation
+    #[builder(default = "EngineType::Vllm")]
+    pub engine_type: EngineType,
+
     #[builder(default = "16384")]
     #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
@@ -236,6 +275,10 @@ pub struct MockEngineArgs {
     /// Lifo (default) evicts the newest request; Fifo evicts the oldest.
     #[builder(default)]
     pub preemption_mode: PreemptionMode,
+
+    /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
+    #[builder(default = "None")]
+    pub sglang: Option<SglangArgs>,
 }
 
 impl Default for MockEngineArgs {
@@ -273,6 +316,7 @@ impl MockEngineArgs {
 
         // Define valid field names
         let valid_fields: HashSet<&str> = [
+            "engine_type",
             "num_gpu_blocks",
             "block_size",
             "max_num_seqs",
@@ -294,6 +338,7 @@ impl MockEngineArgs {
             "zmq_kv_events_port",
             "zmq_replay_port",
             "preemption_mode",
+            "sglang",
         ]
         .iter()
         .cloned()
@@ -315,6 +360,22 @@ impl MockEngineArgs {
         }
 
         // Apply each extra argument to the builder
+        if let Some(value) = extra_args.get("engine_type")
+            && let Some(s) = value.as_str()
+        {
+            let engine_type = match s {
+                "vllm" => EngineType::Vllm,
+                "sglang" => EngineType::Sglang,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid engine_type '{}'. Must be 'vllm' or 'sglang'.",
+                        other
+                    ));
+                }
+            };
+            builder = builder.engine_type(engine_type);
+        }
+
         if let Some(value) = extra_args.get("num_gpu_blocks")
             && let Some(num) = value.as_u64()
         {
@@ -431,6 +492,12 @@ impl MockEngineArgs {
                 }
             };
             builder = builder.preemption_mode(mode);
+        }
+
+        if let Some(value) = extra_args.get("sglang") {
+            let cfg: SglangArgs = serde_json::from_value(value.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse sglang config: {}", e))?;
+            builder = builder.sglang(Some(cfg));
         }
 
         // Parse worker type from is_prefill and is_decode flags

@@ -47,7 +47,7 @@ redirects:
   - source: "/dynamo/resources/examples"
     destination: "/dynamo/dev/resources/examples"
   # Version-scoped getting-started → resources redirects
-  # Only for versions where these pages moved (dev, v1.0.0, latest).
+  # Only for versions where these pages moved (dev, v1.0.0, v1.0.1, latest).
   # Older versions (v0.9.x and below) still have pages under getting-started.
   - source: "/dynamo/dev/getting-started/support-matrix"
     destination: "/dynamo/dev/resources/support-matrix"
@@ -57,6 +57,14 @@ redirects:
     destination: "/dynamo/dev/resources/release-artifacts"
   - source: "/dynamo/dev/getting-started/examples"
     destination: "/dynamo/dev/resources/examples"
+  - source: "/dynamo/v1.0.1/getting-started/support-matrix"
+    destination: "/dynamo/v1.0.1/resources/support-matrix"
+  - source: "/dynamo/v1.0.1/getting-started/feature-matrix"
+    destination: "/dynamo/v1.0.1/resources/feature-matrix"
+  - source: "/dynamo/v1.0.1/getting-started/release-artifacts"
+    destination: "/dynamo/v1.0.1/resources/release-artifacts"
+  - source: "/dynamo/v1.0.1/getting-started/examples"
+    destination: "/dynamo/v1.0.1/resources/examples"
   - source: "/dynamo/v1.0.0/getting-started/support-matrix"
     destination: "/dynamo/v1.0.0/resources/support-matrix"
   - source: "/dynamo/v1.0.0/getting-started/feature-matrix"

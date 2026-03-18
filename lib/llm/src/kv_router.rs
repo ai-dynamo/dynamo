@@ -5,7 +5,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use dynamo_kv_router::{ConcurrentRadixTree, ThreadPoolIndexer};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, ThreadPoolIndexer,
+    approx::PruneConfig,
+    config::{KvRouterConfig, RouterConfigOverride},
+    indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
+    protocols::KV_EVENT_SUBJECT,
+    protocols::{
+        BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
+        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    },
+};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
@@ -22,15 +32,7 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use validator::Validate;
 
-// Re-export from dynamo-kv-router crate
-pub use dynamo_kv_router::approx;
-pub use dynamo_kv_router::indexer;
-pub use dynamo_kv_router::protocols;
-pub use dynamo_kv_router::scheduling;
-pub use dynamo_kv_router::selector;
-
 pub mod cache_control;
-pub mod config;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -45,20 +47,12 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use cache_control::{CacheControlClient, spawn_pin_prefix};
-pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
-        approx::PruneConfig,
-        indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
-        protocols::{
-            BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-            RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
-            compute_block_hash_for_seq,
-        },
         remote_indexer::RemoteIndexer,
         scheduler::{KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
@@ -75,7 +69,6 @@ use std::collections::HashSet;
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub use dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
 // for inter-router comms
@@ -85,9 +78,6 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
-
-// for standalone indexer query — re-export from shared crate
-pub use dynamo_kv_router::indexer::KV_INDEXER_QUERY_ENDPOINT;
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
@@ -175,7 +165,7 @@ impl Indexer {
         // with TTL/pruning regardless of event_threads, since updates come from
         // routing decisions only, not live KV events from workers.
         if !kv_router_config.use_kv_events {
-            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+            let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
             let cancellation_token = component.drt().primary_token();
             let prune_config = Some(PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
@@ -199,7 +189,7 @@ impl Indexer {
             ))));
         }
 
-        let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+        let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
         let cancellation_token = component.drt().primary_token();
 
         Ok(Indexer::KvIndexer(KvIndexer::new_with_frequency(
