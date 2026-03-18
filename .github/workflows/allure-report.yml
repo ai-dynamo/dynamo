@@ -79,7 +79,7 @@ jobs:
       - name: Install Allure 2 CLI
         if: steps.check-results.outputs.has_results == 'true'
         run: |
-          ALLURE_VERSION="2.32.0"
+          ALLURE_VERSION="2.38.0"
           wget -q "https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.tgz"
           tar -xzf "allure-${ALLURE_VERSION}.tgz"
           mv "allure-${ALLURE_VERSION}" allure2-cli
@@ -87,7 +87,7 @@ jobs:
       - name: Install Allure 3 CLI
         if: steps.check-results.outputs.has_results == 'true'
         run: |
-          npm install -g allure
+          npm install -g allure@3.3.1
 
       - name: Get Allure history from gh-pages
         if: steps.check-results.outputs.has_results == 'true'
