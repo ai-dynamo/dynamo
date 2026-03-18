@@ -22,11 +22,11 @@ spec:
           env:
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
-            # Optional: create with: kubectl create secret generic hf-token --from-literal=HF_TOKEN=<token> -n <namespace>
+            # Optional: create with: kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token> -n <namespace>
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: hf-token
+                  name: hf-token-secret
                   key: HF_TOKEN
                   optional: true
           args:
