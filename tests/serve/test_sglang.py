@@ -202,7 +202,77 @@ sglang_configs = {
             )
         ],
     ),
-    # --- RUN 2: WITH UCX_TLS=^mm (expected pass, captures VMA counts from both sender and receiver) ---
+    # --- RUN 2: UCX_MEM_MMAP_HOOK_MODE=none (tests bistro patching hypothesis) ---
+    "multimodal_epd_qwen_no_bistro": SGLangConfig(
+        name="multimodal_epd_qwen_no_bistro",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+            "UCX_MEM_MMAP_HOOK_MODE": "none",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    # --- RUN 3: UCX_MEMTYPE_CACHE=n (tests CUDA memory type cache interaction) ---
+    "multimodal_epd_qwen_no_memtype": SGLangConfig(
+        name="multimodal_epd_qwen_no_memtype",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+            "UCX_MEMTYPE_CACHE": "n",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    # --- RUN 4: UCX_TLS=^mm (known fix, control) ---
     "multimodal_epd_qwen": SGLangConfig(
         name="multimodal_epd_qwen",
         directory=sglang_dir,
@@ -231,9 +301,6 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                # NOTE: The response text may mention 'bus', 'train', 'streetcar', etc.
-                # so we need something consistently found in the response, or a different
-                # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
                 max_tokens=100,

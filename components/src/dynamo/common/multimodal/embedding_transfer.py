@@ -380,16 +380,21 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         _pid = os.getpid()
         _maps = len(open(f"/proc/{_pid}/maps").readlines())
         _max = int(open("/proc/sys/vm/max_map_count").read().strip())
-        _msg = f"[VMA_DEBUG] SENDER pid={_pid} maps={_maps} max_map_count={_max} headroom={_max - _maps}"
-        print(_msg, flush=True)
-        logger.warning(_msg)
+        _hook_mode = os.environ.get("UCX_MEM_MMAP_HOOK_MODE", "default")
+        _tls = os.environ.get("UCX_TLS", "default")
+        for _line in [
+            f"[DIAG] SENDER pid={_pid} maps={_maps} max_map_count={_max} headroom={_max - _maps}",
+            f"[DIAG] SENDER UCX_TLS={_tls} UCX_MEM_MMAP_HOOK_MODE={_hook_mode}",
+        ]:
+            print(_line, flush=True)
+            logger.warning(_line)
         # NIXL agent setup
         self.sender_id = f"sender_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.sender_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
         )
         _maps_after = len(open(f"/proc/{_pid}/maps").readlines())
-        _msg = f"[VMA_DEBUG] SENDER post_nixl_agent maps={_maps_after} delta={_maps_after - _maps}"
+        _msg = f"[DIAG] SENDER post_nixl_agent maps={_maps_after} delta={_maps_after - _maps}"
         print(_msg, flush=True)
         logger.warning(_msg)
         self.remote_agents = {}
@@ -634,19 +639,31 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.ring_buffer = RingBuffer(buffer_size)
         self.transfer_tensor = self.ring_buffer.buffer_tensor
 
-        # NIXL agent setup
+        # NIXL agent setup — diagnostics for CI segfault investigation
         _pid = os.getpid()
         _maps = len(open(f"/proc/{_pid}/maps").readlines())
         _max = int(open("/proc/sys/vm/max_map_count").read().strip())
-        _msg = f"[VMA_DEBUG] RECEIVER pid={_pid} maps={_maps} max_map_count={_max} headroom={_max - _maps}"
-        print(_msg, flush=True)
-        logger.warning(_msg)
+        _fds = len(os.listdir(f"/proc/{_pid}/fd"))
+        try:
+            _shm = os.popen("df -h /dev/shm 2>/dev/null | tail -1").read().strip()
+            _shm_files = len(os.listdir("/dev/shm"))
+        except Exception:
+            _shm, _shm_files = "N/A", -1
+        _hook_mode = os.environ.get("UCX_MEM_MMAP_HOOK_MODE", "default")
+        _tls = os.environ.get("UCX_TLS", "default")
+        for _line in [
+            f"[DIAG] RECEIVER pid={_pid} maps={_maps} max_map_count={_max} headroom={_max - _maps}",
+            f"[DIAG] RECEIVER fds={_fds} shm_files={_shm_files} shm_df='{_shm}'",
+            f"[DIAG] RECEIVER UCX_TLS={_tls} UCX_MEM_MMAP_HOOK_MODE={_hook_mode}",
+        ]:
+            print(_line, flush=True)
+            logger.warning(_line)
         self.receiver_id = f"receiver_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.receiver_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
         )
         _maps_after = len(open(f"/proc/{_pid}/maps").readlines())
-        _msg = f"[VMA_DEBUG] RECEIVER post_nixl_agent maps={_maps_after} delta={_maps_after - _maps}"
+        _msg = f"[DIAG] RECEIVER post_nixl_agent maps={_maps_after} delta={_maps_after - _maps}"
         print(_msg, flush=True)
         logger.warning(_msg)
         self.remote_agents = {}
