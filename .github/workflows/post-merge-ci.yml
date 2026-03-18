@@ -96,7 +96,7 @@ jobs:
   # ============================================================================
   vllm-dev-pipeline:
     name: vllm-dev
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor-matrix.yml
     with:
       framework: vllm
       target: dev
@@ -104,15 +104,14 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      copy_timeout_minutes: 20
-      run_cpu_only_tests: false
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
+      push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   sglang-dev-pipeline:
     name: sglang-dev
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor-matrix.yml
     with:
       framework: sglang
       target: dev
@@ -120,15 +119,14 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      copy_timeout_minutes: 20
-      run_cpu_only_tests: false
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
+      push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   trtllm-dev-pipeline:
     name: trtllm-dev
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor-matrix.yml
     with:
       framework: trtllm
       target: dev
@@ -136,10 +134,9 @@ jobs:
       cuda_versions: '["13.1"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      copy_timeout_minutes: 20
-      run_cpu_only_tests: false
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
+      push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   # ============================================================================
