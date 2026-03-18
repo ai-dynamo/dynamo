@@ -38,6 +38,7 @@ from dynamo.common.forward_pass_metrics import (
     WelfordAccumulator,
     encode,
 )
+from dynamo.runtime.logging import configure_dynamo_logging
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.structured_output import StructuredOutputManager
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
