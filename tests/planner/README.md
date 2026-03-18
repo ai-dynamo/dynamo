@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.common.txt -r container/deps/requirements.planner.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
@@ -23,7 +23,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/components/profiler/profiler-guide.md) for detailed instructions.
 
 ## Interpolator Testing
 
@@ -166,7 +166,7 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 **Prerequisites:**
 
 - **[kube-prometheus-stack](../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
-- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/components/planner/planner-guide.md#prerequisites) for details).
 
 **Prepare the test deployment manifest:**
 
@@ -209,7 +209,7 @@ Remove `volumes` and `volumeMounts`:
           - name: planner-profile-data
             configMap:
               # Must be pre-created before deployment by the profiler
-              # See docs/planner/sla_planner_quickstart.md for more details
+              # See docs/components/planner/planner-guide.md for more details
               name: planner-profile-data
 ```
 

@@ -47,6 +47,7 @@ use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
 };
+use dashmap::DashMap;
 use derive_builder::Builder;
 use derive_getters::Getters;
 use educe::Educe;
@@ -236,12 +237,16 @@ impl Component {
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
-        Endpoint {
+        let endpoint = Endpoint {
             component: self.clone(),
             name: endpoint.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
-        }
+        };
+        // Attach endpoint registry so scrapes traverse separate registries (avoids collisions).
+        self.get_metrics_registry()
+            .add_child_registry(endpoint.get_metrics_registry());
+        endpoint
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
@@ -421,6 +426,13 @@ pub struct Namespace {
     /// This hierarchy's own metrics registry
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
+
+    /// Cache for components to avoid duplicate registrations and metrics collisions.
+    /// When the same component is requested multiple times, we return the cached instance
+    /// to ensure all endpoints share the same Component and MetricsRegistry.
+    /// Uses DashMap for lock-free reads and automatic handling of concurrent inserts.
+    #[builder(default = "Arc::new(DashMap::new())")]
+    component_cache: Arc<DashMap<String, Component>>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -453,27 +465,60 @@ impl std::fmt::Display for Namespace {
 
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String) -> anyhow::Result<Self> {
-        Ok(NamespaceBuilder::default()
+        let ns = NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name)
-            .build()?)
+            .build()?;
+        // Attach namespace registry so scrapes traverse separate registries (avoids collisions).
+        ns.drt()
+            .get_metrics_registry()
+            .add_child_registry(ns.get_metrics_registry());
+        Ok(ns)
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
+    ///
+    /// Components are cached by name to ensure that multiple calls with the same name
+    /// return the same Component instance. This prevents duplicate metrics registrations
+    /// and ensures all endpoints share the same Component's MetricsRegistry.
     pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
-        ComponentBuilder::from_runtime(self.runtime.clone())
-            .name(name)
+        let name = name.into();
+
+        // Fast path: Check if component exists in cache
+        // DashMap provides lock-free reads via internal sharding
+        if let Some(cached) = self.component_cache.get(&name) {
+            return Ok(cached.value().clone());
+        }
+
+        // Slow path: Create new component
+        let component = ComponentBuilder::from_runtime(self.runtime.clone())
+            .name(&name)
             .namespace(self.clone())
-            .build()
+            .build()?;
+
+        // Attach component registry so scrapes traverse separate registries (avoids collisions).
+        self.get_metrics_registry()
+            .add_child_registry(component.get_metrics_registry());
+
+        // Cache the component for future calls
+        // DashMap handles race conditions internally - if another thread
+        // inserted the same key concurrently, we just use our created component
+        self.component_cache.insert(name, component.clone());
+
+        Ok(component)
     }
 
     /// Create a [`Namespace`] in the parent namespace
     pub fn namespace(&self, name: impl Into<String>) -> anyhow::Result<Namespace> {
-        Ok(NamespaceBuilder::default()
+        let child = NamespaceBuilder::default()
             .runtime(self.runtime.clone())
             .name(name.into())
             .parent(Some(Arc::new(self.clone())))
-            .build()?)
+            .build()?;
+        // Attach child namespace registry so scrapes traverse separate registries (avoids collisions).
+        self.get_metrics_registry()
+            .add_child_registry(child.get_metrics_registry());
+        Ok(child)
     }
 
     pub fn name(&self) -> String {

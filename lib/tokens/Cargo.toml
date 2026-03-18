@@ -16,6 +16,7 @@ dashmap = { workspace = true }
 derive-getters = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 bs58 = "0.5"
 

@@ -21,10 +21,12 @@ package v1alpha1
 
 import (
 	"fmt"
+	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -124,6 +126,23 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
+
+	// EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+	// Only applicable when ComponentType is "epp".
+	// +optional
+	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
+
+	// FrontendSidecar configures an auto-generated frontend sidecar container.
+	// When specified, the operator injects a fully configured frontend container
+	// with all standard Dynamo environment variables, health probes, and ports.
+	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
+	// +optional
+	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
+
+	// Checkpoint configures container checkpointing for this service.
+	// When enabled, pods can be restored from a checkpoint files for faster cold start.
+	// +optional
+	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
 type MultinodeSpec struct {
@@ -198,6 +217,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
+// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:shortName=dcd
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
@@ -332,7 +352,11 @@ func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName st
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
+	// The dynamo namespace is used as the first segment of endpoint paths
+	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
+	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
+	sanitized := strings.ReplaceAll(dgdName, ".", "-")
+	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
 }
 
 // ModelReference identifies a model served by this component
@@ -344,4 +368,49 @@ type ModelReference struct {
 	// Revision is the model revision/version (optional)
 	// +optional
 	Revision string `json:"revision,omitempty"`
+}
+
+// FrontendSidecarSpec configures the auto-generated frontend sidecar container.
+// The operator uses these fields together with built-in frontend defaults (command, probes, ports,
+// and Dynamo env vars) to produce a fully configured sidecar container.
+type FrontendSidecarSpec struct {
+	// Image is the container image for the frontend sidecar.
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// Args overrides the default frontend arguments. When specified, these replace
+	// the default ["-m", "dynamo.frontend"] entirely.
+	// For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
+	// environment variables in the frontend sidecar container.
+	// +optional
+	EnvFromSecret *string `json:"envFromSecret,omitempty"`
+
+	// Envs defines additional environment variables for the frontend sidecar.
+	// These are merged with (and can override) the auto-generated Dynamo env vars.
+	// +optional
+	Envs []corev1.EnvVar `json:"envs,omitempty"`
+}
+
+// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+// EPP is responsible for intelligent endpoint selection and KV-aware routing.
+type EPPConfig struct {
+	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
+	// The ConfigMap should contain EndpointPickerConfig YAML.
+	// Mutually exclusive with Config.
+	// +optional
+	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
+	// The operator will marshal this to YAML and create a ConfigMap automatically.
+	// Mutually exclusive with ConfigMapRef.
+	// One of ConfigMapRef or Config must be specified (no default configuration).
+	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+	// +optional
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
 }

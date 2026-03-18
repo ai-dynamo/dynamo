@@ -9,7 +9,7 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
     http::service::metrics::Metrics,
-    namespace::is_global_namespace,
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -24,6 +24,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
+        .http_cancel_token(Some(distributed_runtime.primary_token()))
         .with_request_template(engine_config.local_model().request_template());
 
     // Set HTTP metrics port if provided (for parallel test execution)
@@ -35,18 +36,18 @@ pub async fn run(
         EngineConfig::Dynamic { ref model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
             let router_config = model.router_config();
+            let migration_limit = model.migration_limit();
             // Listen for models registering themselves, add them to gRPC service
-            let namespace = model.namespace().unwrap_or("");
-            let target_namespace = if is_global_namespace(namespace) {
-                None
-            } else {
-                Some(namespace.to_string())
-            };
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                model.namespace(),
+                model.namespace_prefix(),
+            );
             run_watcher(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
                 router_config.clone(),
-                target_namespace,
+                migration_limit,
+                namespace_filter,
             )
             .await?;
             grpc_service
@@ -69,19 +70,18 @@ pub async fn run(
             let manager = grpc_service.model_manager();
             let checksum = model.card().mdcsum();
 
-            let tokenizer_hf = model.card().tokenizer_hf()?;
-            let chat_pipeline =
-                common::build_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
-                .await?;
+            let tokenizer = model.card().tokenizer()?;
+            let chat_pipeline = common::build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            .await?;
             manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer_hf)
+            >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             grpc_service
@@ -109,11 +109,19 @@ async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
-    target_namespace: Option<String>,
+    migration_limit: u32,
+    namespace_filter: NamespaceFilter,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new());
-    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None, metrics);
+    let watch_obj = ModelWatcher::new(
+        runtime.clone(),
+        model_manager,
+        router_config,
+        migration_limit,
+        None,
+        metrics,
+    );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -129,9 +137,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj
-            .watch(discovery_stream, target_namespace.as_deref())
-            .await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())

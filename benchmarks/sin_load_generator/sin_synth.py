@@ -20,7 +20,7 @@ import math
 import random
 
 import numpy as np
-from prefix_data_generator.hasher import RollingHasher
+from aiperf.dataset.synthesis import RollingHasher
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
@@ -56,7 +56,7 @@ def main(args):
                 (random.randrange(args.total_blocks),)
                 for _ in range(math.ceil(isl / args.block_size))
             ]
-            rolling_hash_ids = rolling_hasher(hash_ids)
+            rolling_hash_ids = rolling_hasher.hash_token_blocks(hash_ids)
             output_data.append(
                 {
                     "timestamp": int(t_req * 1000),  # in ms, integer

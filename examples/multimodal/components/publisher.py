@@ -22,7 +22,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.llm import WorkerMetricsPublisher
-from dynamo.runtime import Component
+from dynamo.runtime import Endpoint
 
 
 class NullStatLogger(StatLoggerBase):
@@ -48,11 +48,11 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         dp_rank: int,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
-        self._component = component
+        self._endpoint = endpoint
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
         # Schedule async endpoint creation
@@ -61,7 +61,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     async def _create_endpoint(self) -> None:
         """Create the NATS endpoint asynchronously."""
         try:
-            await self.inner.create_endpoint(self._component)
+            await self.inner.create_endpoint(self._endpoint)
             logging.debug("Multimodal metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create multimodal metrics publisher endpoint")
@@ -94,11 +94,11 @@ class StatLoggerFactory:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         dp_rank: int = 0,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
-        self.component = component
+        self.endpoint = endpoint
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
         self.metrics_labels = metrics_labels or []
@@ -106,7 +106,7 @@ class StatLoggerFactory:
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
-        logger = DynamoStatLoggerPublisher(self.component, dp_rank)
+        logger = DynamoStatLoggerPublisher(self.endpoint, dp_rank)
         self.created_logger = logger
 
         return logger

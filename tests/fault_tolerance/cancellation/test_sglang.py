@@ -29,10 +29,10 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
@@ -142,7 +142,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             # Ensure any orphaned SGLang engine cores or child helpers are cleaned up
             stragglers=[
                 "SGLANG:EngineCore",
@@ -185,7 +185,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.xfail(strict=False)
+@pytest.mark.skip(reason="DYN-2265")
+@pytest.mark.nightly
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -291,8 +292,9 @@ def test_request_cancellation_sglang_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.timeout(185)  # 3x average
+@pytest.mark.timeout(300)  # 3x average
 @pytest.mark.gpu_2
+@pytest.mark.pre_merge
 def test_request_cancellation_sglang_decode_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):

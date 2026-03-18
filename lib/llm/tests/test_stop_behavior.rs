@@ -58,7 +58,7 @@ fn make_decoder(
         stop: stop_sequences.map(|v| v.into_iter().map(String::from).collect()),
         ..Default::default()
     };
-    Decoder::new(decode_stream, stop_conditions, include_stop_str)
+    Decoder::new(decode_stream, stop_conditions, include_stop_str, None)
 }
 
 #[test]

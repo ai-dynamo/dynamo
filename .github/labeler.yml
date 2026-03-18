@@ -74,12 +74,12 @@ deployment::k8s:
           - deploy/operator/**
 
 # Misc labels
-build:
+container:
   - changed-files:
       - any-glob-to-any-file:
           - container/**
 
-ci:
+actions:
   - changed-files:
       - any-glob-to-any-file:
           - .github/workflows/**

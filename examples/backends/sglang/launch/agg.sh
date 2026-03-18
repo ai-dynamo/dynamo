@@ -1,15 +1,15 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving: single worker handles both prefill and decode.
+# GPUs: 1
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
 MODEL="Qwen/Qwen3-0.6B"
@@ -54,11 +54,13 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
+
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run worker with metrics enabled
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
@@ -71,4 +73,7 @@ python3 -m dynamo.sglang \
   --skip-tokenizer-init \
   --enable-metrics \
   "${TRACE_ARGS[@]}" \
-  "${EXTRA_ARGS[@]}"
+  "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

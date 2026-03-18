@@ -12,7 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if and .Values.metricsService.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+# Tri-state for ServiceMonitor creation (metricsService.enabled):
+#   null  = auto-detect via .Capabilities (works with helm install/upgrade)
+#   true  = always create (use with helm template / GitOps)
+#   false = never create (opt-out even if prometheus-operator is installed)
+{{- $serviceMonitorEnabled := false }}
+{{- if kindIs "invalid" .Values.metricsService.enabled }}
+  {{- $serviceMonitorEnabled = (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- else }}
+  {{- $serviceMonitorEnabled = .Values.metricsService.enabled }}
+{{- end }}
+{{- if $serviceMonitorEnabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -27,10 +37,11 @@ spec:
       control-plane: controller-manager
       {{- include "dynamo-operator.selectorLabels" . | nindent 6 }}
   endpoints:
-  - port: https
+  - port: metrics
     scheme: https
     path: /metrics
     interval: 15s
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
     tlsConfig:
       insecureSkipVerify: true
 {{- end }}

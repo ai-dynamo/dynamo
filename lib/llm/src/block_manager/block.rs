@@ -95,6 +95,10 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// The offload priority of the block. Higher priority blocks are offloaded first.
     /// If the block should not be offloaded, return None.
     fn offload_priority(&self) -> Option<u64>;
+
+    /// Returns a new metadata instance with the specified priority.
+    /// Used to carry priority through the block lifecycle for offload filtering.
+    fn with_priority(&self, priority: u32) -> Self;
 }
 
 /// A trait for blocks that can be returned to the pool.
@@ -524,7 +528,38 @@ impl BlockMetadata for BasicMetadata {
     fn offload_priority(&self) -> Option<u64> {
         Some(self.priority as u64)
     }
+
+    fn with_priority(&self, priority: u32) -> Self {
+        self.update_priority(priority)
+    }
 }
+
+#[cfg(test)]
+mod basic_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_metadata_with_priority() {
+        let metadata = BasicMetadata::default();
+        let updated = metadata.with_priority(75);
+
+        assert_eq!(updated.offload_priority(), Some(75));
+    }
+
+    #[test]
+    fn test_basic_metadata_with_priority_preserves_ticks() {
+        let mut metadata = BasicMetadata::default();
+        metadata.on_acquired(100);
+        metadata.on_returned(200);
+
+        let updated = metadata.with_priority(50);
+
+        assert_eq!(updated.priority(), 50);
+        assert_eq!(updated.acquired_tick(), 100);
+        assert_eq!(updated.returned_tick(), 200);
+    }
+}
+
 /// Collection that holds shared storage and layout
 #[derive(Debug)]
 pub struct Blocks<L: BlockLayout, M: BlockMetadata> {

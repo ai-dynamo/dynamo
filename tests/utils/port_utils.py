@@ -198,6 +198,126 @@ def allocate_ports(count: int, start_port: int) -> list[int]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def allocate_contiguous_ports(
+    count: int, block_size: int, start_port: int
+) -> list[int]:
+    """Find and return contiguous port blocks in i16 range with flock-based locking.
+
+    Args:
+        count: Number of contiguous blocks to allocate
+        block_size: Size of each contiguous block
+        start_port: Starting port number for allocation (required)
+
+    Returns:
+        list[int]: Flattened list of allocated ports grouped into contiguous blocks
+    """
+    if count <= 0:
+        return []
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+
+    caller_file = "unknown"
+    caller_function = "unknown"
+    caller_line = 0
+
+    frame = inspect.currentframe()
+    if frame and frame.f_back:
+        caller_frame = frame.f_back
+        caller_info = inspect.getframeinfo(caller_frame)
+        caller_function = caller_frame.f_code.co_name
+        caller_file = caller_info.filename
+        caller_line = caller_info.lineno
+
+    if start_port < _PORT_MIN or start_port > _PORT_MAX:
+        raise ValueError(
+            f"start_port must be between {_PORT_MIN} and {_PORT_MAX}, got {start_port}"
+        )
+
+    if start_port + block_size - 1 > _PORT_MAX:
+        raise ValueError(
+            f"start_port {start_port} with block_size {block_size} exceeds {_PORT_MAX}"
+        )
+
+    _PORT_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PORT_LOCK_FILE.touch(exist_ok=True)
+
+    if not os.access(_PORT_LOCK_FILE, os.W_OK):
+        raise PermissionError(
+            f"Port allocation lock file is not writable: {_PORT_LOCK_FILE}"
+        )
+
+    with open(_PORT_LOCK_FILE, "r+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            registry = _load_port_registry()
+            registry = _cleanup_stale_allocations(registry)
+
+            allocated_ports = set(int(p) for p in registry.keys())
+            ports: list[int] = []
+
+            current_port = start_port + random.randint(0, 100)
+            if current_port + block_size - 1 > _PORT_MAX:
+                current_port = _PORT_MIN
+
+            max_retries = 500
+            attempts = 0
+
+            while len(ports) < count * block_size and attempts < max_retries:
+                attempts += 1
+                base_port = current_port
+
+                current_port += 1
+                if current_port + block_size - 1 > _PORT_MAX:
+                    current_port = _PORT_MIN
+
+                candidate_ports = list(range(base_port, base_port + block_size))
+
+                if candidate_ports[-1] > _PORT_MAX:
+                    continue
+
+                if any(
+                    port in allocated_ports or port in ports for port in candidate_ports
+                ):
+                    continue
+
+                sockets: list[socket.socket] = []
+                try:
+                    for port in candidate_ports:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.bind(("", port))
+                        sockets.append(sock)
+                except OSError:
+                    for sock in sockets:
+                        sock.close()
+                    continue
+
+                for sock in sockets:
+                    sock.close()
+
+                ports.extend(candidate_ports)
+                timestamp = time.time()
+                for port in candidate_ports:
+                    registry[str(port)] = {
+                        "timestamp": timestamp,
+                        "caller_file": caller_file,
+                        "caller_function": caller_function,
+                        "caller_line": caller_line,
+                    }
+
+            if len(ports) < count * block_size:
+                raise RuntimeError(
+                    f"Could not find {count} contiguous port blocks of size {block_size} "
+                    f"after {max_retries} retries"
+                )
+
+            _save_port_registry(registry)
+            return ports
+
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def allocate_port(start_port: int) -> int:
     """Find and return a single available port in i16 range.
 

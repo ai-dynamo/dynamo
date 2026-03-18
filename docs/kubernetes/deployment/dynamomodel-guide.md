@@ -1,4 +1,8 @@
-# Managing Models with DynamoModel
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Managing Models with DynamoModel
+---
 
 ## Overview
 
@@ -120,7 +124,7 @@ spec:
 ```
 
 **For complete field specifications, validation rules, and all options, see:**
-📖 [DynamoModel API Reference](../api_reference.md#dynamomodel)
+📖 [DynamoModel API Reference](../api-reference.md#dynamomodel)
 
 ### Status Summary
 
@@ -433,7 +437,7 @@ status:
    - For HuggingFace: Verify token is valid, repo exists and is accessible
 
 2. **Invalid LoRA format**
-   **Solution:** Ensure your LoRA weights are in the format expected by your backend framework (vLLM, SGLang, etc.)
+   **Solution:** Ensure your LoRA weights are in the format expected by your backend framework (SGLang, vLLM, etc.)
 
 3. **Endpoint API errors**
    ```bash
@@ -607,7 +611,7 @@ The operator automatically handles all service discovery - you don't configure s
 
 For complete field specifications, validation rules, and detailed type definitions, see:
 
-**📖 [Dynamo CRD API Reference](../api_reference.md#dynamomodel)**
+**📖 [Dynamo CRD API Reference](../api-reference.md#dynamomodel)**
 
 ## Summary
 
@@ -621,5 +625,5 @@ DynamoModel provides declarative model management for Dynamo deployments:
 **Next Steps:**
 - Try the [Quick Start](#quick-start) example
 - Explore [Common Use Cases](#common-use-cases)
-- Check the [API Reference](../api_reference.md#dynamomodel) for advanced configuration
+- Check the [API Reference](../api-reference.md#dynamomodel) for advanced configuration
 

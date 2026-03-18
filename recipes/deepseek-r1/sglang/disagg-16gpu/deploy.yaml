@@ -67,6 +67,8 @@ spec:
             - --host
             - 0.0.0.0
             - --prefill-round-robin-balance
+            - --watchdog-timeout
+            - "3600"
     prefill:
       componentType: worker
       subComponentType: prefill
@@ -110,3 +112,5 @@ spec:
             - 0.0.0.0
             - --load-balance-method
             - round_robin
+            - --watchdog-timeout
+            - "3600"

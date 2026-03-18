@@ -8,14 +8,17 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.utils.namespace import get_worker_namespace
+
 from . import __version__
+from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
 from .utils.planner_profiler_perf_data_converter import (
     convert_profile_results_to_npz,
     is_mocker_format_npz,
     is_profile_results_dir,
 )
 
-DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DYN_NAMESPACE = get_worker_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
@@ -87,7 +90,7 @@ def resolve_planner_profile_data(
     )
 
 
-def create_temp_engine_args_file(args) -> Path:
+def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
     """
     Create a temporary JSON file with MockEngineArgs from CLI arguments.
     Returns the path to the temporary file.
@@ -104,8 +107,9 @@ def create_temp_engine_args_file(args) -> Path:
         "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
         "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
         "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "watermark": getattr(args, "watermark", None),
+        "preemption_mode": getattr(args, "preemption_mode", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
+        "decode_speedup_ratio": getattr(args, "decode_speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
         "planner_profile_data": (
@@ -115,9 +119,35 @@ def create_temp_engine_args_file(args) -> Path:
         ),
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": getattr(args, "enable_local_indexer", None),
-        # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
+        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
+        # Note: bootstrap_port and zmq_kv_events_port are NOT included here
+        # - they are per-worker and set in launch_workers()
+        # Note: kv_bytes_per_token and kv_cache_dtype are NOT included here
+        # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
+        # - kv_cache_dtype is only used Python-side for the auto-computation.
+        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
+        "engine_type": getattr(args, "engine_type", None),
     }
+
+    # Parse --reasoning JSON string into a nested object
+    reasoning_str = getattr(args, "reasoning", None)
+    if reasoning_str:
+        engine_args["reasoning"] = json.loads(reasoning_str)
+
+    # Build nested sglang config from individual CLI flags
+    sglang_args = {
+        "schedule_policy": getattr(args, "sglang_schedule_policy", None),
+        "page_size": getattr(args, "sglang_page_size", None),
+        "max_prefill_tokens": getattr(args, "sglang_max_prefill_tokens", None),
+        "chunked_prefill_size": getattr(args, "sglang_chunked_prefill_size", None),
+        "clip_max_new_tokens": getattr(args, "sglang_clip_max_new_tokens", None),
+        "schedule_conservativeness": getattr(
+            args, "sglang_schedule_conservativeness", None
+        ),
+    }
+    sglang_args = {k: v for k, v in sglang_args.items() if v is not None}
+    if sglang_args:
+        engine_args["sglang"] = sglang_args
 
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}
@@ -133,16 +163,50 @@ def create_temp_engine_args_file(args) -> Path:
     return temp_path
 
 
-def validate_worker_type_args(args):
+def validate_worker_type_args(args: argparse.Namespace) -> None:
     """
-    Validate that is_prefill_worker and is_decode_worker are not both True.
+    Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
     Raises ValueError if validation fails.
     """
-    if args.is_prefill_worker and args.is_decode_worker:
+    import warnings
+
+    explicit_mode = args.disaggregation_mode is not None
+    has_legacy = args.is_prefill_worker or args.is_decode_worker
+
+    if has_legacy and explicit_mode:
         raise ValueError(
-            "Cannot specify both --is-prefill-worker and --is-decode-worker. "
-            "A worker must be either prefill, decode, or aggregated (neither flag set)."
+            "Cannot combine --is-prefill-worker/--is-decode-worker with "
+            "--disaggregation-mode. Use only --disaggregation-mode."
         )
+
+    if has_legacy:
+        if args.is_prefill_worker and args.is_decode_worker:
+            raise ValueError(
+                "Cannot specify both --is-prefill-worker and --is-decode-worker. "
+                "A worker must be either prefill, decode, or aggregated (neither flag set)."
+            )
+        if args.is_prefill_worker:
+            warnings.warn(
+                "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            args.disaggregation_mode = "prefill"
+        elif args.is_decode_worker:
+            warnings.warn(
+                "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            args.disaggregation_mode = "decode"
+
+    # Apply default if neither new flag nor legacy flags were provided
+    if args.disaggregation_mode is None:
+        args.disaggregation_mode = "agg"
+
+    # Sync booleans from disaggregation_mode
+    args.is_prefill_worker = args.disaggregation_mode == "prefill"
+    args.is_decode_worker = args.disaggregation_mode == "decode"
 
 
 def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
@@ -152,7 +216,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:
@@ -240,16 +304,27 @@ def parse_args():
         help="Disable chunked prefill",
     )
     parser.add_argument(
-        "--watermark",
-        type=float,
+        "--preemption-mode",
+        type=str,
         default=None,
-        help="Watermark value for the mocker engine (default: 0.01)",
+        choices=["lifo", "fifo"],
+        help="Preemption mode for decode eviction under memory pressure. "
+        "'lifo' (default) evicts the newest request (matches vLLM v1), "
+        "'fifo' evicts the oldest request.",
     )
     parser.add_argument(
         "--speedup-ratio",
         type=float,
         default=None,
-        help="Speedup ratio for mock execution (default: 1.0)",
+        help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
+    )
+    parser.add_argument(
+        "--decode-speedup-ratio",
+        type=float,
+        default=None,
+        help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
+        "Models speculative decoding (e.g. Eagle) where decode throughput improves "
+        "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
     )
     parser.add_argument(
         "--data-parallel-size",
@@ -279,6 +354,64 @@ def parse_args():
         "All workers share the same tokio runtime and thread pool.",
     )
 
+    # Reasoning token output
+    parser.add_argument(
+        "--reasoning",
+        type=str,
+        default=None,
+        help="Enable reasoning token output. JSON object with fields: "
+        "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
+        'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
+    )
+
+    # Engine type selection
+    parser.add_argument(
+        "--engine-type",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang"],
+        help="Engine simulation type: 'vllm' (default) or 'sglang'.",
+    )
+
+    # SGLang-specific configuration
+    parser.add_argument(
+        "--sglang-schedule-policy",
+        type=str,
+        default=None,
+        choices=["fifo", "fcfs", "lpm"],
+        help="SGLang scheduling policy: 'fifo'/'fcfs' (default) or 'lpm' (longest prefix match).",
+    )
+    parser.add_argument(
+        "--sglang-page-size",
+        type=int,
+        default=None,
+        help="SGLang radix cache page size in tokens (default: 1).",
+    )
+    parser.add_argument(
+        "--sglang-max-prefill-tokens",
+        type=int,
+        default=None,
+        help="SGLang maximum prefill tokens budget per batch (default: 16384).",
+    )
+    parser.add_argument(
+        "--sglang-chunked-prefill-size",
+        type=int,
+        default=None,
+        help="SGLang chunked prefill size — max tokens per chunk (default: 8192).",
+    )
+    parser.add_argument(
+        "--sglang-clip-max-new-tokens",
+        type=int,
+        default=None,
+        help="SGLang clip max new tokens for admission budget (default: 4096).",
+    )
+    parser.add_argument(
+        "--sglang-schedule-conservativeness",
+        type=float,
+        default=None,
+        help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
+    )
+
     # Legacy support - allow direct JSON file specification
     parser.add_argument(
         "--extra-engine-args",
@@ -289,22 +422,50 @@ def parse_args():
 
     # Worker type configuration
     parser.add_argument(
+        "--disaggregation-mode",
+        type=str,
+        default=None,
+        choices=["agg", "prefill", "decode"],
+        help="Worker disaggregation mode: 'agg' (default, aggregated), "
+        "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
+    )
+    parser.add_argument(
         "--is-prefill-worker",
         action="store_true",
         default=False,
-        help="Register as Prefill model type instead of Chat+Completions (default: False)",
+        help="DEPRECATED: use --disaggregation-mode=prefill. "
+        "Register as Prefill model type instead of Chat+Completions (default: False)",
     )
     parser.add_argument(
         "--is-decode-worker",
         action="store_true",
         default=False,
-        help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
+        help="DEPRECATED: use --disaggregation-mode=decode. "
+        "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
-        "--enable-local-indexer",
+        "--durable-kv-events",
         action="store_true",
-        default=False,
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
+    )
+    parser.add_argument(
+        "--zmq-kv-events-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ PUB base ports for KV event publishing "
+        "in vLLM native wire format. One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. A KvEventPublisher relay "
+        "subscribes and forwards events to NATS. (default: None, disabled)",
+    )
+    parser.add_argument(
+        "--zmq-replay-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ ROUTER base ports for KV event replay. "
+        "One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. "
+        "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
     )
     parser.add_argument(
         "--bootstrap-ports",
@@ -315,12 +476,57 @@ def parse_args():
         "Prefill workers listen on these ports; decode workers connect to them. "
         "If not specified, bootstrap rendezvous is disabled.",
     )
+
+    # KV cache transfer latency simulation
     parser.add_argument(
-        "--store-kv",
+        "--kv-transfer-bandwidth",
+        type=float,
+        default=DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS,
+        help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
+        "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
+        "For intra-node NVLink, typical value is ~450.",
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
         type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        default="auto",
+        choices=[
+            "auto",
+            "bfloat16",
+            "fp8",
+            "fp8_ds_mla",
+            "fp8_e4m3",
+            "fp8_e5m2",
+            "fp8_inc",
+        ],
+        help="Data type for KV cache, used to compute kv_bytes_per_token. "
+        "'auto' uses the model's dtype (default).",
+    )
+    parser.add_argument(
+        "--kv-bytes-per-token",
+        type=int,
+        default=None,
+        help="KV cache bytes per token. If not specified, auto-computed from model config "
+        "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
+    )
+
+    parser.add_argument(
+        "--stagger-delay",
+        type=float,
+        default=-1.0,
+        help=(
+            "Delay in seconds between launching each worker to avoid overwhelming "
+            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
+            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
+            "Default: -1 (auto)"
+        ),
+    )
+    parser.add_argument(
+        "--discovery-backend",
+        type=str,
+        choices=["kubernetes", "etcd", "file", "mem"],
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -328,6 +534,13 @@ def parse_args():
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
 
     args = parser.parse_args()
@@ -344,6 +557,26 @@ def parse_args():
             raise ValueError(
                 f"--bootstrap-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.bootstrap_ports_list)}: {args.bootstrap_ports_list}"
+            )
+
+    # Parse and validate zmq_kv_events_ports (same comma-separated format as bootstrap_ports)
+    args.zmq_kv_events_ports_list = parse_bootstrap_ports(args.zmq_kv_events_ports)
+    if args.zmq_kv_events_ports_list:
+        if len(args.zmq_kv_events_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-kv-events-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_kv_events_ports_list)}: {args.zmq_kv_events_ports_list}"
+            )
+
+    # Parse and validate zmq_replay_ports
+    args.zmq_replay_ports_list = parse_bootstrap_ports(args.zmq_replay_ports)
+    if args.zmq_replay_ports_list:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--zmq-replay-ports requires --zmq-kv-events-ports")
+        if len(args.zmq_replay_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
 
     # Set endpoint default based on worker type if not explicitly provided

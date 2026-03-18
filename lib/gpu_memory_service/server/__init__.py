@@ -10,7 +10,7 @@ from gpu_memory_service.common.types import (
     StateSnapshot,
 )
 from gpu_memory_service.server.handler import MetadataEntry, RequestHandler
-from gpu_memory_service.server.locking import Connection, GlobalLockFSM
+from gpu_memory_service.server.locking import Connection, GMSLocalFSM
 from gpu_memory_service.server.memory_manager import (
     AllocationInfo,
     AllocationNotFoundError,
@@ -29,6 +29,6 @@ __all__ = [
     "RequestedLockType",
     "RequestHandler",
     "ServerState",
-    "GlobalLockFSM",
+    "GMSLocalFSM",
     "StateSnapshot",
 ]

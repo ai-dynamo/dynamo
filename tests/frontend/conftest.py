@@ -15,7 +15,6 @@ import time
 
 import pytest
 import requests
-import tritonclient.grpc as grpcclient
 
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
@@ -58,7 +57,7 @@ def start_services_with_http(
     with DynamoFrontendProcess(
         request,
         frontend_port=ports.frontend_port,
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ):
         logger.info(f"HTTP Frontend started on port {ports.frontend_port}")
         yield ports.frontend_port, ports.system_ports[0]
@@ -80,6 +79,8 @@ def check_grpc_server_ready(
     Raises:
         Exception: If server is not ready after max_attempts
     """
+    import tritonclient.grpc as grpcclient
+
     for attempt in range(max_attempts):
         try:
             client = grpcclient.InferenceServerClient(f"localhost:{port}")
@@ -188,7 +189,7 @@ def start_services_with_grpc(
         with DynamoFrontendProcess(
             request,
             frontend_port=ports.frontend_port,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             extra_args=[
                 "--kserve-grpc-server",
                 "--grpc-metrics-port",
@@ -261,7 +262,7 @@ class MockerWorkerProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.mocker"],
             log_dir=log_dir,

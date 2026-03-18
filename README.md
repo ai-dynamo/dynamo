@@ -15,352 +15,212 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-![Dynamo banner](./docs/images/frontpage-banner.png)
+![Dynamo banner](./docs/assets/img/dynamo-frontpage-banner.png)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/ai-dynamo)](https://pypi.org/project/ai-dynamo/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
-[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ) ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
+[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
+![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Support Matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Blog](https://developer.nvidia.com/blog/nvidia-dynamo-1-production-ready/)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
 
-# NVIDIA Dynamo
+# Dynamo
 
-High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
+**The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
-## Why Dynamo
+Built in Rust for performance, Python for extensibility.
+
+## When to use Dynamo
+
+- You're serving LLMs across **multiple GPUs or nodes** and need to coordinate them
+- You want **KV-aware routing** to avoid redundant prefill computation
+- You need to **independently scale prefill and decode** (disaggregated serving)
+- You want **automatic scaling** that meets latency SLAs at minimum total cost of ownership (TCO)
+- You need **fast cold-starts** when spinning up new replicas
+
+If you're running a single model on a single GPU, your inference engine alone is probably sufficient.
+
+**Feature support at a glance:**
+
+| | [SGLang](https://docs.nvidia.com/dynamo/backends/sg-lang) | [TensorRT-LLM](https://docs.nvidia.com/dynamo/backends/tensor-rt-llm) | [vLLM](https://docs.nvidia.com/dynamo/backends/v-llm) |
+|---|:----:|:----------:|:--:|
+| [**Disaggregated Serving**](https://docs.nvidia.com/dynamo/design-docs/disaggregated-serving) | ✅ | ✅ | ✅ |
+| [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
+| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
+| [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
+| [**Tool Calling**](https://docs.nvidia.com/dynamo/user-guides/tool-calling) | ✅ | ✅ | ✅ |
+
+> **[Full Feature Matrix →](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — LoRA, request migration, speculative decoding, and feature interactions.
+
+## Key Results
+
+| Result | Context |
+|--------|---------|
+| **7x** higher throughput per GPU | DeepSeek R1 on GB200 NVL72 w/ Dynamo vs B200 without ([InferenceX](https://inferencex.semianalysis.com/)) |
+| **7x** faster model startup | ModelExpress weight streaming (DeepSeek-V3 on H200) |
+| **2x** faster time to first token | KV-aware routing, Qwen3-Coder 480B ([Baseten benchmark](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)) |
+| **80%** fewer SLA breaches | Planner autoscaling at 5% lower TCO ([Alibaba APSARA 2025 @ 2:50:00](https://yunqi.aliyun.com/2025/session?agendaId=6062)) |
+| **750x** higher throughput | DeepSeek-R1 on GB300 NVL72 ([InferenceXv2](https://inferencex.semianalysis.com/)) |
+
+
+## What Dynamo Does
+
+Most inference engines optimize a single GPU or a single node. Dynamo is the **orchestration layer above them** — it turns a cluster of GPUs into a coordinated inference system.
 
 <p align="center">
-  <img src="./docs/images/frontpage-gpu-vertical.png" alt="Multi Node Multi-GPU topology" width="600" />
+  <img src="./docs/assets/img/dynamo-readme-overview.svg" alt="Dynamo architecture overview" width="600" />
 </p>
 
-Large language models exceed single-GPU capacity. Tensor parallelism spreads layers across GPUs but creates coordination challenges. Dynamo closes this orchestration gap.
+**[Architecture Deep Dive →](https://docs.nvidia.com/dynamo/design-docs/overall-architecture)**
 
-Dynamo is inference engine agnostic (supports TRT-LLM, vLLM, SGLang) and provides:
+### Core Capabilities
 
-- **Disaggregated Prefill & Decode** – Maximizes GPU throughput with latency/throughput trade-offs
-- **Dynamic GPU Scheduling** – Optimizes performance based on fluctuating demand
-- **LLM-Aware Request Routing** – Eliminates unnecessary KV cache re-computation
-- **Accelerated Data Transfer** – Reduces inference response time using NIXL
-- **KV Cache Offloading** – Leverages multiple memory hierarchies for higher throughput
+| Capability | What it does | Why it matters |
+|------------|-------------|----------------|
+| [**Disaggregated Prefill/Decode**](https://docs.nvidia.com/dynamo/design-docs/disaggregated-serving) | Separates prefill and decode into independently scalable GPU pools | Maximizes GPU utilization; each phase runs on hardware tuned for its workload |
+| [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | Routes requests based on worker load and KV cache overlap | Eliminates redundant prefill computation — 2x faster TTFT |
+| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | Offloads KV cache across GPU → CPU → SSD → remote storage | Extends effective context length beyond GPU memory |
+| [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
+| [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
+| [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
+| [**AIConfigurator**](https://github.com/ai-dynamo/aiconfigurator) | Simulates 10K+ deployment configs in seconds | Finds optimal serving config without burning GPU-hours |
+| [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
-<p align="center">
-  <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
-</p>
+### New in 1.0
 
-Built in Rust for performance and Python for extensibility, Dynamo is fully open-source with an OSS-first development approach.
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/deploying-your-first-model))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Agentic inference:** Per-request hints for latency priority, expected output length, and cache pinning TTL. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
+- **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
+- **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
+- **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
+- **Storage-tier KV offload:** S3/Azure blob support + global KV events for cluster-wide cache visibility
 
-## Framework Support Matrix
+## Quick Start
 
-| Feature                                                              | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
-| -------------------------------------------------------------------- | :--: | :----: | :----------: |
-| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md)      | ✅   | ✅     | ✅           |
-| [**KV-Aware Routing**](docs/router/kv_cache_routing.md)              | ✅   | ✅     | ✅           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                 | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                           | ✅   | 🚧     | ✅           |
-| [**Multimodal**](docs/multimodal/index.md)                           | ✅   | ✅     | ✅           |
-| [**Tool Calling**](docs/agents/tool-calling.md)                      | ✅   | ✅     | ✅           |
-
-> **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
-
-## Latest News
-
-- [12/05] [Moonshot AI's Kimi K2 achieves 10x inference speedup with Dynamo on GB200](https://quantumzeitgeist.com/kimi-k2-nvidia-ai-ai-breakthrough/)
-- [12/02] [Mistral AI runs Mistral Large 3 with 10x faster inference using Dynamo](https://www.marktechpost.com/2025/12/02/nvidia-and-mistral-ai-bring-10x-faster-inference-for-the-mistral-3-family-on-gb200-nvl72-gpu-systems/)
-- [12/01] [InfoQ: NVIDIA Dynamo simplifies Kubernetes deployment for LLM inference](https://www.infoq.com/news/2025/12/nvidia-dynamo-kubernetes/)
-- [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
-- [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
-- [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
-
-## Get Started
-
-| Path | Use Case | Time | Requirements |
-|------|----------|------|--------------|
-| [**Local Quick Start**](#local-quick-start) | Test on a single machine | ~5 min | 1 GPU, Ubuntu 24.04 |
-| [**Kubernetes Deployment**](#kubernetes-deployment) | Production multi-node clusters | ~30 min | K8s cluster with GPUs |
-
-## Contributing
-
-Want to help shape the future of distributed LLM inference? We welcome contributors at all levels—from doc fixes to new features.
-
-- **[Contributing Guide](CONTRIBUTING.md)** – How to get started
-- **[Report a Bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)** – Found an issue?
-- **[Feature Request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)** – Have an idea?
-
-# Local Quick Start
-
-The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/reference/support-matrix.md](docs/reference/support-matrix.md)
-
-## 1. Initial Setup
-
-The Dynamo team recommends the `uv` Python package manager, although any way works. Install uv:
-
-```
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Install Python Development Headers
-
-Backend engines require Python development headers for JIT compilation. Install them with:
+### Option A: Container (fastest)
 
 ```bash
-sudo apt install python3-dev
+# Pull a prebuilt container (SGLang example)
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
+
+# Inside the container — start frontend and worker
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+
+# Send a request
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "max_tokens": 100
+}' | jq
 ```
 
-## 2. Select an Engine
+Also available: [`tensorrtllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
-
-```
-uv venv venv
-source venv/bin/activate
-uv pip install pip
-
-# Choose one
-uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
-```
-
-## 3. Run Dynamo
-
-### Sanity Check (Optional)
-
-Before trying out Dynamo, you can verify your system configuration and dependencies:
+### Option B: Install from PyPI
 
 ```bash
-python3 deploy/sanity_check.py
+pip install "ai-dynamo[sglang]"   # or [vllm] or [trtllm]
 ```
 
-This is a quick check for system resources, development tools, LLM frameworks, and Dynamo components.
+Then start the frontend and a worker as shown above. See the [full installation guide](https://docs.nvidia.com/dynamo/getting-started/quickstart) for system dependencies and backend-specific notes.
 
-### Running an LLM API Server
+### Option C: Kubernetes (recommended)
 
-Dynamo provides a simple way to spin up a local set of inference components including:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide) and deploy with a single manifest:
 
-- **OpenAI Compatible Frontend** – High performance OpenAI compatible http api server written in Rust.
-- **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
-- **Workers** – Set of pre-configured LLM serving engines.
+```yaml
+# Zero-config deploy: specify model + SLA, Dynamo handles the rest
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-model
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  sla:
+    ttft: 200.0   # ms
+    itl: 20.0     # ms
+  autoApply: true
+```
+
+Pre-built recipes for common models:
+
+| Model | Framework | Mode | Recipe |
+|-------|-----------|------|--------|
+| Llama-3-70B | vLLM | Aggregated | [View](recipes/llama-3-70b/vllm/) |
+| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
+| Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
+
+See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](examples/deployments/EKS/) · [Google GKE](examples/deployments/GKE/)
+
+## Building from Source
+
+For contributors who want to build and develop locally. See the [full build guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide#building-from-source) for details.
 
 ```bash
-# Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
-# For local dev: --store-kv file avoids etcd (workers and frontend must share a disk)
-python3 -m dynamo.frontend --http-port 8000 --store-kv file
-
-# Start the SGLang engine. You can run several of these for the same or different models.
-# The frontend will discover them automatically.
-python3 -m dynamo.sglang --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --store-kv file
-```
-
-> **Note:** vLLM workers publish KV cache events by default, which requires NATS. For dependency-free local development with vLLM, add `--kv-events-config '{"enable_kv_cache_events": false}'`. This keeps local prefix caching enabled while disabling event publishing. See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
-
-#### Send a Request
-
-```bash
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "Hello, how are you?"
-    }
-    ],
-    "stream":false,
-    "max_tokens": 300
-  }' | jq
-```
-
-Rerun with `curl -N` and change `stream` in the request to `true` to get the responses as soon as the engine issues them.
-
-### What's Next?
-
-- **Scale up**: Deploy on Kubernetes with [Recipes](recipes/)
-- **Add features**: Enable [KV-aware routing](docs/router/kv_cache_routing.md), [disaggregated serving](docs/design_docs/disagg_serving.md)
-- **Benchmark**: Use [AIPerf](docs/benchmarks/benchmarking.md) to measure performance
-- **Try other engines**: [vLLM](docs/backends/vllm/), [SGLang](docs/backends/sglang/), [TensorRT-LLM](docs/backends/trtllm/)
-
-# Kubernetes Deployment
-
-For production deployments on Kubernetes clusters with multiple GPUs.
-
-## Prerequisites
-
-- Kubernetes cluster with GPU nodes
-- [Dynamo Platform installed](docs/kubernetes/README.md)
-- HuggingFace token for model downloads
-
-## Production Recipes
-
-Pre-built deployment configurations for common models and topologies:
-
-| Model | Framework | Mode | GPUs | Recipe |
-|-------|-----------|------|------|--------|
-| Llama-3-70B | vLLM | Aggregated | 4x H100 | [View](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | Disaggregated | 8x H200 | [View](recipes/deepseek-r1/sglang/) |
-| Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | 8x GPU | [View](recipes/qwen3-32b-fp8/trtllm/) |
-
-See [recipes/README.md](recipes/README.md) for the full list and deployment instructions.
-
-## Cloud Deployment Guides
-
-- [Amazon EKS](examples/deployments/EKS/)
-- [Google GKE](examples/deployments/GKE/)
-
-# Concepts
-
-## Engines
-
-Dynamo is inference engine agnostic. Install the wheel for your chosen engine and run with `python3 -m dynamo.<engine> --help`.
-
-| Engine | Install | Docs | Best For |
-|--------|---------|------|----------|
-| vLLM | `uv pip install ai-dynamo[vllm]` | [Guide](docs/backends/vllm/) | Broadest feature coverage |
-| SGLang | `uv pip install ai-dynamo[sglang]` | [Guide](docs/backends/sglang/) | High-throughput serving |
-| TensorRT-LLM | `pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo[trtllm]` | [Guide](docs/backends/trtllm/) | Maximum performance |
-
-> **Note:** TensorRT-LLM requires `pip` (not `uv`) due to URL-based dependencies. See the [TRT-LLM guide](docs/backends/trtllm/) for container setup and prerequisites.
-
-Use `CUDA_VISIBLE_DEVICES` to specify which GPUs to use. Engine-specific options (context length, multi-GPU, etc.) are documented in each backend guide.
-
-## Service Discovery and Messaging
-
-Dynamo uses TCP for inter-component communication. External services are optional for most deployments:
-
-| Deployment | etcd | NATS | Notes |
-|------------|------|------|-------|
-| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
-| **Local Development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
-| **KV-Aware Routing** | — | ✅ Required | Prefix caching enabled by default requires NATS |
-
-For local development without external dependencies, pass `--store-kv file` (avoids etcd) to both the frontend and workers. vLLM users should also pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable KV event publishing (avoids NATS) while keeping local prefix caching enabled; SGLang and TRT-LLM don't require this flag.
-
-For distributed non-Kubernetes deployments or KV-aware routing:
-
-- [etcd](https://etcd.io/) can be run directly as `./etcd`.
-- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
-
-To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
-
-# Advanced Topics
-
-## Benchmarking
-
-Dynamo provides comprehensive benchmarking tools:
-
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
-- **[SLA-Driven Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize deployments to meet SLA requirements
-
-## Frontend OpenAPI Specification
-
-The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To generate without running the server:
-
-```bash
-cargo run -p dynamo-llm --bin generate-frontend-openapi
-```
-
-This writes to `docs/frontends/openapi.json`.
-
-# Building from Source
-
-For contributors who want to build Dynamo from source rather than installing from PyPI.
-
-## 1. Install Libraries
-
-**Ubuntu:**
-
-```
+# Install system deps (Ubuntu 24.04)
 sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
-```
 
-**macOS:**
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.cargo/env
 
-- [Homebrew](https://brew.sh/)
-
-```
-# if brew is not installed on your system, install it
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-- [Xcode](https://developer.apple.com/xcode/)
-
-```
-brew install cmake protobuf
-
-## Check that Metal is accessible
-xcrun -sdk macosx metal
-```
-
-If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
-
-## 2. Install Rust
-
-```
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-```
-
-## 3. Create a Python Virtual Environment
-
-Follow the instructions in [uv installation](https://docs.astral.sh/uv/#installation) guide to install uv if you don't have `uv` installed. Once uv is installed, create a virtual environment and activate it.
-
-- Install uv
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-- Create a virtual environment
-
-```bash
-uv venv dynamo
-source dynamo/bin/activate
-```
-
-## 4. Install Build Tools
-
-```
+# Create venv and build
+uv venv dynamo && source dynamo/bin/activate
 uv pip install pip maturin
-```
-
-[Maturin](https://github.com/PyO3/maturin) is the Rust<->Python bindings build tool.
-
-## 5. Build the Rust Bindings
-
-```
-cd lib/bindings/python
-maturin develop --uv
-```
-
-## 6. Install GPU Memory Service
-
-The GPU Memory Service is a Python package with a C++ extension. It requires only Python development headers and a C++ compiler (g++).
-
-```bash
-cd $PROJECT_ROOT
+cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
 uv pip install -e lib/gpu_memory_service
-```
-
-## 7. Install the Wheel
-
-```
-cd $PROJECT_ROOT
 uv pip install -e .
 ```
 
-You should now be able to run `python3 -m dynamo.frontend`.
+> VSCode/Cursor users: see the [`.devcontainer`](.devcontainer/README.md) for a pre-configured dev environment.
 
-For local development, pass `--store-kv file` to avoid external dependencies (see Service Discovery and Messaging section).
+## Community and Contributing
 
-Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
+Dynamo is built in the open with an OSS-first development model. We welcome contributions of all kinds.
 
-If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+- **[Contribution Guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide)** — How to contribute code, docs, and recipes
+- **[Design Proposals](https://github.com/ai-dynamo/enhancements)** — RFCs for major features
+- **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — Biweekly community calls
+- **[Discord](https://discord.gg/D92uqZRjCZ)** — Chat with the team and community
+- **[Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)** — Deep dives from production users
+
+## Latest News
+
+- [03/15] [Dynamo 1.0 is here — production-ready with strong community adoption](https://developer.nvidia.com/blog/nvidia-dynamo-1-production-ready/)
+- [03/15] [NVIDIA Blackwell Ultra sets new inference records in MLPerf](https://developer.nvidia.com/blog/nvidia-blackwell-ultra-sets-new-inference-records-in-mlperf-debut/)
+- [03/15] [NVIDIA Blackwell leads on SemiAnalysis InferenceMax benchmarks](https://developer.nvidia.com/blog/nvidia-blackwell-leads-on-new-semianalysis-inferencemax-benchmarks/)
+- [12/05] [Moonshot AI's Kimi K2 achieves 10x inference speedup with Dynamo on GB200](https://quantumzeitgeist.com/kimi-k2-nvidia-ai-ai-breakthrough/)
+- [12/02] [Mistral AI runs Mistral Large 3 with 10x faster inference using Dynamo](https://www.marktechpost.com/2025/12/02/nvidia-and-mistral-ai-bring-10x-faster-inference-for-the-mistral-3-family-on-gb200-nvl72-gpu-systems/)
+- [11/20] [Dell integrates PowerScale with NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
+
+<details>
+<summary>Older news</summary>
+
+- [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
+- [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
+- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
+- [12/01] [InfoQ: NVIDIA Dynamo simplifies Kubernetes deployment for LLM inference](https://www.infoq.com/news/2025/12/nvidia-dynamo-kubernetes/)
+
+</details>
+
+## Reference
+
+- **[Support Matrix](https://docs.nvidia.com/dynamo/resources/support-matrix)** — Hardware, OS, CUDA, and backend versions
+- **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
+- **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
+- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
+- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/dynamo-benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->
-[disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/router/kv_cache_routing.md
-[planner]: docs/planner/sla_planner.md
-[kvbm]: docs/kvbm/kvbm_architecture.md
+[disagg]: docs/design-docs/disagg-serving.md
+[kv-routing]: docs/components/router/README.md
+[planner]: docs/components/planner/planner-guide.md
+[kvbm]: docs/components/kvbm/README.md
 [mm]: examples/multimodal/
-[migration]: docs/fault_tolerance/request_migration.md
+[migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/agents/tool-calling.md

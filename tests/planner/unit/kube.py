@@ -346,3 +346,162 @@ async def test_get_graph_deployment_not_found(k8s_api, mock_custom_api):
     exception = exc_info.value
     assert exception.deployment_name == "parent-dgd"
     assert exception.namespace == "default"
+
+
+# Tests for get_service_replica_status
+
+
+def test_get_service_replica_status_stable_with_available_replicas(
+    k8s_api, mock_custom_api
+):
+    """Test stable case with availableReplicas present (takes precedence over readyReplicas)"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"prefill-worker": {"replicas": 2}}},
+        "status": {
+            "services": {
+                "prefill-worker": {
+                    "availableReplicas": 2,
+                    "readyReplicas": 2,
+                    "updatedReplicas": 2,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    assert count == 2
+    assert is_stable is True
+
+
+def test_get_service_replica_status_stable_with_ready_replicas_fallback(
+    k8s_api, mock_custom_api
+):
+    """Test stable case falling back to readyReplicas when availableReplicas is not present"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"decode-worker": {"replicas": 4}}},
+        "status": {
+            "services": {
+                "decode-worker": {
+                    "readyReplicas": 4,
+                    "updatedReplicas": 4,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "decode-worker")
+
+    assert count == 4
+    assert is_stable is True
+
+
+def test_get_service_replica_status_scale_up_in_progress(k8s_api, mock_custom_api):
+    """Test scale-up in progress: desired=4, updated=2, ready=2"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"prefill-worker": {"replicas": 4}}},
+        "status": {
+            "services": {
+                "prefill-worker": {
+                    "availableReplicas": 2,
+                    "readyReplicas": 2,
+                    "updatedReplicas": 2,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    assert count == 2
+    assert is_stable is False
+
+
+def test_get_service_replica_status_scale_down_in_progress(k8s_api, mock_custom_api):
+    """Test scale-down in progress: desired=2, updated=4, ready=4"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"decode-worker": {"replicas": 2}}},
+        "status": {
+            "services": {
+                "decode-worker": {
+                    "availableReplicas": 4,
+                    "readyReplicas": 4,
+                    "updatedReplicas": 4,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "decode-worker")
+
+    assert count == 4
+    assert is_stable is False
+
+
+def test_get_service_replica_status_rollout_in_progress(k8s_api, mock_custom_api):
+    """Test rollout in progress: desired=4, updated=2, ready=4 (old replicas still running)"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"prefill-worker": {"replicas": 4}}},
+        "status": {
+            "services": {
+                "prefill-worker": {
+                    "availableReplicas": 4,
+                    "readyReplicas": 4,
+                    "updatedReplicas": 2,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    assert count == 4
+    assert is_stable is False
+
+
+def test_get_service_replica_status_missing_status_fields(k8s_api, mock_custom_api):
+    """Test handling when status fields are missing"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"prefill-worker": {"replicas": 2}}},
+        "status": {"services": {}},
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    # Should default to 0 for missing fields
+    assert count == 0
+    # desired=2, updated=0, count=0 -> not stable
+    assert is_stable is False
+
+
+def test_get_service_replica_status_empty_deployment(k8s_api, mock_custom_api):
+    """Test handling when deployment has no spec or status"""
+    deployment: Dict[str, Any] = {}
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    # All values default to 0, which makes it "stable" (0 == 0 == 0)
+    assert count == 0
+    assert is_stable is True
+
+
+def test_get_service_replica_status_available_replicas_zero(k8s_api, mock_custom_api):
+    """Test when availableReplicas is explicitly 0 (should use 0, not fall back to ready)"""
+    deployment: Dict[str, Any] = {
+        "spec": {"services": {"prefill-worker": {"replicas": 0}}},
+        "status": {
+            "services": {
+                "prefill-worker": {
+                    "availableReplicas": 0,
+                    "readyReplicas": 2,  # Should be ignored
+                    "updatedReplicas": 0,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    # availableReplicas=0 should be used (not readyReplicas)
+    assert count == 0
+    assert is_stable is True

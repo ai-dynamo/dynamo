@@ -9,6 +9,7 @@ use bytemuck::cast_slice;
 use derive_getters::Dissolve;
 use std::ops::Range;
 
+pub mod blocks;
 mod radix;
 pub use radix::PositionalRadixTree;
 
