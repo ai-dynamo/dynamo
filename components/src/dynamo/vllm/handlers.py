@@ -52,6 +52,43 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+class VllmEngineQuiesceController:
+    def __init__(self, engine_client: Any):
+        self._engine_client = engine_client
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, *args: object) -> bool:
+        if self._is_quiesced:
+            return False
+
+        level = args[0] if args else None
+        await self._engine_client.pause_generation()
+        if level is None:
+            await self._engine_client.sleep()
+        else:
+            await self._engine_client.sleep(level)
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+
+        if tags is None:
+            await self._engine_client.wake_up()
+        else:
+            await self._engine_client.wake_up(tags)
+        await self._engine_client.resume_generation()
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
+
+
 @dataclass(frozen=True)
 class LoRAInfo:
     """Metadata for a loaded LoRA adapter."""
@@ -332,8 +369,8 @@ class BaseWorkerHandler(ABC):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
-        self._sleep_wake_lock = asyncio.Lock()
-        self._engine_is_sleeping = False
+        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        self._quiesce_lock = asyncio.Lock()
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -357,8 +394,8 @@ class BaseWorkerHandler(ABC):
         """
         body = body or {}
         level = body.get("level", 1)
-        async with self._sleep_wake_lock:
-            if self._engine_is_sleeping:
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
@@ -374,11 +411,11 @@ class BaseWorkerHandler(ABC):
 
                 # Step 2: Abort in-flight requests and wait for them to drain so the
                 # GPU is fully quiesced before unmapping memory.
-                await self.engine_client.pause_generation()
-
-                # Step 3: Now safe to sleep - no in-flight GPU work
-                await self.engine_client.sleep(level)
-                self._engine_is_sleeping = True
+                if not await self._quiesce_controller.quiesce(level):
+                    return {
+                        "status": "ok",
+                        "message": "Engine already sleeping",
+                    }
 
                 return {
                     "status": "ok",
@@ -392,29 +429,27 @@ class BaseWorkerHandler(ABC):
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
-            body: Unused. Wake always restores all sleep-managed memory.
+            body: Optional dict with "tags" to request a partial wake.
 
         Order of operations:
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
-        async with self._sleep_wake_lock:
-            if not self._engine_is_sleeping:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self.engine_client.wake_up()
-
-                # Step 2: Resume generation and re-register.
-                await self.engine_client.resume_generation()
+                await self._quiesce_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-
-                self._engine_is_sleeping = False
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",

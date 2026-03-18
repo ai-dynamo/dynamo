@@ -16,6 +16,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  # Patch checkpoint Jobs with terminal checkpoint status
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "patch", "update"]
+  # Coordinate checkpoint ownership with per-Job leases
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
   # Emit operational events on pod/restore lifecycle updates
   - apiGroups: [""]
     resources: ["events"]
@@ -33,6 +41,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  # Patch checkpoint Jobs with terminal checkpoint status
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "patch", "update"]
+  # Coordinate checkpoint ownership with per-Job leases
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
   # Emit operational events on pod/restore lifecycle updates
   - apiGroups: [""]
     resources: ["events"]

@@ -28,7 +28,6 @@ import (
 
 	istioNetworking "istio.io/api/networking/v1beta1"
 
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -928,8 +927,9 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
-// addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
-func addStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
+// AddStandardEnvVars adds the standard environment variables that are common to
+// both checkpoint jobs and generated worker pods.
+func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
 	standardEnvVars := []corev1.EnvVar{}
 	if operatorConfig.Infrastructure.NATSAddress != "" {
 		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
@@ -1077,7 +1077,7 @@ func GenerateBasePodSpec(
 		})
 	}
 
-	addStandardEnvVars(&container, operatorConfig)
+	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
 
@@ -1113,11 +1113,6 @@ func GenerateBasePodSpec(
 			MountPath: mountPoint,
 		})
 	}
-	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
-		volumes = append(volumes, *shmVol)
-		container.VolumeMounts = append(container.VolumeMounts, *shmMount)
-	}
-
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
 	if multinodeDeployer == nil {
@@ -1161,8 +1156,9 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
+	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
@@ -1171,7 +1167,7 @@ func GenerateBasePodSpec(
 	// This handles ALL checkpoint-related modifications:
 	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
 	// - Security context (hostIPC, privileged mode)
-	// - Environment variables (checkpoint path, hash, CRIU settings)
+	// - Restore/checkpoint pod metadata (labels/annotations)
 	// - Storage configuration (volumes, mounts)
 	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
 	// Checkpoint config comes from the operator's controller config (Helm values)
@@ -1215,7 +1211,6 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
-
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
 		workerHashSuffix = component.Labels[commonconsts.KubeLabelDynamoWorkerHash]
@@ -1277,7 +1272,7 @@ func generateFrontendSidecar(
 		container.Env = MergeEnvs(container.Env, spec.Envs)
 	}
 
-	addStandardEnvVars(&container, operatorConfig)
+	AddStandardEnvVars(&container, operatorConfig)
 
 	return container, nil
 }
@@ -1423,7 +1418,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1432,6 +1427,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
+			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
 
 			// Apply restart annotation if this service should be restarted.
 			// For services not in the current restart order, preserve their existing annotation
@@ -1481,7 +1477,6 @@ func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
@@ -1510,18 +1505,15 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
-
-	// Inject checkpoint labels AFTER user labels so they cannot be overridden.
-	var err error
-	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.ComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}
-
-	// Only mark pods as restore targets when a concrete checkpoint is ready.
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
-		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
+	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 	return labels, nil
 }
@@ -1706,8 +1698,10 @@ func GenerateBasePodSpecForController(
 	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
-	// For controller usage, we may not have serviceName, so use the component name as fallback
-	serviceName := dynComponent.Name
+	serviceName := dynComponent.Spec.ServiceName
+	if serviceName == "" {
+		serviceName = dynComponent.Name
+	}
 	podSpec, err := GenerateBasePodSpec(
 		componentSpec,
 		backendFramework,
@@ -1741,31 +1735,4 @@ func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) str
 		// For unknown backends, don't assume compilation cache support
 		return ""
 	}
-}
-
-func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
-	// default: enabled=true, size=8Gi
-	size := resource.MustParse(commonconsts.DefaultSharedMemorySize)
-	if spec != nil {
-		if spec.Disabled {
-			return nil, nil
-		}
-		if !spec.Size.IsZero() {
-			size = spec.Size
-		}
-	}
-	volume := corev1.Volume{
-		Name: commonconsts.KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &size,
-			},
-		},
-	}
-	volumeMount := corev1.VolumeMount{
-		Name:      commonconsts.KubeValueNameSharedMemory,
-		MountPath: commonconsts.DefaultSharedMemoryMountPath,
-	}
-	return &volume, &volumeMount
 }

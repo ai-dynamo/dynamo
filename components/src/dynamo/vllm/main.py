@@ -44,7 +44,7 @@ from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import get_checkpoint_config
+from .snapshot import prepare_snapshot_engine
 
 # Optional imports for frontend decoding support
 MediaDecoder: type | None = None
@@ -61,7 +61,6 @@ except ImportError:
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
-CHECKPOINT_SLEEP_MODE_LEVEL = 1
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -102,11 +101,6 @@ async def worker() -> None:
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
-    # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
-    early_exit, checkpoint_cfg = get_checkpoint_config()
-    if early_exit:
-        return
-
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
     #
@@ -119,34 +113,26 @@ async def worker() -> None:
     if not os.path.exists(config.model):
         await fetch_model(config.model)
 
+    # CHECKPOINT MODE: Load engine BEFORE runtime creation
+    # This allows checkpointing GPU state before runtime connections are established
+    snapshot_controller = await prepare_snapshot_engine(
+        config,
+        setup_vllm_engine,
+    )
+
+    snapshot_engine = None
+    if snapshot_controller is not None:
+        snapshot_engine = snapshot_controller.engine
+        (
+            config.namespace,
+            config.discovery_backend,
+        ) = snapshot_controller.reload_restore_identity()
+
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
     if config.headless:
-        if checkpoint_cfg is not None:
-            raise ValueError(
-                "--headless is incompatible with checkpoint mode "
-                "(DYN_CHECKPOINT_SIGNAL_FILE is set). "
-                "Remove --headless or unset DYN_CHECKPOINT_SIGNAL_FILE."
-            )
         run_dynamo_headless(config)
         return
-
-    # CHECKPOINT MODE: Load engine BEFORE runtime creation
-    # This allows checkpointing GPU state before runtime connections are established
-    snapshot_engine = None
-    if checkpoint_cfg is not None:
-        logger.info("Checkpoint mode enabled (watcher-driven signals)")
-
-        # Checkpoint mode requires sleep mode — enable before engine init
-        config.engine_args.enable_sleep_mode = True
-
-        snapshot_engine = setup_vllm_engine(config)
-        engine_client = snapshot_engine[0]
-
-        if not await checkpoint_cfg.run_lifecycle(
-            engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
-        ):
-            return
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(

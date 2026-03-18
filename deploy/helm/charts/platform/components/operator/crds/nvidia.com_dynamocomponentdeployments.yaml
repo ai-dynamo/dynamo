@@ -678,8 +678,8 @@ spec:
                   properties:
                     checkpointRef:
                       description: |-
-                        CheckpointRef references an existing Checkpoint CR to use
-                        If specified, Identity is ignored and this checkpoint is used directly
+                        CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
+                        If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
                       type: string
                     enabled:
                       default: false
@@ -11211,6 +11211,9 @@ spec:
                       pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                       x-kubernetes-int-or-string: true
                   type: object
+                  x-kubernetes-validations:
+                    - message: sharedMemory.size must not be set when sharedMemory.disabled is true
+                      rule: '!(self.disabled && has(self.size))'
                 subComponentType:
                   description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                   type: string
