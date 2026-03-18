@@ -13,6 +13,7 @@ use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::positional::PositionalIndexer;
 use super::*;
 use crate::protocols::*;
+use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
 // ============================================================================
 // Helper functions
@@ -63,25 +64,15 @@ fn make_store_event_with_parent(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let new_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
 
-    RouterEvent {
+    router_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash,
-                blocks: new_block_hashes
-                    .iter()
-                    .zip(new_seq_hashes.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    }
+        0,
+        0,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash,
+            blocks: stored_blocks_with_sequence_hashes(&new_block_hashes, new_seq_hashes),
+        }),
+    )
 }
 
 /// Create a store event with all options.
@@ -95,25 +86,15 @@ fn make_store_event_full(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-    RouterEvent {
+    router_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash,
-                blocks: local_block_hashes
-                    .iter()
-                    .zip(seq_hashes.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank,
-        },
-    }
+        0,
+        dp_rank,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash,
+            blocks: stored_blocks_with_sequence_hashes(&local_block_hashes, &seq_hashes),
+        }),
+    )
 }
 
 /// Create a remove event for blocks with given local hashes.
@@ -131,19 +112,15 @@ fn make_remove_event_with_dp_rank(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-    RouterEvent {
+    remove_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: seq_hashes
-                    .iter()
-                    .map(|&h| ExternalSequenceBlockHash(h))
-                    .collect(),
-            }),
-            dp_rank,
-        },
-    }
+        0,
+        dp_rank,
+        seq_hashes
+            .iter()
+            .map(|&h| ExternalSequenceBlockHash(h))
+            .collect(),
+    )
 }
 
 /// Create a remove event with parent hash for continuation sequences.
@@ -165,19 +142,15 @@ fn make_remove_event_with_parent(
 
     let suffix_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
 
-    RouterEvent {
+    remove_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: suffix_seq_hashes
-                    .iter()
-                    .map(|&h| ExternalSequenceBlockHash(h))
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    }
+        0,
+        0,
+        suffix_seq_hashes
+            .iter()
+            .map(|&h| ExternalSequenceBlockHash(h))
+            .collect(),
+    )
 }
 
 /// Snapshot the tree state for deterministic comparison.
@@ -222,14 +195,7 @@ fn make_clear_event(worker_id: u64) -> RouterEvent {
 
 /// Create a clear event with a specific dp_rank.
 fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
-    RouterEvent {
-        worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Cleared,
-            dp_rank,
-        },
-    }
+    router_event(worker_id, 0, dp_rank, KvCacheEventData::Cleared)
 }
 
 // ============================================================================
@@ -646,16 +612,7 @@ async fn test_partial_block_removal(variant: &str) {
     let seq_hashes = compute_seq_hash_for_block(&full_hashes);
     let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]); // Last block's hash
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![block_3_seq_hash],
-            }),
-            dp_rank: 0,
-        },
-    };
+    let remove_event = remove_event(0, 0, 0, vec![block_3_seq_hash]);
     index.apply_event(remove_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -698,16 +655,7 @@ async fn test_remove_mid_chain_block(variant: &str) {
     let seq_hashes = compute_seq_hash_for_block(&full_hashes);
     let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]);
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![block_3_seq_hash],
-            }),
-            dp_rank: 0,
-        },
-    };
+    let remove_event = remove_event(0, 0, 0, vec![block_3_seq_hash]);
     index.apply_event(remove_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -895,47 +843,27 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
     let lora_seq = compute_seq_hash_for_block(&lora_hashes);
 
     // Store base-model blocks on worker 0
-    let base_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: base_hashes
-                    .iter()
-                    .zip(base_seq.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    };
+    let base_event = router_event(
+        0,
+        0,
+        0,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            blocks: stored_blocks_with_sequence_hashes(&base_hashes, &base_seq),
+        }),
+    );
     index.apply_event(base_event).await;
 
     // Store LoRA blocks on worker 1
-    let lora_event = RouterEvent {
-        worker_id: 1,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: lora_hashes
-                    .iter()
-                    .zip(lora_seq.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    };
+    let lora_event = router_event(
+        1,
+        0,
+        0,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            blocks: stored_blocks_with_sequence_hashes(&lora_hashes, &lora_seq),
+        }),
+    );
     index.apply_event(lora_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1003,49 +931,29 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
 
     // Worker 0: base model
     index
-        .apply_event(RouterEvent {
-            worker_id: 0,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: base_local
-                        .iter()
-                        .zip(base_seq.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            0,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&base_local, &base_seq),
+            }),
+        ))
         .await;
 
     // Worker 1: LoRA adapter — different LocalBlockHash, so this goes to
     // a separate tree path instead of colliding with worker 0's node.
     index
-        .apply_event(RouterEvent {
-            worker_id: 1,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: lora_local
-                        .iter()
-                        .zip(lora_seq.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            1,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&lora_local, &lora_seq),
+            }),
+        ))
         .await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1094,48 +1002,28 @@ async fn test_different_lora_adapters_do_not_conflict(variant: &str) {
 
     // Store adapter-a blocks on worker 0
     index
-        .apply_event(RouterEvent {
-            worker_id: 0,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: hashes_a
-                        .iter()
-                        .zip(seq_a.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            0,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
+            }),
+        ))
         .await;
 
     // Store adapter-b blocks on worker 1
     index
-        .apply_event(RouterEvent {
-            worker_id: 1,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: hashes_b
-                        .iter()
-                        .zip(seq_b.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            1,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
+            }),
+        ))
         .await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1317,16 +1205,7 @@ async fn test_long_sequence_partial_removal(variant: &str) {
         .map(|&h| ExternalSequenceBlockHash(h))
         .collect();
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: remove_hashes,
-            }),
-            dp_rank: 0,
-        },
-    };
+    let remove_event = remove_event(0, 0, 0, remove_hashes);
     index.apply_event(remove_event).await;
 
     flush_and_settle(index.as_ref()).await;
@@ -1868,6 +1747,7 @@ async fn test_frequency(variant: &str) {
 // KvIndexerMetrics tests
 // ============================================================================
 
+#[cfg(feature = "metrics")]
 #[test]
 fn test_increment_event_applied() {
     let metrics = KvIndexerMetrics::new_unregistered();
@@ -1941,7 +1821,7 @@ async fn test_local_indexer_slice_within_range() {
     let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
         match resp {
             WorkerKvQueryResponse::Events(e) => e,
-            WorkerKvQueryResponse::TreeDump(e) => e,
+            WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             _ => panic!("Unexpected response type"),
         }
     };
@@ -1962,7 +1842,7 @@ async fn test_local_indexer_slice_within_range() {
 
     // start_id=0 is before buffer (first is 1), so should trigger tree dump
     let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
     let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
     let ids = get_ids(extract_events(result));
@@ -2016,7 +1896,7 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
     let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
         match resp {
             WorkerKvQueryResponse::Events(e) => e,
-            WorkerKvQueryResponse::TreeDump(e) => e,
+            WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             _ => panic!("Unexpected response type: {:?}", resp),
         }
     };
@@ -2038,11 +1918,11 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     // Tree dump path tests
     let result = indexer.get_events_in_id_range(None, None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(&result, WorkerKvQueryResponse::TreeDump { .. }));
     assert_eq!(extract_events(result).len(), 10);
 
     let result = indexer.get_events_in_id_range(Some(7), None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
     // Edge cases
     let result = indexer.get_events_in_id_range(Some(15), Some(10)).await;
@@ -2050,6 +1930,98 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     let result = indexer.get_events_in_id_range(Some(100), Some(200)).await;
     assert!(matches!(result, WorkerKvQueryResponse::TooNew { .. }));
+}
+
+#[tokio::test]
+async fn test_tree_dump_includes_last_event_id() {
+    // Create indexer with small buffer (5 events max)
+    let indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let make_event = |id: u64| {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id: id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(id * 100),
+                        tokens_hash: LocalBlockHash(id * 200),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+    };
+
+    // Add 10 events (IDs 5-14), buffer keeps last 5: events 10-14
+    for id in 5..15 {
+        indexer
+            .apply_event_with_buffer(make_event(id))
+            .await
+            .unwrap();
+    }
+    indexer.flush().await;
+
+    // Request with start_id=None -> tree dump should include last_event_id=14
+    let result = indexer.get_events_in_id_range(None, None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 14,
+                "last_event_id should be the buffer's newest event ID"
+            );
+            assert!(!events.is_empty(), "tree dump should contain events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+
+    // Request with start_id older than buffer -> tree dump should include last_event_id=14
+    let result = indexer.get_events_in_id_range(Some(7), None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 14,
+                "last_event_id should be the buffer's newest event ID"
+            );
+            assert!(!events.is_empty(), "tree dump should contain events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+
+    // Empty buffer case: create a fresh indexer with no events
+    let empty_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+    let result = empty_indexer.get_events_in_id_range(None, None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 0,
+                "empty buffer should return last_event_id=0"
+            );
+            assert!(events.is_empty(), "empty indexer should have no events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2097,6 +2069,51 @@ async fn test_local_indexer_buffer_and_serialization() {
     };
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn test_local_indexer_does_not_buffer_failed_send() {
+    let local_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let test_event = RouterEvent::new(
+        7,
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        },
+    );
+
+    let event_tx = local_indexer.event_sender();
+    local_indexer.shutdown();
+    event_tx.closed().await;
+
+    let result = local_indexer.apply_event_with_buffer(test_event).await;
+    assert!(matches!(result, Err(KvRouterError::IndexerOffline)));
+    assert_eq!(local_indexer.buffer_len(), 0);
+
+    match local_indexer.get_events_in_id_range(None, None).await {
+        WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+        } => {
+            assert!(events.is_empty());
+            assert_eq!(last_event_id, 0);
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
