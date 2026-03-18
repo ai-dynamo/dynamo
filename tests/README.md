@@ -116,6 +116,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
+| VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). The pytest invocation can use `--max-vram-gib=N` to select only tests that fit on the available GPU. Does not prevent running on smaller GPUs (that will OOM). Use `profile_pytest.py` to measure. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
@@ -126,9 +127,28 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.gpu_1
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
 @pytest.mark.vllm
 def test_kv_cache_behavior():
     ...
+```
+
+### Filtering by VRAM
+
+The `max_vram_gib(N)` marker records how much GPU memory a test needs. The pytest invocation can use `--max-vram-gib=N` as a **selector** to run only tests that fit on the available GPU. Tests that exceed the budget are skipped at collection time (before any test starts). Tests without a `max_vram_gib` marker always run (no constraint assumed).
+
+Nothing prevents you from running without this flag — but if a test needs more VRAM than is physically available, it will OOM at runtime (e.g., vLLM raises `ValueError: No available memory for the cache blocks`).
+
+```bash
+# Run only tests that fit on a 48 GiB GPU — tests needing >48 GiB are skipped
+python3 -m pytest --max-vram-gib=48 tests/
+
+# GPU tests that have no max_vram_gib marker yet — need profiling
+# TODO: profile these tests and add max_vram_gib markers
+python3 -m pytest -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/
+
+# No filter — run everything regardless of VRAM (tests that exceed available memory will OOM)
+python3 -m pytest tests/
 ```
 
 ### Lifecycle Marker Note
@@ -413,6 +433,113 @@ GPU and model-loading overhead means Dynamo E2E tests are inherently slower than
 - If model downloads fail, ensure `HF_TOKEN` is set and network access is available.
 - If `ImportError: cannot import name ... from 'dynamo._internal'`, you need to compile the Rust bindings first (see [Prerequisites](#prerequisites)).
 - If coverage is insufficient, add more tests or refactor code for better testability.
+
+---
+
+## GPU VRAM Profiler (`profile_pytest.py`)
+
+When writing or reviewing GPU tests, use `tests/utils/profile_pytest.py` to measure how much VRAM a test actually needs. The script runs the test repeatedly with different GPU memory caps and uses binary search to find the minimum VRAM required. It then prints recommended pytest markers you can copy into your test.
+
+### How it works
+
+The profiler sets the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` environment variable (a fraction from 0.0 to 1.0 of total GPU RAM) and runs the test at each probe point. It bisects between "passes" and "OOM/fails" to find the boundary. After the search, it samples `nvidia-smi` to report peak VRAM, phase analysis, and marker recommendations.
+
+**Requirement:** The test under profile **must** honor the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` env var. For standalone tests that allocate CUDA memory directly, check `os.environ.get("_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")` and cap your allocation accordingly — see `tests/utils/test_mock_gpu_alloc.py` for an example.
+
+### Engine-specific mapping
+
+`_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is a generic env var (float 0.0-1.0) that launch scripts translate to the engine-specific CLI flag:
+
+| Engine  | CLI flag                         | Launch script support |
+|---------|----------------------------------|-----------------------|
+| vLLM    | `--gpu-memory-utilization`       | Implemented in `agg.sh`, `disagg.sh`, etc. |
+| SGLang  | `--mem-fraction-static`          | Not yet implemented (TODO) |
+| TRT-LLM | `--free-gpu-memory-fraction`    | Not yet implemented (has its own `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`, TODO: unify) |
+
+Scripts that already hard-code their own memory fraction (e.g. `agg_multimodal.sh` with 0.85) have a TODO to honor `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` in the future. If the profiler detects constant VRAM across all probes (meaning the env var is ignored), it prints a warning and skips marker recommendations.
+
+### Usage
+
+```bash
+# Default mode: binary search for minimum VRAM (recommended)
+# -xvs is optional: stop on first failure, verbose, show output
+python tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated] -xvs
+
+# Single-pass profiling (no binary search, just measure one run using default RAM)
+python tests/utils/profile_pytest.py --no-find-min-vram tests/serve/test_vllm.py::test_serve_deployment[aggregated]
+```
+
+### Example output
+
+```bash
+========================================================================
+FIND MINIMUM VRAM (binary search)
+========================================================================
+  GPU total : 48.0 GiB
+  GPU free  : 48.0 GiB  (in use: 0.0 GiB)
+  Test      : tests/serve/test_vllm.py::test_serve_deployment[aggregated] -x
+
+  Range   : 5% - 95%  (tolerance 5%)
+  Max iter: 6 (1 validation + 5 bisections)
+
+  [probe 1/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.95 (45.6 GiB)  [validation run]
+  [PASS] peak 18.5 GiB, wall 41s, iter took 49s
+  ...
+  [probe 5/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.33 (15.9 GiB)
+  [FAIL] OOM or error at 33% (15.9 GiB), iter took 30s
+
+  [probe 6/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.36 (17.2 GiB)  [~0 left, ETA ~0s]
+  [PASS] peak 18.5 GiB, wall 41s, iter took 49s
+
+========================================================================
+MINIMUM VRAM RESULT
+========================================================================
+  Lowest passing utilization : 36%
+  Minimum VRAM needed        : ~17.2 GiB (peak observed: 18.5 GiB, +10% safety: 20.4 GiB)
+
+  # test_serve_deployment[aggregated]: @pytest.mark.max_vram_gib(21)
+  # Fits on: L4 (24 GiB), V100-32GB (32 GiB), A6000/A40 (48 GiB), A100/H100 (80 GiB)
+  # Will OOM on: edge/embedded (4 GiB), RTX 3060/4060 (8 GiB), T4 (16 GiB)
+========================================================================
+
+========================================================================
+Recommended markers to add to your pytest. You can copy-paste this:
+========================================================================
+# Measured using: tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated]
+@pytest.mark.e2e  # wall time 41.2s, loads a real model
+@pytest.mark.gpu_1  # 1 GPU(s) used, peak 18.5 GiB
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.timeout(124)  # 3x observed 41.2s
+
+  WARNING: Wall time 41.2s is too slow for pre_merge (> 20s). Consider post_merge or nightly instead.
+  WARNING: Will OOM on edge/embedded (4 GiB).
+  WARNING: Will OOM on RTX 3060/4060 (8 GiB).
+  WARNING: Will OOM on T4 (16 GiB).
+========================================================================
+```
+
+### How to use the recommendations
+
+1. **Copy the `@pytest.mark.*` lines** into your test function or `pytestmark` list.
+
+2. **VRAM marker** — `max_vram_gib(N)` records the peak GPU memory the test needs (with 10% safety margin). This marker does **not** skip tests on its own — if a test runs on a GPU that is too small, it will OOM and fail hard. Use `--max-vram-gib=N` to select only tests that fit on the available GPU (see [Filtering by VRAM](#filtering-by-vram) for examples). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
+
+3. **Lifecycle markers** — the profiler recommends `pre_merge` only for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
+
+4. **Timeout** — the recommended value is 3x the observed wall time. Adjust upward if your test has high variance (e.g., first-run model download, flaky network).
+
+5. **Test type** (`unit`, `integration`, `e2e`) — inferred from wall time and whether a real model was loaded. Override if you know better (e.g., a fast test that uses a mock engine is `integration`, not `e2e`).
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--no-find-min-vram` | Skip binary search; run a single profiling pass instead |
+| `--interval N` | GPU sampling interval in seconds (default: 1.0) |
+| `--baseline-seconds N` | Seconds to sample before launching pytest (default: 3.0) |
+| `--teardown-seconds N` | Seconds to sample after pytest exits (default: 5.0) |
+| `--csv FILE` | Write raw nvidia-smi samples to a CSV file |
+| `--no-recommend` | Suppress marker recommendations |
 
 ---
 

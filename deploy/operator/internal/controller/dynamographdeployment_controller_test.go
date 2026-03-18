@@ -23,11 +23,13 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -339,6 +341,314 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-worker-checkpoint",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "keep-existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(existing).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+	}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: string(commonconsts.ComponentTypeWorker),
+		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    v1alpha1.CheckpointModeAuto,
+			Identity: &v1alpha1.DynamoCheckpointIdentity{
+				Model:                identity.Model,
+				BackendFramework:     identity.BackendFramework,
+				TensorParallelSize:   1,
+				PipelineParallelSize: 1,
+				ExtraParameters:      map[string]string{},
+			},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Name:  "main",
+				Image: "new-writer:latest",
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	if err != nil {
+		t.Fatalf("createCheckpointCR() error = %v", err)
+	}
+	if ckpt.Name != "existing-worker-checkpoint" {
+		t.Fatalf("createCheckpointCR() returned checkpoint %s, want existing-worker-checkpoint", ckpt.Name)
+	}
+
+	updated := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "existing-worker-checkpoint", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+	if len(updated.Spec.Job.PodTemplateSpec.Spec.Containers) != 1 {
+		t.Fatalf("expected one job container, got %d", len(updated.Spec.Job.PodTemplateSpec.Spec.Containers))
+	}
+	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
+		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "friendly-checkpoint",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "keep-existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeAuto,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	}
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info, ok := checkpointInfos["worker"]
+	if !ok {
+		t.Fatalf("expected checkpoint info for worker service")
+	}
+	if info.Ready {
+		t.Fatalf("expected referenced checkpoint to remain not ready")
+	}
+	if !info.Exists {
+		t.Fatalf("expected referenced checkpoint to exist")
+	}
+	if info.Hash != hash {
+		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	}
+	if checkpointStatuses["worker"].CheckpointName != "friendly-checkpoint" {
+		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	}
+
+	checkpoints := &v1alpha1.DynamoCheckpointList{}
+	if err := reconciler.List(ctx, checkpoints, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list checkpoints: %v", err)
+	}
+	if len(checkpoints.Items) != 1 {
+		t.Fatalf("expected only the referenced checkpoint to exist, found %d", len(checkpoints.Items))
+	}
+	if checkpoints.Items[0].Name != "friendly-checkpoint" {
+		t.Fatalf("unexpected checkpoint %s", checkpoints.Items[0].Name)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-worker-checkpoint",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "keep-existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(existing).
+			WithStatusSubresource(existing).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled: true,
+						Mode:    v1alpha1.CheckpointModeAuto,
+						Identity: &v1alpha1.DynamoCheckpointIdentity{
+							Model:            identity.Model,
+							BackendFramework: identity.BackendFramework,
+						},
+					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Name:  "main",
+							Image: "new-writer:latest",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info, ok := checkpointInfos["worker"]
+	if !ok {
+		t.Fatalf("expected checkpoint info for worker service")
+	}
+	if info.Ready {
+		t.Fatalf("expected existing checkpoint to remain not ready")
+	}
+	if !info.Exists {
+		t.Fatalf("expected existing checkpoint to be detected")
+	}
+	if info.Hash != hash {
+		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	}
+	if checkpointStatuses["worker"].CheckpointName != "existing-worker-checkpoint" {
+		t.Fatalf("checkpoint status name = %s, want existing-worker-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	}
+
+	updated := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "existing-worker-checkpoint", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+	if len(updated.Spec.Job.PodTemplateSpec.Spec.Containers) != 1 {
+		t.Fatalf("expected one job container, got %d", len(updated.Spec.Job.PodTemplateSpec.Spec.Containers))
+	}
+	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
+		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
 	}
 }
 

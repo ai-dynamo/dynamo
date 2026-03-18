@@ -26,6 +26,56 @@ from tests.utils.test_output import resolve_test_output_path
 _logger = logging.getLogger(__name__)
 
 
+<<<<<<< anants/add-pyproject-toml-to-test-images
+=======
+def pytest_configure(config):
+    # Defining markers to avoid `<marker> not found in 'markers' configuration option`
+    # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
+    # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
+    # in pyproject.toml. If you add or remove markers there, mirror the change here.
+    markers = [
+        "pre_merge: marks tests to run before merging",
+        "post_merge: marks tests to run after merge",
+        "parallel: marks tests that can run in parallel with pytest-xdist",
+        "nightly: marks tests to run nightly",
+        "weekly: marks tests to run weekly",
+        "gpu_0: marks tests that don't require GPU",
+        "gpu_1: marks tests to run on GPU",
+        "gpu_2: marks tests to run on 2GPUs",
+        "gpu_4: marks tests to run on 4GPUs",
+        "gpu_8: marks tests to run on 8GPUs",
+        "max_vram_gib(N): peak VRAM in GiB (with 10% safety). Filter with --max-vram-gib=N",
+        "e2e: marks tests as end-to-end tests",
+        "integration: marks tests as integration tests",
+        "unit: marks tests as unit tests",
+        "stress: marks tests as stress tests",
+        "performance: marks tests as performance tests",
+        "vllm: marks tests as requiring vllm",
+        "trtllm: marks tests as requiring trtllm",
+        "sglang: marks tests as requiring sglang",
+        "lmcache: mark tests as requiring lmcache",
+        "multimodal: marks tests as multimodal (image/video) tests",
+        "slow: marks tests as known to be slow",
+        "h100: marks tests to run on H100",
+        "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
+        "router: marks tests for router component",
+        "planner: marks tests for planner component",
+        "kvbm: marks tests for KV behavior and model determinism",
+        "kvbm_v2: marks tests using KVBM V2",
+        "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
+        "model: model id used by a test or parameter",
+        "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+        "k8s: marks tests as requiring Kubernetes",
+        "fault_tolerance: marks tests as fault tolerance tests",
+        "deploy: marks tests as deployment tests",
+        # Third-party plugin markers
+        "timeout: test timeout in seconds (pytest-timeout plugin)",
+    ]
+    for marker in markers:
+        config.addinivalue_line("markers", marker)
+
+
+>>>>>>> main
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add shared command-line options for all tests.
 
@@ -54,6 +104,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,  # None = use fixture's default behavior
         help="Skip restarting NATS and etcd services before deployment. "
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
+    parser.addoption(
+        "--max-vram-gib",
+        type=float,
+        default=None,
+        help="Skip tests whose @pytest.mark.max_vram_gib(N) exceeds this value (GiB).",
     )
 
 
@@ -246,6 +302,17 @@ def pytest_collection_modifyitems(config, items):
             for item in items:
                 if _item_has_marker(item, marker_name):
                     item.add_marker(skip)
+
+    # Skip tests that exceed --max-vram-gib
+    vram_limit = config.getoption("--max-vram-gib", default=None)
+    if vram_limit is not None:
+        skip_vram = pytest.mark.skip(
+            reason=f"requires more than {vram_limit} GiB VRAM (--max-vram-gib={vram_limit})"
+        )
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram_gib")
+            if vram_mark and vram_mark.args and vram_mark.args[0] > vram_limit:
+                item.add_marker(skip_vram)
 
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
@@ -790,11 +857,17 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
     frontend_port = allocate_port(DefaultPort.FRONTEND.value)
     system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list]
+    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list, kv_event_port]
     try:
-        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+        yield ServicePorts(
+            frontend_port=frontend_port,
+            system_ports=system_port_list,
+            kv_event_port=kv_event_port,
+        )
     finally:
         deallocate_ports(all_ports)
