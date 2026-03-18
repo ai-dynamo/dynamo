@@ -1,4 +1,4 @@
-name: 'Setup Deploy'
+name: 'Setup Dynamo Operator'
 description: 'Create a vCluster, install the Dynamo platform operator inside it via Helm'
 
 inputs:

@@ -1,4 +1,4 @@
-name: 'Teardown Deploy'
+name: 'Teardown Dynamo Operator'
 description: 'Delete a vCluster and its host namespace'
 
 inputs:
