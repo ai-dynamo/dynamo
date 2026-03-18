@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -68,7 +69,7 @@ func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 
 // getMultinodeFlags returns the multinode flags and whether shell interpretation is needed
 func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) (string, bool) {
-	distInitAddr := fmt.Sprintf("%s:%s", multinodeDeployer.GetLeaderHostname(serviceName), SglangPort)
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	var nodeRank string
 	var needsShell bool
@@ -76,10 +77,30 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 	if role == RoleLeader {
 		nodeRank = "0"
 		needsShell = false
+		leaderHostname = convertIfShellVar(leaderHostname)
 	} else {
 		nodeRank, needsShell = multinodeDeployer.GetNodeRank()
 	}
+	distInitAddr := fmt.Sprintf("%s:%s", leaderHostname, SglangPort)
 
 	flags := fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
 	return flags, needsShell
+}
+
+func convertIfShellVar(s string) string {
+	re := regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
+
+	if strings.HasPrefix(s, "$(") && strings.HasSuffix(s, ")") {
+		return s
+	}
+
+	if re.MatchString(s) {
+		match := re.FindStringSubmatch(s)
+		if len(match) > 1 {
+			name := re.FindStringSubmatch(s)[1]
+			return "$(" + name + ")"
+		}
+	}
+
+	return s
 }
