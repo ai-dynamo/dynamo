@@ -40,17 +40,25 @@ This script will:
 
 To push scraped metrics to an external Prometheus (or any remote-write–compatible endpoint), set these environment variables before running the script:
 
-| Variable              | Description                          | Default |
-|-----------------------|--------------------------------------|--------|
-| `REMOTE_WRITE_HOST`    | Host of the remote write endpoint    | — (disabled if unset) |
-| `REMOTE_WRITE_PORT`    | Port of the remote write endpoint   | `9091` |
+| Variable                      | Description                                  | Default     |
+|-------------------------------|----------------------------------------------|-------------|
+| `REMOTE_WRITE_HOST`           | Host of the remote write endpoint            | — (disabled if unset) |
+| `REMOTE_WRITE_PORT`           | Port of the remote write endpoint           | `9091`      |
+| `REMOTE_WRITE_METRIC_REGEX`   | Prometheus regex for metric names to send   | `^agent_.*` |
 
-Metrics are sent only when `REMOTE_WRITE_HOST` is set. The script configures Prometheus with a single `remote_write` target: `http://<host>:<port>/api/v1/write`. Only metrics whose name has the `nixl_` prefix are sent to the remote endpoint; all others are filtered out.
+Metrics are sent only when `REMOTE_WRITE_HOST` is set. The script configures Prometheus with a single `remote_write` target: `http://<host>:<port>/api/v1/write`. Only metrics whose name matches `REMOTE_WRITE_METRIC_REGEX` are sent; all others are filtered out. You can use any valid Prometheus regex (e.g. `^agent_.*`, `^nixl_.*`, `^(agent_|nixl_).*`).
 
-Example:
+Examples:
 
 ```bash
+# Default filter: agent_.*
 REMOTE_WRITE_HOST=prom.example.com REMOTE_WRITE_PORT=9091 ./setup-monitoring.sh
+
+# Custom filter: only nixl_ metrics
+REMOTE_WRITE_HOST=prom.example.com REMOTE_WRITE_METRIC_REGEX='^nixl_.*' ./setup-monitoring.sh
+
+# Multiple patterns: agent_ or nixl_
+REMOTE_WRITE_HOST=prom.example.com REMOTE_WRITE_METRIC_REGEX='^(agent_|nixl_).*' ./setup-monitoring.sh
 ```
 
 ## Verification
