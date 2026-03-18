@@ -204,6 +204,8 @@ filterwarnings = [
     "ignore:Triton is not supported on current platform.*:UserWarning",
     # torch.jit.script_method deprecation from torch.utils.mkldnn
     "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
+    # nvidia-modelopt warning about transformers version (transitive dep from TRT-LLM)
+    "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
     # SGLang quantization warnings on CPU-only runners
     "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
     "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
