@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# [DO NOT MERGE] Test vLLM multimodal EPD with NIXL_WRITE (no LOCAL override) + UCX_PROTO_INFO
+# [DO NOT MERGE] VMA debug: capture vm.max_map_count and /proc/self/maps count before NIXL agent init
 name: PR
 
 on:
@@ -26,8 +26,8 @@ jobs:
       core: 'true'
       operator: 'false'
       deploy: 'false'
-      vllm: 'true'
-      sglang: 'false'
+      vllm: 'false'
+      sglang: 'true'
       trtllm: 'false'
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
@@ -40,12 +40,12 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
-  vllm-pipeline:
-    name: vllm
+  sglang-pipeline:
+    name: sglang
     needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
-      framework: vllm
+      framework: sglang
       target: runtime
       platforms: '["amd64"]'
       cuda_versions: '["12.9"]'
@@ -55,14 +55,14 @@ jobs:
       copy_to_acr: false
       run_cpu_only_tests: false
       run_single_gpu_tests: true
-      single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 35
+      single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
+      single_gpu_test_timeout_minutes: 30
       run_multi_gpu_tests: false
     secrets: inherit
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, vllm-pipeline]
+    needs: [changed-files, sglang-pipeline]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -73,7 +73,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, changed-files]
+    needs: [sglang-pipeline, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

@@ -377,11 +377,21 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
     """
 
     def __init__(self):
+        _pid = os.getpid()
+        _maps = len(open(f"/proc/{_pid}/maps").readlines())
+        _max = int(open("/proc/sys/vm/max_map_count").read().strip())
+        _msg = f"[VMA_DEBUG] SENDER pid={_pid} maps={_maps} max_map_count={_max} headroom={_max - _maps}"
+        print(_msg, flush=True)
+        logger.warning(_msg)
         # NIXL agent setup
         self.sender_id = f"sender_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.sender_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
         )
+        _maps_after = len(open(f"/proc/{_pid}/maps").readlines())
+        _msg = f"[VMA_DEBUG] SENDER post_nixl_agent maps={_maps_after} delta={_maps_after - _maps}"
+        print(_msg, flush=True)
+        logger.warning(_msg)
         self.remote_agents = {}
         self.agent_metadata = self.nixl_agent.get_agent_metadata()
         self.agent_metadata_b64 = base64.b64encode(self.agent_metadata).decode("utf-8")
@@ -625,10 +635,20 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.transfer_tensor = self.ring_buffer.buffer_tensor
 
         # NIXL agent setup
+        _pid = os.getpid()
+        _maps = len(open(f"/proc/{_pid}/maps").readlines())
+        _max = int(open("/proc/sys/vm/max_map_count").read().strip())
+        _msg = f"[VMA_DEBUG] RECEIVER pid={_pid} maps={_maps} max_map_count={_max} headroom={_max - _maps}"
+        print(_msg, flush=True)
+        logger.warning(_msg)
         self.receiver_id = f"receiver_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.receiver_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
         )
+        _maps_after = len(open(f"/proc/{_pid}/maps").readlines())
+        _msg = f"[VMA_DEBUG] RECEIVER post_nixl_agent maps={_maps_after} delta={_maps_after - _maps}"
+        print(_msg, flush=True)
+        logger.warning(_msg)
         self.remote_agents = {}
         self.reg_descs = self.nixl_agent.register_memory(self.transfer_tensor)
         self.agent_metadata = self.nixl_agent.get_agent_metadata()
