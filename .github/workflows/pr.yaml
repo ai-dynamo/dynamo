@@ -537,26 +537,26 @@ jobs:
         run: |
           git fetch origin gh-pages:gh-pages 2>/dev/null || echo "No gh-pages branch yet"
 
-          # Restore history for Allure 2 report
+          # Restore history for Allure 3 report (primary, at pre-merge/)
           if git show gh-pages:pre-merge/history 2>/dev/null; then
-            mkdir -p allure-results/history
-            for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
-              git show "gh-pages:pre-merge/history/$f" > "allure-results/history/$f" 2>/dev/null || true
-            done
-            echo "Restored Allure 2 history from gh-pages/pre-merge"
-          else
-            echo "No previous Allure 2 history found"
-          fi
-
-          # Restore history for Allure 3 report
-          if git show gh-pages:pre-merge-v3/history 2>/dev/null; then
             mkdir -p allure-results-v3-history
             for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
-              git show "gh-pages:pre-merge-v3/history/$f" > "allure-results-v3-history/$f" 2>/dev/null || true
+              git show "gh-pages:pre-merge/history/$f" > "allure-results-v3-history/$f" 2>/dev/null || true
             done
-            echo "Restored Allure 3 history from gh-pages/pre-merge-v3"
+            echo "Restored Allure 3 history from gh-pages/pre-merge"
           else
             echo "No previous Allure 3 history found"
+          fi
+
+          # Restore history for Allure 2 report (at pre-merge-v2/)
+          if git show gh-pages:pre-merge-v2/history 2>/dev/null; then
+            mkdir -p allure-results/history
+            for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
+              git show "gh-pages:pre-merge-v2/history/$f" > "allure-results/history/$f" 2>/dev/null || true
+            done
+            echo "Restored Allure 2 history from gh-pages/pre-merge-v2"
+          else
+            echo "No previous Allure 2 history found"
           fi
 
       - name: Generate Allure 2 Report
@@ -598,15 +598,15 @@ jobs:
             git checkout --orphan gh-pages
           fi
 
-          # Deploy Allure 2 report
+          # Deploy Allure 3 report (primary)
           mkdir -p pre-merge
           rm -rf pre-merge/*
-          cp -r "${GITHUB_WORKSPACE}/allure-report/"* pre-merge/
+          cp -r "${GITHUB_WORKSPACE}/allure-report-v3/"* pre-merge/
 
-          # Deploy Allure 3 report
-          mkdir -p pre-merge-v3
-          rm -rf pre-merge-v3/*
-          cp -r "${GITHUB_WORKSPACE}/allure-report-v3/"* pre-merge-v3/
+          # Deploy Allure 2 report
+          mkdir -p pre-merge-v2
+          rm -rf pre-merge-v2/*
+          cp -r "${GITHUB_WORKSPACE}/allure-report/"* pre-merge-v2/
 
           # Commit and push
           git add -A
@@ -622,8 +622,8 @@ jobs:
         run: |
           echo "## Allure Reports" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- [Allure 2 Report](https://ai-dynamo.github.io/dynamo/pre-merge/)" >> $GITHUB_STEP_SUMMARY
-          echo "- [Allure 3 Report](https://ai-dynamo.github.io/dynamo/pre-merge-v3/)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure Report](https://ai-dynamo.github.io/dynamo/pre-merge/)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure 2 Report](https://ai-dynamo.github.io/dynamo/pre-merge-v2/)" >> $GITHUB_STEP_SUMMARY
 
   # ============================================================================
   # CLEANUP JOBS
