@@ -87,19 +87,15 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 	return flags, needsShell
 }
 
-func convertIfShellVar(s string) string {
-	re := regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
+var shellVarRe = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
 
+func convertIfShellVar(s string) string {
 	if strings.HasPrefix(s, "$(") && strings.HasSuffix(s, ")") {
 		return s
 	}
 
-	if re.MatchString(s) {
-		match := re.FindStringSubmatch(s)
-		if len(match) > 1 {
-			name := re.FindStringSubmatch(s)[1]
-			return "$(" + name + ")"
-		}
+	if match := shellVarRe.FindStringSubmatch(s); len(match) > 1 {
+		return "$(" + match[1] + ")"
 	}
 
 	return s
