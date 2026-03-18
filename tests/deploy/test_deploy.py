@@ -47,6 +47,7 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
+GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def validate_chat_response(
@@ -224,13 +225,7 @@ async def test_deployment(
         )
 
 
-# ============================================================================
 # GAIE (Gateway API Inference Extension) deployment test
-# ============================================================================
-
-GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
-
-
 @pytest.mark.gaie
 @pytest.mark.k8s
 @pytest.mark.deploy
@@ -249,10 +244,10 @@ async def test_gaie_deployment(
     the full Gateway path.
     """
     frontend_image = request.config.getoption("--frontend-image")
-    vllm_image = request.config.getoption("--vllm-image")
+    worker_image = request.config.getoption("--image")
 
     assert frontend_image, "--frontend-image is required for GAIE deploy test"
-    assert vllm_image, "--vllm-image is required for GAIE deploy test"
+    assert worker_image, "--image is required for GAIE deploy test"
     assert namespace, "--namespace is required for GAIE deploy test"
 
     workspace = _get_workspace_dir()
@@ -269,11 +264,11 @@ async def test_gaie_deployment(
     deployment_spec.namespace = namespace
 
     logger.info(f"Frontend image: {frontend_image}")
-    logger.info(f"vLLM image: {vllm_image}")
+    logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
     for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
-        deployment_spec.set_image(vllm_image, service_name=worker)
+        deployment_spec.set_image(worker_image, service_name=worker)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 
     route_hostname = f"{namespace}.example.com"

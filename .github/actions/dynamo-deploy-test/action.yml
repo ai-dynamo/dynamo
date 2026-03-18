@@ -198,10 +198,13 @@ runs:
       id: test-name
       if: always()
       shell: bash
+      env:
+        TEST_NAME: ${{ inputs.test_name }}
+        FRAMEWORK: ${{ inputs.framework }}
+        PROFILE: ${{ inputs.profile }}
       run: |
-        TEST_NAME="${{ inputs.test_name }}"
         if [ -z "${TEST_NAME}" ]; then
-          TEST_NAME="${{ inputs.framework }}_${{ inputs.profile }}"
+          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
         fi
         echo "name=${TEST_NAME}" >> $GITHUB_OUTPUT
 
