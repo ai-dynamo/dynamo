@@ -904,7 +904,6 @@ def test_lora_aggregated(
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-@pytest.mark.skip(reason="DYN-2265")
 def test_lora_aggregated_router(
     request,
     runtime_services_dynamic_ports,
