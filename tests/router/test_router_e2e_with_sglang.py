@@ -425,7 +425,9 @@ def test_router_decisions_sglang_multiple_workers(
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
-@pytest.mark.skip(reason="DYN-2265")
+@pytest.mark.skip(
+    reason="DYN-2265"
+)  # Currently fails probably due to SGLang startup issues when multiple workers on same GPU; re-enable when fixed
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,

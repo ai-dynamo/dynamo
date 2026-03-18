@@ -19,10 +19,8 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
-from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
@@ -44,11 +42,7 @@ from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
-from .health_check import (
-    VllmHealthCheckPayload,
-    VllmOmniHealthCheckPayload,
-    VllmPrefillHealthCheckPayload,
-)
+from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import get_checkpoint_config
 
@@ -180,9 +174,6 @@ async def worker() -> None:
             snapshot_engine=snapshot_engine,
         )
         logger.debug("multimodal worker completed")
-    elif config.omni:
-        await init_omni(runtime, config, shutdown_event)
-        logger.debug("init_omni completed")
     elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
             runtime,
@@ -1046,86 +1037,6 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
     except Exception as e:
         logging.error(f"Failed to get configuration values from vLLM config: {e}")
         raise
-
-
-async def init_omni(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-) -> None:
-    """Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
-
-    Supports text-to-text, text-to-image, and text-to-video generation
-    through a single unified OmniHandler.
-    """
-    from dynamo.vllm.omni import OmniHandler
-
-    generate_endpoint = runtime.endpoint(
-        f"{config.namespace}.{config.component}.{config.endpoint}"
-    )
-
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    # Initialize media filesystem for storing generated images/videos
-    media_fs = (
-        get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
-    )
-
-    # Initialize unified OmniHandler
-    handler = OmniHandler(
-        runtime=runtime,
-        config=config,
-        default_sampling_params={},
-        shutdown_event=shutdown_event,
-        media_output_fs=media_fs,
-        media_output_http_url=config.media_output_http_url,
-    )
-
-    logger.info(f"Omni worker initialized for model: {config.model}")
-
-    # Set up metrics collection for vLLM and LMCache metrics
-    setup_metrics_collection(config, generate_endpoint, logger)
-
-    # TODO: extend for multi-stage pipelines
-    model_type = get_output_modalities(config.output_modalities, config.model)
-    if model_type is None:
-        # Default to Images
-        model_type = ModelType.Images
-    await register_model(
-        ModelInput.Text,
-        model_type,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve Omni worker endpoint...")
-
-    health_check_payload = (
-        await VllmOmniHealthCheckPayload.create(handler.engine_client)
-    ).to_dict()
-
-    try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[
-                (
-                    prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
-                ),
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
-                ),
-            ],
-            health_check_payload=health_check_payload,
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve Omni endpoint: {e}")
-        raise
-    finally:
-        logger.debug("Cleaning up Omni worker")
-        handler.cleanup()
 
 
 def main() -> None:

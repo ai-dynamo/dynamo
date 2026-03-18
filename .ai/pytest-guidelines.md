@@ -304,31 +304,6 @@ def test_vllm_aggregated(start_serve_deployment):
     ...
 ```
 
-## Async Tests
-
-`asyncio_mode = "auto"` is configured in `pyproject.toml`, so all `async def test_*`
-functions are collected automatically.
-
-**Always flag** `@pytest.mark.asyncio` -- this is a **required change, not a style
-suggestion**. The marker is never needed in this repo. Remove it.
-
-```python
-# BAD -- redundant marker; asyncio_mode = "auto" handles this
-@pytest.mark.asyncio
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-@pytest.mark.unit
-async def test_async_endpoint():
-    await asyncio.sleep(0.01)
-
-# GOOD -- no marker needed, pytest collects it automatically
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-@pytest.mark.unit
-async def test_async_endpoint():
-    await asyncio.sleep(0.01)
-```
-
 ## Hermetic Testing
 
 Tests must be isolated. Every test must run in any order, on any machine, and

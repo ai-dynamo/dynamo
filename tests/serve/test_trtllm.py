@@ -190,18 +190,23 @@ trtllm_configs = {
     "aggregated_multimodal_router": TRTLLMConfig(
         name="aggregated_multimodal_router",
         directory=trtllm_dir,
-        script_name="agg_multimodal.sh",
+        script_name="agg_multimodal_router.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen2-VL-7B-Instruct",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=60,
-        request_payloads=[multimodal_payload_default()],
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
     ),
     # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for pre-merge CI
     # Uses Qwen3-VL-2B-Instruct model with 1 GPU (all workers share same GPU)
