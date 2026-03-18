@@ -126,7 +126,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           args:
           - |
             python3 -m dynamo.frontend --http-port 8000
@@ -158,7 +158,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           workingDir: /workspace/components/backends/trtllm
           # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
           #       you might need to increase 'failureThreshold' below to allow more time for startup
@@ -216,7 +216,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           workingDir: /workspace/components/backends/trtllm
           # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
           #       you might need to increase 'failureThreshold' below to allow more time for startup

@@ -43,7 +43,7 @@
 //! ```
 //!
 //! For registering with external libraries:
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{
 //!     PinnedAllocator, StorageAllocator,
 //!     nixl::NixlRegisterableStorage
@@ -153,6 +153,18 @@ pub enum StorageError {
 
     #[error("Out of bounds: {0}")]
     OutOfBounds(String),
+}
+
+impl From<dynamo_memory::StorageError> for StorageError {
+    fn from(e: dynamo_memory::StorageError) -> Self {
+        match e {
+            dynamo_memory::StorageError::AllocationFailed(s) => StorageError::AllocationFailed(s),
+            dynamo_memory::StorageError::OperationFailed(s) => StorageError::OperationFailed(s),
+            dynamo_memory::StorageError::Cuda(e) => StorageError::Cuda(e),
+            dynamo_memory::StorageError::Nixl(e) => StorageError::NixlError(e),
+            e => StorageError::OperationFailed(e.to_string()),
+        }
+    }
 }
 
 /// Core storage trait that provides access to memory regions

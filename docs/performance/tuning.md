@@ -1,21 +1,8 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
-# Disaggregation and Performance Tuning
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Tuning Disaggregated Performance
+---
 
 Disaggregation gains performance by separating the prefill and decode into different engines to reduce interferences between the two.
 However, performant disaggregation requires careful tuning of the inference parameters.
@@ -89,7 +76,7 @@ For most frameworks, when chunked prefill is enabled and one forward iteration g
 In the prefill engine, the best strategy is to operate at the smallest batch size that saturates the GPUs so that the average time to first token (TTFT) is minimized.
 For example, for Llama3.3-70b NVFP4 quantization on B200 TP1 in vLLM, the below figure shows the prefill time with different isl (prefix caching is turned off):
 
-![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../images/prefill_time.png)
+![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../assets/img/prefill-time.png)
 
 For isl less than 1000, the prefill efficiency is low because the GPU is not fully saturated.
 For isl larger than 4000, the prefill time per token increases because the attention takes longer to compute with a longer history.

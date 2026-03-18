@@ -36,17 +36,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 // DynamoGraphDeploymentScalingAdapterReconciler reconciles a DynamoGraphDeploymentScalingAdapter object
 type DynamoGraphDeploymentScalingAdapterReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
-	Config   commonController.Config
+	Scheme        *runtime.Scheme
+	Recorder      record.EventRecorder
+	Config        *configv1alpha1.OperatorConfiguration
+	RuntimeConfig *commonController.RuntimeConfig
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
@@ -155,7 +158,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 		For(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
-		Named("dgdscalingadapter").
+		Named(consts.ResourceTypeDynamoGraphDeploymentScalingAdapter).
 		// Watch DGDs to sync status when DGD service replicas change
 		Watches(
 			&nvidiacomv1alpha1.DynamoGraphDeployment{},
@@ -176,8 +179,8 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
 		).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
-		Complete(r)
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
+		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentScalingAdapter))
 }
 
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests

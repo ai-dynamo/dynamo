@@ -21,7 +21,7 @@ spec:
           mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
     decode:
       componentType: worker
       subComponentType: decode
@@ -38,7 +38,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
           workingDir: /sgl-workspace/dynamo
           command:
             - python3
@@ -67,6 +67,8 @@ spec:
             - --host
             - 0.0.0.0
             - --prefill-round-robin-balance
+            - --watchdog-timeout
+            - "3600"
     prefill:
       componentType: worker
       subComponentType: prefill
@@ -83,7 +85,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
           workingDir: /sgl-workspace/dynamo
           command:
             - python3
@@ -110,3 +112,5 @@ spec:
             - 0.0.0.0
             - --load-balance-method
             - round_robin
+            - --watchdog-timeout
+            - "3600"

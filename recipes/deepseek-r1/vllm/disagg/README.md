@@ -3,19 +3,19 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-### DeepSeek-R1 with vLLM — Disaggregated on 8x Hopper
+### DeepSeek-R1 with vLLM — Disaggregated on 32x Hopper
 
-This recipe deploys DeepSeek-R1 using vLLM in a disaggregated prefill/decode setup on a single Hopper node with 8 GPUs.
+This recipe deploys DeepSeek-R1 using vLLM in a disaggregated prefill/decode setup across four Hopper nodes (32 GPUs total: 16 for prefill, 16 for decode).
 
 - Model cache PVC + download job: `recipes/deepseek-r1/model-cache/`
-- Deployment manifest: `recipes/deepseek-r1/vllm/disagg/deploy_hopper_8gpu.yaml`
+- Deployment manifest: `recipes/deepseek-r1/vllm/disagg/deploy_hopper_16gpu.yaml`
 
 ### 0) Prerequisites: Install the platform
 
 Follow the Kubernetes deployment guide to install the Dynamo platform and prerequisites (CRDs/operator, etc.):
 - `docs/kubernetes/README.md`
 
-Ensure you have a GPU-enabled cluster with sufficient capacity (8x H100/H200 “Hopper”), and that the NVIDIA GPU Operator is healthy.
+Ensure you have a GPU-enabled cluster with sufficient capacity (32x H100/H200 "Hopper" across 4 nodes), and that the NVIDIA GPU Operator is healthy.
 
 ### 1) Set namespace
 
@@ -58,15 +58,15 @@ This will populate:
 - `/model-cache/deepseek-r1`
 - `/model-cache/deepseek-r1-fp4`
 
-### 4) Deploy vLLM (Disaggregated, Prefill DEP16, Decode DEP16)
+### 4) Deploy vLLM (Disaggregated, 16-way Data-Expert Parallel)
 
-Apply the single-node disaggregated deployment:
+Apply the multi-node disaggregated deployment:
 
 ```bash
 kubectl apply -f ./deploy_hopper_16gpu.yaml -n ${NAMESPACE}
 ```
 
-The manifest runs separate prefill and decode workers, each mounting the shared model cache, with settings tuned for Hopper.
+The manifest runs separate prefill and decode workers across multiple nodes, each mounting the shared model cache, with settings tuned for Hopper GPUs.
 
 Test the deployment locally by port-forwarding and sending a request:
 

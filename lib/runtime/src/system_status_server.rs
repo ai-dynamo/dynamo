@@ -224,7 +224,7 @@ pub async fn spawn_system_status_server(
         .layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
     let address = format!("{}:{}", host, port);
-    tracing::info!("[spawn_system_status_server] binding to: {}", address);
+    tracing::info!("[spawn_system_status_server] binding to: {address}");
 
     let listener = match TcpListener::bind(&address).await {
         Ok(listener) => {
@@ -250,7 +250,7 @@ pub async fn spawn_system_status_server(
             .with_graceful_shutdown(observer.cancelled_owned())
             .await
         {
-            tracing::error!("System status server error: {}", e);
+            tracing::error!("System status server error: {e}");
         }
     });
 
@@ -288,18 +288,16 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 /// Metrics handler with DistributedRuntime uptime
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    // Update the uptime gauge with current value
-    state.drt().system_health().lock().update_uptime_gauge();
-
-    // Get all metrics from DistributedRuntime
-    // Note: In the new hierarchy-based architecture, metrics are automatically registered
-    // at all parent levels, so DRT's metrics include all metrics from children
-    // (Namespace, Component, Endpoint). The prometheus_expfmt() method also executes
-    // all update callbacks and expfmt callbacks before returning the metrics.
+    // Get all metrics from the DistributedRuntime.
+    // The uptime gauge is updated automatically via a PrometheusUpdateCallback
+    // registered in DistributedRuntime::new(), so it is always fresh before scrape.
+    //
+    // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
+    // so /metrics traverses registered child registries and produces a single combined output.
     let response = match state.drt().metrics().prometheus_expfmt() {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("Failed to get metrics from registry: {}", e);
+            tracing::error!("Failed to get metrics from registry: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get metrics".to_string(),
@@ -336,7 +334,7 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
             (StatusCode::OK, json).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to serialize metadata: {}", e);
+            tracing::error!("Failed to serialize metadata: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to serialize metadata".to_string(),
@@ -368,8 +366,17 @@ async fn load_lora_handler(
     .await
     {
         Ok(response) => {
-            tracing::info!("LoRA loaded successfully: {}", request.lora_name);
-            (StatusCode::OK, Json(response))
+            if response.status == "error" {
+                tracing::error!(
+                    "Failed to load LoRA {}: {}",
+                    request.lora_name,
+                    response.message.as_deref().unwrap_or("Unknown error")
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
+            } else {
+                tracing::info!("LoRA loaded successfully: {}", request.lora_name);
+                (StatusCode::OK, Json(response))
+            }
         }
         Err(e) => {
             tracing::error!("Failed to load LoRA {}: {}", request.lora_name, e);
@@ -399,7 +406,7 @@ async fn unload_lora_handler(
         .strip_prefix('/')
         .unwrap_or(&lora_name)
         .to_string();
-    tracing::info!("Unloading LoRA: {}", lora_name);
+    tracing::info!("Unloading LoRA: {lora_name}");
 
     // Call the unload_lora endpoint for each available backend
     match call_lora_endpoint(
@@ -412,8 +419,17 @@ async fn unload_lora_handler(
     .await
     {
         Ok(response) => {
-            tracing::info!("LoRA unloaded successfully: {}", lora_name);
-            (StatusCode::OK, Json(response))
+            if response.status == "error" {
+                tracing::error!(
+                    "Failed to unload LoRA {}: {}",
+                    lora_name,
+                    response.message.as_deref().unwrap_or("Unknown error")
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
+            } else {
+                tracing::info!("LoRA unloaded successfully: {lora_name}");
+                (StatusCode::OK, Json(response))
+            }
         }
         Err(e) => {
             tracing::error!("Failed to unload LoRA {}: {}", lora_name, e);
@@ -444,7 +460,7 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
             (StatusCode::OK, Json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to list LoRAs: {}", e);
+            tracing::error!("Failed to list LoRAs: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(LoraResponse {
@@ -471,7 +487,7 @@ async fn call_lora_endpoint(
 ) -> anyhow::Result<LoraResponse> {
     use crate::engine::AsyncEngine;
 
-    tracing::debug!("Calling local endpoint: '{}'", endpoint_name);
+    tracing::debug!("Calling local endpoint: '{endpoint_name}'");
 
     // Get the endpoint from the local registry (in-process call only)
     let local_registry = drt.local_endpoint_registry();
@@ -542,7 +558,7 @@ async fn engine_route_handler(
     Path(path): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    tracing::trace!("Engine route request to /engine/{}", path);
+    tracing::trace!("Engine route request to /engine/{path}");
 
     // Parse body as JSON (empty object for GET/empty body)
     let body_json: serde_json::Value = if body.is_empty() {
@@ -551,7 +567,7 @@ async fn engine_route_handler(
         match serde_json::from_slice(&body) {
             Ok(json) => json,
             Err(e) => {
-                tracing::warn!("Invalid JSON in request body: {}", e);
+                tracing::warn!("Invalid JSON in request body: {e}");
                 return (
                     StatusCode::BAD_REQUEST,
                     json!({
@@ -569,7 +585,7 @@ async fn engine_route_handler(
     let callback = match state.drt().engine_routes().get(&path) {
         Some(cb) => cb,
         None => {
-            tracing::debug!("Route /engine/{} not found", path);
+            tracing::debug!("Route /engine/{path} not found");
             return (
                 StatusCode::NOT_FOUND,
                 json!({
@@ -585,7 +601,7 @@ async fn engine_route_handler(
     // Call callback (it's async, so await it)
     match callback(body_json).await {
         Ok(response) => {
-            tracing::trace!("Engine route handler succeeded for /engine/{}", path);
+            tracing::trace!("Engine route handler succeeded for /engine/{path}");
             (StatusCode::OK, response.to_string()).into_response()
         }
         Err(e) => {
@@ -1016,7 +1032,7 @@ mod integration_tests {
                     }
                 }
 
-                tracing::info!("Health endpoint test results: {}/200 requests succeeded", success_count);
+                tracing::info!("Health endpoint test results: {success_count}/200 requests succeeded");
                 if !failures.is_empty() {
                     tracing::warn!("Failed requests: {}", failures.len());
                 }

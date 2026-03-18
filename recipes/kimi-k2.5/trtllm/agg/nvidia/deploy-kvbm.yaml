@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config-kimi-agg-kvbm
+data:
+  config.yaml: |
+    max_batch_size: 128
+    max_num_tokens: 8448
+    max_seq_len: 8212
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    enable_attention_dp: true
+    pipeline_parallel_size: 1
+    print_iter_log: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.75
+      dtype: fp8
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 8448
+    trust_remote_code: true
+    kv_connector_config:
+      connector_module: kvbm.trtllm_integration.connector
+      connector_scheduler_class: DynamoKVBMConnectorLeader
+      connector_worker_class: DynamoKVBMConnectorWorker
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k25-agg-kvbm
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - kimi-k25-agg-kvbm-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
+      replicas: 1
+    TrtllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          ports:
+          - name: system
+            containerPort: 9090
+          - name: nixl
+            containerPort: 19090
+          - name: kvbm
+            containerPort: 6880
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_NAME}" \
+              --served-model-name "${MODEL_NAME}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 8 \
+              --dyn-reasoning-parser kimi_k25 \
+              --dyn-tool-call-parser kimi_k2
+          command:
+          - /bin/sh
+          - -c
+          # REQUIRED: replace with your patched image tag (run patch/patch-container.sh first).
+          # Upstream TRT-LLM does not support KimiK25ForConditionalGeneration without the patch.
+          # Example: ./patch/patch-container.sh <your-image> -> produces <your-image>-patched
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: MODEL_NAME
+            value: nvidia/Kimi-K2.5-NVFP4
+          - name: ENGINE_ARGS
+            value: /opt/dynamo/configs/config.yaml
+          - name: HF_HOME
+            value: /opt/models
+          # Adjust CPU cache size as needed; start small for faster startup
+          - name: DYN_KVBM_CPU_CACHE_GB
+            value: "10"
+          # Enable KVBM metrics
+          - name: DYN_KVBM_METRICS
+            value: "true"
+          - name: DYN_KVBM_METRICS_PORT
+            value: "6880"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config-kimi-agg-kvbm
+            readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config-kimi-agg-kvbm
+          name: llm-config-kimi-agg-kvbm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"

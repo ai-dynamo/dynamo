@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"context"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -38,15 +39,16 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 }
 
 // Validate performs stateless validation on the DynamoComponentDeployment.
+// Context is required for operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings and error.
-func (v *DynamoComponentDeploymentValidator) Validate() (admission.Warnings, error) {
+func (v *DynamoComponentDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate shared spec fields using SharedSpecValidator
 	calculatedNamespace := v.deployment.GetDynamoNamespace()
 	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace)
 
 	// DCD-specific validation would go here (currently none)
 
-	return sharedValidator.Validate()
+	return sharedValidator.Validate(ctx)
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoComponentDeployment.

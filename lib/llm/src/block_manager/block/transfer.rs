@@ -242,7 +242,7 @@ where
                             )?;
                         }
                     }
-                }
+                };
                 ctx.cuda_event(tx)?;
 
                 Ok(rx)

@@ -84,8 +84,8 @@ async def http_server(runtime: DistributedRuntime):
     port = 8008
     model_name = "test_model"
     start_done = asyncio.Event()
-    child_token = runtime.child_token()
     checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
+    service = HttpService(port=port)  # Create service outside worker so we can shutdown
 
     async def worker():
         """The server worker task."""
@@ -94,11 +94,10 @@ async def http_server(runtime: DistributedRuntime):
             python_engine = MockHttpEngine(model_name)
             engine = HttpAsyncEngine(python_engine.generate, loop)
 
-            service = HttpService(port=port)
             service.add_chat_completions_model(model_name, checksum, engine)
             service.enable_endpoint("chat", True)
 
-            shutdown_signal = service.run(child_token)
+            shutdown_signal = service.run(runtime)
             print("Starting service on port", port)
             start_done.set()
             await shutdown_signal
@@ -106,8 +105,6 @@ async def http_server(runtime: DistributedRuntime):
             print("Server encountered an error:", e)
             start_done.set()
             raise ValueError(f"Server failed to start: {e}")
-        finally:
-            child_token.cancel()
 
     server_task = asyncio.create_task(worker())
     await asyncio.wait_for(start_done.wait(), timeout=30.0)
@@ -116,7 +113,7 @@ async def http_server(runtime: DistributedRuntime):
     yield f"http://localhost:{port}", model_name
 
     # Teardown: Cancel the server task if it's still running
-    child_token.cancel()
+    service.shutdown()  # Shutdown service
     await asyncio.sleep(0.1)  # Give some time for graceful shutdown
     if not server_task.done():
         server_task.cancel()

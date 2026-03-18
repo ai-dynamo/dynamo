@@ -213,6 +213,12 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         Value::from_serialize(&messages_json)
     }
 
+    fn typed_messages(
+        &self,
+    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+        Some(self.inner.messages.as_slice())
+    }
+
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
             None
@@ -230,6 +236,13 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         } else {
             Some(Value::from_serialize(&self.inner.tool_choice))
         }
+    }
+
+    fn response_format(&self) -> Option<Value> {
+        self.inner
+            .response_format
+            .as_ref()
+            .map(Value::from_serialize)
     }
 
     fn should_add_generation_prompt(&self) -> bool {

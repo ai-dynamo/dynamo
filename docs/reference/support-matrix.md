@@ -1,14 +1,118 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Support Matrix
+subtitle: Hardware, software, and build compatibility for Dynamo
+---
 
-# Dynamo Support Matrix
+**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
 
-This document provides the support matrix for Dynamo, including hardware, software and build instructions.
+## At a Glance
 
-> **See also:** [Feature Compatibility Matrix](../../feature-matrix.md) for backend-specific feature support (vLLM, TensorRT-LLM, SGLang).
+**Latest stable release:** [v1.0.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
+
+**Experimental release:** [v1.1.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.17.1` | NIXL `0.10.1`
+
+| Requirement | Supported |
+| :--- | :--- |
+| **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
+| **OS** | Ubuntu 22.04, Ubuntu 24.04, CentOS Stream 9 (experimental) |
+| **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
+| **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0) |
+
+**On this page:** [Backend Dependencies](#backend-dependencies) | [CUDA and Drivers](#cuda-and-driver-requirements) | [Hardware](#hardware-compatibility) | [Platform](#platform-architecture-compatibility) | [Cloud](#cloud-service-provider-compatibility) | [Build Support](#build-support)
+
+## Backend Dependencies
+
+The following table shows the backend framework versions included with each Dynamo release:
+
+| **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
+| :--- | :--- | :--- | :--- | :--- |
+| **main (ToT)** | `0.5.9` | `1.3.0rc7` | `0.17.1` | `0.10.1` |
+| **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
+| **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **v0.9.1** | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
+| **v0.9.0** | `0.5.8` | `1.3.0rc1` | `0.14.1` | `0.9.0` |
+| **v0.8.1.post3** | `0.5.6.post2` | `1.2.0rc6.post3` | `0.12.0` | `0.8.0` |
+| **v0.8.1.post2** | `0.5.6.post2` | `1.2.0rc6.post2` | `0.12.0` | `0.8.0` |
+| **v0.8.1.post1** | `0.5.6.post2` | `1.2.0rc6.post1` | `0.12.0` | `0.8.0` |
+| **v0.8.1** | `0.5.6.post2` | `1.2.0rc6.post1` | `0.12.0` | `0.8.0` |
+| **v0.8.0** | `0.5.6.post2` | `1.2.0rc6.post1` | `0.12.0` | `0.8.0` |
+| **v0.7.1** | `0.5.4.post3` | `1.2.0rc3` | `0.11.0` | `0.8.0` |
+| **v0.7.0.post1** | `0.5.4.post3` | `1.2.0rc3` | `0.11.0` | `0.8.0` |
+| **v0.7.0** | `0.5.4.post3` | `1.2.0rc2` | `0.11.0` | `0.8.0` |
+| **v0.6.1.post1** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
+| **v0.6.1** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
+| **v0.6.0** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
+
+### Version Labels
+
+- **main (ToT)** reflects the current development branch.
+- Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
+
+### Version Compatibility
+
+- Backend versions listed are the only versions tested and supported for each release.
+- TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
+
+### CUDA and Driver Requirements
+
+Dynamo container images include CUDA toolkit libraries. The host machine must have a compatible NVIDIA GPU driver installed.
+
+| Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **1.0.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| **1.0.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| **0.9.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| **0.9.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| **0.8.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| **0.8.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| **0.7.1** | **SGLang** | 12.8 | 570.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| **0.7.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.8 | 570.xx+ | |
+
+Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
+
+Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
+
+For detailed artifact versions and NGC links (including container images, Python wheels, Helm charts, and Rust crates), see the [Release Artifacts](release-artifacts.md) page.
+
+#### CUDA Compatibility Resources
+
+For detailed information on CUDA driver compatibility, forward compatibility, and troubleshooting:
+
+- [CUDA Compatibility Overview](https://docs.nvidia.com/deploy/cuda-compatibility/)
+- [Why CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/why-cuda-compatibility.html)
+- [Minor Version Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
+- [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
+- [FAQ](https://docs.nvidia.com/deploy/cuda-compatibility/frequently-asked-questions.html)
+
+For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
 
 ## Hardware Compatibility
 
@@ -17,6 +121,7 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 | **x86_64**           | Supported    |
 | **ARM64**            | Supported    |
 
+Dynamo provides multi-arch container images supporting both AMD64 (x86_64) and ARM64 architectures. See [Release Artifacts](release-artifacts.md) for available images.
 
 ### GPU Compatibility
 
@@ -40,49 +145,10 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Ubuntu**           | 24.04       | ARM64            | Supported    |
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
-> [!Note]
-> Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04).
->
-> Compatibility with other Linux distributions is expected but has not been officially verified yet.
+Wheels are built using a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but not officially verified.
 
 > [!Caution]
 > KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
-
-## Software Compatibility
-
-### Runtime Dependency
-
-| **Python Package** | **Version** | glibc version                         | CUDA Version |
-| :----------------- | :---------- | :------------------------------------ | :----------- |
-| ai-dynamo          | 0.8.0       | >=2.28                                |              |
-| ai-dynamo-runtime  | 0.8.0       | >=2.28 (Python 3.12 has known issues) |              |
-| NIXL               | 0.8.0       | >=2.27                                | >=11.8       |
-
-### Build Dependency
-
-The following table shows the dependency versions included with each Dynamo release:
-
-| **Dependency** | **main (ToT)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
-| :------------- | :------------- | :--------- | :--------- | :--------------- | :--------- |
-| SGLang         | 0.5.7          | 0.5.6.post2 | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
-| TensorRT-LLM   | 1.2.0rc6.post1 | 1.2.0rc6.post1 | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
-| vLLM           | 0.13.0         | 0.12.0     | 0.11.0     | 0.11.0           | 0.11.0     |
-| NIXL           | 0.8.0          | 0.8.0      | 0.8.0      | 0.8.0            | 0.8.0      |
-
-> [!Note]
-> **main (ToT)** reflects the current development branch.
-
-
-> [!Important]
-> Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.
-
-### CUDA Support by Framework
-| **Dynamo Version**   | **SGLang**                        | **TensorRT-LLM**        | **vLLM**                          |
-| :------------------- | :-------------------------------- | :-----------------------| :-------------------------------- |
-| **Dynamo 0.8.0**     | CUDA 12.9, CUDA 13.0 (🧪)         | CUDA 13.0               | CUDA 12.9, CUDA 13.0 (🧪)         |
-| **Dynamo 0.7.1**     | CUDA 12.8                         | CUDA 13.0               | CUDA 12.9                         |
-
-> 🧪 = Experimental
 
 ## Cloud Service Provider Compatibility
 
@@ -90,37 +156,49 @@ The following table shows the dependency versions included with each Dynamo rele
 
 | **Host Operating System** | **Version** | **Architecture** | **Status** |
 | :------------------------ | :---------- | :--------------- | :--------- |
-| **Amazon Linux**          | 2023        | x86_64           | Supported¹ |
+| **Amazon Linux**          | 2023        | x86_64           | Supported  |
 
 > [!Caution]
-> There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
+> **AL2023 TensorRT-LLM Limitation:** There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
 
 ## Build Support
+
+For version-specific artifact details, installation commands, and release history, see [Release Artifacts](release-artifacts.md).
 
 **Dynamo** currently provides build support in the following ways:
 
 - **Wheels**: We distribute Python wheels of Dynamo and KV Block Manager:
   - [ai-dynamo](https://pypi.org/project/ai-dynamo/)
   - [ai-dynamo-runtime](https://pypi.org/project/ai-dynamo-runtime/)
-  - **New as of Dynamo v0.7.0:** [kvbm](https://pypi.org/project/kvbm/) as a standalone implementation.
+  - [kvbm](https://pypi.org/project/kvbm/) as a standalone implementation.
 
-- **Dynamo Runtime Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Runtime for each of the LLM inference frameworks on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
-  - [SGLang](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
-  - [TensorRT-LLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
-  - [vLLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)
-
-- **Dynamo Kubernetes Operator Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Operator on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
-  - [kubernetes-operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator) to simplify deployments of Dynamo Graphs.
+- **Dynamo Container Images**: We distribute multi-arch images (x86 & ARM64 compatible) on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
+  - [Dynamo Frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend) *(New in v0.8.0)*
+  - [SGLang Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
+  - [SGLang Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime-cu13)
+  - [TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
+  - [TensorRT-LLM Runtime (EFA)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime) *(New in v1.0.0, Experimental, AMD64 only)*
+  - [vLLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)
+  - [vLLM Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime-cu13)
+  - [vLLM Runtime (EFA)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime) *(New in v1.0.0, Experimental, AMD64 only)*
+  - [Kubernetes Operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator)
+  - [Snapshot Agent](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent) *(New in v1.0.0, Preview)*
 
 - **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the helm charts supporting Kubernetes deployments of Dynamo:
-  - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds)
-  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform)
-  - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph)
+  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform) (now includes CRDs)
+  - [Snapshot](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/snapshot) *(New in v1.0.0, Preview)*
+  - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds) *(Deprecated in v1.0.0, CRDs managed by Operator)*
+  - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph) *(Deprecated in v0.9.0)*
 
 - **Rust Crates**:
   - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/)
+  - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
   - [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai/)
   - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
-  - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
+  - [dynamo-config](https://crates.io/crates/dynamo-config/) *(New in v0.8.0)*
+  - [dynamo-memory](https://crates.io/crates/dynamo-memory/) *(New in v0.8.0)*
+  - [dynamo-tokens](https://crates.io/crates/dynamo-tokens/) *(New in v0.9.0)*
+  - [dynamo-mocker](https://crates.io/crates/dynamo-mocker/) *(New in v1.0.0)*
+  - [dynamo-kv-router](https://crates.io/crates/dynamo-kv-router/) *(New in v1.0.0)*
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation).
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#local-quick-start) in the README.

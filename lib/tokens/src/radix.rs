@@ -2,16 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dashmap::DashMap;
+use std::hash::Hash;
 
-use crate::PositionalSequenceHash;
+use crate::{PositionalHash, PositionalSequenceHash};
 
 /// Positionally sparse radix tree for efficient indexing of [PositionalSequenceHashes][`crate::PositionalSequenceHash`].
 #[derive(Clone)]
-pub struct PositionalRadixTree<T> {
-    map: DashMap<u64, DashMap<PositionalSequenceHash, T>>,
+pub struct PositionalRadixTree<V, K = PositionalSequenceHash>
+where
+    K: PositionalHash + Hash + Eq + Clone,
+{
+    map: DashMap<u64, DashMap<K, V>>,
 }
 
-impl<T> PositionalRadixTree<T> {
+impl<V, K> PositionalRadixTree<V, K>
+where
+    K: PositionalHash + Hash + Eq + Clone,
+{
     /// Creates a new empty [`PositionalRadixTree`].
     pub fn new() -> Self {
         Self {
@@ -19,24 +26,21 @@ impl<T> PositionalRadixTree<T> {
         }
     }
 
-    /// Provides the entry for the [`PositionalSequenceHash`] at the given position.
-    pub fn prefix(
-        &self,
-        seq_hash: &PositionalSequenceHash,
-    ) -> dashmap::mapref::one::RefMut<'_, u64, DashMap<PositionalSequenceHash, T>> {
-        let position = seq_hash.position();
+    /// Provides the entry for the key at the given position.
+    pub fn prefix(&self, key: &K) -> dashmap::mapref::one::RefMut<'_, u64, DashMap<K, V>> {
+        let position = key.position();
         self.map.entry(position).or_default()
     }
 
-    /// Provides the sub-map for all [`PositionalSequenceHash`] entries at the given position.
+    /// Provides the sub-map for all entries at the given position.
     pub fn position(
         &self,
         position: u64,
-    ) -> Option<dashmap::mapref::one::RefMut<'_, u64, DashMap<PositionalSequenceHash, T>>> {
+    ) -> Option<dashmap::mapref::one::RefMut<'_, u64, DashMap<K, V>>> {
         self.map.get_mut(&position)
     }
 
-    /// Returns the number of entries [`PositionalSequenceHashes`][`crate::PositionalSequenceHash`] in the [`PositionalRadixTree`].
+    /// Returns the number of entries in the [`PositionalRadixTree`].
     pub fn len(&self) -> usize {
         if self.map.is_empty() {
             return 0;
@@ -44,13 +48,16 @@ impl<T> PositionalRadixTree<T> {
         self.map.iter().map(|level| level.len()).sum()
     }
 
-    /// Returns true if the [`PositionalRadixTree`] is empty of [`PositionalSequenceHashes`][`crate::PositionalSequenceHash`]
+    /// Returns true if the [`PositionalRadixTree`] is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
-impl<T> Default for PositionalRadixTree<T> {
+impl<V, K> Default for PositionalRadixTree<V, K>
+where
+    K: PositionalHash + Hash + Eq + Clone,
+{
     fn default() -> Self {
         Self {
             map: DashMap::new(),

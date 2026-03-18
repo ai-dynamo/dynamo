@@ -53,7 +53,7 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
+> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
 
 ## CRD Structure
 
@@ -112,7 +112,8 @@ Before using these templates, ensure you have:
 The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
-./container/build.sh --framework tensorrtllm
+python container/render.py --framework=trtllm --output-short-filename --cuda-version=13.1
+docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```
@@ -124,7 +125,8 @@ apt-get update && apt-get -y install git git-lfs
 
 For ARM machines, use:
 ```bash
-./container/build.sh --framework tensorrtllm --platform linux/arm64
+python container/render.py --framework=vllm --platform arm64 --output-short-filename
+docker build -f container/rendered.Dockerfile .
 ```
 
 ## Usage
@@ -153,7 +155,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create_deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create-deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -239,11 +241,11 @@ TensorRT-LLM supports two methods for KV cache transfer in disaggregated serving
 - **UCX** (default): Standard method for KV cache transfer
 - **NIXL** (experimental): Alternative transfer method
 
-For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/kv-cache-transfer.md).
+For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/trtllm-kv-cache-transfer.md).
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -262,13 +264,13 @@ Configure the `model` name and `host` based on your deployment.
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
-- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)
-- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/llama4_plus_eagle.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
+- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
+- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/trtllm-multinode-examples.md)
+- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/trtllm-llama4-plus-eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting

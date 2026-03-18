@@ -260,18 +260,18 @@ impl SharedTcpServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
-                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
+                            tracing::trace!("Accepted TCP connection from {peer_addr}");
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_connection(stream, handlers, work_tx).await {
-                                    tracing::error!("TCP connection error: {}", e);
+                                    tracing::error!("TCP connection error: {e}");
                                 }
                             });
                         }
                         Err(e) => {
-                            tracing::error!("Failed to accept TCP connection: {}", e);
+                            tracing::error!("Failed to accept TCP connection: {e}");
                         }
                     }
                 }
@@ -294,6 +294,8 @@ impl SharedTcpServer {
         endpoint_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
+        let fqn_endpoint = format!("{namespace}.{component_name}.{endpoint_name}");
+
         let handler = Arc::new(EndpointHandler {
             service_handler,
             instance_id,
@@ -314,8 +316,7 @@ impl SharedTcpServer {
             .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
 
         tracing::info!(
-            "Registered endpoint '{}' with shared TCP server on {}",
-            endpoint_name,
+            "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
             self.actual_address().unwrap_or(self.bind_addr)
         );
 
@@ -409,7 +410,7 @@ impl SharedTcpServer {
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to read TCP request: {}", e);
+                    tracing::warn!("Failed to read TCP request: {e}");
                     // Send error response
                     let error_response =
                         TcpResponseMessage::new(Bytes::from(format!("Read error: {}", e)));
@@ -424,7 +425,7 @@ impl SharedTcpServer {
             let endpoint_path = match request_msg.endpoint_path() {
                 Ok(path) => path,
                 Err(e) => {
-                    tracing::warn!("Invalid UTF-8 in endpoint path: {}", e);
+                    tracing::warn!("Invalid UTF-8 in endpoint path: {e}");
                     let error_response =
                         TcpResponseMessage::new(Bytes::from_static(b"Invalid endpoint path"));
                     if let Ok(encoded) = error_response.encode() {
@@ -453,7 +454,7 @@ impl SharedTcpServer {
             let handler = match handler {
                 Some(h) => h,
                 None => {
-                    tracing::warn!("No handler found for endpoint: {}", endpoint_path);
+                    tracing::warn!("No handler found for endpoint: {endpoint_path}");
                     // Send error response
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
                         "Unknown endpoint: {}",
@@ -673,10 +674,7 @@ mod tests {
     #[tokio::test]
     async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
         // Initialize tracing for test debugging
-        let _ = tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(tracing::Level::DEBUG)
-            .try_init();
+        crate::logging::init();
 
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -877,10 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_pool_bounds_concurrency() {
-        let _ = tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(tracing::Level::DEBUG)
-            .try_init();
+        crate::logging::init();
 
         // Use a small pool size for testing
         let pool_size = 3;

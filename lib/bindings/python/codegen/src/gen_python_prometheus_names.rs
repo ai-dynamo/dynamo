@@ -196,7 +196,7 @@ Parses lib/runtime/src/metrics/prometheus_names.rs and generates a pure Python
 module with 1:1 constant mappings at lib/bindings/python/src/dynamo/prometheus_names.py
 
 This allows Python code to import Prometheus metric constants without Rust bindings:
-    from dynamo.prometheus_names import frontend_service, kvstats
+    from dynamo.prometheus_names import frontend_service
 
 OPTIONS:
     --source PATH    Path to Rust source file
