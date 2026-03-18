@@ -144,7 +144,7 @@ type ServiceCheckpointStatus struct {
 	// IdentityHash is the computed hash of the checkpoint identity
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint is ready for use
+	// Ready indicates if the checkpoint was visible to the worker at startup
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }
