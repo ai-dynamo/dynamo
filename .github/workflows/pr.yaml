@@ -438,13 +438,6 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
           platform_arch: amd64
-      - name: Self-cleanup vCluster (rerun)
-        if: always() && steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/teardown-deploy
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   deploy-test-sglang:
     runs-on: prod-default-small-v2
@@ -506,13 +499,6 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
           platform_arch: amd64
-      - name: Self-cleanup vCluster (rerun)
-        if: always() && steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/teardown-deploy
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
@@ -578,13 +564,6 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
           platform_arch: amd64
-      - name: Self-cleanup vCluster (rerun)
-        if: always() && steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/teardown-deploy
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.VCLUSTER_NAME }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   # ============================================================================
   # CLEANUP JOBS
