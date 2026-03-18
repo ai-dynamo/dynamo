@@ -51,7 +51,12 @@ jobs:
               *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
               *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
               *"Release"*) echo "subdir=release" >> $GITHUB_OUTPUT ;;
-              *) echo "subdir=other" >> $GITHUB_OUTPUT ;;
+              *)
+                echo "::error::Unknown workflow name: '${WORKFLOW_NAME}'"
+                echo "::error::If this is a new workflow, update: (1) this case statement, (2) allurerc.mjs plugin filters, (3) the allure-all unified dashboard config."
+                echo "::error::If an existing workflow was renamed, also update the gh-pages subdir and dashboard-results path to preserve history trends."
+                exit 1
+                ;;
             esac
           fi
 
@@ -87,7 +92,7 @@ jobs:
       - name: Install Allure 3 CLI
         if: steps.check-results.outputs.has_results == 'true'
         run: |
-          npm install -g allure@3.3.1
+          npm install allure@3.3.1
 
       - name: Get Allure history from gh-pages
         if: steps.check-results.outputs.has_results == 'true'
@@ -131,7 +136,7 @@ jobs:
             mkdir -p allure-v3-workspace/allure-results/history
             cp allure-results-v3-history/* allure-v3-workspace/allure-results/history/ 2>/dev/null || true
           fi
-          allure generate --cwd allure-v3-workspace -o allure-report-v3
+          npx allure generate --cwd allure-v3-workspace -o allure-report-v3
 
       - name: Generate unified dashboard
         if: steps.check-results.outputs.has_results == 'true'
@@ -156,7 +161,7 @@ jobs:
           done
 
           # Generate unified dashboard using allurerc.mjs
-          allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
+          npx allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
 
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'

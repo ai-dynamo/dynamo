@@ -530,7 +530,7 @@ jobs:
       - name: Install Allure 3 CLI
         if: steps.check-results.outputs.has_results == 'true'
         run: |
-          npm install -g allure@3.3.1
+          npm install allure@3.3.1
 
       - name: Get Allure history from gh-pages
         if: steps.check-results.outputs.has_results == 'true'
@@ -575,7 +575,7 @@ jobs:
             cp allure-results-v3-history/* allure-v3-workspace/allure-results/history/ 2>/dev/null || true
           fi
           # Allure 3 uses --cwd to find allure-results/ and has no --clean flag
-          allure generate --cwd allure-v3-workspace -o allure-report-v3
+          npx allure generate --cwd allure-v3-workspace -o allure-report-v3
 
       - name: Generate unified dashboard
         if: steps.check-results.outputs.has_results == 'true'
@@ -597,7 +597,7 @@ jobs:
           done
 
           # Generate unified dashboard using allurerc.mjs
-          allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
+          npx allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
 
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'
