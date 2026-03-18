@@ -168,8 +168,43 @@ sglang_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
+    # --- RUN 1: WITHOUT UCX_TLS=^mm (will segfault, but captures encode worker proto info) ---
+    "multimodal_epd_qwen_no_fix": SGLangConfig(
+        name="multimodal_epd_qwen_no_fix",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+            "UCX_PROTO_INFO": "y",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    # --- RUN 2: WITH UCX_TLS=^mm (should pass, captures proto info for comparison) ---
     "multimodal_epd_qwen": SGLangConfig(
-        # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_epd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
@@ -182,6 +217,8 @@ sglang_configs = {
             "DYN_WORKER_GPU": "0",
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
+            "UCX_TLS": "^mm",
+            "UCX_PROTO_INFO": "y",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[

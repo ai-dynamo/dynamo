@@ -377,11 +377,6 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
     """
 
     def __init__(self):
-        # Exclude UCX shared-memory FIFO transport (uct_mm) which can segfault
-        # in ucs_mpool_grow on certain platforms (e.g. AWS EC2 AMD EPYC).
-        # cuda_ipc/cuda_copy remain available for actual GPU data transfers.
-        os.environ.setdefault("UCX_TLS", "^mm")
-
         # NIXL agent setup
         self.sender_id = f"sender_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
@@ -628,11 +623,6 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         # start if the last remaining buffer is not enough
         self.ring_buffer = RingBuffer(buffer_size)
         self.transfer_tensor = self.ring_buffer.buffer_tensor
-
-        # Exclude UCX shared-memory FIFO transport (uct_mm) which can segfault
-        # in ucs_mpool_grow on certain platforms (e.g. AWS EC2 AMD EPYC).
-        # cuda_ipc/cuda_copy remain available for actual GPU data transfers.
-        os.environ.setdefault("UCX_TLS", "^mm")
 
         # NIXL agent setup
         self.receiver_id = f"receiver_{str(uuid.uuid4())}"
