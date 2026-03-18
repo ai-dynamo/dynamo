@@ -259,7 +259,7 @@ jobs:
     name: vllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
       target: dev
@@ -268,13 +268,17 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false
+      copy_to_acr: false
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
     secrets: inherit
 
   sglang-dev-pipeline:
     name: sglang-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
       target: dev
@@ -283,13 +287,17 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false
+      copy_to_acr: false
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
     secrets: inherit
 
   trtllm-dev-pipeline:
     name: trtllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       target: dev
@@ -298,6 +306,10 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false
+      copy_to_acr: false
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
     secrets: inherit
 
    # ============================================================================
