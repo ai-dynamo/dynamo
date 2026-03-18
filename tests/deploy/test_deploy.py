@@ -227,7 +227,6 @@ async def test_deployment(
 
 # GAIE (Gateway API Inference Extension) deployment test
 @pytest.mark.gaie
-@pytest.mark.vllm
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
