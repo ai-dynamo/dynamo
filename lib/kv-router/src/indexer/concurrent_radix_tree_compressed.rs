@@ -184,10 +184,7 @@ impl ConcurrentRadixTreeCompressed {
 
     /// Search a node's subtree for the node whose edge contains `hash`.
     /// Used to resolve stale lookup entries caused by cross-thread splits.
-    fn find_in_subtree(
-        start: &SharedNode,
-        hash: ExternalSequenceBlockHash,
-    ) -> Option<SharedNode> {
+    fn find_in_subtree(start: &SharedNode, hash: ExternalSequenceBlockHash) -> Option<SharedNode> {
         let mut stack = Vec::new();
         {
             let guard = start.read();
@@ -592,8 +589,10 @@ impl ConcurrentRadixTreeCompressed {
                     Some(existing) => existing,
                     None => {
                         // No existing child — create a new node for all remaining blocks.
-                        let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> =
-                            remaining.iter().map(|b| (b.tokens_hash, b.block_hash)).collect();
+                        let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = remaining
+                            .iter()
+                            .map(|b| (b.tokens_hash, b.block_hash))
+                            .collect();
                         let mut edge_index =
                             FxHashMap::with_capacity_and_hasher(edge.len(), FxBuildHasher);
                         for (i, &(_, h)) in edge.iter().enumerate() {
@@ -642,7 +641,10 @@ impl ConcurrentRadixTreeCompressed {
                     match_len += 1;
                 }
 
-                debug_assert!(match_len >= 1, "first hash must match since child was found by it");
+                debug_assert!(
+                    match_len >= 1,
+                    "first hash must match since child was found by it"
+                );
 
                 if match_len < edge_len {
                     // Partial edge match: split at match_len, add worker to prefix.
@@ -676,7 +678,9 @@ impl ConcurrentRadixTreeCompressed {
                             full_edge_workers,
                             children: FxHashMap::default(),
                         }));
-                        child_guard.children.insert(tail_first_local, new_node.clone());
+                        child_guard
+                            .children
+                            .insert(tail_first_local, new_node.clone());
                         drop(child_guard);
 
                         Self::apply_split_lookup(lookup, split);
@@ -987,7 +991,10 @@ impl ConcurrentRadixTreeCompressed {
 
         while let Some((current_node, parent_hash)) = queue.pop_front() {
             let guard = current_node.read();
-            debug_assert!(!guard.edge.is_empty(), "non-root node must have non-empty edge");
+            debug_assert!(
+                !guard.edge.is_empty(),
+                "non-root node must have non-empty edge"
+            );
 
             let full_blocks: Vec<KvCacheStoredBlockData> = guard
                 .edge
@@ -1001,9 +1008,9 @@ impl ConcurrentRadixTreeCompressed {
             let last_ext = guard.edge.last().unwrap().1;
 
             for &worker in &guard.full_edge_workers {
-                events.push(RouterEvent {
-                    worker_id: worker.worker_id,
-                    event: KvCacheEvent {
+                events.push(RouterEvent::new(
+                    worker.worker_id,
+                    KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
                             parent_hash,
@@ -1011,13 +1018,13 @@ impl ConcurrentRadixTreeCompressed {
                         }),
                         dp_rank: worker.dp_rank,
                     },
-                });
+                ));
                 event_id += 1;
             }
             for (&worker, &k) in &guard.worker_cutoffs {
-                events.push(RouterEvent {
-                    worker_id: worker.worker_id,
-                    event: KvCacheEvent {
+                events.push(RouterEvent::new(
+                    worker.worker_id,
+                    KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
                             parent_hash,
@@ -1025,7 +1032,7 @@ impl ConcurrentRadixTreeCompressed {
                         }),
                         dp_rank: worker.dp_rank,
                     },
-                });
+                ));
                 event_id += 1;
             }
 
