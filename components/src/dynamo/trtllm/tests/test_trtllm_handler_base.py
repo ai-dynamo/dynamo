@@ -342,7 +342,7 @@ class TestMaxTokensDynamicDefault:
     """Tests for dynamic max_tokens default when client omits max_completion_tokens.
 
     When max_tokens is None (client didn't specify), the handler should compute
-    model_max_len - input_length as the default, matching vLLM handler behavior.
+    model_max_len - input_length as the default.
     """
 
     def _make_handler(self, model_max_len: int | None = None) -> HandlerBase:
