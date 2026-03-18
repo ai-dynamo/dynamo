@@ -51,6 +51,7 @@ from .args import Config
 from .constants import EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
+from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
@@ -1023,7 +1024,7 @@ class BaseWorkerHandler(ABC):
         return prompt, sequence_length, embeddings_tensor
 
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any], context
+        self, request: Dict[str, Any], request_id: str, context
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -1055,7 +1056,7 @@ class BaseWorkerHandler(ABC):
                     supported = False
             if supported:
                 vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
-                    image_urls, "dummy_id", model=self.config.model, context=context
+                    image_urls, request_id, model=self.config.model, context=context
                 )
                 logger.debug(
                     f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
@@ -1422,8 +1423,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
-        # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request, context)
+        # Firstly extract disaggregated params from prefill result if available
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
+                "kv_transfer_params"
+            )
+            embedding_params = prefill_result.get("disaggregated_params", {}).get(
+                "embedding_params"
+            )
+        else:
+            kv_params = None
+            embedding_params = None
+
+        multi_modal_data = None
+        # The decode worker is handling disaggregated requests, the mm embedding will be synthetic
+        if prefill_result is not None and embedding_params is not None:
+            if is_qwen_vl_model(self.config.model):
+                multi_modal_data = construct_qwen_decode_mm_data(
+                    embedding_params["image_grid_thw"],
+                    embedding_params["embeddings_shape"],
+                    request_id,
+                )
+        else:
+            # Extract and decode multimodal data if present
+            multi_modal_data = await self._extract_multimodal_data(
+                request, request_id, context
+            )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1437,14 +1463,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = build_sampling_params(
             request, self.default_sampling_params, self.model_max_len
         )
-
-        prefill_result = request.get("prefill_result")
-        if prefill_result and isinstance(prefill_result, dict):
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
-        else:
-            kv_params = None
 
         if kv_params is not None:
             if sampling_params.extra_args is None:
@@ -1633,7 +1651,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        multi_modal_data = await self._extract_multimodal_data(
+            request, request_id, context
+        )
+        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1713,10 +1734,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": (
-                        {"kv_transfer_params": res.kv_transfer_params}
-                        if res.kv_transfer_params
-                        else None
+                    "disaggregated_params": self._build_disaggregated_params(
+                        res.kv_transfer_params, embedding_params
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -1736,3 +1755,38 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 )
 
                 yield output
+
+    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+        disaggregated_params = {}
+        if kv_transfer_params is not None:
+            disaggregated_params["kv_transfer_params"] = kv_transfer_params
+        if embedding_params is not None:
+            disaggregated_params["embedding_transfer_params"] = embedding_params
+
+        return disaggregated_params if disaggregated_params else None
+
+    def _build_embedding_params(
+        self, multi_modal_data: dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Helper function to build mm embedding parameters to be consumed by the decode worker, typically
+        decode worker doesn't require any metadata for mm embedding as the content has been consumed by
+        prefill. However, especially found for Qwen models, vLLM's processor will try to expand image
+        tokens in the prompt which requires such a metadata to pass through the processor.
+        """
+        embedding_params = {}
+        if is_qwen_vl_model(self.config.model) and isinstance(
+            multi_modal_data.get("image"), dict
+        ):
+            image_data = multi_modal_data["image"]
+            image_grid_thw = image_data.get("image_grid_thw")
+            image_embeds = image_data.get("image_embeds")
+            if image_grid_thw is not None:
+                embedding_params["image_grid_thw"] = (
+                    image_grid_thw.tolist()
+                    if isinstance(image_grid_thw, torch.Tensor)
+                    else image_grid_thw
+                )
+            if image_embeds is not None:
+                embedding_params["embeddings_shape"] = list(image_embeds.shape)
+        return embedding_params if embedding_params else None
