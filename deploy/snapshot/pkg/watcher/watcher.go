@@ -38,6 +38,7 @@ const (
 	kubeAnnotationCheckpointStorageType = "nvidia.com/snapshot-checkpoint-storage-type"
 	kubeAnnotationCheckpointStatus      = "nvidia.com/snapshot-checkpoint-status"
 	kubeAnnotationRestoreStatus         = "nvidia.com/snapshot-restore-status"
+	kubeAnnotationRestoreContainerID    = "nvidia.com/snapshot-restore-container-id"
 )
 
 // Watcher watches for pods with checkpoint/restore labels and triggers operations.
@@ -255,14 +256,7 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 
-	annotationStatus := pod.Annotations[kubeAnnotationRestoreStatus]
-
 	if isPodReady(pod) {
-		return
-	}
-
-	// The operator retries restore by replacing failed restore-target pods.
-	if annotationStatus == "completed" || annotationStatus == "in_progress" || annotationStatus == "failed" {
 		return
 	}
 
@@ -287,7 +281,33 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 
-	if !w.tryAcquire(podKey) {
+	containerName := resolveMainContainerName(pod)
+	if containerName == "" {
+		w.log.Info("Restore pod has no containers", "pod", podKey)
+		return
+	}
+
+	containerID := ""
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != containerName || cs.ContainerID == "" {
+			continue
+		}
+		containerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
+		break
+	}
+	if containerID == "" {
+		w.log.V(1).Info("Restore pod has no running main container yet", "pod", podKey, "container", containerName)
+		return
+	}
+
+	annotationStatus := pod.Annotations[kubeAnnotationRestoreStatus]
+	annotationContainerID := pod.Annotations[kubeAnnotationRestoreContainerID]
+	if annotationContainerID == containerID && (annotationStatus == "completed" || annotationStatus == "in_progress") {
+		return
+	}
+
+	restoreAttemptKey := fmt.Sprintf("%s/%s", podKey, containerID)
+	if !w.tryAcquire(restoreAttemptKey) {
 		return
 	}
 
@@ -295,7 +315,7 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointHash))
 
 	go func() {
-		if err := w.doRestore(ctx, pod, checkpointHash, checkpointLocation, checkpointStorageType, podKey); err != nil {
+		if err := w.doRestore(ctx, pod, containerName, containerID, checkpointHash, checkpointLocation, checkpointStorageType, restoreAttemptKey); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
 			opLog.Error(err, "Restore worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
@@ -445,53 +465,40 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv
 }
 
 // doRestore runs the full restore workflow for a pod:
-//  1. Mark pod as in_progress
+//  1. Mark the current container instance as in_progress
 //  2. Call orchestrate.Restore (inspect placeholder → nsrestore inside namespace)
 //  3. SIGCONT the restored process to wake it up
 //  4. Wait for the pod to become Ready
-//  5. Mark pod as completed or failed
-func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash, checkpointLocation, checkpointStorageType, podKey string) error {
+//  5. Mark the container instance as completed
+func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointHash, checkpointLocation, checkpointStorageType, restoreAttemptKey string) error {
 	releaseOnExit := true
 	defer func() {
 		if releaseOnExit {
-			w.release(podKey)
+			w.release(restoreAttemptKey)
 		}
 	}()
-	log := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
+	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	log := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
 		annotations := map[string]string{
-			kubeAnnotationRestoreStatus: value,
+			kubeAnnotationRestoreStatus:      value,
+			kubeAnnotationRestoreContainerID: containerID,
 		}
-
-		if value == "failed" || value == "completed" {
-			if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
+		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
+			if value == "completed" {
 				releaseOnExit = false
 				return fmt.Errorf("failed to persist terminal restore status %q: %w", value, err)
 			}
-			return nil
-		}
-
-		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			return fmt.Errorf("failed to update restore status %q: %w", value, err)
 		}
 		return nil
 	}
 
 	if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
-		kubeAnnotationRestoreStatus: "in_progress",
+		kubeAnnotationRestoreStatus:      "in_progress",
+		kubeAnnotationRestoreContainerID: containerID,
 	}); err != nil {
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
-	}
-
-	containerName := resolveMainContainerName(pod)
-	if containerName == "" {
-		err := fmt.Errorf("no containers found in pod spec")
-		log.Error(err, "Restore failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus("failed"); statusErr != nil {
-			return statusErr
-		}
-		return nil
 	}
 
 	// Step 1: Run the restore orchestrator (inspect + nsrestore)
@@ -508,8 +515,14 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus("failed"); statusErr != nil {
-			return statusErr
+		placeholderHostPID, _, pidErr := common.ResolveContainerByPod(ctx, w.containerd, pod.Name, pod.Namespace, containerName)
+		if pidErr != nil {
+			releaseOnExit = false
+			return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
+		}
+		if killErr := common.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore failed"); killErr != nil {
+			releaseOnExit = false
+			return fmt.Errorf("restore failed and placeholder could not be killed: %w", killErr)
 		}
 		return nil
 	}
@@ -519,18 +532,17 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 	if err != nil {
 		log.Error(err, "Failed to resolve placeholder host PID for signaling")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus("failed"); statusErr != nil {
-			return statusErr
-		}
-		return nil
+		releaseOnExit = false
+		return fmt.Errorf("failed to resolve placeholder host PID for signaling: %w", err)
 	}
 	if err := common.SendSignalViaPIDNamespace(ctx, log, placeholderHostPID, restoredPID, syscall.SIGCONT, "restore complete"); err != nil {
 		log.Error(err, "Failed to signal restored runtime process")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus("failed"); statusErr != nil {
-			return statusErr
+		if killErr := common.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore signaling failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after restore signaling failure")
 		}
-		return nil
+		releaseOnExit = false
+		return fmt.Errorf("failed to signal restored runtime process: %w", err)
 	}
 
 	// Step 3: Wait for the pod to become Ready
@@ -543,10 +555,11 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 	if err := waitForPodReady(readyCtx, w.clientset, pod.Namespace, pod.Name, containerName); err != nil {
 		log.Error(err, "Restore post-signal readiness check failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus("failed"); statusErr != nil {
-			return statusErr
+		if killErr := common.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore readiness failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after restore readiness failure")
 		}
-		return nil
+		releaseOnExit = false
+		return fmt.Errorf("restore post-signal readiness check failed: %w", err)
 	}
 
 	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointHash))

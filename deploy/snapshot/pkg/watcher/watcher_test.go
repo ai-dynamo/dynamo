@@ -21,6 +21,7 @@ import (
 )
 
 const testNodeName = "test-node"
+const testContainerID = "test-container"
 
 // makeTestWatcher creates a Watcher with a fake k8s client and nil orchestrators.
 // The fake clientset is empty so any goroutine launched by doCheckpoint/doRestore
@@ -249,15 +250,16 @@ func TestHandleCheckpointPodEvent(t *testing.T) {
 
 func TestHandleRestorePodEvent(t *testing.T) {
 	tests := []struct {
-		name       string
-		nodeName   string
-		phase      corev1.PodPhase
-		ready      bool
-		hash       string
-		annotation string
-		createDir  bool // whether to create the checkpoint dir on disk
-		preSeed    bool
-		want       bool
+		name                  string
+		nodeName              string
+		phase                 corev1.PodPhase
+		ready                 bool
+		hash                  string
+		annotationStatus      string
+		annotationContainerID string
+		createDir             bool // whether to create the checkpoint dir on disk
+		preSeed               bool
+		want                  bool
 	}{
 		{
 			name:      "happy path",
@@ -313,34 +315,48 @@ func TestHandleRestorePodEvent(t *testing.T) {
 			want:      false,
 		},
 		{
-			name:       "already completed",
-			nodeName:   testNodeName,
-			phase:      corev1.PodRunning,
-			ready:      false,
-			hash:       "abc123",
-			annotation: "completed",
-			createDir:  true,
-			want:       false,
+			name:                  "already completed for same container",
+			nodeName:              testNodeName,
+			phase:                 corev1.PodRunning,
+			ready:                 false,
+			hash:                  "abc123",
+			annotationStatus:      "completed",
+			annotationContainerID: testContainerID,
+			createDir:             true,
+			want:                  false,
 		},
 		{
-			name:       "already in progress",
-			nodeName:   testNodeName,
-			phase:      corev1.PodRunning,
-			ready:      false,
-			hash:       "abc123",
-			annotation: "in_progress",
-			createDir:  true,
-			want:       false,
+			name:                  "already in progress for same container",
+			nodeName:              testNodeName,
+			phase:                 corev1.PodRunning,
+			ready:                 false,
+			hash:                  "abc123",
+			annotationStatus:      "in_progress",
+			annotationContainerID: testContainerID,
+			createDir:             true,
+			want:                  false,
 		},
 		{
-			name:       "already failed",
-			nodeName:   testNodeName,
-			phase:      corev1.PodRunning,
-			ready:      false,
-			hash:       "abc123",
-			annotation: "failed",
-			createDir:  true,
-			want:       false,
+			name:                  "completed for previous container retries",
+			nodeName:              testNodeName,
+			phase:                 corev1.PodRunning,
+			ready:                 false,
+			hash:                  "abc123",
+			annotationStatus:      "completed",
+			annotationContainerID: "old-container",
+			createDir:             true,
+			want:                  true,
+		},
+		{
+			name:                  "in progress for previous container retries",
+			nodeName:              testNodeName,
+			phase:                 corev1.PodRunning,
+			ready:                 false,
+			hash:                  "abc123",
+			annotationStatus:      "in_progress",
+			annotationContainerID: "old-container",
+			createDir:             true,
+			want:                  true,
 		},
 		{
 			name:      "checkpoint not on disk",
@@ -376,9 +392,10 @@ func TestHandleRestorePodEvent(t *testing.T) {
 			checkpointDir := t.TempDir()
 
 			var annotations map[string]string
-			if tc.annotation != "" {
+			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					kubeAnnotationRestoreStatus: tc.annotation,
+					kubeAnnotationRestoreStatus:      tc.annotationStatus,
+					kubeAnnotationRestoreContainerID: tc.annotationContainerID,
 				}
 			}
 			if tc.hash != "" {
@@ -390,6 +407,11 @@ func TestHandleRestorePodEvent(t *testing.T) {
 			}
 
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:        "main",
+				Ready:       tc.ready,
+				ContainerID: "containerd://" + testContainerID,
+			}}
 
 			if tc.createDir && tc.hash != "" {
 				dir := filepath.Join(checkpointDir, tc.hash)
@@ -401,7 +423,7 @@ func TestHandleRestorePodEvent(t *testing.T) {
 			ctx := context.Background()
 
 			if tc.preSeed {
-				w.inFlight["default/test-pod"] = struct{}{}
+				w.inFlight["default/test-pod/"+testContainerID] = struct{}{}
 			}
 
 			w.handleRestorePodEvent(ctx, pod)
@@ -478,51 +500,5 @@ func TestDoCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testin
 	}
 	if remainingLease.Spec.HolderIdentity == nil || *remainingLease.Spec.HolderIdentity != "test-holder" {
 		t.Fatalf("unexpected remaining lease holder: %#v", remainingLease.Spec.HolderIdentity)
-	}
-}
-
-func TestDoRestoreKeepsInFlightOnTerminalStatusPatchFailure(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-pod",
-			Namespace: "default",
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-		},
-	}
-
-	clientset := fake.NewClientset(pod.DeepCopy())
-	patchCalls := 0
-	clientset.PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
-		patchCalls++
-		if patchCalls == 1 {
-			return false, nil, nil
-		}
-		return true, nil, errors.New("terminal patch failed")
-	})
-
-	w := &Watcher{
-		config: &types.AgentConfig{
-			NodeName: testNodeName,
-		},
-		clientset: clientset,
-		log:       testr.New(t),
-		holderID:  "test-holder",
-		inFlight: map[string]struct{}{
-			"default/test-pod": {},
-		},
-		stopCh: make(chan struct{}),
-	}
-
-	err := w.doRestore(context.Background(), pod, "abc123", filepath.Join(t.TempDir(), "abc123"), "pvc", "default/test-pod")
-	if err == nil {
-		t.Fatal("expected terminal restore status update to fail")
-	}
-	if _, ok := w.inFlight["default/test-pod"]; !ok {
-		t.Fatal("restore terminal status failure should keep pod in-flight")
-	}
-	if patchCalls != 2 {
-		t.Fatalf("patchCalls = %d, want %d", patchCalls, 2)
 	}
 }

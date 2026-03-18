@@ -149,7 +149,6 @@ const (
 	KubeLabelIsRestoreTarget            = "nvidia.com/snapshot-is-restore-target"       // Pod label that triggers DaemonSet auto-restore
 	KubeAnnotationCheckpointLocation    = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
 	KubeAnnotationCheckpointStorageType = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
-	KubeAnnotationRestoreStatus         = "nvidia.com/snapshot-restore-status"          // Pod annotation written by snapshot-agent during restore
 
 	// Environment variables injected into pods
 	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods

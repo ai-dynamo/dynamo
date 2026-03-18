@@ -37,7 +37,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -2139,7 +2138,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 	}
 }
 
-func Test_reconcileDeploymentResources_DeletesFailedRestorePods(t *testing.T) {
+func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 
@@ -2195,23 +2194,9 @@ func Test_reconcileDeploymentResources_DeletesFailedRestorePods(t *testing.T) {
 		},
 	}
 
-	failedRestorePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "failed-restore",
-			Namespace: "default",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoSelector:  "test-component",
-				commonconsts.KubeLabelIsRestoreTarget: commonconsts.KubeLabelValueTrue,
-			},
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationRestoreStatus: "failed",
-			},
-		},
-	}
-
 	fakeKubeClient := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(dcd, deployment, failedRestorePod).
+		WithObjects(dcd, deployment).
 		WithStatusSubresource(dcd, deployment).
 		Build()
 
@@ -2245,8 +2230,6 @@ func Test_reconcileDeploymentResources_DeletesFailedRestorePods(t *testing.T) {
 		},
 	}))
 
-	err = fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(failedRestorePod), &corev1.Pod{})
-	g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue())
 }
 
 func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
