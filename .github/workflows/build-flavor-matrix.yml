@@ -138,8 +138,8 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ inputs.framework }}
-          arch: ${{ inputs.platform }}
-          cuda_version: ${{ inputs.cuda_version }}
+          arch: ${{ matrix.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
         timeout-minutes: ${{ inputs.build_timeout_minutes }}
