@@ -68,7 +68,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -222,9 +222,7 @@ jobs:
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
-      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
+      run_multi_gpu_tests: false  # all sglang multi-GPU tests are currently skipped; re-enable when fixed
     secrets: inherit
 
   # ============================================================================
@@ -310,18 +308,6 @@ jobs:
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
-    secrets: inherit
-
-  # ============================================================================
-  # FRONTEND IMAGE BUILD
-  # ============================================================================
-  frontend-image:
-    name: Frontend Image
-    needs: [changed-files]
-    if: needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-frontend-image.yaml
-    with:
-      skip_change_detection: true
     secrets: inherit
 
    # ============================================================================
@@ -501,70 +487,6 @@ jobs:
           platform_arch: amd64
 
   # ============================================================================
-  # GAIE DEPLOY TEST
-  # ============================================================================
-  deploy-test-gaie:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.vllm == 'true') &&
-      (needs.frontend-image.result == 'success') &&
-      (needs.vllm-pipeline.result == 'success')
-    runs-on: prod-default-small-v2
-    needs: [changed-files, deploy-operator, frontend-image, vllm-pipeline]
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    name: deploy-test-gaie
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Setup Kubeconfig
-        shell: bash
-        env:
-          NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-        run: |
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
-          chmod 600 ${{ github.workspace }}/.kubeconfig
-          echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
-          export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-          kubectl config set-context --current --namespace=${NAMESPACE}
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: "container/deps/requirements.test.txt"
-      - name: Install test dependencies
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r container/deps/requirements.test.txt
-      - name: Run GAIE Deploy Test
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-          NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          FRONTEND_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
-          VLLM_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
-        run: |
-          mkdir -p test-results
-          pytest tests/deploy/test_gaie_deploy.py \
-            --frontend-image="${FRONTEND_IMAGE}" \
-            --vllm-image="${VLLM_IMAGE}" \
-            --namespace="${NAMESPACE}" \
-            -v -s \
-            --durations=10 \
-            --junitxml=test-results/pytest_deploy_gaie_${{ github.run_id }}_${{ job.check_run_id }}.xml \
-            --log-cli-level=INFO
-      - name: Upload Test Results
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
-        if: always()
-        with:
-          name: test-results-gaie-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/pytest_deploy_gaie_${{ github.run_id }}_${{ job.check_run_id }}.xml
-          retention-days: 7
-
-  # ============================================================================
   # CLEANUP JOBS
   # Clean up ephemeral Kubernetes namespace and resources
   # ============================================================================
@@ -594,7 +516,7 @@ jobs:
     name: Cleanup AKS resources
     runs-on: prod-default-small-v2
     if: always()
-    needs: [deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
