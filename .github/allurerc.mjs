@@ -16,7 +16,7 @@ export default defineConfig({
         reportName: "Dashboard",
         singleFile: false,
         reportLanguage: "en",
-        publish: true,
+        publish: false,
       },
     },
     pr: {

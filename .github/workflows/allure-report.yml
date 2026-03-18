@@ -161,7 +161,7 @@ jobs:
           done
 
           # Generate unified dashboard using allurerc.mjs
-          npx allure generate --config="${GITHUB_WORKSPACE}/allurerc.mjs" --cwd unified-workspace -o allure-all-report
+          npx allure generate --config="${GITHUB_WORKSPACE}/.github/allurerc.mjs" --cwd unified-workspace -o allure-all-report
 
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'
