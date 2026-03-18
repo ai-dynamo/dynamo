@@ -292,6 +292,9 @@ vllm_configs = {
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        env={
+            "UCX_PROTO_INFO": "y",
+        },
         request_payloads=[
             chat_payload(
                 [

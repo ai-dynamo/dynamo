@@ -79,7 +79,8 @@ EXTRA_ARGS=""
 #   "local" = local file (safetensors),
 #   "nixl-write" = NIXL WRITE transfer
 #   "nixl-read" = NIXL READ transfer (default: "local")
-export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
+# Remove local default to test NIXL_WRITE (default from backend_args.py)
+# export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
 # In single-GPU mode both workers share the same GPU.
