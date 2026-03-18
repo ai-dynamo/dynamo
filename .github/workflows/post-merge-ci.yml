@@ -106,7 +106,7 @@ jobs:
       build_timeout_minutes: 60
       push_image: true
       run_compliance_scan: true
-      auto_acr_deploy: true
+      copy_to_acr: true
     secrets: inherit
 
   sglang-dev-pipeline:
@@ -121,7 +121,7 @@ jobs:
       build_timeout_minutes: 60
       push_image: true
       run_compliance_scan: true
-      auto_acr_deploy: true
+      copy_to_acr: true
     secrets: inherit
 
   trtllm-dev-pipeline:
@@ -136,7 +136,7 @@ jobs:
       build_timeout_minutes: 60
       push_image: true
       run_compliance_scan: true
-      auto_acr_deploy: true
+      copy_to_acr: true
     secrets: inherit
 
   # ============================================================================
