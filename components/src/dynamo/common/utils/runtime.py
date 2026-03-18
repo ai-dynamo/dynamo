@@ -95,4 +95,4 @@ def run_async(func, *args, **kwargs):
     import concurrent.futures
 
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        return pool.submit(asyncio.run, func(*args, **kwargs)).result(timeout=10)
+        return pool.submit(asyncio.run, func(*args, **kwargs)).result()
