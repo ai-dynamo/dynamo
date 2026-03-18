@@ -740,11 +740,7 @@ pub unsafe extern "C" fn create_routers(
             }
         }
 
-        // Create PrefillRouter based on one-time discovery of prefill workers
-        // Auto-detects disaggregated mode by checking if prefill workers are present
-        // The prefill workers have to be created before the epp is created.
-        // Given that we wait first for the decode worker to show up it is reasonable to assume the prefill will be up as well.
-        let prefill_router = match find_prefill_endpoint(&drt, &namespace_str).await {
+        let prefill_router = match find_prefill_endpoint(&drt, &namespace_str, enforce_disagg).await {
             Some(prefill_endpoint) => {
                 tracing::info!("Prefill worker found, running in disaggregated mode");
                 let mut prefill_config = kv_router_config;
@@ -1405,59 +1401,102 @@ async fn fetch_preprocessor_from_discovery(
     ))
 }
 
-/// Find a prefill endpoint from already-discovered instances (one-time filter).
-/// Returns the endpoint if a prefill worker is found in the target namespace.
+/// Find a prefill endpoint, waiting for prefill workers to register.
+///
+/// Waits indefinitely (controlled by K8s StartupProbe) for a prefill worker
+/// to appear in the target namespace. This prevents the race condition where
+/// the EPP starts before prefill workers have registered, which would create
+/// a permanently disabled PrefillRouter.
+///
+/// Returns None only if `enforce_disagg` is false and no prefill workers
+/// appear within 5 minutes, allowing aggregated-mode fallback.
+/// Returns immediately as soon as a prefill worker registers.
 async fn find_prefill_endpoint(
     drt: &DistributedRuntime,
     target_namespace: &str,
+    enforce_disagg: bool,
 ) -> Option<dynamo_runtime::component::Endpoint> {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::DiscoveryInstance;
 
     let discovery = drt.discovery();
-    let instances = match discovery.list(DiscoveryQuery::AllModels).await {
-        Ok(instances) => instances,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list instances for prefill discovery");
-            return None;
-        }
+
+    // enforce_disagg=true:  wait indefinitely (K8s StartupProbe is the timeout)
+    // enforce_disagg=false: wait up to 5 minutes, exit early as soon as a prefill worker appears
+    let deadline = if enforce_disagg {
+        None
+    } else {
+        Some(tokio::time::Instant::now() + Duration::from_secs(300))
     };
 
-    for instance in instances {
-        if let DiscoveryInstance::Model {
-            namespace,
-            component,
-            endpoint,
-            ..
-        } = &instance
-        {
-            if !namespace.starts_with(target_namespace) {
-                continue;
-            }
+    let mut logged_waiting = false;
 
-            let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => card,
-                Err(_) => continue,
-            };
-
-            // Only handle prefill models
-            if !card.model_type.supports_prefill() {
-                continue;
-            }
-
-            tracing::info!(
-                model_name = card.name(),
-                "Prefill worker found in discovered instances"
-            );
-
-            // Build and return the endpoint
-            if let Ok(ns) = drt.namespace(namespace)
-                && let Ok(comp) = ns.component(component)
-            {
-                return Some(comp.endpoint(endpoint));
+    loop {
+        if let Some(dl) = deadline {
+            if tokio::time::Instant::now() >= dl {
+                tracing::info!(
+                    "No prefill workers found after 5 minutes, proceeding in aggregated mode"
+                );
+                return None;
             }
         }
-    }
 
-    None
+        let instances = match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(instances) => instances,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list instances for prefill discovery");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        for instance in instances {
+            if let DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                ..
+            } = &instance
+            {
+                if !namespace.starts_with(target_namespace) {
+                    continue;
+                }
+
+                let card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                    Ok(card) => card,
+                    Err(_) => continue,
+                };
+
+                if !card.model_type.supports_prefill() {
+                    continue;
+                }
+
+                tracing::info!(
+                    model_name = card.name(),
+                    "Prefill worker found in discovered instances"
+                );
+
+                if let Ok(ns) = drt.namespace(namespace)
+                    && let Ok(comp) = ns.component(component)
+                {
+                    return Some(comp.endpoint(endpoint));
+                }
+            }
+        }
+
+        if !logged_waiting {
+            if enforce_disagg {
+                tracing::info!(
+                    "Waiting for prefill workers to register \
+                     (no timeout - controlled by K8s StartupProbe)..."
+                );
+            } else {
+                tracing::info!(
+                    "Waiting up to 5 minutes for prefill workers to register..."
+                );
+            }
+            logged_waiting = true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
