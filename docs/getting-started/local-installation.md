@@ -106,9 +106,15 @@ Dynamo components discover each other through a shared backend. Two options are 
 
 This guide uses `--discovery-backend file`. For etcd setup, see [Service Discovery](../kubernetes/service-discovery.md).
 
-### Verify System Configuration (Optional)
+### Verify Installation (Optional)
 
-Before running Dynamo, you can verify your system configuration:
+Verify the CLI is installed and callable:
+
+```bash
+python3 -m dynamo.frontend --help
+```
+
+If you cloned the repository, you can run additional system checks:
 
 ```bash
 python3 deploy/sanity_check.py
