@@ -306,7 +306,6 @@ class MultiModalEmbeddingLoader:
         request_id: str,
         *,
         model: str,
-        embeddings_dtype: torch.dtype,
         context=None,
     ) -> Dict[str, Any]:
         """Fetch embeddings and build engine-ready ``multi_modal_data``.
@@ -337,7 +336,7 @@ class MultiModalEmbeddingLoader:
                 _accumulate_embeddings(
                     multi_modal_data,
                     model,
-                    embeddings_dtype,
+                    group.loaded_embedding.dtype,
                     group.loaded_embedding,
                     group.image_grid_thw,
                 )

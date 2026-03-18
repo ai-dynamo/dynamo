@@ -23,6 +23,14 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
@@ -39,8 +47,11 @@ from dynamo.llm import (
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .args import Config
+from .constants import EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
+from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -301,10 +312,11 @@ class BaseWorkerHandler(ABC):
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
+        config: Config | None = None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -327,6 +339,7 @@ class BaseWorkerHandler(ABC):
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
+        self.embedding_loader = self.init_embedding_loader(encode_worker_client, config)
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -342,6 +355,52 @@ class BaseWorkerHandler(ABC):
 
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
+
+    def init_embedding_loader(
+        self, encode_worker_client: Client, config: Config
+    ) -> MultiModalEmbeddingLoader | None:
+        """Initialize the embedding loader with the given encode worker client."""
+        # Without encode worker, the embedding will be generated internally by vLLM.
+        if encode_worker_client is None:
+            return None
+        # Embedding loader consist of two main components:
+        # 1) An remote encode worker client and matching embedding receiver,
+        #    which can request remote encode and handle the transfer of embeddings
+        #    from the encode worker to this prefill worker.
+        # 2) A local embedding cache manager, which can store previously fetched embeddings
+        #    and used to determine whether remote encode is necessary for a given mm data.
+        self.encode_worker_client = encode_worker_client
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_receiver = LocalEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+            # to be at matching size, need to overwrite nixl connect library
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
+        # [gluo FIXME/NOTE] This embedding cache manager is purely used for caching embedding
+        # results from encode worker, but 'config.multimodal_embedding_cache_capacity_gb' is
+        # also used to configure the DynamoMultimodalEmbeddingCacheConnector within the vLLM.
+        # This results in duplication of memory and ideally we should have single cache manager
+        # which can be used by vLLM internal and here. Then we can explore asynchrous embedding
+        # transfer as we can process and block until the embedding is actually used within vLLM.
+        self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
+        if config.multimodal_embedding_cache_capacity_gb > 0:
+            capacity_bytes = int(
+                config.multimodal_embedding_cache_capacity_gb * 1024**3
+            )
+            self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
+                capacity_bytes
+            )
+        self.embedding_loader = MultiModalEmbeddingLoader(
+            encode_worker_client=self.encode_worker_client,  # type: ignore
+            receiver=self.embedding_receiver,
+            embedding_cache_manager=self.embedding_cache_manager,
+        )
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -975,8 +1034,29 @@ class BaseWorkerHandler(ABC):
             )
 
         mm_map = request["multi_modal_data"]
-        vllm_mm_data = {}
 
+        # [gluo NOTE] If embedding loader is configured, currently we unconditionally
+        # fetch from the embedding loader.
+        if self.embedding_loader is not None:
+            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
+            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
+            # support 'Decoded' variant. Need to update the encode worker to unify handling
+            image_urls = []
+            supported = True
+            for item in mm_map.get(IMAGE_URL_KEY, []):
+                if isinstance(item, dict) and "Url" in item:
+                    image_urls.append(item["Url"])
+                elif isinstance(item, dict) and "Decoded" in item:
+                    supported = False
+            if supported:
+                vllm_mm_data = await self.embedding_loader.load_embedding_batch(mm_map)
+                logger.debug(
+                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                )
+                return vllm_mm_data if vllm_mm_data else None
+
+        # Fallback that the vLLM engine will perform encoding internally.
+        vllm_mm_data = {}
         # Process image_url entries
         images = await self.image_loader.load_image_batch(
             mm_map.get(IMAGE_URL_KEY, []),
@@ -1298,11 +1378,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
     ):
-        if encode_worker_client is not None:
-            raise NotImplementedError(
-                "'encode_worker_client' is provided which indicates remote "
-                "multimodal encode is configured, this is not currently supported."
-            )
         super().__init__(
             runtime,
             engine,
@@ -1314,6 +1389,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
+            encode_worker_client,
         )
 
     async def generate(self, request, context):
