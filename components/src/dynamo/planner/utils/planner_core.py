@@ -257,7 +257,11 @@ class BasePlanner:
         prometheus_engine_client: Optional[DirectRouterMetricsClient] = None,
         connector=None,
         start_prometheus_server: bool = True,
+        component_type: Optional[SubComponentType] = None,
     ):
+        if component_type is not None:
+            self.component_type = component_type
+
         self.config = config
         self.dryrun = dryrun
         self.shared_state = shared_state or PlannerSharedState()
@@ -746,7 +750,9 @@ class BasePlanner:
 
     def apply_component_budget(self, desired_replicas: int) -> int:
         return _apply_component_gpu_budget(
-            desired_replicas, self._engine_num_gpu(), self.config
+            max(desired_replicas, self.config.min_endpoint),
+            self._engine_num_gpu(),
+            self.config,
         )
 
     async def _apply_scaling(self, desired_replicas: int) -> None:

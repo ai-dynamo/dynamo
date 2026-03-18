@@ -94,13 +94,14 @@ class DynamoSglangPublisher:
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
         # need KV event publishing which is set up separately in init_kv_event_publish()
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
+        self._ctx: zmq.asyncio.Context | None = None
         if node_rank == 0:
-            self._ctx = zmq.asyncio.Context()  # type: ignore
+            self._ctx = zmq.asyncio.Context()
             self._sock = get_zmq_socket(
                 self._ctx,
                 zmq.PULL,
                 self.engine.port_args.metrics_ipc_name,
-                True,  # type: ignore
+                True,
             )
         else:
             self._ctx = None

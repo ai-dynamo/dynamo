@@ -3,7 +3,8 @@
 
 import asyncio
 import logging
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Dict, Optional
 
 import sglang as sgl
 
@@ -25,12 +26,14 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         super().__init__(engine, config, publisher, None, shutdown_event)
         logging.info("Embedding worker handler initialized")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Generate embeddings for the given input.
 
@@ -44,6 +47,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         embedding_request = EmbeddingRequest(**request)
 
         # Handle different input types
+        prompt: str | list[Any]
         if isinstance(embedding_request.input, str):
             prompt = embedding_request.input
         elif isinstance(embedding_request.input, list):

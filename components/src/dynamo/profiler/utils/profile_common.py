@@ -15,6 +15,7 @@
 
 """Shared helpers and configuration for the profiler pipeline."""
 
+import copy
 import logging
 import os
 from dataclasses import dataclass
@@ -231,3 +232,35 @@ def warn_gpu_shortage(
             gpus_needed,
             total_gpus,
         )
+
+
+def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> list:
+    """Return tolerations from overrides.profilingJob.template.spec.tolerations."""
+    try:
+        if dgdr.overrides is None or dgdr.overrides.profilingJob is None:
+            return []
+        return (
+            dgdr.overrides.profilingJob.get("template", {})
+            .get("spec", {})
+            .get("tolerations", [])
+        )
+    except (AttributeError, KeyError):
+        return []
+
+
+def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
+    """Add tolerations to every service's extraPodSpec in a DGD config dict.
+
+    Tolerations already present in a service are preserved; only new entries
+    (by identity) are appended.  Returns a deep copy with tolerations applied.
+    """
+    result = copy.deepcopy(dgd_config)
+    for _svc_name, svc in result.get("spec", {}).get("services", {}).items():
+        if not isinstance(svc, dict):
+            continue
+        eps = svc.setdefault("extraPodSpec", {})
+        existing = eps.get("tolerations", [])
+        new_entries = [t for t in tolerations if t not in existing]
+        if new_entries:
+            eps["tolerations"] = list(existing) + new_entries
+    return result

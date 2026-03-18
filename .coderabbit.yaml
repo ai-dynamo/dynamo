@@ -27,5 +27,14 @@ reviews:
       enabled: false
     unit_tests:
       enabled: false
+  path_instructions:
+    - path: "**/*.py"
+      instructions: "Review against .ai/python-guidelines.md"
+    - path: "**/tests/**/*.py"
+      instructions: "Review against .ai/pytest-guidelines.md"
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - ".ai/**/*.md"
 chat:
   auto_reply: true

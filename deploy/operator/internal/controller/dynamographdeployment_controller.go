@@ -74,7 +74,7 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
-	MPISecretReplicator   *secret.SecretReplicator
+	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
 }
 
@@ -87,6 +87,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -322,12 +323,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
-	// Always ensure MPI SSH secret is available in this namespace
-	if r.MPISecretReplicator != nil {
-		err := r.MPISecretReplicator.Replicate(ctx, dynamoDeployment.Namespace)
-		if err != nil {
-			logger.Error(err, "Failed to replicate MPI secret", "namespace", dynamoDeployment.Namespace)
-			return ReconcileResult{}, fmt.Errorf("failed to replicate MPI secret: %w", err)
+	if r.SSHKeyManager != nil && hasMultinode {
+		if err := r.SSHKeyManager.EnsureAndReplicate(ctx, dynamoDeployment.Namespace); err != nil {
+			logger.Error(err, "Failed to ensure MPI SSH key secret", "namespace", dynamoDeployment.Namespace)
+			return ReconcileResult{}, fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
 		}
 	}
 
@@ -1204,12 +1203,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	return nil
 }
 
-// reconcileCheckpoints reconciles Checkpoint CRs for services with checkpointing enabled
-// For Auto mode, it creates Checkpoint CRs if they don't exist
-// Returns a map of service names to checkpoint status and a map of service names to checkpoint info
-func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]nvidiacomv1alpha1.ServiceCheckpointStatus, map[string]*checkpoint.CheckpointInfo, error) {
+// reconcileCheckpoints reconciles Checkpoint CRs for services with checkpointing enabled.
+// For Auto mode, it creates Checkpoint CRs if they do not exist.
+// Returns per-service checkpoint status and resolved checkpoint info.
+func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment,
+) (map[string]nvidiacomv1alpha1.ServiceCheckpointStatus, map[string]*checkpoint.CheckpointInfo, error) {
 	logger := log.FromContext(ctx)
-	statuses := make(map[string]nvidiacomv1alpha1.ServiceCheckpointStatus)
+	checkpointStatuses := make(map[string]nvidiacomv1alpha1.ServiceCheckpointStatus)
 	checkpointInfos := make(map[string]*checkpoint.CheckpointInfo)
 
 	for serviceName, component := range dynamoDeployment.Spec.Services {
@@ -1229,8 +1231,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[serviceName] = info
 
-		// If no checkpoint found and mode is Auto, create one
-		if info.CheckpointName == "" && component.Checkpoint.Mode == nvidiacomv1alpha1.CheckpointModeAuto {
+		// checkpointRef is authoritative. Auto mode should only create the canonical checkpoint
+		// when the service is using identity-based lookup.
+		if component.Checkpoint.Mode == nvidiacomv1alpha1.CheckpointModeAuto &&
+			(component.Checkpoint.CheckpointRef == nil || *component.Checkpoint.CheckpointRef == "") &&
+			!info.Exists &&
+			info.Identity != nil &&
+			!info.Ready {
 			logger.Info("Creating DynamoCheckpoint CR in Auto mode", "service", serviceName)
 
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, serviceName, component)
@@ -1238,28 +1245,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 				logger.Error(err, "Failed to create DynamoCheckpoint CR", "service", serviceName)
 				return nil, nil, fmt.Errorf("failed to create checkpoint for service %s: %w", serviceName, err)
 			}
-
+			info.Exists = true
 			info.CheckpointName = ckpt.Name
-			// Compute hash locally since status may not be populated yet
-			// (checkpoint controller reconciles asynchronously)
-			hash, err := checkpoint.ComputeIdentityHash(*component.Checkpoint.Identity)
-			if err != nil {
-				logger.Error(err, "Failed to compute checkpoint identity hash", "service", serviceName)
-				return nil, nil, fmt.Errorf("failed to compute checkpoint hash for service %s: %w", serviceName, err)
+			if info.Hash == "" {
+				info.Hash = ckpt.Status.IdentityHash
 			}
-			info.Hash = hash
-			info.Ready = false // Newly created checkpoint is not ready yet
+			info.Ready = false
 		}
 
-		// Update status
-		statuses[serviceName] = nvidiacomv1alpha1.ServiceCheckpointStatus{
+		checkpointStatuses[serviceName] = nvidiacomv1alpha1.ServiceCheckpointStatus{
 			CheckpointName: info.CheckpointName,
 			IdentityHash:   info.Hash,
 			Ready:          info.Ready,
 		}
 	}
 
-	return statuses, checkpointInfos, nil
+	return checkpointStatuses, checkpointInfos, nil
 }
 
 // createCheckpointCR creates a DynamoCheckpoint CR for a service in Auto mode
@@ -1275,70 +1276,36 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 
 	identity := component.Checkpoint.Identity
 
-	// Compute hash for naming
-	hash, err := checkpoint.ComputeIdentityHash(*identity)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+	checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
+		Model:                identity.Model,
+		BackendFramework:     identity.BackendFramework,
+		DynamoVersion:        identity.DynamoVersion,
+		TensorParallelSize:   identity.TensorParallelSize,
+		PipelineParallelSize: identity.PipelineParallelSize,
+		Dtype:                identity.Dtype,
+		MaxModelLen:          identity.MaxModelLen,
+		ExtraParameters:      identity.ExtraParameters,
 	}
 
-	// Generate checkpoint name: use hash directly (16 chars, 64 bits)
-	// This allows natural deduplication - same identity = same checkpoint name
-	// 16 characters provides excellent collision resistance (1% at 500M configs)
-	ckptName := hash
-
-	// Use SyncResource to create/update the DynamoCheckpoint CR
-	// Pass nil as parentResource to create an independent checkpoint (no owner reference)
-	// This ensures the checkpoint persists even if the DGD is deleted
-	_, ckpt, err := commoncontroller.SyncResource(ctx, r, nil, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoCheckpoint, bool, error) {
-		// Build the checkpoint identity from service identity
-		checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
-			Model:                identity.Model,
-			BackendFramework:     identity.BackendFramework,
-			DynamoVersion:        identity.DynamoVersion,
-			TensorParallelSize:   identity.TensorParallelSize,
-			PipelineParallelSize: identity.PipelineParallelSize,
-			Dtype:                identity.Dtype,
-			MaxModelLen:          identity.MaxModelLen,
-			ExtraParameters:      identity.ExtraParameters,
-		}
-
-		// Build pod template from service spec for checkpoint job
-		// This uses GenerateBasePodSpec to ensure same config as worker pods (image pull secrets, etc.)
-		// Pass framework from checkpoint identity for accurate backend detection
-		podTemplate, err := r.buildCheckpointJobPodTemplate(
-			dynamoDeployment,
-			component,
-			serviceName,
-			identity.BackendFramework, // Use framework from checkpoint identity
-		)
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
-		}
-
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ckptName,
-				Namespace: dynamoDeployment.Namespace,
-				Labels: map[string]string{
-					consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
-					consts.KubeLabelDynamoComponent:           serviceName,
-					consts.KubeLabelCheckpointHash:            hash,
-				},
-			},
-			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-				Identity: checkpointIdentity,
-				Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
-					PodTemplateSpec: podTemplate,
-				},
-			},
-		}
-		return ckpt, false, nil
-	})
+	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
+	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
+	podTemplate, err := r.buildCheckpointJobPodTemplate(
+		dynamoDeployment,
+		component,
+		serviceName,
+		identity.BackendFramework,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sync checkpoint CR: %w", err)
+		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 	}
 
-	return ckpt, nil
+	return checkpoint.CreateOrGetAutoCheckpoint(
+		ctx,
+		r.Client,
+		dynamoDeployment.Namespace,
+		checkpointIdentity,
+		podTemplate,
+	)
 }
 
 // buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from service spec
@@ -1605,6 +1572,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
 			)
+
 	}
 	// Wrap with metrics collection
 	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)

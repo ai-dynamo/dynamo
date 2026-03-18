@@ -77,7 +77,7 @@ type OperatorConfiguration struct {
 // ServerConfiguration holds server bind addresses and ports.
 type ServerConfiguration struct {
 	// Metrics server configuration
-	// +kubebuilder:default={bindAddress: "127.0.0.1", port: 8080}
+	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8080, secure: true}
 	Metrics MetricsServer `json:"metrics"`
 	// Health probe server configuration
 	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8081}
@@ -98,8 +98,9 @@ type Server struct {
 // MetricsServer extends Server with secure serving option.
 type MetricsServer struct {
 	Server `json:",inline"`
-	// Secure enables secure serving for the metrics endpoint
-	Secure bool `json:"secure"`
+	// Secure enables secure serving for the metrics endpoint.
+	// nil = default to true (secure by default).
+	Secure *bool `json:"secure,omitempty"`
 }
 
 // CertProvisionMode controls how webhook TLS certificates are managed.
@@ -264,7 +265,7 @@ type CheckpointStorageConfiguration struct {
 // CheckpointPVCConfig holds PVC storage configuration.
 type CheckpointPVCConfig struct {
 	// PVCName is the name of the PVC
-	// +kubebuilder:default="chrek-pvc"
+	// +kubebuilder:default="snapshot-pvc"
 	PVCName string `json:"pvcName"`
 	// BasePath is the base directory within the PVC
 	// +kubebuilder:default="/checkpoints"

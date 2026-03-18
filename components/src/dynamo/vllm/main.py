@@ -7,23 +7,20 @@ import logging
 import os
 import tempfile
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.entrypoints.cli.serve import run_headless
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
-from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
@@ -37,8 +34,21 @@ from dynamo.llm import (
     fetch_model,
     register_model,
 )
+from dynamo.runtime import DistributedRuntime, Endpoint
+from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.worker_factory import WorkerFactory
+
+from . import envs
+from .args import Config, _uses_dynamo_connector, parse_args
+from .constants import DisaggregationMode
+from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
+from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
+from .snapshot import prepare_snapshot_engine
 
 # Optional imports for frontend decoding support
+MediaDecoder: type | None = None
+MediaFetcher: type | None = None
 try:
     from dynamo.llm import MediaDecoder, MediaFetcher
 
@@ -48,25 +58,9 @@ except ImportError:
     MediaFetcher = None
     MEDIA_DECODER_AVAILABLE = False
 
-from dynamo.runtime import DistributedRuntime, Endpoint
-from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.worker_factory import WorkerFactory
-
-from .args import Config, _uses_dynamo_connector, parse_args
-from .checkpoint_restore import get_checkpoint_config
-from .constants import DisaggregationMode
-from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
-from .health_check import (
-    VllmHealthCheckPayload,
-    VllmOmniHealthCheckPayload,
-    VllmPrefillHealthCheckPayload,
-)
-from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
-CHECKPOINT_SLEEP_MODE_LEVEL = 1
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -89,11 +83,15 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
+    # Keep the upstream CLI import local so tests that only exercise
+    # build_headless_namespace() do not pull in vLLM's full CLI import graph.
+    from vllm.entrypoints.cli.serve import run_headless
+
     args = build_headless_namespace(config)
     run_headless(args)
 
 
-async def worker():
+async def worker() -> None:
     config = parse_args()
 
     dump_config(config.dump_config_to, config)
@@ -102,11 +100,6 @@ async def worker():
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
-
-    # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
-    early_exit, checkpoint_cfg = get_checkpoint_config()
-    if early_exit:
-        return
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
@@ -120,34 +113,26 @@ async def worker():
     if not os.path.exists(config.model):
         await fetch_model(config.model)
 
+    # CHECKPOINT MODE: Load engine BEFORE runtime creation
+    # This allows checkpointing GPU state before runtime connections are established
+    snapshot_controller = await prepare_snapshot_engine(
+        config,
+        setup_vllm_engine,
+    )
+
+    snapshot_engine = None
+    if snapshot_controller is not None:
+        snapshot_engine = snapshot_controller.engine
+        (
+            config.namespace,
+            config.discovery_backend,
+        ) = snapshot_controller.reload_restore_identity()
+
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
     if config.headless:
-        if checkpoint_cfg is not None:
-            raise ValueError(
-                "--headless is incompatible with checkpoint mode "
-                "(DYN_CHECKPOINT_SIGNAL_FILE is set). "
-                "Remove --headless or unset DYN_CHECKPOINT_SIGNAL_FILE."
-            )
         run_dynamo_headless(config)
         return
-
-    # CHECKPOINT MODE: Load engine BEFORE runtime creation
-    # This allows checkpointing GPU state before runtime connections are established
-    checkpoint_restore_engine = None
-    if checkpoint_cfg is not None:
-        logger.info("Checkpoint mode enabled (watcher-driven signals)")
-
-        # Checkpoint mode requires sleep mode — enable before engine init
-        config.engine_args.enable_sleep_mode = True
-
-        checkpoint_restore_engine = setup_vllm_engine(config)
-        engine_client = checkpoint_restore_engine[0]
-
-        if not await checkpoint_cfg.run_lifecycle(
-            engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
-        ):
-            return
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(
@@ -172,18 +157,15 @@ async def worker():
             config,
             shutdown_event,
             shutdown_endpoints,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
         logger.debug("multimodal worker completed")
-    elif config.omni:
-        await init_omni(runtime, config, shutdown_event)
-        logger.debug("init_omni completed")
     elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
             runtime,
             config,
             shutdown_event,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
         logger.debug("init_prefill completed")
     else:
@@ -191,14 +173,16 @@ async def worker():
             runtime,
             config,
             shutdown_event,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
 
 
-def setup_metrics_collection(config: Config, generate_endpoint, logger):
+def setup_metrics_collection(
+    config: Config, generate_endpoint: Endpoint, logger: logging.Logger
+) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
     In multiprocess mode (PROMETHEUS_MULTIPROC_DIR set), metrics are stored:
@@ -294,8 +278,9 @@ def setup_kv_event_publisher(
     vllm_config: VllmConfig,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
-) -> Optional[KvEventPublisher]:
+) -> Optional[list[KvEventPublisher]]:
     """
+    list[KvEventPublisher] | None
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
     Args:
@@ -365,7 +350,56 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
-def setup_vllm_engine(config, stat_logger=None):
+def setup_fpm_relay(
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
+) -> Optional[list]:
+    """
+    Set up forward pass metrics relays for the event plane.
+
+    Creates one FpmEventRelay per dp_rank. Each relay subscribes to the
+    local raw ZMQ PUB from InstrumentedScheduler (in the EngineCore child
+    process) and re-publishes to the Dynamo event plane with automatic
+    discovery registration.
+
+    Returns:
+        List of FpmEventRelay instances, or None if FPM is not enabled.
+    """
+    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        return None
+
+    try:
+        from dynamo.llm import FpmEventRelay
+    except ImportError:
+        logger.warning(
+            "FpmEventRelay not available (Rust bindings not built with FPM support). "
+            "Forward pass metrics will not be relayed to the event plane."
+        )
+        return None
+
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+    relays = []
+
+    for dp_rank in range(dp_start, dp_start + dp_size):
+        base_port = envs.DYN_FORWARDPASS_METRIC_PORT
+        zmq_endpoint = f"tcp://127.0.0.1:{base_port + dp_rank}"
+
+        relay = FpmEventRelay(
+            endpoint=generate_endpoint,
+            zmq_endpoint=zmq_endpoint,
+        )
+        relays.append(relay)
+
+        logger.info(f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_endpoint}")
+
+    return relays if relays else None
+
+
+def setup_vllm_engine(
+    config: Config,
+    stat_logger: Optional[StatLoggerFactory] = None,
+    fpm_worker_id: Optional[str] = None,
+) -> tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
@@ -479,6 +513,10 @@ def setup_vllm_engine(config, stat_logger=None):
     # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
     vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
+    # Pass worker identity to InstrumentedScheduler via additional_config.
+    if fpm_worker_id is not None:
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)
@@ -511,11 +549,11 @@ def setup_vllm_engine(config, stat_logger=None):
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
-    generate_endpoint,
+    generate_endpoint: Endpoint,
     config: Config,
     engine_client: AsyncLLM,
-    vllm_config,
-):
+    vllm_config: VllmConfig,
+) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
 
@@ -563,6 +601,7 @@ async def register_vllm_model(
                 "--frontend-decoding requires MediaDecoder support. "
                 "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
             )
+        assert MediaDecoder is not None and MediaFetcher is not None
         media_decoder = MediaDecoder()
         media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
         # media_decoder.enable_video({})
@@ -577,6 +616,7 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
+        context_length=vllm_config.model_config.max_model_len,
         kv_cache_block_size=runtime_values["block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
@@ -589,8 +629,10 @@ async def init_prefill(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    checkpoint_restore_engine=None,
-):
+    snapshot_engine: Optional[
+        tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+    ] = None,
+) -> None:
     """
     Instantiate and serve
     """
@@ -602,14 +644,20 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if checkpoint_restore_engine is not None:
+    fpm_worker_id = str(generate_endpoint.connection_id())
+    if snapshot_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = checkpoint_restore_engine
+        ) = snapshot_engine
+        # TODO: The scheduler in the child process still has worker_id=""
+        # because the engine was forked before the runtime existed.
+        # Propagating the new ID to the child requires shared memory or
+        # a restart of the EngineCore process.
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
     else:
         (
             engine_client,
@@ -617,7 +665,7 @@ async def init_prefill(
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = setup_vllm_engine(config)
+        ) = setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
 
     handler = PrefillWorkerHandler(
         runtime,
@@ -657,6 +705,13 @@ async def init_prefill(
     if kv_publishers:
         handler.kv_publishers = kv_publishers
 
+    # Set up forward pass metrics relay (child ZMQ -> event plane).
+    # In checkpoint mode the engine was created before the runtime, so
+    # ForwardPassMetrics.worker_id will be empty (relay still works).
+    fpm_relays = setup_fpm_relay(generate_endpoint, vllm_config)
+    if fpm_relays:
+        handler.fpm_relays = fpm_relays
+
     setup_metrics_collection(config, generate_endpoint, logger)
 
     # Register sleep/wake_up engine routes
@@ -689,7 +744,7 @@ async def init_prefill(
             #     (long-term reason): prefill engine should pull from a global queue so there is
             #                         only a few in-flight requests that can be quickly finished
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore
                 graceful_shutdown=True,
                 # In practice config.served_model_name is always set, but mypy needs the "or" here.
                 metrics_labels=[
@@ -705,10 +760,16 @@ async def init_prefill(
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks,
+                handler.clear_kv_blocks,  # type: ignore
                 metrics_labels=[
-                    (prometheus_names.labels.MODEL, config.served_model_name),
-                    (prometheus_names.labels.MODEL_NAME, config.served_model_name),
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
                 ],
             ),
         )
@@ -725,8 +786,10 @@ async def init(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    checkpoint_restore_engine=None,
-):
+    snapshot_engine: Optional[
+        tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+    ] = None,
+) -> None:
     """
     Instantiate and serve
     """
@@ -764,14 +827,16 @@ async def init(
         )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if checkpoint_restore_engine is not None:
+    fpm_worker_id = str(generate_endpoint.connection_id())
+    if snapshot_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = checkpoint_restore_engine
+        ) = snapshot_engine
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
@@ -790,7 +855,7 @@ async def init(
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = setup_vllm_engine(config, factory)
+        ) = setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
@@ -833,6 +898,13 @@ async def init(
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
+
+    # Set up forward pass metrics relay (child ZMQ -> event plane).
+    # In checkpoint mode the engine was created before the runtime, so
+    # ForwardPassMetrics.worker_id will be empty (relay still works).
+    fpm_relays = setup_fpm_relay(generate_endpoint, vllm_config)
+    if fpm_relays:
+        handler.fpm_relays = fpm_relays
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
@@ -885,7 +957,7 @@ async def init(
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore
                 graceful_shutdown=True,
                 metrics_labels=model_metrics_labels,
                 health_check_payload=health_check_payload,
@@ -925,7 +997,7 @@ async def init(
         handler.cleanup()
 
 
-def get_engine_cache_info(engine: AsyncLLM):
+def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
     """Retrieve cache configuration information from [`AsyncLLM`] engine."""
 
     try:
@@ -953,87 +1025,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
-async def init_omni(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
-
-    Supports text-to-text, text-to-image, and text-to-video generation
-    through a single unified OmniHandler.
-    """
-    from dynamo.vllm.omni import OmniHandler
-
-    generate_endpoint = runtime.endpoint(
-        f"{config.namespace}.{config.component}.{config.endpoint}"
-    )
-
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    # Initialize media filesystem for storing generated images/videos
-    media_fs = (
-        get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
-    )
-
-    # Initialize unified OmniHandler
-    handler = OmniHandler(
-        runtime=runtime,
-        config=config,
-        default_sampling_params={},
-        shutdown_event=shutdown_event,
-        media_output_fs=media_fs,
-        media_output_http_url=config.media_output_http_url,
-    )
-
-    logger.info(f"Omni worker initialized for model: {config.model}")
-
-    # Set up metrics collection for vLLM and LMCache metrics
-    setup_metrics_collection(config, generate_endpoint, logger)
-
-    # TODO: extend for multi-stage pipelines
-    model_type = get_output_modalities(config.output_modalities, config.model)
-    if model_type is None:
-        # Default to Images
-        model_type = ModelType.Images
-    await register_model(
-        ModelInput.Text,
-        model_type,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve Omni worker endpoint...")
-
-    health_check_payload = (
-        await VllmOmniHealthCheckPayload.create(handler.engine_client)
-    ).to_dict()
-
-    try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[
-                (
-                    prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
-                ),
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
-                ),
-            ],
-            health_check_payload=health_check_payload,
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve Omni endpoint: {e}")
-        raise
-    finally:
-        logger.debug("Cleaning up Omni worker")
-        handler.cleanup()
-
-
-def main():
+def main() -> None:
     uvloop.run(worker())
 
 

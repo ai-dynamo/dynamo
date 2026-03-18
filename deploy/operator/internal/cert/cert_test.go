@@ -185,8 +185,7 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 			fmt.Sprintf("%s.%s", testServiceName, testNamespace),
 			fmt.Sprintf("%s.%s.svc.cluster.local", testServiceName, testNamespace),
 		},
-		EnableReadinessCheck:   true,
-		RestartOnSecretRefresh: true,
+		EnableReadinessCheck: true,
 	}
 
 	if !reflect.DeepEqual(prov.capturedArgs, expected) {

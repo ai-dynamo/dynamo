@@ -34,8 +34,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
-use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
@@ -77,6 +78,7 @@ type JsonServerStreamingIngress =
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
+const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
 
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
@@ -135,7 +137,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         eprintln!(
             "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
-    } else {
+    } else if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
     }
 
@@ -145,6 +147,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
+    m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -166,6 +169,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
+    m.add_class::<llm::fpm::FpmEventRelay>()?;
+    m.add_class::<llm::fpm::FpmEventSubscriber>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -196,6 +201,24 @@ where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
+    #[cfg(feature = "kv-indexer")]
+    if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
+        let _ = clap_error.print();
+        return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
+    }
+
+    to_pyerr(err)
+}
+
+#[pyfunction(name = "run_kv_indexer")]
+#[pyo3(signature = (argv=None))]
+fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_kv_indexer_cli(argv))
+        .map_err(kv_indexer_to_pyerr)
 }
 
 /// Log a message from Python with file and line info

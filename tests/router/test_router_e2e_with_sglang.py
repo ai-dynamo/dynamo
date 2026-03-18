@@ -12,13 +12,12 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import (  # utilities
+from tests.router.common import (
     _test_router_basic,
     _test_router_decisions,
     _test_router_indexers_sync,
-    generate_random_suffix,
-    get_runtime,
 )
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -423,10 +422,12 @@ def test_router_decisions_sglang_multiple_workers(
 
 
 @pytest.mark.gpu_2
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
-@pytest.mark.skip(reason="DYN-2265")
+@pytest.mark.skip(
+    reason="DYN-2265"
+)  # Currently fails probably due to SGLang startup issues when multiple workers on same GPU; re-enable when fixed
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,

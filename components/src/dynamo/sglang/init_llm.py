@@ -9,11 +9,13 @@ from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -61,16 +63,16 @@ async def init_decode(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    checkpoint_restore_engine: Optional[sgl.Engine] = None,
-):
+    snapshot_engine: Optional[sgl.Engine] = None,
+) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    # Use pre-created engine if provided (checkpoint/restore mode)
-    if checkpoint_restore_engine is not None:
-        engine = checkpoint_restore_engine
+    # Use pre-created engine if provided (snapshot mode)
+    if snapshot_engine is not None:
+        engine = snapshot_engine
         load_time = 0.0
     else:
         start_time = time.time()
@@ -101,9 +103,14 @@ async def init_decode(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
@@ -151,16 +158,16 @@ async def init_prefill(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    checkpoint_restore_engine: Optional[sgl.Engine] = None,
-):
+    snapshot_engine: Optional[sgl.Engine] = None,
+) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    # Use pre-created engine if provided (checkpoint/restore mode)
-    if checkpoint_restore_engine is not None:
-        engine = checkpoint_restore_engine
+    # Use pre-created engine if provided (snapshot mode)
+    if snapshot_engine is not None:
+        engine = snapshot_engine
     else:
         engine = sgl.Engine(server_args=server_args)
 

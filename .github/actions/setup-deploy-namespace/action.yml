@@ -110,18 +110,38 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
         echo "::group::Wait for operator rollout"
-        kubectl rollout status deployment -n $NAMESPACE --watch --timeout=300s
+        kubectl rollout status deployment -n $NAMESPACE --watch --timeout=600s
         echo "::endgroup::"
 
-    - name: Report Unhealthy Pods
+    - name: Debug deployment failure
       if: failure()
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
-        echo "### OPERATOR DEPLOYMENT FAILED: Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
-        echo "Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        kubectl get pods -n ${NAMESPACE} --no-headers \
-          | grep -v -E '(Running|Completed)' \
-          | awk '{print "- **" $1 "** | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY || true
+        set +eo pipefail
+
+        echo "### OPERATOR DEPLOYMENT FAILED" | tee -a $GITHUB_STEP_SUMMARY
+
+        echo "::group::Pod status"
+        kubectl get pods -n "${NAMESPACE}" -o wide
+        echo "::endgroup::"
+
+        NOT_READY=$(kubectl get pods -n "${NAMESPACE}" --no-headers | awk -F'[/ ]+' '$2 != $3 || ($4 != "Running" && $4 != "Completed")')
+        if [ -n "$NOT_READY" ]; then
+          echo "$NOT_READY" | awk '{print "- **" $1 "** | Ready: `" $2 "` | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY
+
+          echo "$NOT_READY" | awk '{print $1}' | while read POD; do
+            echo "::group::describe pod/$POD"
+            kubectl describe pod "$POD" -n "${NAMESPACE}" 2>&1
+            echo "::endgroup::"
+
+            echo "::group::logs pod/$POD"
+            kubectl logs "$POD" -n "${NAMESPACE}" --all-containers --tail=80 2>&1
+            echo "::endgroup::"
+          done
+        fi
+
+        echo "::group::Namespace events (recent)"
+        kubectl get events -n "${NAMESPACE}" --sort-by='.lastTimestamp' 2>&1
+        echo "::endgroup::"

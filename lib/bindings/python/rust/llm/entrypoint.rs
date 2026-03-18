@@ -10,20 +10,22 @@ use std::sync::Arc;
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
-use dynamo_llm::mocker::protocols::MockEngineArgs;
+use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
+use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
@@ -38,21 +40,21 @@ pub enum EngineType {
 }
 
 #[pyclass]
-#[derive(Default, Clone, Debug, Copy)]
+#[derive(Default, Clone, Debug)]
 pub struct KvRouterConfig {
     inner: RsKvRouterConfig,
 }
 
 impl KvRouterConfig {
     pub fn inner(&self) -> RsKvRouterConfig {
-        self.inner
+        self.inner.clone()
     }
 }
 
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=None, router_event_threads=4, router_enable_cache_control=false))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(2.0), router_event_threads=4, router_enable_cache_control=false, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -71,6 +73,8 @@ impl KvRouterConfig {
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
         router_enable_cache_control: bool,
+        router_queue_policy: &str,
+        remote_indexer_component: Option<String>,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -90,6 +94,11 @@ impl KvRouterConfig {
                 router_queue_threshold,
                 router_event_threads,
                 router_enable_cache_control,
+                skip_initial_worker_wait: false,
+                router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
+                    panic!("invalid router_queue_policy: {router_queue_policy:?}")
+                }),
+                remote_indexer_component,
             },
         }
     }
@@ -110,20 +119,20 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    decode_fallback: bool,
+    enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, decode_fallback=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
-        decode_fallback: bool,
+        enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
@@ -131,7 +140,7 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            decode_fallback,
+            enforce_disagg,
         }
     }
 }
@@ -146,7 +155,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
-            decode_fallback: rc.decode_fallback,
+            enforce_disagg: rc.enforce_disagg,
         }
     }
 }
@@ -183,6 +192,7 @@ pub(crate) struct EntrypointArgs {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
+    runtime_config: Option<ModelRuntimeConfig>,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
@@ -194,7 +204,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -211,6 +221,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
+        runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
@@ -257,6 +268,7 @@ impl EntrypointArgs {
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
+            runtime_config,
             namespace,
             namespace_prefix,
             is_prefill,
@@ -301,6 +313,7 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
+        .runtime_config(args.runtime_config.clone().unwrap_or_default().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -419,12 +432,8 @@ async fn select_engine(
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine = dynamo_llm::mocker::make_mocker_engine(
-                distributed_runtime.inner,
-                endpoint,
-                mocker_args,
-            )
-            .await?;
+            let engine =
+                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
 
             RsEngineConfig::InProcessTokens {
                 engine,

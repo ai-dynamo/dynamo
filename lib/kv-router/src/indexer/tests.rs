@@ -14,6 +14,7 @@ use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::positional::PositionalIndexer;
 use super::*;
 use crate::protocols::*;
+use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
 // ============================================================================
 // Helper functions
@@ -64,25 +65,15 @@ fn make_store_event_with_parent(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let new_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
 
-    RouterEvent {
+    router_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash,
-                blocks: new_block_hashes
-                    .iter()
-                    .zip(new_seq_hashes.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    }
+        0,
+        0,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash,
+            blocks: stored_blocks_with_sequence_hashes(&new_block_hashes, new_seq_hashes),
+        }),
+    )
 }
 
 /// Create a store event with all options.
@@ -96,25 +87,15 @@ fn make_store_event_full(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-    RouterEvent {
+    router_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash,
-                blocks: local_block_hashes
-                    .iter()
-                    .zip(seq_hashes.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank,
-        },
-    }
+        0,
+        dp_rank,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash,
+            blocks: stored_blocks_with_sequence_hashes(&local_block_hashes, &seq_hashes),
+        }),
+    )
 }
 
 /// Create a remove event for blocks with given local hashes.
@@ -132,19 +113,80 @@ fn make_remove_event_with_dp_rank(
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
     let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-    RouterEvent {
+    remove_event(
         worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: seq_hashes
-                    .iter()
-                    .map(|&h| ExternalSequenceBlockHash(h))
-                    .collect(),
-            }),
-            dp_rank,
-        },
+        0,
+        dp_rank,
+        seq_hashes
+            .iter()
+            .map(|&h| ExternalSequenceBlockHash(h))
+            .collect(),
+    )
+}
+
+/// Create a remove event with parent hash for continuation sequences.
+/// `prefix_hashes` are the hashes of the prefix (to compute parent_hash and full seq context).
+/// `local_hashes` are the blocks being removed.
+fn make_remove_event_with_parent(
+    worker_id: u64,
+    prefix_hashes: &[u64],
+    local_hashes: &[u64],
+) -> RouterEvent {
+    let full_hashes: Vec<u64> = prefix_hashes
+        .iter()
+        .chain(local_hashes.iter())
+        .copied()
+        .collect();
+    let full_block_hashes: Vec<LocalBlockHash> =
+        full_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
+    let full_seq_hashes = compute_seq_hash_for_block(&full_block_hashes);
+
+    let suffix_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
+
+    remove_event(
+        worker_id,
+        0,
+        0,
+        suffix_seq_hashes
+            .iter()
+            .map(|&h| ExternalSequenceBlockHash(h))
+            .collect(),
+    )
+}
+
+/// Snapshot the tree state for deterministic comparison.
+/// Dumps all events, zeros out `event_id`, and sorts by `(worker_id, dp_rank, block_hash)`.
+async fn snapshot_tree(index: &dyn KvIndexerInterface) -> Vec<RouterEvent> {
+    let mut events = index.dump_events().await.unwrap();
+    for ev in &mut events {
+        ev.event.event_id = 0;
     }
+    events.sort_by(|a, b| {
+        a.worker_id.cmp(&b.worker_id).then_with(|| {
+            a.event.dp_rank.cmp(&b.event.dp_rank).then_with(|| {
+                let hash_a = match &a.event.data {
+                    KvCacheEventData::Stored(s) => {
+                        s.blocks.first().map(|b| b.block_hash.0).unwrap_or(0)
+                    }
+                    KvCacheEventData::Removed(r) => {
+                        r.block_hashes.first().map(|h| h.0).unwrap_or(0)
+                    }
+                    KvCacheEventData::Cleared => 0,
+                };
+                let hash_b = match &b.event.data {
+                    KvCacheEventData::Stored(s) => {
+                        s.blocks.first().map(|b| b.block_hash.0).unwrap_or(0)
+                    }
+                    KvCacheEventData::Removed(r) => {
+                        r.block_hashes.first().map(|h| h.0).unwrap_or(0)
+                    }
+                    KvCacheEventData::Cleared => 0,
+                };
+                hash_a.cmp(&hash_b)
+            })
+        })
+    });
+    events
 }
 
 /// Create a clear event for a worker.
@@ -154,14 +196,7 @@ fn make_clear_event(worker_id: u64) -> RouterEvent {
 
 /// Create a clear event with a specific dp_rank.
 fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
-    RouterEvent {
-        worker_id,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Cleared,
-            dp_rank,
-        },
-    }
+    router_event(worker_id, 0, dp_rank, KvCacheEventData::Cleared)
 }
 
 // ============================================================================
@@ -202,6 +237,14 @@ fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
     }
 }
 
+/// Ensure queued indexer work is drained, then give a short settle window.
+/// This is intentionally conservative for tests that assert immediately
+/// after asynchronous event ingestion.
+async fn flush_and_settle(index: &dyn KvIndexerInterface) {
+    index.flush().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
 #[tokio::test]
 #[apply(indexer_template)]
 async fn test_store_and_find(variant: &str) {
@@ -210,7 +253,7 @@ async fn test_store_and_find(variant: &str) {
     // Store a sequence for worker 0
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Find matches using local hashes
     let scores = index
@@ -233,7 +276,7 @@ async fn test_partial_match(variant: &str) {
     // Store [1, 2, 3] for worker 0
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Find matches for [1, 2, 999] - should match first 2 then stop
     let scores = index
@@ -258,7 +301,7 @@ async fn test_remove(variant: &str) {
     // Remove all blocks
     index.apply_event(make_remove_event(0, &[1, 2, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Find should return nothing
     let scores = index
@@ -283,7 +326,7 @@ async fn test_multiple_workers_shared_prefix(variant: &str) {
     index.apply_event(make_store_event(0, &[1, 2])).await;
     index.apply_event(make_store_event(1, &[1, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query [1] - both workers should match
     let scores = index.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
@@ -310,12 +353,12 @@ async fn test_remove_worker(variant: &str) {
     index.apply_event(make_store_event(1, &[1, 2, 3])).await;
 
     // Allow time for async event processing
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     index.remove_worker(0).await;
 
     // Allow time for async remove_worker processing
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     let scores = index
         .find_matches(vec![
@@ -344,7 +387,7 @@ async fn test_large_stores(variant: &str) {
             .await;
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify we can find matches for the last stored sequence
     let last_seq: Vec<LocalBlockHash> = (1..=512u64)
@@ -364,31 +407,23 @@ async fn test_dump_and_restore(variant: &str) {
     index.apply_event(make_store_event(1, &[1, 2, 4])).await;
 
     // Allow background worker threads to process events.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
-    // Dump the tree as events
+    // Dump the tree as events and replay into a new index
     let events = index.dump_events().await.unwrap();
     assert!(!events.is_empty());
 
-    // Create a new index and replay events
     let restored = make_indexer(variant);
     for event in events {
         restored.apply_event(event).await;
     }
 
-    // Allow background worker threads to process replayed events.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(restored.as_ref()).await;
 
-    // Verify find_matches produces same results
-    let original_scores = index
-        .find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)])
-        .await
-        .unwrap();
-    let restored_scores = restored
-        .find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)])
-        .await
-        .unwrap();
-    assert_eq!(original_scores.scores, restored_scores.scores);
+    assert_eq!(
+        snapshot_tree(index.as_ref()).await,
+        snapshot_tree(restored.as_ref()).await
+    );
 }
 
 #[tokio::test]
@@ -403,7 +438,7 @@ async fn test_clear_all_blocks(variant: &str) {
     // Clear worker 0's blocks using the Cleared event
     index.apply_event(make_clear_event(0)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Worker 0's blocks should be gone, worker 1's remain
     let scores = index
@@ -425,7 +460,7 @@ async fn test_empty_query(variant: &str) {
 
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Empty query should return empty scores
     let scores = index.find_matches(vec![]).await.unwrap();
@@ -439,7 +474,7 @@ async fn test_miss_query(variant: &str) {
 
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query for non-existent blocks
     let scores = index
@@ -461,7 +496,7 @@ async fn test_shutdown(variant: &str) {
 async fn test_shutdown_idempotent(variant: &str) {
     let index = make_indexer(variant);
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
     index.shutdown();
     index.shutdown();
 }
@@ -480,7 +515,7 @@ async fn test_find_matches_for_request(variant: &str) {
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
     // Allow time for async processing
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Note: find_matches_for_request computes block hashes from tokens,
     // so we need tokens that hash to the same LocalBlockHash values.
@@ -522,7 +557,7 @@ async fn test_parent_hash_chains(variant: &str) {
         .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
         .await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query for full sequence [1, 2, 3, 4, 5] should match all 5 blocks
     let full_seq: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
@@ -552,7 +587,7 @@ async fn test_multiple_dp_ranks(variant: &str) {
         .apply_event(make_store_event_with_dp_rank(0, &[1, 2, 3], 2))
         .await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query should return all 3 dp_ranks as separate entries
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -572,7 +607,7 @@ async fn test_partial_block_removal(variant: &str) {
     // Store [1, 2, 3]
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify all 3 blocks match
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -586,19 +621,10 @@ async fn test_partial_block_removal(variant: &str) {
     let seq_hashes = compute_seq_hash_for_block(&full_hashes);
     let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]); // Last block's hash
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![block_3_seq_hash],
-            }),
-            dp_rank: 0,
-        },
-    };
+    let remove_event = remove_event(0, 0, 0, vec![block_3_seq_hash]);
     index.apply_event(remove_event).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query [1, 2, 3] - should only match 2 blocks now (block 3 is removed)
     let scores = index.find_matches(seq).await.unwrap();
@@ -612,19 +638,73 @@ async fn test_partial_block_removal(variant: &str) {
 
 #[tokio::test]
 #[apply(indexer_template)]
+async fn test_remove_mid_chain_block(variant: &str) {
+    // TODO: positional indexer has no parent-child structure, so mid-chain removal
+    // doesn't invalidate later positions — jump search skips over the gap and over-counts.
+    if variant == "flat" {
+        return;
+    }
+
+    let index = make_indexer(variant);
+
+    // Store [1, 2, 3, 4, 5]
+    index
+        .apply_event(make_store_event(0, &[1, 2, 3, 4, 5]))
+        .await;
+
+    flush_and_settle(index.as_ref()).await;
+
+    // Verify all 5 blocks match
+    let seq: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
+    let scores = index.find_matches(seq.clone()).await.unwrap();
+    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 5);
+
+    // Remove only block 3 (index 2) — the middle of the chain
+    let full_hashes: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
+    let seq_hashes = compute_seq_hash_for_block(&full_hashes);
+    let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]);
+
+    let remove_event = remove_event(0, 0, 0, vec![block_3_seq_hash]);
+    index.apply_event(remove_event).await;
+
+    flush_and_settle(index.as_ref()).await;
+
+    // Query [1, 2, 3, 4, 5] — only first 2 positions reachable (block 3 removed, orphaning 4 & 5)
+    let scores = index.find_matches(seq.clone()).await.unwrap();
+    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+
+    // Query [1, 2] — prefix before the gap is still intact
+    let prefix_seq: Vec<LocalBlockHash> = (1..=2).map(LocalBlockHash).collect();
+    let scores = index.find_matches(prefix_seq).await.unwrap();
+    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+
+    // Re-store block 3 as a continuation of [1, 2]
+    index
+        .apply_event(make_store_event_with_parent(0, &[1, 2], &[3]))
+        .await;
+
+    flush_and_settle(index.as_ref()).await;
+
+    // Query [1, 2, 3, 4, 5] — block 3 is back but 4 & 5 were orphaned, so score = 3
+    let scores = index.find_matches(seq).await.unwrap();
+    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+}
+
+#[tokio::test]
+#[apply(indexer_template)]
 async fn test_remove_nonexistent_worker(variant: &str) {
     let index = make_indexer(variant);
 
     // Store data for worker 0
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Remove non-existent worker 999 - should not error or affect worker 0
     index.remove_worker(999).await;
 
     // Allow time for async processing
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Worker 0's data should still be there
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -644,7 +724,7 @@ async fn test_remove_nonexistent_blocks(variant: &str) {
     // Try to remove blocks [999, 998] that don't exist - should not error
     index.apply_event(make_remove_event(0, &[999, 998])).await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Original data should still be there
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -663,7 +743,7 @@ async fn test_clear_then_reuse(variant: &str) {
     // Clear the worker
     index.apply_event(make_clear_event(0)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify data is gone
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -673,7 +753,7 @@ async fn test_clear_then_reuse(variant: &str) {
     // Store new data for the same worker
     index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify new data is accessible
     let scores = index.find_matches(seq).await.unwrap();
@@ -694,7 +774,7 @@ async fn test_multiple_sequences_per_worker(variant: &str) {
         .apply_event(make_store_event(0, &[100, 101, 102]))
         .await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query first sequence
     let seq1: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -726,7 +806,7 @@ async fn test_clear_clears_all_dp_ranks(variant: &str) {
         .apply_event(make_store_event_with_dp_rank(0, &[1, 2, 3], 1))
         .await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify both dp_ranks are present
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
@@ -736,7 +816,7 @@ async fn test_clear_clears_all_dp_ranks(variant: &str) {
     // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
     index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Both dp_ranks should be cleared
     let scores = index.find_matches(seq).await.unwrap();
@@ -772,52 +852,30 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
     let lora_seq = compute_seq_hash_for_block(&lora_hashes);
 
     // Store base-model blocks on worker 0
-    let base_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: base_hashes
-                    .iter()
-                    .zip(base_seq.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    };
+    let base_event = router_event(
+        0,
+        0,
+        0,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            blocks: stored_blocks_with_sequence_hashes(&base_hashes, &base_seq),
+        }),
+    );
     index.apply_event(base_event).await;
 
     // Store LoRA blocks on worker 1
-    let lora_event = RouterEvent {
-        worker_id: 1,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: lora_hashes
-                    .iter()
-                    .zip(lora_seq.iter())
-                    .map(|(&local, &seq)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ExternalSequenceBlockHash(seq),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        },
-    };
+    let lora_event = router_event(
+        1,
+        0,
+        0,
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            blocks: stored_blocks_with_sequence_hashes(&lora_hashes, &lora_seq),
+        }),
+    );
     index.apply_event(lora_event).await;
 
-    // flush + settle time for thread-pool variants
-    index.flush().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query with base-model hashes → only worker 0
     let base_scores = index.find_matches(base_hashes.clone()).await.unwrap();
@@ -882,53 +940,32 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
 
     // Worker 0: base model
     index
-        .apply_event(RouterEvent {
-            worker_id: 0,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: base_local
-                        .iter()
-                        .zip(base_seq.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            0,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&base_local, &base_seq),
+            }),
+        ))
         .await;
 
     // Worker 1: LoRA adapter — different LocalBlockHash, so this goes to
     // a separate tree path instead of colliding with worker 0's node.
     index
-        .apply_event(RouterEvent {
-            worker_id: 1,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: lora_local
-                        .iter()
-                        .zip(lora_seq.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            1,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&lora_local, &lora_seq),
+            }),
+        ))
         .await;
 
-    index.flush().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Base query finds only worker 0
     let base_scores = index.find_matches(base_local.clone()).await.unwrap();
@@ -974,52 +1011,31 @@ async fn test_different_lora_adapters_do_not_conflict(variant: &str) {
 
     // Store adapter-a blocks on worker 0
     index
-        .apply_event(RouterEvent {
-            worker_id: 0,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: hashes_a
-                        .iter()
-                        .zip(seq_a.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            0,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
+            }),
+        ))
         .await;
 
     // Store adapter-b blocks on worker 1
     index
-        .apply_event(RouterEvent {
-            worker_id: 1,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: hashes_b
-                        .iter()
-                        .zip(seq_b.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        })
+        .apply_event(router_event(
+            1,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
+            }),
+        ))
         .await;
 
-    index.flush().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query adapter-a → only worker 0
     let scores_a = index.find_matches(hashes_a.clone()).await.unwrap();
@@ -1048,7 +1064,7 @@ async fn test_long_sequence_single_store(variant: &str) {
     let sequence: Vec<u64> = (1..=seq_len).collect();
     index.apply_event(make_store_event(0, &sequence)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query full sequence - should match all blocks
     let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1100,7 +1116,7 @@ async fn test_long_sequence_multiple_continuations(variant: &str) {
         .apply_event(make_store_event_with_parent(0, &prefix_1_2, &third_chunk))
         .await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query full sequence - should match all 150 blocks
     let full_query: Vec<LocalBlockHash> = (1..=150).map(LocalBlockHash).collect();
@@ -1143,7 +1159,7 @@ async fn test_long_sequence_branching_continuations(variant: &str) {
         .apply_event(make_store_event_with_parent(1, &common_prefix, &branch_b))
         .await;
 
-    index.flush().await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query common prefix - both workers should match
     let prefix_query: Vec<LocalBlockHash> = (1..=30).map(LocalBlockHash).collect();
@@ -1180,7 +1196,7 @@ async fn test_long_sequence_partial_removal(variant: &str) {
     let sequence: Vec<u64> = (1..=100).collect();
     index.apply_event(make_store_event(0, &sequence)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify full match
     let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1198,19 +1214,10 @@ async fn test_long_sequence_partial_removal(variant: &str) {
         .map(|&h| ExternalSequenceBlockHash(h))
         .collect();
 
-    let remove_event = RouterEvent {
-        worker_id: 0,
-        event: KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: remove_hashes,
-            }),
-            dp_rank: 0,
-        },
-    };
+    let remove_event = remove_event(0, 0, 0, remove_hashes);
     index.apply_event(remove_event).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query should now only match first 79 blocks
     let scores = index.find_matches(full_query).await.unwrap();
@@ -1241,7 +1248,7 @@ async fn test_long_sequence_interleaved_workers(variant: &str) {
     index.apply_event(make_store_event(2, &seq_50)).await;
     index.apply_event(make_store_event(3, &seq_25)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query for 60 blocks - workers 0,1 match 60, worker 2 matches 50, worker 3 matches 25
     let query_60: Vec<LocalBlockHash> = (1..=60).map(LocalBlockHash).collect();
@@ -1285,7 +1292,7 @@ async fn test_long_sequence_exact_jump_size_boundaries(variant: &str) {
     let seq_96: Vec<u64> = (2001..=2096).collect();
     index.apply_event(make_store_event(2, &seq_96)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify all sequences match correctly
     let query_32: Vec<LocalBlockHash> = seq_32.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1326,7 +1333,7 @@ async fn test_long_sequence_off_by_one_jump_boundaries(variant: &str) {
     index.apply_event(make_store_event(2, &seq_63)).await;
     index.apply_event(make_store_event(3, &seq_65)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify all sequences match correctly
     let query_31: Vec<LocalBlockHash> = seq_31.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1367,7 +1374,7 @@ async fn test_long_sequence_divergence_at_jump_boundaries(variant: &str) {
     let sequence: Vec<u64> = (1..=128).collect();
     index.apply_event(make_store_event(0, &sequence)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Test divergence exactly at jump boundaries (position 31, 32, 33, 63, 64, 65)
     for diverge_pos in [31usize, 32, 33, 63, 64, 65, 95, 96, 97] {
@@ -1414,7 +1421,7 @@ async fn test_long_sequence_deep_continuation_chain(variant: &str) {
         full_prefix.extend(&chunk);
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query full sequence
     let full_query: Vec<LocalBlockHash> = (1..=200).map(LocalBlockHash).collect();
@@ -1442,7 +1449,7 @@ async fn test_long_sequence_clear_and_rebuild(variant: &str) {
     let sequence: Vec<u64> = (1..=100).collect();
     index.apply_event(make_store_event(0, &sequence)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify it's stored
     let query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1455,7 +1462,7 @@ async fn test_long_sequence_clear_and_rebuild(variant: &str) {
     // Clear the worker
     index.apply_event(make_clear_event(0)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify it's cleared
     let scores = index.find_matches(query.clone()).await.unwrap();
@@ -1465,7 +1472,7 @@ async fn test_long_sequence_clear_and_rebuild(variant: &str) {
     let new_sequence: Vec<u64> = (1001..=1100).collect();
     index.apply_event(make_store_event(0, &new_sequence)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Verify new sequence works
     let new_query: Vec<LocalBlockHash> = new_sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1521,7 +1528,7 @@ async fn test_long_sequence_multiple_workers_diverging(variant: &str) {
         ))
         .await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query 1-100 - worker 0 matches 100, workers 1&2 match 40
     let query: Vec<LocalBlockHash> = worker_0_full.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1560,7 +1567,7 @@ async fn test_long_sequence_staggered_lengths(variant: &str) {
             .await;
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Query for 100 blocks - each worker should match their stored length
     let query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
@@ -1598,7 +1605,7 @@ async fn test_very_long_sequence(variant: &str) {
     let sequence: Vec<u64> = (1..=seq_len).collect();
     index.apply_event(make_store_event(0, &sequence)).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_and_settle(index.as_ref()).await;
 
     // Full match
     let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -1749,6 +1756,7 @@ async fn test_frequency(variant: &str) {
 // KvIndexerMetrics tests
 // ============================================================================
 
+#[cfg(feature = "metrics")]
 #[test]
 fn test_increment_event_applied() {
     let metrics = KvIndexerMetrics::new_unregistered();
@@ -1822,7 +1830,7 @@ async fn test_local_indexer_slice_within_range() {
     let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
         match resp {
             WorkerKvQueryResponse::Events(e) => e,
-            WorkerKvQueryResponse::TreeDump(e) => e,
+            WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             _ => panic!("Unexpected response type"),
         }
     };
@@ -1843,7 +1851,7 @@ async fn test_local_indexer_slice_within_range() {
 
     // start_id=0 is before buffer (first is 1), so should trigger tree dump
     let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
     let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
     let ids = get_ids(extract_events(result));
@@ -1892,12 +1900,12 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
     }
 
     // Wait for events to be processed
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    indexer.flush().await;
 
     let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
         match resp {
             WorkerKvQueryResponse::Events(e) => e,
-            WorkerKvQueryResponse::TreeDump(e) => e,
+            WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             _ => panic!("Unexpected response type: {:?}", resp),
         }
     };
@@ -1919,11 +1927,11 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     // Tree dump path tests
     let result = indexer.get_events_in_id_range(None, None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(&result, WorkerKvQueryResponse::TreeDump { .. }));
     assert_eq!(extract_events(result).len(), 10);
 
     let result = indexer.get_events_in_id_range(Some(7), None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
     // Edge cases
     let result = indexer.get_events_in_id_range(Some(15), Some(10)).await;
@@ -1931,6 +1939,98 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     let result = indexer.get_events_in_id_range(Some(100), Some(200)).await;
     assert!(matches!(result, WorkerKvQueryResponse::TooNew { .. }));
+}
+
+#[tokio::test]
+async fn test_tree_dump_includes_last_event_id() {
+    // Create indexer with small buffer (5 events max)
+    let indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let make_event = |id: u64| {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id: id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(id * 100),
+                        tokens_hash: LocalBlockHash(id * 200),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+    };
+
+    // Add 10 events (IDs 5-14), buffer keeps last 5: events 10-14
+    for id in 5..15 {
+        indexer
+            .apply_event_with_buffer(make_event(id))
+            .await
+            .unwrap();
+    }
+    indexer.flush().await;
+
+    // Request with start_id=None -> tree dump should include last_event_id=14
+    let result = indexer.get_events_in_id_range(None, None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 14,
+                "last_event_id should be the buffer's newest event ID"
+            );
+            assert!(!events.is_empty(), "tree dump should contain events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+
+    // Request with start_id older than buffer -> tree dump should include last_event_id=14
+    let result = indexer.get_events_in_id_range(Some(7), None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 14,
+                "last_event_id should be the buffer's newest event ID"
+            );
+            assert!(!events.is_empty(), "tree dump should contain events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+
+    // Empty buffer case: create a fresh indexer with no events
+    let empty_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+    let result = empty_indexer.get_events_in_id_range(None, None).await;
+    match result {
+        WorkerKvQueryResponse::TreeDump {
+            last_event_id,
+            events,
+        } => {
+            assert_eq!(
+                last_event_id, 0,
+                "empty buffer should return last_event_id=0"
+            );
+            assert!(events.is_empty(), "empty indexer should have no events");
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1961,7 +2061,7 @@ async fn test_local_indexer_buffer_and_serialization() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    local_indexer.flush().await;
 
     let buffered_events = local_indexer.get_all_events_in_buffer();
     assert_eq!(buffered_events.len(), 1);
@@ -1978,4 +2078,107 @@ async fn test_local_indexer_buffer_and_serialization() {
     };
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn test_local_indexer_does_not_buffer_failed_send() {
+    let local_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let test_event = RouterEvent::new(
+        7,
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        },
+    );
+
+    let event_tx = local_indexer.event_sender();
+    local_indexer.shutdown();
+    event_tx.closed().await;
+
+    let result = local_indexer.apply_event_with_buffer(test_event).await;
+    assert!(matches!(result, Err(KvRouterError::IndexerOffline)));
+    assert_eq!(local_indexer.buffer_len(), 0);
+
+    match local_indexer.get_events_in_id_range(None, None).await {
+        WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+        } => {
+            assert!(events.is_empty());
+            assert_eq!(last_event_id, 0);
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[apply(indexer_template)]
+async fn test_apply_events_idempotent(variant: &str) {
+    let index = make_indexer(variant);
+
+    // Setup: build initial tree
+    index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+    index.apply_event(make_store_event(1, &[4, 5, 6])).await;
+    index
+        .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[7, 8]))
+        .await;
+    flush_and_settle(index.as_ref()).await;
+    let s0 = snapshot_tree(index.as_ref()).await;
+
+    // Mutation events: each add paired with its remove
+    let adds = [
+        make_store_event(2, &[1, 2, 9]),
+        make_store_event_with_parent(1, &[4, 5, 6], &[10, 11, 12]),
+    ];
+    let removes = [
+        make_remove_event(2, &[1, 2, 9]),
+        make_remove_event_with_parent(1, &[4, 5, 6], &[10, 11, 12]),
+    ];
+
+    // Phase 1: interleaved add/remove
+    index.apply_event(adds[0].clone()).await;
+    index.apply_event(removes[0].clone()).await;
+    index.apply_event(adds[1].clone()).await;
+    index.apply_event(removes[1].clone()).await;
+    flush_and_settle(index.as_ref()).await;
+    let s1 = snapshot_tree(index.as_ref()).await;
+    assert_eq!(
+        s0, s1,
+        "Phase 1: interleaved add/remove should restore tree"
+    );
+
+    // Phase 2: same interleaved again (idempotence of the full cycle)
+    index.apply_event(adds[0].clone()).await;
+    index.apply_event(removes[0].clone()).await;
+    index.apply_event(adds[1].clone()).await;
+    index.apply_event(removes[1].clone()).await;
+    flush_and_settle(index.as_ref()).await;
+    let s2 = snapshot_tree(index.as_ref()).await;
+    assert_eq!(s1, s2, "Phase 2: repeated cycle should be idempotent");
+
+    // Phase 3: non-interleaved (all adds then all removes)
+    index.apply_event(adds[0].clone()).await;
+    index.apply_event(adds[1].clone()).await;
+    index.apply_event(removes[0].clone()).await;
+    index.apply_event(removes[1].clone()).await;
+    flush_and_settle(index.as_ref()).await;
+    let s3 = snapshot_tree(index.as_ref()).await;
+    assert_eq!(
+        s2, s3,
+        "Phase 3: non-interleaved ordering should restore tree"
+    );
 }

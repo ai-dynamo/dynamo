@@ -3,6 +3,7 @@
 
 """Dynamo TRT-LLM backend configuration ArgGroup."""
 
+import argparse
 from typing import Optional
 
 from tensorrt_llm.llmapi import BuildConfig
@@ -20,7 +21,7 @@ DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 class DynamoTrtllmArgGroup(ArgGroup):
     """TensorRT-LLM-specific Dynamo wrapper configuration."""
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--version",
             action="version",

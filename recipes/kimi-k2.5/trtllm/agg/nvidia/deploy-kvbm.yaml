@@ -55,7 +55,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
       replicas: 1
     TrtllmWorker:
       componentType: worker
@@ -76,6 +76,13 @@ spec:
                   values:
                   - "true"
         mainContainer:
+          ports:
+          - name: system
+            containerPort: 9090
+          - name: nixl
+            containerPort: 19090
+          - name: kvbm
+            containerPort: 6880
           args:
           - |
             python3 -m dynamo.trtllm \
@@ -88,7 +95,10 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          # REQUIRED: replace with your patched image tag (run patch/patch-container.sh first).
+          # Upstream TRT-LLM does not support KimiK25ForConditionalGeneration without the patch.
+          # Example: ./patch/patch-container.sh <your-image> -> produces <your-image>-patched
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -98,9 +108,14 @@ spec:
             value: /opt/dynamo/configs/config.yaml
           - name: HF_HOME
             value: /opt/models
-          # Adjust CPU cache size as needed
+          # Adjust CPU cache size as needed; start small for faster startup
           - name: DYN_KVBM_CPU_CACHE_GB
-            value: "100"
+            value: "10"
+          # Enable KVBM metrics
+          - name: DYN_KVBM_METRICS
+            value: "true"
+          - name: DYN_KVBM_METRICS_PORT
+            value: "6880"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm

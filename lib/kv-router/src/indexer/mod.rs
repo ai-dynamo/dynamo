@@ -41,8 +41,6 @@ mod types;
 
 pub mod concurrent_radix_tree;
 pub mod concurrent_radix_tree_compressed;
-#[cfg(feature = "bench")]
-pub mod naive;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;

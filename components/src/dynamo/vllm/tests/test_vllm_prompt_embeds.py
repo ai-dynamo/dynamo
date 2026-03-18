@@ -29,7 +29,7 @@ def mock_handler():
         pass
 
     handler = MockHandler()
-    handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(
+    handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
     return handler

@@ -9,20 +9,6 @@ The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to h
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Run KVBM Standalone](#run-kvbm-standalone)
-- [Run KVBM in Dynamo with vLLM](#run-kvbm-in-dynamo-with-vllm)
-- [Run KVBM in Dynamo with TensorRT-LLM](#run-kvbm-in-dynamo-with-tensorrt-llm)
-- [Run Dynamo with SGLang HiCache](#run-dynamo-with-sglang-hicache)
-- [Disaggregated Serving with KVBM](#disaggregated-serving-with-kvbm)
-- [Configuration](#configuration)
-- [Enable and View KVBM Metrics](#enable-and-view-kvbm-metrics)
-- [Benchmarking KVBM](#benchmarking-kvbm)
-- [Troubleshooting](#troubleshooting)
-- [Developing Locally](#developing-locally)
-
 ## Quick Start
 
 ## Run KVBM Standalone

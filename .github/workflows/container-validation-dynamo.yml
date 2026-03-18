@@ -26,9 +26,9 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ steps.changes.outputs.core }}
-      planner: ${{ steps.changes.outputs.planner }}
-      frontend: ${{ steps.changes.outputs.frontend }}
+      core: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.core == 'true' }}
+      planner: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.planner == 'true' }}
+      frontend: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.frontend == 'true' }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -62,7 +62,8 @@ jobs:
     timeout-minutes: 60
     outputs:
       # Only pass the non-secret tag suffix between jobs (GitHub blanks outputs containing secrets)
-      image_tag_suffix: ${{ steps.define_image_tag.outputs.image_tag_suffix }}
+      runtime_tag_suffix: ${{ steps.define_image_tag.outputs.runtime_tag_suffix }}
+      test_tag_suffix: ${{ steps.define_image_tag.outputs.test_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -90,9 +91,12 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-runtime-cuda${CUDA_MAJOR}-amd64"
-          echo "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
-          echo "remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          RUNTIME_TAG_SUFFIX="${{ github.sha }}-dynamo-runtime-cuda${CUDA_MAJOR}-amd64"
+          TEST_TAG_SUFFIX="${{ github.sha }}-dynamo-test-cuda${CUDA_MAJOR}-amd64"
+          echo "runtime_tag_suffix=${RUNTIME_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "test_tag_suffix=${TEST_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "runtime_remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${RUNTIME_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "test_remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${TEST_TAG_SUFFIX}" >> $GITHUB_OUTPUT
       - name: Generate Dockerfile
         shell: bash
         run: |
@@ -104,10 +108,10 @@ jobs:
               --cuda-version=${{ env.CUDA_VERSION }} \
               --show-result \
               --output-short-filename
-      - name: Build and Push Container
+      - name: Build and Push Runtime Image
         uses: ./.github/actions/docker-remote-build
         with:
-          image_tag: ${{ steps.define_image_tag.outputs.remote_tag }}
+          image_tag: ${{ steps.define_image_tag.outputs.runtime_remote_tag }}
           framework: dynamo
           target: runtime
           platform: amd64
@@ -119,6 +123,28 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           push_image: 'true'
+      - name: Build and Push Test Image
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        shell: bash
+        run: |
+          CACHE_TAG="test-dynamo-cuda${CUDA_VERSION%%.*}-amd64-cache"
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
+          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
+          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            --push \
+            --platform linux/amd64 \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.define_image_tag.outputs.runtime_remote_tag }} \
+            ${CACHE_ARGS} \
+            -t ${{ steps.define_image_tag.outputs.test_remote_tag }} .
 
   rust-checks:
     needs: [changed-files, build]
@@ -128,7 +154,7 @@ jobs:
     timeout-minutes: 30
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.runtime_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -137,7 +163,7 @@ jobs:
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull image
+      - name: Pull runtime image
         run: |
           source ./.github/scripts/retry_docker.sh
           retry_pull ${{ env.IMAGE_TAG }}
@@ -167,7 +193,7 @@ jobs:
     name: Pytest (parallel)
     timeout-minutes: 30
     env:
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -176,7 +202,7 @@ jobs:
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull image
+      - name: Pull test image
         run: |
           source ./.github/scripts/retry_docker.sh
           retry_pull ${{ env.IMAGE_TAG }}
@@ -189,6 +215,7 @@ jobs:
           test_type: "pre_merge_parallel"
           platform_arch: amd64
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: '4'
           dind_as_sidecar: 'false'
 
@@ -199,7 +226,7 @@ jobs:
     name: Pytest (sequential)
     timeout-minutes: 30
     env:
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -208,7 +235,7 @@ jobs:
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull image
+      - name: Pull test image
         run: |
           source ./.github/scripts/retry_docker.sh
           retry_pull ${{ env.IMAGE_TAG }}
@@ -221,5 +248,6 @@ jobs:
           test_type: "pre_merge_sequential"
           platform_arch: amd64
           enable_mypy: 'false'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'false'

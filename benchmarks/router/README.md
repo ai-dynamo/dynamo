@@ -235,7 +235,7 @@ python prefix_ratio_benchmark.py --url http://localhost:8000 http://localhost:80
 python prefix_ratio_benchmark.py --output-dir results/experiment1
 ```
 
-### Step 4 (Alternative): Run Benchmarks with Real Trace Data
+### Step 5 (Alternative): Run Benchmarks with Real Trace Data
 
 Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data. This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
 
@@ -284,7 +284,7 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 > ```
 > However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
 
-### Step 4 (Alternative): Priority Queue Benchmark
+### Step 6 (Alternative): Priority Queue Benchmark
 
 `real_data_priority_benchmark.py` measures whether the router's priority queue correctly differentiates high-, medium-, and low-priority requests. It splits a trace into three tiers, runs a **baseline** (no priority tagging) and a **priority-tagged** run using the same split, then produces a bar chart comparing TTFT across tiers.
 
@@ -352,7 +352,7 @@ python real_data_priority_benchmark.py \
 
 The benchmark outputs a `ttft_comparison.png` bar chart in the results directory showing TTFT (p50 with p25-p75 error bars) for each tier, comparing baseline vs. priority-tagged runs. If the priority queue is working correctly, high-priority requests should show lower TTFT in the priority run compared to baseline, while low-priority requests may show slightly higher TTFT.
 
-### Step 4 (Alternative): Agent Benchmark (Concurrency-Based Multi-Turn)
+### Step 7 (Alternative): Agent Benchmark (Concurrency-Based Multi-Turn)
 
 For benchmarking with multi-turn conversation traces using concurrency-based load generation (instead of timestamp-based replay), use `agent_benchmark.py`. This is useful for testing how the system handles multiple concurrent agent sessions.
 
