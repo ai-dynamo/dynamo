@@ -93,6 +93,10 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - section: Testing
+        contents:
+          - page: Mocker
+            path: mocker/mocker.md
       - section: Multimodal
         path: features/multimodal/README.md
         contents:
