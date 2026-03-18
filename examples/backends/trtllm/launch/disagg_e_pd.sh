@@ -27,6 +27,10 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 # Extra arguments forwarded to the PD worker (e.g. --multimodal-embedding-cache-capacity-gb 10)
 EXTRA_PD_ARGS=("$@")
 
+# Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
+# child processes would inherit. Unset it so only workers that need it set their own.
+unset DYN_SYSTEM_PORT
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Multimodal E/PD" "$MODEL_PATH" "$HTTP_PORT"
 
@@ -34,7 +38,8 @@ print_launch_banner --multimodal "Launching Multimodal E/PD" "$MODEL_PATH" "$HTT
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# run encode worker (vision encoder on GPU 0)
+# run encode worker (vision encoder on GPU 0) with metrics on port 8081
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -44,7 +49,8 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode encode &
 
-# run PD worker 1 (GPU 0)
+# run PD worker 1 (GPU 0) with metrics on port 8082
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

@@ -70,7 +70,7 @@ repos:
   hooks:
   - id: mypy
     name: mypy type checking
-    entry: bash -c 'MYPYPATH=components/src:lib/bindings/python/src mypy --explicit-package-bases components/src/dynamo/common components/src/dynamo/frontend components/src/dynamo/global_planner components/src/dynamo/global_router components/src/dynamo/mocker components/src/dynamo/planner components/src/dynamo/router components/src/dynamo/vllm components/src/dynamo/sglang components/src/dynamo/trtllm && MYPYPATH=lib/bindings/python/src mypy -p dynamo'
+    entry: bash -c 'MYPYPATH=components/src:lib/bindings/python/src mypy --explicit-package-bases components/src/dynamo/common components/src/dynamo/frontend components/src/dynamo/global_planner components/src/dynamo/global_router components/src/dynamo/mocker components/src/dynamo/planner components/src/dynamo/profiler components/src/dynamo/router components/src/dynamo/vllm components/src/dynamo/sglang components/src/dynamo/trtllm && MYPYPATH=lib/bindings/python/src mypy -p dynamo'
     language: python
     types_or: [python, pyi]
     pass_filenames: false

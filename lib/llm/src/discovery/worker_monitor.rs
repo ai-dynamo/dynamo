@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 use dashmap::DashMap;
+use dynamo_kv_router::protocols::ActiveLoad;
 use serde::{Deserialize, Serialize};
 
 use crate::http::service::metrics::{
@@ -17,7 +18,6 @@ use crate::http::service::metrics::{
 };
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
-use crate::kv_router::protocols::ActiveLoad;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
