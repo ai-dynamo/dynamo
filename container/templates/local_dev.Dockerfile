@@ -78,5 +78,10 @@ RUN mkdir -p /home/$USERNAME/.cache/ \
     && chmod g+w /home/$USERNAME/.cache/ \
     && chmod g+w /home/$USERNAME/.cache/pre-commit
 
+{% if device == "xpu" %}
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}
