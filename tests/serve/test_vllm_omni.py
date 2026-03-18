@@ -21,7 +21,7 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payloads import BasePayload
+from tests.utils.payloads import BasePayload, ChatPayload
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +110,64 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
-    # omni_text (Qwen2.5-Omni-7B): ~80GB GPU required, exceeds CI capacity (22GB).
-    # omni_image (Qwen/Qwen-Image): ~40GB GPU required, exceeds CI capacity (22GB).
+    "omni_text": VLLMOmniConfig(
+        name="omni_text",
+        directory=vllm_dir,
+        script_name="agg_omni.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason="Qwen2.5-Omni-7B requires ~80GB GPU memory, exceeds CI capacity (22GB)"
+            ),
+        ],
+        model="Qwen/Qwen2.5-Omni-7B",
+        request_payloads=[
+            ChatPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Say hello"}],
+                    "max_tokens": 32,
+                    "temperature": 0.0,
+                },
+                repeat_count=1,
+                expected_response=["hello", "Hello"],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "omni_image": VLLMOmniConfig(
+        name="omni_image",
+        directory=vllm_dir,
+        script_name="agg_omni_image.sh",
+        script_args=[
+            "--vae-use-slicing",
+            "--vae-use-tiling",
+            "--enforce-eager",
+        ],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason="Qwen/Qwen-Image requires ~40GB GPU memory, exceeds CI capacity (22GB)"
+            ),
+        ],
+        model="Qwen/Qwen-Image",
+        request_payloads=[
+            ImageGenerationPayload(
+                body={
+                    "prompt": "A red apple on a table",
+                    "size": "512x512",
+                    "num_inference_steps": 20,
+                    "response_format": "url",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_i2v": VLLMOmniConfig(
         name="omni_i2v",
         directory=vllm_dir,
