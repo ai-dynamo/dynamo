@@ -158,9 +158,6 @@ def update_dynamo_config_with_engine(
     ):
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.omni:
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"

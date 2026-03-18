@@ -4,6 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{DashMap, mapref::entry::Entry};
+use dynamo_kv_router::{config::KvRouterConfig, protocols::WorkerId};
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -17,10 +18,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{
-        KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{

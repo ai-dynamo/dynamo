@@ -16,7 +16,12 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
       eppConfig:
         config:
           plugins:
@@ -68,7 +73,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -97,7 +102,7 @@ spec:
             - name: HF_HOME
               value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --data-parallel-size 1 --is-prefill-worker --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
@@ -119,7 +124,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -148,7 +153,7 @@ spec:
             - name: HF_HOME
               value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
