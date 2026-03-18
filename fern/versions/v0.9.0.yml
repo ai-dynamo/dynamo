@@ -82,12 +82,12 @@ navigation:
       - section: Multimodality Support
         path: ../pages-v0.9.0/features/multimodal/README.md
         contents:
-          - page: vLLM Multimodal
-            path: ../pages-v0.9.0/features/multimodal/multimodal-vllm.md
-          - page: TensorRT-LLM Multimodal
-            path: ../pages-v0.9.0/features/multimodal/multimodal-trtllm.md
           - page: SGLang Multimodal
             path: ../pages-v0.9.0/features/multimodal/multimodal-sglang.md
+          - page: TensorRT-LLM Multimodal
+            path: ../pages-v0.9.0/features/multimodal/multimodal-trtllm.md
+          - page: vLLM Multimodal
+            path: ../pages-v0.9.0/features/multimodal/multimodal-vllm.md
       - page: Tool Calling
         path: ../pages-v0.9.0/agents/tool-calling.md
       - page: LoRA Adapters
@@ -128,12 +128,12 @@ navigation:
     contents:
       - section: Backends
         contents:
-          - page: vLLM
-            path: ../pages-v0.9.0/backends/vllm/README.md
           - page: SGLang
             path: ../pages-v0.9.0/backends/sglang/README.md
           - page: TensorRT-LLM
             path: ../pages-v0.9.0/backends/trtllm/README.md
+          - page: vLLM
+            path: ../pages-v0.9.0/backends/vllm/README.md
       - section: Frontend
         path: ../pages-v0.9.0/components/frontend/README.md
         contents:
@@ -255,18 +255,6 @@ navigation:
       - page: Tuning Disaggregated Performance
         path: ../pages-v0.9.0/performance/tuning.md
       # -- Backend detail pages --
-      - section: vLLM Details
-        contents:
-          - page: DeepSeek-R1
-            path: ../pages-v0.9.0/backends/vllm/deepseek-r1.md
-          - page: GPT-OSS
-            path: ../pages-v0.9.0/backends/vllm/gpt-oss.md
-          - page: Multi-Node
-            path: ../pages-v0.9.0/backends/vllm/multi-node.md
-          - page: Prometheus
-            path: ../pages-v0.9.0/backends/vllm/prometheus.md
-          - page: Prompt Embeddings
-            path: ../pages-v0.9.0/backends/vllm/prompt-embeddings.md
       - section: SGLang Details
         contents:
           - page: Expert Distribution (EPLB)
@@ -295,6 +283,18 @@ navigation:
             path: ../pages-v0.9.0/backends/trtllm/gpt-oss.md
           - page: Prometheus
             path: ../pages-v0.9.0/backends/trtllm/prometheus.md
+      - section: vLLM Details
+        contents:
+          - page: DeepSeek-R1
+            path: ../pages-v0.9.0/backends/vllm/deepseek-r1.md
+          - page: GPT-OSS
+            path: ../pages-v0.9.0/backends/vllm/gpt-oss.md
+          - page: Multi-Node
+            path: ../pages-v0.9.0/backends/vllm/multi-node.md
+          - page: Prometheus
+            path: ../pages-v0.9.0/backends/vllm/prometheus.md
+          - page: Prompt Embeddings
+            path: ../pages-v0.9.0/backends/vllm/prompt-embeddings.md
       # -- Features (hidden sub-pages) --
       - section: Speculative Decoding
         path: ../pages-v0.9.0/features/speculative-decoding/README.md

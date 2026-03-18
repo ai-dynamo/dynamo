@@ -93,12 +93,6 @@ navigation:
       - section: Multimodal
         path: ../pages-v1.0.0/features/multimodal/README.md
         contents:
-          - page: vLLM Multimodal
-            path: ../pages-v1.0.0/features/multimodal/multimodal-vllm.md
-          - page: SGLang Multimodal
-            path: ../pages-v1.0.0/features/multimodal/multimodal-sglang.md
-          - page: TensorRT-LLM Multimodal
-            path: ../pages-v1.0.0/features/multimodal/multimodal-trtllm.md
           - page: Embedding Cache
             path: ../pages-v1.0.0/features/multimodal/embedding-cache.md
           - page: Encoder Disaggregation
@@ -112,12 +106,12 @@ navigation:
           - page: FastVideo
             slug: fastvideo
             path: ../pages-v1.0.0/features/diffusion/fastvideo.md
-          - page: vLLM-Omni
-            path: ../pages-v1.0.0/backends/vllm/vllm-omni.md
           - page: SGLang Diffusion
             path: ../pages-v1.0.0/backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
             path: ../pages-v1.0.0/backends/trtllm/trtllm-video-diffusion.md
+          - page: vLLM-Omni
+            path: ../pages-v1.0.0/backends/vllm/vllm-omni.md
       - page: Tool Calling
         path: ../pages-v1.0.0/agents/tool-calling.md
       - page: LoRA Adapters
@@ -346,18 +340,6 @@ navigation:
       - page: Global Planner Guide
         path: ../pages-v1.0.0/components/planner/global-planner.md
       # -- Backend detail pages --
-      - section: vLLM Details
-        contents:
-          - page: Reference Guide
-            path: ../pages-v1.0.0/backends/vllm/vllm-reference-guide.md
-          - page: Examples
-            path: ../pages-v1.0.0/backends/vllm/vllm-examples.md
-          - page: KV Cache Offloading
-            path: ../pages-v1.0.0/backends/vllm/vllm-kv-offloading.md
-          - page: Observability
-            path: ../pages-v1.0.0/backends/vllm/vllm-observability.md
-          - page: vLLM-Omni
-            path: ../pages-v1.0.0/backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
           - page: Building a Custom Container
@@ -376,6 +358,18 @@ navigation:
             path: ../pages-v1.0.0/backends/trtllm/trtllm-gemma3-sliding-window-attention.md
           - page: GPT-OSS
             path: ../pages-v1.0.0/backends/trtllm/trtllm-gpt-oss.md
+      - section: vLLM Details
+        contents:
+          - page: Reference Guide
+            path: ../pages-v1.0.0/backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: ../pages-v1.0.0/backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: ../pages-v1.0.0/backends/vllm/vllm-kv-offloading.md
+          - page: Observability
+            path: ../pages-v1.0.0/backends/vllm/vllm-observability.md
+          - page: vLLM-Omni
+            path: ../pages-v1.0.0/backends/vllm/vllm-omni.md
       # -- Features (hidden sub-pages) --
       - section: Speculative Decoding
         path: ../pages-v1.0.0/features/speculative-decoding/README.md

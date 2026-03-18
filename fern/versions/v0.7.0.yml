@@ -222,18 +222,6 @@ navigation:
                 path: ../pages-v0.7.0/api/nixl-connect/rdma-metadata.md
       - section: Backend Details
         contents:
-          - section: vLLM
-            contents:
-              - page: DeepSeek-R1
-                path: ../pages-v0.7.0/backends/vllm/deepseek-r1.md
-              - page: GPT-OSS
-                path: ../pages-v0.7.0/backends/vllm/gpt-oss.md
-              - page: Multi-Node
-                path: ../pages-v0.7.0/backends/vllm/multi-node.md
-              - page: Multimodal
-                path: ../pages-v0.7.0/backends/vllm/multimodal.md
-              - page: Prometheus
-                path: ../pages-v0.7.0/backends/vllm/prometheus.md
           - section: SGLang
             contents:
               - page: GPT-OSS
@@ -274,3 +262,15 @@ navigation:
                 path: ../pages-v0.7.0/backends/trtllm/multimodal-epd.md
               - page: Prometheus
                 path: ../pages-v0.7.0/backends/trtllm/prometheus.md
+          - section: vLLM
+            contents:
+              - page: DeepSeek-R1
+                path: ../pages-v0.7.0/backends/vllm/deepseek-r1.md
+              - page: GPT-OSS
+                path: ../pages-v0.7.0/backends/vllm/gpt-oss.md
+              - page: Multi-Node
+                path: ../pages-v0.7.0/backends/vllm/multi-node.md
+              - page: Multimodal
+                path: ../pages-v0.7.0/backends/vllm/multimodal.md
+              - page: Prometheus
+                path: ../pages-v0.7.0/backends/vllm/prometheus.md
