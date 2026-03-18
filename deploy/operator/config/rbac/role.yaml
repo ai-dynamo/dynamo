@@ -35,7 +35,6 @@ rules:
   resources:
   - pods
   verbs:
-  - delete
   - get
   - list
   - watch
