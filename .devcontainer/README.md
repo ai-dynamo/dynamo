@@ -146,9 +146,9 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 # Single command approach (recommended)
 export FRAMEWORK=vllm         # Note: any of vllm, sglang, trtllm can be used
 python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
-docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:latest-${FRAMEWORK}-local-dev -f container/rendered.Dockerfile .
 
-# Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
+# Now you've created dynamo:latest-vllm-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
