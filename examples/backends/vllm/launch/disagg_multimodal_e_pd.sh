@@ -86,8 +86,8 @@ export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"loc
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
-    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
+    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
@@ -111,7 +111,6 @@ echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)...
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
-  --multimodal-worker \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \

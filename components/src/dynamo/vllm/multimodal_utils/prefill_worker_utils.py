@@ -315,7 +315,7 @@ class MultiModalEmbeddingLoader:
 
         Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
         """
-        if not self._encode_worker_client or not image_urls:
+        if self._encode_worker_client is None or not image_urls:
             return defaultdict(list)
 
         groups, pending = await _fetch_embeddings(

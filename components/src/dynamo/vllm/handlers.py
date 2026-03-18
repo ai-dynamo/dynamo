@@ -83,6 +83,11 @@ def _compute_mm_uuids(
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
     images = multi_modal_data["image"]
+    # [gluo FIXME] Dict being returned when the mm data has been processed,
+    # in this case, we skip computing mm_uuids for now until we better understand
+    # what info should be hash on.
+    if isinstance(images, dict):
+        return None
     if not isinstance(images, list):
         images = [images]
     if not images:
@@ -396,7 +401,7 @@ class BaseWorkerHandler(ABC):
             self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
                 capacity_bytes
             )
-        self.embedding_loader = MultiModalEmbeddingLoader(
+        return MultiModalEmbeddingLoader(
             encode_worker_client=self.encode_worker_client,  # type: ignore
             receiver=self.embedding_receiver,
             embedding_cache_manager=self.embedding_cache_manager,
@@ -1018,7 +1023,7 @@ class BaseWorkerHandler(ABC):
         return prompt, sequence_length, embeddings_tensor
 
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -1049,7 +1054,9 @@ class BaseWorkerHandler(ABC):
                 elif isinstance(item, dict) and "Decoded" in item:
                     supported = False
             if supported:
-                vllm_mm_data = await self.embedding_loader.load_embedding_batch(mm_map)
+                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
+                    image_urls, "dummy_id", model=self.config.model, context=context
+                )
                 logger.debug(
                     f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
                 )
@@ -1416,7 +1423,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        multi_modal_data = await self._extract_multimodal_data(request, context)
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
