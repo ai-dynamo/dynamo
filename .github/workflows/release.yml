@@ -189,10 +189,14 @@ jobs:
           echo "========================================"
 
           copy_image() {
-            local SRC="$1" DST="$2" LABEL="$3"
+            local SRC="$1" DST="$2" LABEL="$3" PLATFORM="${4:-}"
+            local PLATFORM_ARG=""
+            if [ -n "${PLATFORM}" ]; then
+              PLATFORM_ARG="--platform ${PLATFORM}"
+            fi
             echo "----------------------------------------"
             echo "Copying: ${LABEL}"
-            if crane copy "${SRC}" "${DST}"; then
+            if crane copy ${PLATFORM_ARG} "${SRC}" "${DST}"; then
               echo "  Copied: ${LABEL}"
               SUCCESSFUL_COPIES+=("${LABEL}")
               return 0
@@ -217,18 +221,15 @@ jobs:
           }
 
           # ---- CUDA 12 runtime images (vllm and sglang) ----
-          # NOTE: Images are now multi-arch manifests (no -${ARCH} suffix on ECR).
-          # crane copy needs --platform linux/${ARCH} to extract per-arch layers.
-          # TODO: update crane copy calls to use --platform flag (follow-up to ops-3945).
           echo ""
           echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
           CUDA12_FRAMEWORKS=("vllm" "sglang")
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
-              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}" "linux/${ARCH}"
             done
 
             create_manifest \
@@ -250,9 +251,9 @@ jobs:
             fi
 
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
-              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}" "linux/${ARCH}"
             done
 
             create_manifest \
