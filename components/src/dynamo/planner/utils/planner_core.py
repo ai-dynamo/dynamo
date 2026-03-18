@@ -504,6 +504,7 @@ class BasePlanner:
 
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         """Create a client for the given component and endpoint, with a brief sleep for state sync."""
+        assert self.runtime is not None, "Runtime is not initialized"
         client = await self.runtime.endpoint(
             f"{self.namespace}.{component_name}.{endpoint_name}"
         ).client()

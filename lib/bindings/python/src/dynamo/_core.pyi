@@ -2,17 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from typing import (
-    Any,
-    AsyncGenerator,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-)
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
@@ -34,7 +24,7 @@ def get_reasoning_parser_names() -> list[str]:
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
-RequestHandler = Callable[[JsonLike], AsyncGenerator[JsonLike, None]]
+RequestHandler = Callable[..., AsyncIterator[JsonLike]]
 
 class DistributedRuntime:
     """
@@ -453,8 +443,6 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
-    data_parallel_size: int
-    data_parallel_start_rank: int
     bootstrap_host: str | None
     bootstrap_port: int | None
 

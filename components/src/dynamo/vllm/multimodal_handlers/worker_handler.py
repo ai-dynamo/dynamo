@@ -19,7 +19,7 @@ from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_m
 logger = logging.getLogger(__name__)
 
 
-class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
+class MultimodalDecodeWorkerHandler(BaseWorkerHandler[vLLMMultimodalRequest, dict]):
     """Decode worker for disaggregated multimodal serving"""
 
     def __init__(

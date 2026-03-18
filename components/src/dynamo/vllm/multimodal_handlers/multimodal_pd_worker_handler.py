@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 IMAGE_URL_KEY = "image_url"
 
 
-class MultimodalPDWorkerHandler(BaseWorkerHandler):
+class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
     """Prefill/Decode or Prefill-only worker for multimodal serving"""
 
     def __init__(
@@ -381,6 +381,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ) as decode_timer,
         ):
             num_output_tokens_so_far = 0
+            if self.decode_worker_client is None:
+                raise RuntimeError("Decode worker client is not configured.")
             async for (decode_response) in await self.decode_worker_client.round_robin(
                 request.model_dump_json()
             ):

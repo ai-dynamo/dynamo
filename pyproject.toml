@@ -380,6 +380,10 @@ module = [
     "uvloop",
     "prometheus_client",
     "prometheus_client.*",
+    "pybase64",
+    "blake3",
+    "cupy_backends",
+    "cupy_backends.*",
 ]
 ignore_missing_imports = true
 

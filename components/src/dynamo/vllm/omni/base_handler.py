@@ -16,12 +16,13 @@ try:
 except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
+from dynamo._core import Context
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 logger = logging.getLogger(__name__)
 
 
-class BaseOmniHandler(BaseWorkerHandler):
+class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
     """Base handler for multi-stage pipelines using vLLM-Omni's AsyncOmni orchestrator."""
 
     def __init__(
@@ -123,8 +124,8 @@ class BaseOmniHandler(BaseWorkerHandler):
         return omni_kwargs
 
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs using AsyncOmni orchestrator with OpenAI-compatible format.
 
         Subclasses should override ``_generate_openai_mode`` for custom output handling.

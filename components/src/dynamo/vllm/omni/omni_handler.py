@@ -15,6 +15,7 @@ from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.image_protocol import (
     ImageData,
@@ -99,8 +100,8 @@ class OmniHandler(BaseOmniHandler):
         self._image_loader = ImageLoader()
 
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs via the unified OpenAI mode.
 
         Args:
@@ -111,13 +112,14 @@ class OmniHandler(BaseOmniHandler):
             Response dictionaries.
         """
         request_id = context.id()
+        assert request_id is not None, "Request ID is required"
         logger.debug(f"Omni Request ID: {request_id}")
 
         async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
-        self, request: Dict[str, Any], context, request_id: str
+        self, request: Dict[str, Any], context: Context, request_id: str
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 

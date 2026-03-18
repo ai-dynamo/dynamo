@@ -55,10 +55,11 @@ jobs:
     - name: Install mypy and type stubs
       run: |
         pip install mypy==1.18.2 \
-          boto3-stubs[s3] types-aiofiles types-PyYAML types-requests types-tabulate
+          boto3-stubs[s3] types-aiofiles types-PyYAML types-requests types-tabulate \
+          matplotlib-stubs
     - name: Run mypy (components)
       run: |
-        MYPYPATH=components/src python3 -m mypy --explicit-package-bases \
+        MYPYPATH=components/src:lib/bindings/python/src python3 -m mypy --explicit-package-bases \
           components/src/dynamo/common \
           components/src/dynamo/frontend \
           components/src/dynamo/global_planner \

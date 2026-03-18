@@ -65,7 +65,7 @@ async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
         yield "mock endpoint"
 
     generate_endpoint = runtime.endpoint(f"{config.namespace}.Planner.generate")
-    await generate_endpoint.serve_endpoint(generate)  # type: ignore[arg-type]
+    await generate_endpoint.serve_endpoint(generate)
 
 
 def _parse_config() -> PlannerConfig:
