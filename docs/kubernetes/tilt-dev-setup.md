@@ -35,7 +35,6 @@ workloads — while iterating on controller logic with sub-second feedback.
 | [Helm](https://helm.sh/docs/intro/install/) | v3 | Chart rendering |
 | [Go](https://go.dev/dl/) | 1.25+ | Compiling the operator |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | — | Cluster access |
-| [jq](https://jqlang.github.io/jq/download/) | — | Webhook CA injection |
 | A Kubernetes cluster | — | kind, minikube, or remote cluster |
 
 You also need a **container registry** that is accessible to your cluster's
@@ -66,7 +65,7 @@ Press **Space** in the terminal to open the web UI. Press **Ctrl-C** to
 shut everything down (resources remain deployed; run `tilt down` to tear
 them down).
 
-![Tilt web UI showing the operator, CRDs, webhook cert, and infrastructure resources](../assets/img/tilt-ui.png)
+![Tilt web UI showing the operator, CRDs, and infrastructure resources](../assets/img/tilt-ui.png)
 
 ## Configuration
 
@@ -117,8 +116,6 @@ skip_codegen: true
 | `enable_etcd` | bool | `false` | Deploy etcd subchart. Only needed when `discoveryBackend` is `etcd`. |
 | `enable_kai_scheduler` | bool | `false` | Deploy kai-scheduler for GPU-aware scheduling in multi-node setups. |
 | `enable_grove` | bool | `false` | Deploy Grove for PodClique-based multi-node orchestration. |
-| `webhook_cert_mode` | string | `auto` | How webhook TLS certificates are managed. See [Webhook Certificates](#webhook-certificates). |
-| `webhook_ca_bundle` | string | `""` | Base64-encoded CA bundle (required when `webhook_cert_mode: external`). |
 | `image_pull_secret` | string | `""` | Name of a `docker-registry` Secret for pulling images from private registries. |
 | `helm_values` | map | `{}` | Arbitrary `--set` overrides passed to `helm template`. |
 | `operator_version` | string | *(from Chart.yaml)* | Operator `--operator-version` flag. Defaults to `appVersion` from the operator subchart. |
@@ -144,16 +141,13 @@ When you run `tilt up`, the following resources are created in order:
 ```
 manager-build     Compile Go binary locally
         │
-   ┌────┴────┐
-   │         │
-  crds    webhook-cert    mpi-ssh-secret
-   │         │                 │
-   └────┬────┘─────────────────┘
+        ├───── crds       Apply CRDs via server-side apply
         │
-    operator          Deploy operator pod (live-updated)
-        │
-  webhook-ca-inject   Patch webhook configs with CA bundle
+    operator              Deploy operator pod (live-updated)
 ```
+
+The operator handles webhook certificate generation, CA bundle injection, and
+MPI SSH key provisioning at runtime — no external setup needed.
 
 ### What Each Resource Does
 
@@ -164,21 +158,12 @@ compile the operator binary. Re-runs on changes to `api/`, `cmd/`, `internal/`,
 **crds** — Applies CRDs from the Helm chart via `kubectl apply --server-side`.
 When `skip_codegen` is `false`, runs `make generate && make manifests` first.
 
-**webhook-cert** — Generates a self-signed TLS certificate for the admission
-webhooks (in `auto` mode). The certificate is stored in a Secret and the CA
-bundle is injected into webhook configurations after the operator starts.
-
-**mpi-ssh-secret** — Generates an SSH keypair for multi-node MPI communication.
-The production Helm chart handles this via a post-install hook Job; Tilt
-generates the keypair inline.
-
 **operator** — The operator Deployment itself. Tilt watches the compiled binary
 and uses `live_update` to sync it into the running container and restart the
-process — no image rebuild needed.
-
-**webhook-ca-inject** — After the operator is running, patches
-`MutatingWebhookConfiguration` and `ValidatingWebhookConfiguration` resources
-with the CA bundle so the API server trusts the self-signed cert.
+process — no image rebuild needed. On startup, the operator's built-in cert
+controller generates a self-signed TLS certificate, injects the CA bundle into
+webhook configurations, and creates the MPI SSH secret — matching production
+behavior exactly.
 
 ### Live Update Cycle
 
@@ -194,39 +179,18 @@ No `docker build`, no `docker push`, no `kubectl rollout restart`.
 
 ## Webhook Certificates
 
-The Tiltfile supports three modes for webhook TLS certificates, mirroring the
-Helm chart's configuration:
+The operator handles webhook TLS certificates automatically at runtime using a
+built-in cert controller (based on OPA cert-controller). On startup it:
 
-### Auto (Default)
+1. Creates a self-signed CA and webhook serving certificate.
+2. Stores them in the `webhook-server-cert` Secret.
+3. Injects the CA bundle into `ValidatingWebhookConfiguration` and
+   `MutatingWebhookConfiguration` resources.
 
-```yaml
-webhook_cert_mode: auto
-```
-
-Tilt generates a self-signed certificate and injects the CA bundle into webhook
-configurations after deploy. This is the simplest option and works out of the
-box.
-
-### cert-manager
-
-```yaml
-webhook_cert_mode: cert-manager
-```
-
-Requires [cert-manager](https://cert-manager.io/) already installed in the
-cluster. Tilt lets the Helm-rendered `Issuer`/`Certificate` CRs and the
-cert-manager ca-injector handle everything. Equivalent to the Helm chart's
-`certManager.enabled=true`.
-
-### External
-
-```yaml
-webhook_cert_mode: external
-webhook_ca_bundle: <base64-encoded-CA>
-```
-
-You manage the `webhook-server-cert` Secret yourself. Tilt validates the Secret
-exists and patches webhook configurations with the provided CA bundle.
+This matches production behavior and requires no external tooling. For
+alternative certificate management (cert-manager or external certs), see the
+[webhook documentation](../kubernetes/webhooks.md) and configure via
+`helm_values` in `tilt-settings.yaml`.
 
 ## Typical Workflows
 
@@ -315,13 +279,15 @@ If pods show `ImagePullBackOff`:
 ### Webhook TLS Errors
 
 If applying a DGD/DGDR fails with `x509: certificate signed by unknown authority`:
-- Check the `webhook-ca-inject` resource in the Tilt UI for errors.
-- Verify the `webhook-server-cert` Secret exists:
+- Check the operator logs in the Tilt UI — the cert controller logs its
+  progress on startup.
+- Verify the `webhook-server-cert` Secret exists and has been populated:
   ```bash
   kubectl -n dynamo-system get secret webhook-server-cert
   ```
-- Re-trigger CA injection from the Tilt UI by clicking the refresh icon on
-  `webhook-ca-inject`.
+- The operator may need a few seconds after startup to generate certs and
+  inject the CA bundle. Wait for the `cert-controller` log messages before
+  applying resources.
 
 ### CRD Codegen Failures
 
