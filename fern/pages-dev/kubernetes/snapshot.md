@@ -11,7 +11,7 @@ title: Snapshot
 | Startup Type | Time | What Happens |
 |--------------|------|--------------|
 | **Cold Start** | ~1 min | Download model, load to GPU, initialize engine |
-| **Warm Start** (restore from checkpoint) | ~ 10 sec | Restore from checkpoint tar |
+| **Warm Start** (restore from checkpoint) | ~ 10 sec | Restore from a ready checkpoint directory |
 
 > ⚠️ Restore time may vary depending on cluster configuration (storage bandwidth, GPU model, etc.)
 
@@ -146,34 +146,13 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --disable-custom-all-reduce
           env:
-            - name: GLOO_SOCKET_IFNAME
-              value: lo
-            - name: NCCL_SOCKET_IFNAME
-              value: lo
             - name: NCCL_DEBUG
               value: ERROR
             - name: TORCH_CPP_LOG_LEVEL
               value: ERROR
             - name: TORCH_DISTRIBUTED_DEBUG
               value: "OFF"
-            - name: CUDA_ERROR_LEVEL
-              value: "10"
-            - name: NCCL_CUMEM_ENABLE
-              value: "0"
-            - name: NCCL_CUMEM_HOST_ENABLE
-              value: "0"
-            - name: NCCL_NVLS_ENABLE
-              value: "0"
-            - name: NCCL_P2P_DISABLE
-              value: "0"
-            - name: NCCL_SHM_DISABLE
-              value: "1"
-            - name: NCCL_IB_DISABLE
-              value: "1"
-            - name: TORCH_NCCL_ENABLE_MONITORING
-              value: "0"
 ```
 
 For SGLang, use `dynamo.sglang`, an SGLang placeholder image, `backendFramework: sglang`, and the matching CLI flags.
@@ -184,24 +163,26 @@ Apply the manifest:
 kubectl apply -f vllm-snapshot-demo.yaml -n ${NAMESPACE}
 ```
 
-On the first rollout, the worker cold-starts, the operator creates a `DynamoCheckpoint`, and the checkpoint Job writes data into `snapshot-pvc`.
+On the first rollout, the worker cold-starts, the operator resolves the checkpoint identity hash, and the checkpoint Job writes a new checkpoint directory into `snapshot-pvc`.
 
 ### 5. Wait for the checkpoint to become ready
 
-Capture the checkpoint name from DGD status, then wait for the `DynamoCheckpoint` phase to become `Ready`:
+Auto mode resolves checkpoints by identity hash. It may create `checkpoint-<hash>` or reuse an existing checkpoint with a different CR name. For the sample identity above, the hash is `73e74442beb109ed`:
 
 ```bash
-CHECKPOINT_NAME=$(kubectl get dgd vllm-snapshot-demo -n ${NAMESPACE} \
-  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}')
+kubectl get dckpt -n ${NAMESPACE}
 
+CKPT_NAME=$(kubectl get dckpt -n ${NAMESPACE} \
+  -l nvidia.com/snapshot-checkpoint-hash=73e74442beb109ed \
+  -o jsonpath='{.items[0].metadata.name}')
 kubectl wait \
   --for=jsonpath='{.status.phase}'=Ready \
-  "dynamocheckpoint/${CHECKPOINT_NAME}" \
+  "dynamocheckpoint/${CKPT_NAME}" \
   -n ${NAMESPACE} \
-  --timeout=30m
+  --timeout=5m
 ```
 
-The DGD status also reports the computed checkpoint hash at `.status.checkpoints.VllmDecodeWorker.identityHash`.
+If you change the checkpoint identity, the hash changes and so does the checkpoint selected by Auto mode.
 
 ### 6. Trigger restore
 
@@ -218,7 +199,7 @@ New worker pods for `VllmDecodeWorker` will restore from the ready checkpoint au
 
 ### Auto Mode (Recommended)
 
-The operator computes the checkpoint identity hash, looks for an existing `DynamoCheckpoint` with a matching `nvidia.com/snapshot-checkpoint-hash` label, and creates one if it does not find one:
+The operator computes the checkpoint identity hash, looks up an existing `DynamoCheckpoint` by that hash, and creates a new `DynamoCheckpoint` only when no matching checkpoint already exists:
 
 ```yaml
 checkpoint:
@@ -232,7 +213,12 @@ checkpoint:
     maxModelLen: 4096
 ```
 
-When a service uses checkpointing, DGD status reports the resolved `checkpointName`, `identityHash`, and `ready` fields under `.status.checkpoints.<service-name>`.
+The `DynamoGraphDeployment` mirrors checkpoint resolution state under `.status.checkpoints`, including the resolved checkpoint CR name, identity hash, and whether the checkpoint was visible to the worker when it started:
+
+```bash
+kubectl get dgd vllm-snapshot-demo -n ${NAMESPACE} \
+  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}{"\n"}{.status.checkpoints.VllmDecodeWorker.identityHash}{"\n"}'
+```
 
 ### Manual Management and `checkpointRef`
 
@@ -241,26 +227,26 @@ Use `checkpointRef` when you want a service to restore from a specific `DynamoCh
 ```yaml
 checkpoint:
   enabled: true
-  checkpointRef: "qwen3-06b-vllm-prewarm"
+  checkpointRef: "qwen3-06b-bf16"
 ```
 
 This is useful when:
 - You want to **pre-warm checkpoints** before creating DGDs
 - You want **explicit control** over which checkpoint to use
 
-`checkpointRef` resolves by `DynamoCheckpoint.metadata.name`, not by `status.identityHash`. A manual checkpoint can use any valid Kubernetes resource name.
+`checkpointRef` resolves by `DynamoCheckpoint.metadata.name`. Use a readable CR name when you want an explicit checkpoint that operators can reference directly.
 
 If you are managing checkpoint CRs yourself, set `mode: Manual` on the service to prevent the operator from creating a new `DynamoCheckpoint` when identity-based lookup does not find one.
 
 ```bash
 # Check checkpoint status by CR name
-kubectl get dynamocheckpoint qwen3-06b-vllm-prewarm -n ${NAMESPACE}
+kubectl get dynamocheckpoint qwen3-06b-bf16 -n ${NAMESPACE}
 
 # Now create DGD referencing it
 kubectl apply -f my-dgd.yaml -n ${NAMESPACE}
 ```
 
-If you want `mode: Auto` DGDs to discover a manually created checkpoint by identity, add the label `nvidia.com/snapshot-checkpoint-hash=<identity-hash>` to that `DynamoCheckpoint`. Auto-created checkpoints already use that label, and currently use the same hash as the CR name.
+`mode: Auto` still resolves checkpoints by identity hash. The operator backfills `status.identityHash` and the `nvidia.com/snapshot-checkpoint-hash` label on each `DynamoCheckpoint` so auto lookup and uniqueness checks do not depend on the CR name.
 
 ## Checkpoint Identity
 
@@ -309,7 +295,8 @@ The `DynamoCheckpoint` (shortname: `dckpt`) is a Kubernetes Custom Resource that
 - **Pre-warming:** Create checkpoints before deploying DGDs for instant startup
 - **Explicit control:** Manage checkpoint lifecycle independently from DGDs
 
-The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set the checkpoint environment variables manually; the operator injects them for checkpoint jobs and restored pods.
+The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod template should match the worker container you want checkpointed, including image, command, args, secrets, volumes, and resource limits. You do not need to set checkpoint-control plumbing manually; the operator injects the checkpoint-ready signal path for checkpoint Jobs and adds the restore metadata consumed by restored pods and the node-local controller inside the `snapshot-agent` DaemonSet.
+`spec.job.backoffLimit` is deprecated and ignored. Checkpoint Jobs are always single-attempt.
 
 **Create a checkpoint:**
 
@@ -317,9 +304,7 @@ The operator requires `spec.identity` and `spec.job.podTemplateSpec`. The pod te
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoCheckpoint
 metadata:
-  name: qwen3-06b-vllm-prewarm
-  labels:
-    nvidia.com/snapshot-checkpoint-hash: "e5962d34ba272638"  # Add this if Auto-mode identity lookup should find the CR
+  name: qwen3-06b-bf16
 spec:
   identity:
     model: Qwen/Qwen3-0.6B
@@ -330,7 +315,6 @@ spec:
 
   job:
     activeDeadlineSeconds: 3600
-    backoffLimit: 3
     ttlSecondsAfterFinished: 300
     podTemplateSpec:
       spec:
@@ -345,18 +329,19 @@ spec:
             args:
               - --model
               - Qwen/Qwen3-0.6B
-              - --disable-custom-all-reduce
             env:
-              - name: GLOO_SOCKET_IFNAME
-                value: lo
-              - name: NCCL_SOCKET_IFNAME
-                value: lo
+              - name: NCCL_DEBUG
+                value: ERROR
+              - name: TORCH_CPP_LOG_LEVEL
+                value: ERROR
+              - name: TORCH_DISTRIBUTED_DEBUG
+                value: "OFF"
             resources:
               limits:
                 nvidia.com/gpu: "1"
 ```
 
-You can name the CR however you want if you plan to use `checkpointRef`. If you want `mode: Auto` identity lookup to find a manual CR, set the `nvidia.com/snapshot-checkpoint-hash` label to the computed 16-character identity hash. Using the hash as the CR name is a convenient convention, but it is not required.
+For this example identity, the operator computes a deterministic identity hash and stores it in `status.identityHash`. Auto mode uses that hash, not the CR name, when it decides whether to reuse or create a checkpoint.
 
 **Check status:**
 
@@ -366,9 +351,9 @@ kubectl get dynamocheckpoint -n ${NAMESPACE}
 # Or use shortname
 kubectl get dckpt -n ${NAMESPACE}
 
-NAME                MODEL                          BACKEND  PHASE    HASH              AGE
-qwen3-06b-vllm-prewarm Qwen/Qwen3-0.6B            vllm     Ready    e5962d34ba272638  5m
-llama3-8b-vllm-prewarm meta-llama/Llama-3-8B      vllm     Creating 7ab4f89c12de3456  2m
+NAME               MODEL                                BACKEND  PHASE     HASH              AGE
+qwen3-06b-bf16     Qwen/Qwen3-0.6B                      vllm     Ready     3bff874d069f0ed5  5m
+llama3-8b-bf16     meta-llama/Meta-Llama-3-8B-Instruct  vllm     Creating  9be4f5574b5a285d  2m
 ```
 
 **Phases:**
@@ -380,45 +365,33 @@ llama3-8b-vllm-prewarm meta-llama/Llama-3-8B      vllm     Creating 7ab4f89c12de
 | `Ready` | Checkpoint available for use |
 | `Failed` | Checkpoint creation failed |
 
-`Ready` is a value in `status.phase`, not a Kubernetes condition. The `conditions` array tracks job lifecycle events:
-
-| Condition Type | Meaning |
-|----------------|---------|
-| `JobCreated` | The checkpoint Job has been created |
-| `JobCompleted` | The checkpoint Job has completed successfully or failed |
-
 Other useful status fields are:
 
 | Field | Meaning |
 |-------|---------|
+| `status.identityHash` | Deterministic hash of `spec.identity` used for auto lookup and reuse |
 | `status.jobName` | Name of the checkpoint Job |
-| `status.identityHash` | Computed 16-character hash for the checkpoint identity |
 | `status.location` | Checkpoint location in the configured storage backend |
 | `status.storageType` | Storage backend type (`pvc`, `s3`, or `oci`) |
 | `status.createdAt` | Timestamp recorded when the checkpoint becomes ready |
 | `status.message` | Failure or progress message when available |
 
+`status.conditions` is deprecated for `DynamoCheckpoint`. The legacy condition types `JobCreated` and `JobCompleted` are kept for compatibility only. Prefer `status.phase`, `status.jobName`, and `status.message` when checking checkpoint progress.
+
 **Detailed status:**
 
 ```bash
-kubectl describe dckpt qwen3-06b-vllm-prewarm -n ${NAMESPACE}
+kubectl describe dckpt qwen3-06b-bf16 -n ${NAMESPACE}
 ```
 
 ```yaml
 Status:
   Phase: Ready
-  IdentityHash: e5962d34ba272638
-  JobName: checkpoint-qwen3-06b-vllm-prewarm
-  Location: /checkpoints/e5962d34ba272638.tar
+  IdentityHash: 3bff874d069f0ed5
+  JobName: checkpoint-job-3bff874d069f0ed5
+  Location: /checkpoints/3bff874d069f0ed5
   StorageType: pvc
   CreatedAt: 2026-01-29T10:05:00Z
-  Conditions:
-    - Type: JobCreated
-      Status: "True"
-      Reason: JobCreated
-    - Type: JobCompleted
-      Status: "True"
-      Reason: JobSucceeded
 ```
 
 **Reference from DGD:**
@@ -431,16 +404,16 @@ spec:
     VllmDecodeWorker:
       checkpoint:
         enabled: true
-        checkpointRef: "qwen3-06b-vllm-prewarm"
+        checkpointRef: "qwen3-06b-bf16"
 ```
 
-Or use `mode: Auto` with the same identity and snapshot-hash label, and the operator will reuse it automatically.
+Or use `mode: Auto` with the same identity, and the operator will reuse the same deterministic checkpoint object automatically.
 
 ## Limitations
 
 - **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-GPU only**: Multi-GPU configurations may work in very basic hardware configurations, but are not officially supported yet.
-- **Network state**: No active TCP connections can be checkpointed
+- **Network state**: Restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets can work with the supported CRIU TCP policies, but non-loopback or pod-IP-bound connections can still break restore.
 - **Security**: Dynamo Snapshot runs as a **privileged DaemonSet** which is required to run CRIU and cuda-checkpoint. However, workload pods do not need to be privileged.
 
 ## Troubleshooting
@@ -451,7 +424,10 @@ Or use `mode: Auto` with the same identity and snapshot-hash label, and the oper
    ```bash
    kubectl get dckpt -n ${NAMESPACE}
    kubectl describe dckpt <checkpoint-name> -n ${NAMESPACE}
-   kubectl logs job/$(kubectl get dckpt <checkpoint-name> -n ${NAMESPACE} -o jsonpath='{.status.jobName}') -n ${NAMESPACE}
+   JOB_NAME=$(kubectl get dckpt <checkpoint-name> -n ${NAMESPACE} -o jsonpath='{.status.jobName}')
+   if [ -n "${JOB_NAME}" ]; then
+     kubectl logs job/"${JOB_NAME}" -n ${NAMESPACE}
+   fi
    ```
 
 2. Check the DaemonSet:
