@@ -66,14 +66,22 @@ repos:
   - id: trailing-whitespace
     exclude: lib/llm/tests/data/deepseek-v3.2/.*\.txt$
 
-# NOTE: removing from pre commit
-# will move to gitlab ci to run in proper
-# container
-#- repo: https://github.com/pre-commit/mirrors-mypy
-#  rev: v1.13.0
-#  hooks:
-#  - id: mypy
-#    exclude: model.py # WAR errors about 'model.py' duplicate module name
+- repo: local
+  hooks:
+  - id: mypy
+    name: mypy type checking
+    entry: bash -c 'MYPYPATH=components/src:lib/bindings/python/src mypy --explicit-package-bases components/src/dynamo/common components/src/dynamo/frontend components/src/dynamo/global_planner components/src/dynamo/global_router components/src/dynamo/mocker components/src/dynamo/planner components/src/dynamo/router components/src/dynamo/vllm components/src/dynamo/sglang components/src/dynamo/trtllm && MYPYPATH=lib/bindings/python/src mypy -p dynamo'
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies:
+      - mypy==1.18.2
+      - boto3-stubs[s3]
+      - types-aiofiles
+      - types-PyYAML
+      - types-requests
+      - types-tabulate
+      - matplotlib-stubs
 
 # Fast linting
 - repo: https://github.com/astral-sh/ruff-pre-commit
