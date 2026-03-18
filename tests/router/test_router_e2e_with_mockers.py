@@ -403,12 +403,18 @@ class MockerProcess:
                     f"(known_ids={known_ids})"
                 )
 
-            # Register each dp_rank endpoint with the standalone indexer
+            # Register each dp_rank endpoint with the standalone indexer.
+            # The mocker binds on base_port + dp_rank (contiguous), so we must
+            # use the same formula here rather than indexing into the allocated
+            # port list, which may contain gaps when intervening ports are busy.
             zmq_addresses = {}
             register_url = f"{self.standalone_indexer_url}/register"
+            replay_base = (
+                self._zmq_replay_ports[i * dp_size] if self._zmq_replay_ports else None
+            )
             async with aiohttp.ClientSession() as session:
                 for dp_rank in range(dp_size):
-                    port = self._zmq_kv_events_ports[i * dp_size + dp_rank]
+                    port = base_port + dp_rank
                     endpoint = f"tcp://127.0.0.1:{port}"
                     zmq_addresses[dp_rank] = endpoint
 
@@ -421,9 +427,10 @@ class MockerProcess:
                             "block_size", BLOCK_SIZE
                         ),
                     }
-                    if self._zmq_replay_ports:
-                        replay_port = self._zmq_replay_ports[i * dp_size + dp_rank]
-                        payload["replay_endpoint"] = f"tcp://127.0.0.1:{replay_port}"
+                    if replay_base is not None:
+                        payload[
+                            "replay_endpoint"
+                        ] = f"tcp://127.0.0.1:{replay_base + dp_rank}"
                     async with session.post(register_url, json=payload) as resp:
                         if resp.status != 201:
                             body = await resp.text()
