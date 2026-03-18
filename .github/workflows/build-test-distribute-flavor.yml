@@ -160,6 +160,7 @@ jobs:
       target_tag_plain: ${{ steps.build.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.build.outputs.test_tag_plain }}
       compliance_arches: ${{ steps.compliance-arches.outputs.arches }}
+      test_runners: ${{ steps.test-runners.outputs.runners }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
@@ -177,6 +178,22 @@ jobs:
           # "linux/amd64"             -> ["linux/amd64"]
           JSON=$(printf '%s\n' ${PLATFORM//,/ } | jq -Rsc '[splits("\n") | select(length>0)]')
           echo "arches=${JSON}" >> $GITHUB_OUTPUT
+      - name: Compute test runners
+        id: test-runners
+        shell: bash
+        run: |
+          PLATFORM="${{ inputs.platform }}"
+          # Emit a JSON array of {arch, runner} objects for platforms actually being built
+          # "linux/amd64,linux/arm64" -> both runners
+          # "linux/amd64"             -> amd64 runner only (covers EFA and other single-arch)
+          # "linux/arm64"             -> arm64 runner only
+          if [[ "$PLATFORM" == *"amd64"* && "$PLATFORM" == *"arm64"* ]]; then
+            echo 'runners=[{"arch":"amd64","runner":"prod-tester-amd-gpu-v1"},{"arch":"arm64","runner":"prod-tester-arm-v1"}]' >> $GITHUB_OUTPUT
+          elif [[ "$PLATFORM" == *"arm64"* ]]; then
+            echo 'runners=[{"arch":"arm64","runner":"prod-tester-arm-v1"}]' >> $GITHUB_OUTPUT
+          else
+            echo 'runners=[{"arch":"amd64","runner":"prod-tester-amd-gpu-v1"}]' >> $GITHUB_OUTPUT
+          fi
       - name: Build
         id: build
         uses: ./.github/actions/build-flavor
@@ -219,11 +236,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: prod-tester-amd-gpu-v1
-          - arch: arm64
-            runner: prod-tester-arm-v1
+        include: ${{ fromJson(needs.build.outputs.test_runners) }}
     runs-on: ${{ matrix.runner }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
