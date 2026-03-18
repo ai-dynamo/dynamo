@@ -84,14 +84,15 @@ def run_async(func, *args, **kwargs):
     Returns:
         The result of the async function.
     """
-    # Handle both sync and async contexts
+    # Check if we're in async context, exception is raised if not and we can safely
+    # run 'func' with asyncio.run()
     try:
-        asyncio.get_running_loop()  # Check if we're in async context
-        # If we're in an async context, we need to run the connection creation in a separate thread to avoid blocking the event loop
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(asyncio.run, func(*args, **kwargs)).result(timeout=10)
+        asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop - safe to use asyncio.run()
         return asyncio.run(func(*args, **kwargs))
+
+    # In an async context, we want to run 'func' in a separate thread to avoid blocking the event loop
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        return pool.submit(asyncio.run, func(*args, **kwargs)).result(timeout=10)

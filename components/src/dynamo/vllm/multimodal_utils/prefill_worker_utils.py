@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-from collections import defaultdict
 from typing import Any, Dict, List
 
 import torch
@@ -92,32 +91,32 @@ def _accumulate_embeddings(
         image_grid_thw=image_grid_thw,
     )
 
+    if "image" not in multi_modal_data:
+        multi_modal_data["image"] = mm_data["image"]
+        return
+
     if isinstance(mm_data["image"], dict):
         # Qwen-VL style: dict with image_embeds + image_grid_thw tensors
-        if multi_modal_data["image"] == []:
-            multi_modal_data["image"] = mm_data["image"]
-        else:
-            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
-            multi_modal_data["image"]["image_embeds"] = torch.cat(
-                (
-                    multi_modal_data["image"]["image_embeds"],
-                    mm_data["image"]["image_embeds"],
-                )
+        multi_modal_data["image"]["image_embeds"] = torch.cat(
+            (
+                multi_modal_data["image"]["image_embeds"],
+                mm_data["image"]["image_embeds"],
             )
-            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
-                (
-                    multi_modal_data["image"]["image_grid_thw"],
-                    mm_data["image"]["image_grid_thw"],
-                )
+        )
+        multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+            (
+                multi_modal_data["image"]["image_grid_thw"],
+                mm_data["image"]["image_grid_thw"],
             )
+        )
+    elif isinstance(mm_data["image"], torch.Tensor):
+        multi_modal_data["image"] = torch.cat(
+            (multi_modal_data["image"], mm_data["image"])
+        )
     else:
-        # [gluo FIXME] embedding with multiple images?
-        if multi_modal_data["image"] == []:
-            multi_modal_data["image"] = mm_data["image"]
-        else:
-            multi_modal_data["image"] = torch.cat(
-                (multi_modal_data["image"], mm_data["image"])
-            )
+        raise ValueError(
+            f"Unexpected image data format from construct_mm_data: {type(mm_data['image'])}"
+        )
 
 
 def _ensure_owned_tensors(multi_modal_data: Dict[str, Any]) -> None:
@@ -317,7 +316,7 @@ class MultiModalEmbeddingLoader:
         Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
         """
         if not self._encode_worker_client or not image_urls:
-            return defaultdict(list)
+            return {}
 
         groups, pending = await _fetch_embeddings(
             self._encode_worker_client,
@@ -328,7 +327,7 @@ class MultiModalEmbeddingLoader:
             context=context,
         )
 
-        multi_modal_data: Dict[str, Any] = defaultdict(list)
+        multi_modal_data: Dict[str, Any] = {}
         with time_and_log_code_section(
             f"[PREFILL] request: {request_id} accumulate embeddings"
         ):

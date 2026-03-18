@@ -4,7 +4,6 @@
 import copy
 import logging
 import uuid
-from collections import defaultdict
 from typing import Any
 
 import torch
@@ -166,8 +165,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         Returns an empty dict when no encode worker is configured or no images
         are present.
         """
-        if not self.encode_worker_client or not image_urls:
-            return defaultdict(list)
 
         return await self.embedding_loader.load_multimodal_embeddings(
             image_urls,
@@ -211,10 +208,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 if not value:
                     del multi_modal_data[key]
                 else:
-                    # [gluo FIXME] should be mindful to default dict, move this evaluation logic to here
-                    # so that we don't accidentally add empty keys to the dict which causes vLLM misbehavior
                     logger.debug(
-                        f"Prepared multimodal data size: {len(multi_modal_data[key])}"
+                        f"Prepared multimodal data key {key}, number of items: {len(multi_modal_data[key])}"
                     )
 
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
