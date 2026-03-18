@@ -79,6 +79,7 @@ python -m dynamo.mocker \
 | `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
 | `--enable-prefix-caching` | True | Enable prefix caching |
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
+| `--preemption-mode` | `lifo` | Decode eviction policy under memory pressure: `lifo` (vLLM v1 style) or `fifo` |
 | `--watermark` | 0.01 | KV cache watermark (fraction reserved) |
 | `--speedup-ratio` | 1.0 | Timing speedup factor |
 | `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
@@ -93,6 +94,41 @@ python -m dynamo.mocker \
 | `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured KV cache allocation and eviction traces |
+
+> **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
+
+## Performance Modeling Setup
+
+By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, pass `--planner-profile-data` with a profiler output directory:
+
+```bash
+python -m dynamo.mocker \
+    --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
+    --speedup-ratio 1.0
+```
+
+The profile results directory should contain:
+
+- `selected_prefill_interpolation/raw_data.npz`
+- `selected_decode_interpolation/raw_data.npz`
+
+To generate profile data for your own model and hardware, run the profiler and then point `--planner-profile-data` at the resulting output directory.
+
+## Kubernetes Deployment
+
+The mocker can be deployed through example `DynamoGraphDeployment` manifests for both aggregated and disaggregated setups:
+
+```bash
+kubectl apply -f examples/backends/mocker/deploy/agg.yaml
+kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
+```
 
 ## Architecture
 
