@@ -207,6 +207,15 @@ The mocker is particularly useful for:
 | KV Events | Native | Compatible |
 | Data Parallelism | Multi-GPU | Simulated |
 
+## Next Steps
+
+| Document | Description |
+|----------|-------------|
+| [Benchmarking Dynamo Deployments](../benchmarks/benchmarking.md) | Run AIPerf against a mocker-backed deployment to measure latency, TTFT, throughput, and scaling behavior |
+| [Aggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
+| [Disaggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
+| [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
+
 ## Feature Gaps (WIP)
 
 The following features are not yet supported by the mocker:
