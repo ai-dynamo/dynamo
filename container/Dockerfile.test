@@ -22,7 +22,4 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
             --requirement /tmp/requirements.test.txt; \
     fi
 
-# Copy pyproject.toml for mypy config (tool.mypy overrides)
-COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/
-
 USER dynamo
