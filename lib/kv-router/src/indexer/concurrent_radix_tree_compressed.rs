@@ -982,55 +982,96 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        while let Some((current_node, parent_hash)) = queue.pop_front() {
-            let guard = current_node.read();
-            debug_assert!(
-                !guard.edge.is_empty(),
-                "non-root node must have non-empty edge"
-            );
+        while let Some((start_node, parent_hash)) = queue.pop_front() {
+            let mut merged_edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = Vec::new();
+            let mut current = start_node;
 
-            let full_blocks: Vec<KvCacheStoredBlockData> = guard
-                .edge
-                .iter()
-                .map(|&(local, ext)| KvCacheStoredBlockData {
-                    tokens_hash: local,
-                    block_hash: ext,
-                    mm_extra_info: None,
-                })
-                .collect();
-            let last_ext = guard.edge.last().unwrap().1;
+            loop {
+                let guard = current.read();
 
-            for &worker in &guard.full_edge_workers {
-                events.push(RouterEvent::new(
-                    worker.worker_id,
-                    KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
-                            blocks: full_blocks.clone(),
-                        }),
-                        dp_rank: worker.dp_rank,
-                    },
-                ));
-                event_id += 1;
-            }
-            for (&worker, &k) in &guard.worker_cutoffs {
-                events.push(RouterEvent::new(
-                    worker.worker_id,
-                    KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
-                            blocks: full_blocks[..k as usize].to_vec(),
-                        }),
-                        dp_rank: worker.dp_rank,
-                    },
-                ));
-                event_id += 1;
-            }
+                if !guard.has_any_workers() && guard.children.is_empty() {
+                    break;
+                }
 
-            for child_node in guard.children.values() {
-                queue.push_back((child_node.clone(), Some(last_ext)));
+                merged_edge.extend_from_slice(&guard.edge);
+
+                let live_children: Vec<SharedNode> = guard
+                    .children
+                    .values()
+                    .filter(|child| {
+                        let cg = child.read();
+                        cg.has_any_workers() || !cg.children.is_empty()
+                    })
+                    .cloned()
+                    .collect();
+
+                // Merge condition: this node is a pure passthrough that can be
+                // collapsed with its single child. Requires identical worker sets
+                // and no partial-coverage cutoffs on either side.
+                let can_merge = guard.worker_cutoffs.is_empty() && live_children.len() == 1 && {
+                    let cg = live_children[0].read();
+                    cg.full_edge_workers == guard.full_edge_workers
+                        && cg.worker_cutoffs.is_empty()
+                        && cg.has_any_workers()
+                };
+
+                if can_merge {
+                    let next = live_children[0].clone();
+                    drop(guard);
+                    current = next;
+                    continue;
+                }
+
+                if merged_edge.is_empty() {
+                    drop(guard);
+                    break;
+                }
+
+                let full_blocks: Vec<KvCacheStoredBlockData> = merged_edge
+                    .iter()
+                    .map(|&(local, ext)| KvCacheStoredBlockData {
+                        tokens_hash: local,
+                        block_hash: ext,
+                        mm_extra_info: None,
+                    })
+                    .collect();
+                let last_ext = merged_edge.last().unwrap().1;
+
+                for &worker in &guard.full_edge_workers {
+                    events.push(RouterEvent::new(
+                        worker.worker_id,
+                        KvCacheEvent {
+                            event_id,
+                            data: KvCacheEventData::Stored(KvCacheStoreData {
+                                parent_hash,
+                                blocks: full_blocks.clone(),
+                            }),
+                            dp_rank: worker.dp_rank,
+                        },
+                    ));
+                    event_id += 1;
+                }
+                for (&worker, &k) in &guard.worker_cutoffs {
+                    events.push(RouterEvent::new(
+                        worker.worker_id,
+                        KvCacheEvent {
+                            event_id,
+                            data: KvCacheEventData::Stored(KvCacheStoreData {
+                                parent_hash,
+                                blocks: full_blocks[..k as usize].to_vec(),
+                            }),
+                            dp_rank: worker.dp_rank,
+                        },
+                    ));
+                    event_id += 1;
+                }
+
+                for child in live_children {
+                    queue.push_back((child, Some(last_ext)));
+                }
+
+                drop(guard);
+                break;
             }
         }
 
