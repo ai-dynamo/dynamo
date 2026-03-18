@@ -147,12 +147,12 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
           env:
+            - name: NCCL_DEBUG
+              value: ERROR
             - name: TORCH_CPP_LOG_LEVEL
               value: ERROR
             - name: TORCH_DISTRIBUTED_DEBUG
               value: "OFF"
-            - name: TORCH_NCCL_ENABLE_MONITORING
-              value: "0"
 ```
 
 For SGLang, use `dynamo.sglang`, an SGLang placeholder image, `backendFramework: sglang`, and the matching CLI flags.
@@ -163,23 +163,26 @@ Apply the manifest:
 kubectl apply -f vllm-snapshot-demo.yaml -n ${NAMESPACE}
 ```
 
-On the first rollout, the worker cold-starts, the operator creates a `DynamoCheckpoint`, and the checkpoint Job writes a new checkpoint directory into `snapshot-pvc`.
+On the first rollout, the worker cold-starts, the operator resolves the checkpoint identity hash, and the checkpoint Job writes a new checkpoint directory into `snapshot-pvc`.
 
 ### 5. Wait for the checkpoint to become ready
 
-Auto mode creates a `DynamoCheckpoint` named `checkpoint-<hash>`, where `<hash>` is the deterministic 16-character identity hash. For the sample identity above, the checkpoint name is `checkpoint-0d888542e79d9df4`:
+Auto mode resolves checkpoints by identity hash. It may create `checkpoint-<hash>` or reuse an existing checkpoint with a different CR name. For the sample identity above, the hash is `73e74442beb109ed`:
 
 ```bash
 kubectl get dckpt -n ${NAMESPACE}
 
+CKPT_NAME=$(kubectl get dckpt -n ${NAMESPACE} \
+  -l nvidia.com/snapshot-checkpoint-hash=73e74442beb109ed \
+  -o jsonpath='{.items[0].metadata.name}')
 kubectl wait \
   --for=jsonpath='{.status.phase}'=Ready \
-  "dynamocheckpoint/checkpoint-0d888542e79d9df4" \
+  "dynamocheckpoint/${CKPT_NAME}" \
   -n ${NAMESPACE} \
-  --timeout=30m
+  --timeout=5m
 ```
 
-If you change the checkpoint identity, the hash changes and so does the auto-created checkpoint name.
+If you change the checkpoint identity, the hash changes and so does the checkpoint selected by Auto mode.
 
 ### 6. Trigger restore
 
@@ -210,7 +213,12 @@ checkpoint:
     maxModelLen: 4096
 ```
 
-The `DynamoGraphDeployment` mirrors checkpoint resolution state under `.status.checkpoints`, including the resolved checkpoint CR name, identity hash, and whether the checkpoint was visible to the worker when it started.
+The `DynamoGraphDeployment` mirrors checkpoint resolution state under `.status.checkpoints`, including the resolved checkpoint CR name, identity hash, and whether the checkpoint was visible to the worker when it started:
+
+```bash
+kubectl get dgd vllm-snapshot-demo -n ${NAMESPACE} \
+  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}{"\n"}{.status.checkpoints.VllmDecodeWorker.identityHash}{"\n"}'
+```
 
 ### Manual Management and `checkpointRef`
 
@@ -328,8 +336,6 @@ spec:
                 value: ERROR
               - name: TORCH_DISTRIBUTED_DEBUG
                 value: "OFF"
-              - name: TORCH_NCCL_ENABLE_MONITORING
-                value: "0"
             resources:
               limits:
                 nvidia.com/gpu: "1"
@@ -346,8 +352,8 @@ kubectl get dynamocheckpoint -n ${NAMESPACE}
 kubectl get dckpt -n ${NAMESPACE}
 
 NAME               MODEL                                BACKEND  PHASE     HASH              AGE
-qwen3-06b-bf16     Qwen/Qwen3-0.6B                      vllm     Ready     0ef92fc0f7239834  5m
-llama3-8b-bf16     meta-llama/Meta-Llama-3-8B-Instruct  vllm     Creating  871bbc6fb7abd517  2m
+qwen3-06b-bf16     Qwen/Qwen3-0.6B                      vllm     Ready     3bff874d069f0ed5  5m
+llama3-8b-bf16     meta-llama/Meta-Llama-3-8B-Instruct  vllm     Creating  9be4f5574b5a285d  2m
 ```
 
 **Phases:**
@@ -381,9 +387,9 @@ kubectl describe dckpt qwen3-06b-bf16 -n ${NAMESPACE}
 ```yaml
 Status:
   Phase: Ready
-  IdentityHash: 0ef92fc0f7239834
-  JobName: checkpoint-job-0ef92fc0f7239834
-  Location: /checkpoints/0ef92fc0f7239834
+  IdentityHash: 3bff874d069f0ed5
+  JobName: checkpoint-job-3bff874d069f0ed5
+  Location: /checkpoints/3bff874d069f0ed5
   StorageType: pvc
   CreatedAt: 2026-01-29T10:05:00Z
 ```

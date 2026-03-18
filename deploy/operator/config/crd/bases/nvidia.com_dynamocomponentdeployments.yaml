@@ -11205,12 +11205,17 @@ spec:
                     disabled:
                       type: boolean
                     size:
+                      allOf:
+                        - pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        - pattern: ^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                       anyOf:
                         - type: integer
                         - type: string
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                       x-kubernetes-int-or-string: true
                   type: object
+                  x-kubernetes-validations:
+                    - message: sharedMemory.size must not be set when sharedMemory.disabled is true
+                      rule: '!(self.disabled && has(self.size))'
                 subComponentType:
                   description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                   type: string

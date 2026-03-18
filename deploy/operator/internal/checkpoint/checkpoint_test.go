@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -80,10 +81,26 @@ func testInfo() *CheckpointInfo {
 	return &CheckpointInfo{Enabled: true, Hash: testHash}
 }
 
-// --- Helper function tests ---
+type createHookClient struct {
+	client.Client
+	onCreate func(ctx context.Context, obj client.Object) error
+}
+
+func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if c.onCreate != nil {
+		if err := c.onCreate(ctx, obj); err != nil {
+			return err
+		}
+		c.onCreate = nil
+	}
+
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// --- Resource helper tests ---
 
 func TestHelpers(t *testing.T) {
-	// getCheckpointInfoFromCheckpoint — ready
+	// checkpointInfoFromObject — ready
 	hash, err := ComputeIdentityHash(testIdentity())
 	require.NoError(t, err)
 	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
@@ -96,7 +113,7 @@ func TestHelpers(t *testing.T) {
 			StorageType:  "pvc",
 		},
 	}
-	info, err := getCheckpointInfoFromCheckpoint(ckpt)
+	info, err := checkpointInfoFromObject(ckpt)
 	require.NoError(t, err)
 	assert.True(t, info.Enabled)
 	assert.True(t, info.Ready)
@@ -104,11 +121,61 @@ func TestHelpers(t *testing.T) {
 	assert.Equal(t, "/checkpoints/"+hash, info.Location)
 	assert.Equal(t, ckpt.Name, info.CheckpointName)
 
-	// getCheckpointInfoFromCheckpoint — not ready
+	// checkpointInfoFromObject — not ready
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
-	info, err = getCheckpointInfoFromCheckpoint(ckpt)
+	info, err = checkpointInfoFromObject(ckpt)
 	require.NoError(t, err)
 	assert.False(t, info.Ready)
+}
+
+func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+
+	identity := testIdentity()
+	hash, err := ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	friendly := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "friendly-checkpoint",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				consts.KubeLabelCheckpointHash: hash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{},
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+			Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		},
+	}
+
+	baseClient := fake.NewClientBuilder().WithScheme(s).Build()
+	c := &createHookClient{
+		Client: baseClient,
+		onCreate: func(ctx context.Context, obj client.Object) error {
+			_, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
+			if !ok {
+				return nil
+			}
+			return baseClient.Create(ctx, friendly.DeepCopy())
+		},
+	}
+
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{})
+	require.NoError(t, err)
+	assert.Equal(t, friendly.Name, ckpt.Name)
+
+	list := &nvidiacomv1alpha1.DynamoCheckpointList{}
+	require.NoError(t, baseClient.List(ctx, list))
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, friendly.Name, list.Items[0].Name)
 }
 
 // --- Injection idempotency tests ---

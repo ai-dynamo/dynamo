@@ -209,15 +209,18 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
 
+	foundSharedMemoryVolume := false
 	for _, v := range podSpec.Volumes {
 		if v.Name != consts.KubeValueNameSharedMemory {
 			continue
 		}
+		foundSharedMemoryVolume = true
 		require.NotNil(t, v.EmptyDir)
 		assert.Equal(t, corev1.StorageMediumMemory, v.EmptyDir.Medium)
 		require.NotNil(t, v.EmptyDir.SizeLimit)
 		assert.Equal(t, resource.MustParse(consts.DefaultSharedMemorySize), *v.EmptyDir.SizeLimit)
 	}
+	require.True(t, foundSharedMemoryVolume, "shared-memory volume not found: "+consts.KubeValueNameSharedMemory)
 
 	// Restart policy, user image/command preserved
 	assert.Equal(t, corev1.RestartPolicyNever, podSpec.RestartPolicy)
@@ -270,13 +273,16 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
 	job := r.buildCheckpointJob(ckpt, "checkpoint-job-"+testHash)
+	foundCustomShmVolume := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == consts.KubeValueNameSharedMemory {
+			foundCustomShmVolume = true
 			require.NotNil(t, v.EmptyDir)
 			require.NotNil(t, v.EmptyDir.SizeLimit)
 			assert.Equal(t, customShmSize, *v.EmptyDir.SizeLimit)
 		}
 	}
+	require.True(t, foundCustomShmVolume, "shared-memory volume not found: "+consts.KubeValueNameSharedMemory)
 	main := job.Spec.Template.Spec.Containers[0]
 
 	envMap := make(map[string]string, len(main.Env))
@@ -326,7 +332,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		r := makeCheckpointReconciler(s, ckpt)
 
 		result, err := r.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: "ready-ckpt", Namespace: testNamespace},
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
 		})
 		require.NoError(t, err)
 		assert.Equal(t, ctrl.Result{}, result)

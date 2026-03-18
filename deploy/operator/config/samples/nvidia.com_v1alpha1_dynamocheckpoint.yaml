@@ -16,7 +16,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoCheckpoint
 metadata:
-  name: 871bbc6fb7abd517
+  name: llama3-8b-bf16
 spec:
   # Identity - determines the checkpoint hash
   identity:
@@ -30,8 +30,8 @@ spec:
     extraParameters:
       enableChunkedPrefill: "true"
 
-  # Capture configuration for checkpoint creation
-  capture:
+  # Job configuration for checkpoint creation
+  job:
     activeDeadlineSeconds: 3600
     ttlSecondsAfterFinished: 300
     podTemplateSpec:

@@ -100,7 +100,7 @@ type DynamoCheckpointJobConfig struct {
 
 	// ActiveDeadlineSeconds specifies the maximum time the Job can run
 	// +optional
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=3600
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 

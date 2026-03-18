@@ -52,9 +52,13 @@ class CheckpointConfig:
         await quiesce_controller.quiesce(*quiesce_args)
 
         self._install_signal_handlers()
+        try:
+            with open(self.ready_file, "w", encoding="utf-8") as ready_file:
+                ready_file.write("ready")
+        except Exception:
+            self._remove_signal_handlers()
+            raise
 
-        with open(self.ready_file, "w", encoding="utf-8") as ready_file:
-            ready_file.write("ready")
         logger.info(
             "Ready for checkpoint. Waiting for watcher signal "
             "(SIGUSR1=checkpoint complete, SIGCONT=restore complete)"
