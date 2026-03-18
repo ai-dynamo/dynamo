@@ -75,12 +75,6 @@ macro_rules! read_lock {
     };
 }
 
-macro_rules! write_lock {
-    ($self:expr, $lock:expr) => {
-        $lock.write()
-    };
-}
-
 /// Thread-safe shared reference to a Node.
 type SharedNode = Arc<RwLock<Node>>;
 
@@ -535,7 +529,7 @@ impl ConcurrentRadixTreeCompressed {
 
                 // If parent_hash is not the tail of the node's edge, split so it becomes tail.
                 let split_data = {
-                    let mut guard = write_lock!(self, node);
+                    let mut guard = node.write();
                     if !guard.edge.is_empty() && guard.edge.last().unwrap().1 != parent_hash {
                         guard
                             .edge
@@ -584,7 +578,7 @@ impl ConcurrentRadixTreeCompressed {
             let first_local = remaining[0].tokens_hash;
 
             let child = {
-                let mut parent_guard = write_lock!(self, current_parent);
+                let mut parent_guard = current_parent.write();
                 match parent_guard.children.get(&first_local).cloned() {
                     Some(existing) => existing,
                     None => {
@@ -622,19 +616,18 @@ impl ConcurrentRadixTreeCompressed {
             };
 
             {
-                let mut child_guard = write_lock!(self, child);
+                let mut child_guard = child.write();
                 let edge_len = child_guard.edge.len();
-                let min_len = edge_len.min(remaining.len());
 
                 let mut match_len = 0;
-                for i in 0..min_len {
-                    if child_guard.edge[i].0 != remaining[i].tokens_hash {
+                for (edge_elem, rem_elem) in child_guard.edge.iter().zip(remaining.iter()) {
+                    if edge_elem.0 != rem_elem.tokens_hash {
                         break;
                     }
-                    if child_guard.edge[i].1 != remaining[i].block_hash {
+                    if edge_elem.1 != rem_elem.block_hash {
                         tracing::warn!(
-                            expected = ?remaining[i].block_hash,
-                            actual = ?child_guard.edge[i].1,
+                            expected = ?rem_elem.block_hash,
+                            actual = ?edge_elem.1,
                             "block_hash mismatch: sequence hashes should be uniform across workers"
                         );
                     }
@@ -770,7 +763,7 @@ impl ConcurrentRadixTreeCompressed {
                 // Returns Some(removed_count) on success, None if the node is stale
                 // (hash was moved to a descendant by a concurrent split).
                 let update: Option<usize> = {
-                    let mut guard = write_lock!(self, cur_node);
+                    let mut guard = cur_node.write();
 
                     match guard.edge_index.get(&block_hash).copied() {
                         None => None, // stale: hash moved to a child
@@ -903,7 +896,7 @@ impl ConcurrentRadixTreeCompressed {
                     if !seen.insert(ptr) {
                         continue;
                     }
-                    let mut guard = write_lock!(self, node);
+                    let mut guard = node.write();
                     guard.full_edge_workers.remove(&worker);
                     guard.worker_cutoffs.remove(&worker);
                     if !guard.has_any_workers() {
@@ -937,7 +930,7 @@ impl ConcurrentRadixTreeCompressed {
                 if !seen.insert(ptr) {
                     continue;
                 }
-                let mut guard = write_lock!(self, node);
+                let mut guard = node.write();
                 guard.full_edge_workers.remove(&key);
                 guard.worker_cutoffs.remove(&key);
                 if !guard.has_any_workers() {
@@ -984,7 +977,7 @@ impl ConcurrentRadixTreeCompressed {
 
         {
             let root_guard = self.root.read();
-            for (_, child_node) in &root_guard.children {
+            for child_node in root_guard.children.values() {
                 queue.push_back((child_node.clone(), None::<ExternalSequenceBlockHash>));
             }
         }
@@ -1036,7 +1029,7 @@ impl ConcurrentRadixTreeCompressed {
                 event_id += 1;
             }
 
-            for (_, child_node) in &guard.children {
+            for child_node in guard.children.values() {
                 queue.push_back((child_node.clone(), Some(last_ext)));
             }
         }

@@ -41,12 +41,6 @@ macro_rules! read_lock {
     };
 }
 
-macro_rules! write_lock {
-    ($self:expr, $lock:expr) => {
-        $lock.write()
-    };
-}
-
 /// Thread-safe shared reference to a Block.
 type SharedBlock = Arc<RwLock<Block>>;
 
@@ -361,7 +355,7 @@ impl ConcurrentRadixTree {
 
         for block_data in op.blocks {
             let child = {
-                let mut parent_guard = write_lock!(self, current);
+                let mut parent_guard = current.write();
 
                 // Insert worker into this node if it was the child from the
                 // previous iteration (skip for the initial parent, which is
@@ -420,7 +414,7 @@ impl ConcurrentRadixTree {
         }
 
         if needs_worker_insert {
-            write_lock!(self, current).workers.insert(worker);
+            current.write().workers.insert(worker);
         }
 
         Ok(())
@@ -458,7 +452,7 @@ impl ConcurrentRadixTree {
                 continue;
             };
 
-            let mut guard = write_lock!(self, block);
+            let mut guard = block.write();
             guard.workers.remove(&worker);
             if guard.workers.is_empty() {
                 guard.children.clear();
@@ -498,7 +492,7 @@ impl ConcurrentRadixTree {
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
                 for (_, block) in worker_lookup.into_iter() {
-                    let mut guard = write_lock!(self, block);
+                    let mut guard = block.write();
                     guard.workers.remove(&worker);
                     if guard.workers.is_empty() {
                         guard.children.clear();
@@ -530,7 +524,7 @@ impl ConcurrentRadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_lookup) = lookup.remove(&key) {
             for (_, block) in worker_lookup.into_iter() {
-                let mut guard = write_lock!(self, block);
+                let mut guard = block.write();
                 guard.workers.remove(&key);
                 if guard.workers.is_empty() {
                     guard.children.clear();
