@@ -78,22 +78,37 @@ python -m dynamo.mocker \
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
 | `--enable-prefix-caching` | True | Enable prefix caching |
+| `--no-enable-prefix-caching` | - | Disable prefix caching |
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
+| `--no-enable-chunked-prefill` | - | Disable chunked prefill |
 | `--preemption-mode` | `lifo` | Decode eviction policy under memory pressure: `lifo` (vLLM v1 style) or `fifo` |
 | `--watermark` | 0.01 | KV cache watermark (fraction reserved) |
 | `--speedup-ratio` | 1.0 | Timing speedup factor |
 | `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
 | `--data-parallel-size` | 1 | Number of DP replicas |
 | `--startup-time` | None | Simulated startup delay (seconds) |
-| `--planner-profile-data` | None | Path to NPZ file with timing data |
+| `--planner-profile-data` | None | Path to either a mocker-format `.npz` file or a profiler results directory |
 | `--num-workers` | 1 | Workers per process |
+| `--reasoning` | None | JSON config for emitting reasoning token spans in responses |
+| `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
+| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
+| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens |
+| `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
+| `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
+| `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
+| `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
-| `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
-| `--bootstrap-ports` | None | Ports for P/D rendezvous |
+| `--durable-kv-events` | False | Deprecated JetStream KV-event mode; prefer the local indexer / event-plane subscriber path |
+| `--zmq-kv-events-ports` | None | Comma-separated ZMQ PUB base ports for KV event publishing, one per worker |
+| `--zmq-replay-ports` | None | Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker |
+| `--bootstrap-ports` | None | Comma-separated rendezvous base ports, one per worker in disaggregated mode |
 | `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
+| `--discovery-backend` | `etcd` | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
+| `--request-plane` | `tcp` | Request transport: `nats`, `http`, or `tcp` |
+| `--event-plane` | `nats` | Event transport: `nats` or `zmq` |
 
 ## Environment Variables
 
@@ -105,7 +120,12 @@ python -m dynamo.mocker \
 
 ## Performance Modeling Setup
 
-By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, pass `--planner-profile-data` with a profiler output directory:
+By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, pass `--planner-profile-data` with either:
+
+- a mocker-format `.npz` file, or
+- a profiler output directory
+
+The mocker automatically accepts profiler-style results directories and converts them internally.
 
 ```bash
 python -m dynamo.mocker \
@@ -120,6 +140,24 @@ The profile results directory should contain:
 - `selected_decode_interpolation/raw_data.npz`
 
 To generate profile data for your own model and hardware, run the profiler and then point `--planner-profile-data` at the resulting output directory.
+
+## Event Transport and Router Testing
+
+The default event path uses the local indexer / event-plane subscriber flow. The older durable KV-events mode is still available through `--durable-kv-events`, but it is deprecated and should not be the preferred setup for new tests.
+
+For router and indexer experiments that need native wire-format event forwarding, the mocker also supports a ZMQ path:
+
+- `--event-plane zmq`
+- `--zmq-kv-events-ports` for per-worker PUB base ports
+- `--zmq-replay-ports` for optional replay/gap-recovery ROUTER base ports
+
+When set, each worker binds on its base port plus `dp_rank`, so the number of comma-separated base ports must match `--num-workers`.
+
+## Disaggregation Port Layout
+
+`--bootstrap-ports` takes a comma-separated list of base ports, one per worker. In multi-worker mode, the number of listed ports must exactly match `--num-workers`.
+
+Prefill workers listen on these ports and publish the bootstrap endpoint through discovery. Decode workers use the matching ports to rendezvous before decode begins.
 
 ## Kubernetes Deployment
 
