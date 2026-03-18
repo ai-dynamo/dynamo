@@ -24,6 +24,10 @@ navigation:
         path: ../pages-dev/getting-started/quickstart.md
       - page: Introduction
         path: ../pages-dev/getting-started/introduction.md
+      - page: Local Installation
+        path: ../pages-dev/getting-started/local-installation.md
+      - page: Building from Source
+        path: ../pages-dev/getting-started/building-from-source.md
       - page: Contribution Guide
         path: ../pages-dev/contribution-guide.md
   # ==================== Resources ====================
@@ -110,12 +114,12 @@ navigation:
           - page: FastVideo
             slug: fastvideo
             path: ../pages-dev/features/diffusion/fastvideo.md
+          - page: vLLM-Omni
+            path: ../pages-dev/backends/vllm/vllm-omni.md
           - page: SGLang Diffusion
             path: ../pages-dev/backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
             path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
-          - page: vLLM-Omni
-            path: ../pages-dev/backends/vllm/vllm-omni.md
       - page: Tool Calling
         path: ../pages-dev/agents/tool-calling.md
       - page: LoRA Adapters
@@ -336,6 +340,18 @@ navigation:
       - page: NVIDIA Request Extensions (nvext)
         path: ../pages-dev/components/frontend/nvext.md
       # -- Backend detail pages --
+      - section: vLLM Details
+        contents:
+          - page: Reference Guide
+            path: ../pages-dev/backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: ../pages-dev/backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: ../pages-dev/backends/vllm/vllm-kv-offloading.md
+          - page: Observability
+            path: ../pages-dev/backends/vllm/vllm-observability.md
+          - page: vLLM-Omni
+            path: ../pages-dev/backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
           - page: Building a Custom Container
@@ -354,18 +370,6 @@ navigation:
             path: ../pages-dev/backends/trtllm/trtllm-gemma3-sliding-window-attention.md
           - page: GPT-OSS
             path: ../pages-dev/backends/trtllm/trtllm-gpt-oss.md
-      - section: vLLM Details
-        contents:
-          - page: Reference Guide
-            path: ../pages-dev/backends/vllm/vllm-reference-guide.md
-          - page: Examples
-            path: ../pages-dev/backends/vllm/vllm-examples.md
-          - page: KV Cache Offloading
-            path: ../pages-dev/backends/vllm/vllm-kv-offloading.md
-          - page: Observability
-            path: ../pages-dev/backends/vllm/vllm-observability.md
-          - page: vLLM-Omni
-            path: ../pages-dev/backends/vllm/vllm-omni.md
       # -- Features (hidden sub-pages) --
       - section: Speculative Decoding
         path: ../pages-dev/features/speculative-decoding/README.md
