@@ -105,6 +105,8 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
       push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   sglang-dev-pipeline:
@@ -118,6 +120,8 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
       push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   trtllm-dev-pipeline:
@@ -131,6 +135,8 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
       push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   # ============================================================================

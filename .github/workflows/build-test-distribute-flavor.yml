@@ -193,8 +193,6 @@ jobs:
           build_only: ${{ inputs.build_only }}
           sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
-          extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
 
 
 

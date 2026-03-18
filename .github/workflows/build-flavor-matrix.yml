@@ -61,6 +61,16 @@ on:
         required: false
         type: boolean
         default: false
+      run_compliance_scan:
+        description: 'Run compliance scan after build'
+        required: false
+        type: boolean
+        default: false
+      auto_acr_deploy:
+        description: 'Also push the image directly to ACR using the same tag (mirrors copy-to-acr behavior)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -121,6 +131,7 @@ jobs:
           sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
           build_only: ${{ inputs.build_only }}
           show_summary: ${{ inputs.push_image }}
+          auto_acr_deploy: ${{ inputs.auto_acr_deploy }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' }}
         uses: ./.github/actions/builder-refresher
@@ -144,3 +155,27 @@ jobs:
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
           no_cache: ${{ inputs.no_cache }}
+      - name: Calculate compliance image URI
+        id: compliance-image
+        if: inputs.run_compliance_scan
+        shell: bash
+        run: |
+          CUDA_MAJOR="${{ matrix.cuda_version }}"
+          CUDA_MAJOR="${CUDA_MAJOR%%.*}"
+          EFA_SUFFIX=""
+          if [ "${{ inputs.make_efa }}" == "true" ]; then
+            EFA_SUFFIX="-efa"
+          fi
+          TARGET_TAG="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}"
+          IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG}-cuda${CUDA_MAJOR}-${{ matrix.platform }}"
+          echo "runtime_image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "cuda_major=${CUDA_MAJOR}" >> $GITHUB_OUTPUT
+      - name: Compliance scan
+        if: inputs.run_compliance_scan
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ steps.compliance-image.outputs.runtime_image }}
+          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.compliance-image.outputs.cuda_major }}-${{ matrix.platform }}
+          arch: ${{ matrix.platform }}
+          framework: ${{ inputs.framework }}
+          cuda_version: ${{ matrix.cuda_version }}
