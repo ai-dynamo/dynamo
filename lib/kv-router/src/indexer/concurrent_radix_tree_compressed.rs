@@ -66,35 +66,15 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "lock-stats")]
-use super::LockContentionStats;
-#[cfg(feature = "node-stats")]
-use super::NodeTouchStats;
 use super::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
-#[cfg(feature = "lock-stats")]
-macro_rules! read_lock {
-    ($self:expr, $lock:expr) => {
-        $self.lock_stats.tracked_read(&*$lock)
-    };
-}
-
-#[cfg(not(feature = "lock-stats"))]
 macro_rules! read_lock {
     ($self:expr, $lock:expr) => {
         $lock.read()
     };
 }
 
-#[cfg(feature = "lock-stats")]
-macro_rules! write_lock {
-    ($self:expr, $lock:expr) => {
-        $self.lock_stats.tracked_write(&*$lock)
-    };
-}
-
-#[cfg(not(feature = "lock-stats"))]
 macro_rules! write_lock {
     ($self:expr, $lock:expr) => {
         $lock.write()
@@ -164,12 +144,6 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
-
-    #[cfg(feature = "node-stats")]
-    pub node_stats: NodeTouchStats,
-
-    #[cfg(feature = "lock-stats")]
-    pub lock_stats: LockContentionStats,
 }
 
 impl Default for ConcurrentRadixTreeCompressed {
@@ -182,11 +156,6 @@ impl Default for ConcurrentRadixTreeCompressed {
 // This custom drop uses an iterative approach.
 impl Drop for ConcurrentRadixTreeCompressed {
     fn drop(&mut self) {
-        #[cfg(feature = "lock-stats")]
-        self.lock_stats.report("ConcurrentRadixTreeCompressed");
-        #[cfg(feature = "node-stats")]
-        self.node_stats.report("ConcurrentRadixTreeCompressed");
-
         let mut stack: Vec<SharedNode> = Vec::new();
         {
             let mut root = self.root.write();
@@ -206,10 +175,6 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(RwLock::new(Node::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
-            #[cfg(feature = "node-stats")]
-            node_stats: NodeTouchStats::new(),
-            #[cfg(feature = "lock-stats")]
-            lock_stats: LockContentionStats::new(),
         }
     }
 
@@ -384,9 +349,6 @@ impl ConcurrentRadixTreeCompressed {
         sequence: &[LocalBlockHash],
         early_exit: bool,
     ) -> OverlapScores {
-        #[cfg(feature = "node-stats")]
-        let mut _nt = self.node_stats.guard(super::NodeTouchOp::FindMatches);
-
         let mut scores = OverlapScores::new();
         if sequence.is_empty() {
             return scores;
@@ -400,10 +362,6 @@ impl ConcurrentRadixTreeCompressed {
 
         let mut next_child = {
             let root_guard = read_lock!(self, self.root);
-            #[cfg(feature = "node-stats")]
-            {
-                _nt.count += 1;
-            }
             root_guard.children.get(&sequence[0]).cloned()
         };
 
@@ -420,10 +378,6 @@ impl ConcurrentRadixTreeCompressed {
             let edge_match_len;
             {
                 let guard = read_lock!(self, child);
-                #[cfg(feature = "node-stats")]
-                {
-                    _nt.count += 1;
-                }
                 edge_len = guard.edge.len();
                 let walk_len = edge_len.min(sequence.len() - seq_pos);
 
@@ -626,9 +580,6 @@ impl ConcurrentRadixTreeCompressed {
         parent: &SharedNode,
         blocks: &[KvCacheStoredBlockData],
     ) {
-        #[cfg(feature = "node-stats")]
-        let mut _nt = self.node_stats.guard(super::NodeTouchOp::Store);
-
         let mut current_parent = parent.clone();
         let mut remaining = blocks;
 
@@ -637,10 +588,6 @@ impl ConcurrentRadixTreeCompressed {
 
             let child = {
                 let mut parent_guard = write_lock!(self, current_parent);
-                #[cfg(feature = "node-stats")]
-                {
-                    _nt.count += 1;
-                }
                 match parent_guard.children.get(&first_local).cloned() {
                     Some(existing) => existing,
                     None => {
@@ -677,10 +624,6 @@ impl ConcurrentRadixTreeCompressed {
 
             {
                 let mut child_guard = write_lock!(self, child);
-                #[cfg(feature = "node-stats")]
-                {
-                    _nt.count += 1;
-                }
                 let edge_len = child_guard.edge.len();
                 let min_len = edge_len.min(remaining.len());
 
@@ -793,9 +736,6 @@ impl ConcurrentRadixTreeCompressed {
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        #[cfg(feature = "node-stats")]
-        let mut _nt = self.node_stats.guard(super::NodeTouchOp::Remove);
-
         if !lookup.contains_key(&worker) {
             return Err(KvCacheEventError::BlockNotFound);
         }
@@ -827,10 +767,6 @@ impl ConcurrentRadixTreeCompressed {
                 // (hash was moved to a descendant by a concurrent split).
                 let update: Option<usize> = {
                     let mut guard = write_lock!(self, cur_node);
-                    #[cfg(feature = "node-stats")]
-                    {
-                        _nt.count += 1;
-                    }
 
                     match guard.edge_index.get(&block_hash).copied() {
                         None => None, // stale: hash moved to a child
@@ -1107,39 +1043,10 @@ impl ConcurrentRadixTreeCompressed {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTreeCompressed {
-    fn total_tree_size(&self) -> usize {
-        let mut count = 0usize;
-        let mut stack: Vec<SharedNode> = Vec::new();
-        {
-            let root = self.root.read();
-            stack.extend(root.children.values().cloned());
-        }
-        let mut visited = FxHashSet::<usize>::default();
-        while let Some(node) = stack.pop() {
-            let ptr = Arc::as_ptr(&node) as usize;
-            if !visited.insert(ptr) {
-                continue;
-            }
-            count += 1;
-            let guard = node.read();
-            stack.extend(guard.children.values().cloned());
-        }
-        count
-    }
-
-    fn worker(
-        &self,
-        event_receiver: flume::Receiver<WorkerTask>,
-        shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> anyhow::Result<()> {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
 
-        while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-            let task = match event_receiver.recv_timeout(std::time::Duration::from_millis(5)) {
-                Ok(t) => t,
-                Err(flume::RecvTimeoutError::Timeout) => continue,
-                Err(flume::RecvTimeoutError::Disconnected) => break,
-            };
+        while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
                     if let Err(e) = self.apply_event(&mut lookup, event) {

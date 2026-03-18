@@ -32,35 +32,15 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "lock-stats")]
-use super::LockContentionStats;
-#[cfg(feature = "node-stats")]
-use super::NodeTouchStats;
 use super::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
-#[cfg(feature = "lock-stats")]
-macro_rules! read_lock {
-    ($self:expr, $lock:expr) => {
-        $self.lock_stats.tracked_read(&*$lock)
-    };
-}
-
-#[cfg(not(feature = "lock-stats"))]
 macro_rules! read_lock {
     ($self:expr, $lock:expr) => {
         $lock.read()
     };
 }
 
-#[cfg(feature = "lock-stats")]
-macro_rules! write_lock {
-    ($self:expr, $lock:expr) => {
-        $self.lock_stats.tracked_write(&*$lock)
-    };
-}
-
-#[cfg(not(feature = "lock-stats"))]
 macro_rules! write_lock {
     ($self:expr, $lock:expr) => {
         $lock.write()
@@ -132,12 +112,6 @@ pub struct ConcurrentRadixTree {
     root: SharedBlock,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
-
-    #[cfg(feature = "node-stats")]
-    pub node_stats: NodeTouchStats,
-
-    #[cfg(feature = "lock-stats")]
-    pub lock_stats: LockContentionStats,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -150,11 +124,6 @@ impl Default for ConcurrentRadixTree {
 // This custom drop implementation avoids this using an iterative approach.
 impl Drop for ConcurrentRadixTree {
     fn drop(&mut self) {
-        #[cfg(feature = "lock-stats")]
-        self.lock_stats.report("ConcurrentRadixTree");
-        #[cfg(feature = "node-stats")]
-        self.node_stats.report("ConcurrentRadixTree");
-
         let mut stack: Vec<SharedBlock> = Vec::new();
 
         // Break root -> children edge up front
@@ -181,10 +150,6 @@ impl ConcurrentRadixTree {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
-            #[cfg(feature = "node-stats")]
-            node_stats: NodeTouchStats::new(),
-            #[cfg(feature = "lock-stats")]
-            lock_stats: LockContentionStats::new(),
         }
     }
 
@@ -207,9 +172,6 @@ impl ConcurrentRadixTree {
         sequence: &[LocalBlockHash],
         early_exit: bool,
     ) -> OverlapScores {
-        #[cfg(feature = "node-stats")]
-        let mut _nt = self.node_stats.guard(super::NodeTouchOp::FindMatches);
-
         let mut scores = OverlapScores::new();
 
         if sequence.is_empty() {
@@ -219,10 +181,6 @@ impl ConcurrentRadixTree {
         // Get first child from root.
         let first_child = {
             let guard = read_lock!(self, self.root);
-            #[cfg(feature = "node-stats")]
-            {
-                _nt.count += 1;
-            }
             guard.children.get(&sequence[0]).cloned()
         };
 
@@ -233,10 +191,6 @@ impl ConcurrentRadixTree {
         // Initialize active worker set from first child.
         let (mut active, mut active_count) = {
             let guard = read_lock!(self, first_child);
-            #[cfg(feature = "node-stats")]
-            {
-                _nt.count += 1;
-            }
             (guard.workers.clone(), guard.workers.len())
         };
 
@@ -274,10 +228,6 @@ impl ConcurrentRadixTree {
         for (idx, local_hash) in sequence.iter().enumerate().skip(1) {
             let next_block = {
                 let guard = read_lock!(self, current);
-                #[cfg(feature = "node-stats")]
-                {
-                    _nt.count += 1;
-                }
                 guard.children.get(local_hash).cloned()
             };
 
@@ -383,9 +333,6 @@ impl ConcurrentRadixTree {
         op: KvCacheStoreData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        #[cfg(feature = "node-stats")]
-        let mut _nt = self.node_stats.guard(super::NodeTouchOp::Store);
-
         // Ensure this worker has an entry in the outer map.
         let worker_lookup = lookup.entry(worker).or_default();
 
@@ -415,10 +362,6 @@ impl ConcurrentRadixTree {
         for block_data in op.blocks {
             let child = {
                 let mut parent_guard = write_lock!(self, current);
-                #[cfg(feature = "node-stats")]
-                {
-                    _nt.count += 1;
-                }
 
                 // Insert worker into this node if it was the child from the
                 // previous iteration (skip for the initial parent, which is
@@ -478,10 +421,6 @@ impl ConcurrentRadixTree {
 
         if needs_worker_insert {
             write_lock!(self, current).workers.insert(worker);
-            #[cfg(feature = "node-stats")]
-            {
-                _nt.count += 1;
-            }
         }
 
         Ok(())
@@ -501,9 +440,6 @@ impl ConcurrentRadixTree {
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        #[cfg(feature = "node-stats")]
-        let mut _nt = self.node_stats.guard(super::NodeTouchOp::Remove);
-
         let Some(worker_lookup) = lookup.get_mut(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
         };
@@ -523,10 +459,6 @@ impl ConcurrentRadixTree {
             };
 
             let mut guard = write_lock!(self, block);
-            #[cfg(feature = "node-stats")]
-            {
-                _nt.count += 1;
-            }
             guard.workers.remove(&worker);
             if guard.workers.is_empty() {
                 guard.children.clear();
