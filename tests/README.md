@@ -143,6 +143,9 @@ Nothing prevents you from running without this flag — but if a test needs more
 # Run only tests that fit on a 48 GiB GPU — tests needing >48 GiB are skipped
 python3 -m pytest --max-vram-gib=48 tests/
 
+# Preview which tests would run vs skip (no tests are executed)
+python3 -m pytest --max-vram-gib=24 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
+
 # GPU tests that have no max_vram_gib marker yet — need profiling
 # TODO: profile these tests and add max_vram_gib markers
 python3 -m pytest -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/
