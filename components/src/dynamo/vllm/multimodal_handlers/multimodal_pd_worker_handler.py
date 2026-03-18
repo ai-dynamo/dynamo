@@ -75,11 +75,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Initialize multimodal-specific components
         logger.info("Multimodal PD Worker startup started.")
 
-        if "video" in self.config.model.lower():
-            self.EMBEDDINGS_DTYPE = torch.uint8
-        else:
-            self.EMBEDDINGS_DTYPE = torch.float16
-
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
         #    which can request remote encode and handle the transfer of embeddings
@@ -170,7 +165,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             image_urls,
             request_id,
             model=self.config.model,
-            embeddings_dtype=self.EMBEDDINGS_DTYPE,
             context=context,
         )
 
