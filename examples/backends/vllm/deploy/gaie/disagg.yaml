@@ -14,7 +14,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: docker.io/lambda108/epp-inference-extension-dynamo:fix-header-epp
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "16"
@@ -104,6 +104,7 @@ spec:
           - /bin/sh
           - -c
           image: docker.io/lambda108/dynamo:post-rebase
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
@@ -154,6 +155,7 @@ spec:
           - /bin/sh
           - -c
           image: docker.io/lambda108/dynamo:post-rebase
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
