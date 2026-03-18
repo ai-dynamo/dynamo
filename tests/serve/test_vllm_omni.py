@@ -91,18 +91,15 @@ class VideoGenerationPayload(BasePayload):
 class I2VPayload(VideoGenerationPayload):
     """Payload for image-to-video via /v1/videos with input_reference."""
 
-    _image_path: str = ""
+    _tmp_dir: Any = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
-        # Create a minimal test image for the input_reference
-        if not self._image_path:
-            from PIL import Image
+        from PIL import Image
 
-            fd, path = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            Image.new("RGB", (64, 64), color="red").save(path)
-            self._image_path = path
-            self.body["input_reference"] = path
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        path = os.path.join(self._tmp_dir.name, "input.png")
+        Image.new("RGB", (64, 64), color="red").save(path)
+        self.body["input_reference"] = path
 
 
 @dataclass
@@ -113,60 +110,8 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
-    # Qwen2.5-Omni-7B requires ~80GB GPU memory, exceeds CI GPU capacity.
-    # "omni_text": VLLMOmniConfig(
-    #     name="omni_text",
-    #     directory=vllm_dir,
-    #     script_name="agg_omni.sh",
-    #     marks=[
-    #         pytest.mark.gpu_1,
-    #         pytest.mark.post_merge,
-    #         pytest.mark.timeout(1200),
-    #     ],
-    #     model="Qwen/Qwen2.5-Omni-7B",
-    #     request_payloads=[
-    #         ChatPayload(
-    #             body={
-    #                 "messages": [{"role": "user", "content": "Say hello"}],
-    #                 "max_tokens": 32,
-    #                 "temperature": 0.0,
-    #             },
-    #             repeat_count=1,
-    #             expected_response=["hello", "Hello"],
-    #             expected_log=[],
-    #         ),
-    #     ],
-    # ),
-    # Qwen/Qwen-Image requires ~56GB GPU memory, exceeds CI GPU capacity.
-    # "omni_image": VLLMOmniConfig(
-    #     name="omni_image",
-    #     directory=vllm_dir,
-    #     script_name="agg_omni_image.sh",
-    #     script_args=[
-    #         "--vae-use-slicing",
-    #         "--vae-use-tiling",
-    #         "--enforce-eager",
-    #     ],
-    #     marks=[
-    #         pytest.mark.gpu_1,
-    #         pytest.mark.post_merge,
-    #         pytest.mark.timeout(1200),
-    #     ],
-    #     model="Qwen/Qwen-Image",
-    #     request_payloads=[
-    #         ImageGenerationPayload(
-    #             body={
-    #                 "prompt": "A red apple on a table",
-    #                 "size": "512x512",
-    #                 "num_inference_steps": 20,
-    #                 "response_format": "url",
-    #             },
-    #             repeat_count=1,
-    #             expected_response=[],
-    #             expected_log=[],
-    #         ),
-    #     ],
-    # ),
+    # omni_text (Qwen2.5-Omni-7B): ~80GB GPU required, exceeds CI capacity (22GB).
+    # omni_image (Qwen/Qwen-Image): ~40GB GPU required, exceeds CI capacity (22GB).
     "omni_i2v": VLLMOmniConfig(
         name="omni_i2v",
         directory=vllm_dir,
@@ -204,8 +149,8 @@ vllm_omni_configs = {
             ),
         ],
     ),
-    "omni_video": VLLMOmniConfig(
-        name="omni_video",
+    "omni_t2v": VLLMOmniConfig(
+        name="omni_t2v",
         directory=vllm_dir,
         script_name="agg_omni_video.sh",
         script_args=[
