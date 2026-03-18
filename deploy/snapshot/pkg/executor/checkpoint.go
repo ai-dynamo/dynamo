@@ -1,6 +1,6 @@
-// Package orchestrate provides the top-level checkpoint and restore orchestrators.
+// Package executor provides the top-level checkpoint and restore executors.
 // These wire together the lib packages (criu, cuda, etc.) into multi-step workflows.
-package orchestrate
+package executor
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
@@ -21,32 +22,43 @@ import (
 
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID    string
-	ContainerName  string
-	CheckpointHash string
-	CheckpointDir  string
-	NodeName       string
-	PodName        string
-	PodNamespace   string
+	ContainerID           string
+	ContainerName         string
+	CheckpointHash        string
+	CheckpointLocation    string
+	CheckpointStorageType string
+	NodeName              string
+	PodName               string
+	PodNamespace          string
 }
 
 // Checkpoint performs a CRIU dump of a container.
 // The operation has three phases: inspect, configure, capture.
 //
-// The checkpoint directory is staged under tmp/<hash> during the operation.
-// On success, it is atomically renamed to <hash> at the base path root.
+// The checkpoint directory is staged under tmp/<uuid> during the operation.
+// On success, the previous checkpoint is removed and the staged directory is
+// renamed into place at the base path root.
 func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
-	finalDir := filepath.Join(req.CheckpointDir, req.CheckpointHash)
-	tmpDir := filepath.Join(req.CheckpointDir, "tmp", req.CheckpointHash)
-	if err := os.RemoveAll(tmpDir); err != nil {
-		return fmt.Errorf("failed to clean checkpoint staging directory: %w", err)
+	if req.CheckpointStorageType != "pvc" {
+		return fmt.Errorf("checkpoint storage type %q is not supported", req.CheckpointStorageType)
 	}
-	if err := os.MkdirAll(tmpDir, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint directory: %w", err)
+	if req.CheckpointLocation == "" {
+		return fmt.Errorf("checkpoint location is required")
 	}
+
+	finalDir := req.CheckpointLocation
+	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
+	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
+	}
+	tmpDir := filepath.Join(tmpRoot, uuid.NewString())
+	if err := os.Mkdir(tmpDir, 0700); err != nil {
+		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
 
 	// Phase 1: Inspect container state
 	state, err := inspectContainer(ctx, ctrd, log, req)
@@ -67,7 +79,9 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	}
 
 	// Remove any previous checkpoint with the same identity hash before finalizing
-	os.RemoveAll(finalDir)
+	if err := os.RemoveAll(finalDir); err != nil {
+		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
+	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
