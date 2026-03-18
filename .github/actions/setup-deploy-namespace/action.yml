@@ -88,7 +88,10 @@ runs:
       run: |
         echo "::group::Install Dynamo platform via Helm"
         set -x
-        helm registry login registry-1.docker.io -u ${DOCKERHUB_USERNAME} -p ${DOCKERHUB_PASSWORD}
+        if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_PASSWORD}" ]; then
+          echo "Logging into Docker Hub registry"
+          helm registry login registry-1.docker.io -u ${DOCKERHUB_USERNAME} -p ${DOCKERHUB_PASSWORD}
+        fi
 
         # Install Helm chart
         export VIRTUAL_ENV=/opt/dynamo/venv
