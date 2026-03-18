@@ -1391,7 +1391,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 
@@ -1438,7 +1438,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1600,7 +1600,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 

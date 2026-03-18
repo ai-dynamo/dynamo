@@ -153,7 +153,12 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
-            return {"priority": priority}
+            normalized = int(priority)
+            if getattr(
+                self.config.server_args, "schedule_low_priority_values_first", False
+            ):
+                normalized = -normalized
+            return {"priority": normalized}
         return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:

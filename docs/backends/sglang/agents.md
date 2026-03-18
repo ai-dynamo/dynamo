@@ -77,8 +77,7 @@ Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to 
 
 | Agent Hint | Router Behavior | SGLang Engine Behavior |
 |------------|----------------|----------------------|
-| `priority` | No routing effect (forwarded to engine) | Queue ordering when `--enable-priority-scheduling` is set. Also affects radix cache eviction order when `--radix-eviction-policy priority` is set. |
-| `latency_sensitivity` | Shifts request earlier in router queue (requires `--router-queue-threshold`) | No direct engine effect. |
+| `priority` | Raises router queue priority when `--router-queue-threshold` is set. | Queue ordering when `--enable-priority-scheduling` is set. Also affects radix cache eviction order when `--radix-eviction-policy priority` is set. |
 | `osl` | Output block tracking for routing decisions (requires `--router-track-output-blocks`) | No direct engine effect. |
 | `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache. |
 
@@ -100,7 +99,6 @@ response = client.chat.completions.create(
         "nvext": {
             "agent_hints": {
                 "priority": 10,
-                "latency_sensitivity": 2.0,
                 "speculative_prefill": True,
                 "osl": 512
             }
