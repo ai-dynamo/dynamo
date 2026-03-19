@@ -4,7 +4,7 @@
 import copy
 import logging
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from vllm.inputs.data import TokensPrompt
@@ -14,7 +14,6 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.embedding_transfer import (
-    AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
@@ -48,8 +47,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
         runtime,
         engine_client: AsyncLLM,
         config: Config,
-        encode_worker_client: Client | None = None,
-        decode_worker_client: Client | None = None,
+        encode_worker_client: Optional[Client] = None,
+        decode_worker_client: Optional[Client] = None,
         shutdown_event=None,
         generate_endpoint=None,
     ):
@@ -61,15 +60,14 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             shutdown_event=shutdown_event,
         )
 
-        self.config = config
         self.decode_worker_client = decode_worker_client
         self.enable_disagg = config.disaggregation_mode == DisaggregationMode.PREFILL
 
@@ -82,17 +80,15 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
         #    from the encode worker to this prefill worker.
         # 2) A local embedding cache manager, which can store previously fetched embeddings
         #    and used to determine whether remote encode is necessary for a given mm data.
-        self.encode_worker_client = encode_worker_client
+        self.encode_worker_client = encode_worker_client  # type: ignore
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_receiver: AbstractEmbeddingReceiver = (
-                LocalEmbeddingReceiver()
-            )
+            self.embedding_receiver = LocalEmbeddingReceiver()  # type: ignore
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()  # type: ignore
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
             # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
             # to be at matching size, need to overwrite nixl connect library
-            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)  # type: ignore
         else:
             raise ValueError(
                 f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
@@ -105,7 +101,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
             self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
                 capacity_bytes
             )
-        self.embedding_loader = MultiModalEmbeddingLoader(
+        self.embedding_loader: MultiModalEmbeddingLoader = MultiModalEmbeddingLoader(
             encode_worker_client=self.encode_worker_client,  # type: ignore
             receiver=self.embedding_receiver,
             embedding_cache_manager=self.embedding_cache_manager,

@@ -13,7 +13,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Final, Generic, TypeVar
+from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
 from vllm.config import VllmConfig
@@ -355,16 +355,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config: Config | None = None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
-        encode_worker_client: Client | None = None,
+        encode_worker_client: Optional[Client] = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -387,7 +387,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
-        self.embedding_loader = self.init_embedding_loader(encode_worker_client, config)
+        self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -405,11 +405,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.shutdown_event = shutdown_event
 
     def init_embedding_loader(
-        self, encode_worker_client: Client, config: Config
-    ) -> MultiModalEmbeddingLoader | None:
+        self, config: Config, encode_worker_client: Optional[Client] = None
+    ) -> Optional[MultiModalEmbeddingLoader]:
         """Initialize the embedding loader with the given encode worker client."""
         # Without encode worker, the embedding will be generated internally by vLLM.
-        if encode_worker_client is None or config is None:
+        if encode_worker_client is None:
             return None
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
@@ -419,13 +419,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         #    and used to determine whether remote encode is necessary for a given mm data.
         self.encode_worker_client = encode_worker_client
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_receiver = LocalEmbeddingReceiver()
+            self.embedding_receiver = LocalEmbeddingReceiver()  # type: ignore
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()  # type: ignore
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
             # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
             # to be at matching size, need to overwrite nixl connect library
-            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)  # type: ignore
         else:
             raise ValueError(
                 f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
@@ -761,7 +761,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Publish LoRA as a ModelDeploymentCard with format:
                     # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
                     # This allows the frontend to discover it and route correctly to the worker instance
-                    if self.generate_endpoint is not None and self.config is not None:
+                    if self.generate_endpoint is not None:
                         logger.debug(
                             f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
                         )
@@ -1415,12 +1415,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
@@ -1428,12 +1428,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ):
         super().__init__(
             runtime,
+            config,
             engine,
             default_sampling_params,
             model_max_len,
             enable_multimodal,
             generate_endpoint,
-            config,
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
@@ -1649,12 +1649,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
@@ -1662,12 +1662,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     ):
         super().__init__(
             runtime,
+            config,
             engine,
             default_sampling_params,
             model_max_len,
             enable_multimodal,
             generate_endpoint,
-            config,
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,

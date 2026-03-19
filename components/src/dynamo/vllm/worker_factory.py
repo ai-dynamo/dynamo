@@ -449,12 +449,12 @@ class WorkerFactory:
 
         handler = DecodeWorkerHandler(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -632,12 +632,12 @@ class WorkerFactory:
 
         handler = PrefillWorkerHandler(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,

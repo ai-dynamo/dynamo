@@ -40,11 +40,11 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler[vLLMMultimodalRequest, str
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             shutdown_event=shutdown_event,
         )
 
