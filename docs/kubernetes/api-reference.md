@@ -1269,7 +1269,7 @@ _Underlying type:_ _string_
 TopologyDomain is a free-form topology level identifier.
 Domain names are defined by the cluster admin in the ClusterTopology CR.
 Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
-Must match the regex ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ (lowercase alphanumeric,
+Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (lowercase alphanumeric,
 may contain hyphens but must not start or end with one).
 
 _Validation:_
