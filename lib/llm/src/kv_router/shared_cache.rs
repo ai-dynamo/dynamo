@@ -131,10 +131,16 @@ pub struct SharedKvCacheHttpClient {
     url: String,
 }
 
+/// Default timeout for shared cache HTTP requests.
+const SHARED_CACHE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl SharedKvCacheHttpClient {
     pub fn new(url: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(SHARED_CACHE_HTTP_TIMEOUT)
+                .build()
+                .expect("failed to build shared cache HTTP client"),
             url,
         }
     }

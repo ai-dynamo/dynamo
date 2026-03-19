@@ -801,6 +801,7 @@ mod tests {
                 selected_worker: WorkerWithDpRank::from_worker_id(1),
             }),
             Some(Box::new(FakeSharedCache {
+                #[allow(clippy::single_range_in_vec_init)]
                 hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
                     vec![0..2],
                 )),
