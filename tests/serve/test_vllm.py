@@ -125,10 +125,10 @@ vllm_configs = {
             pytest.mark.max_vram_gib(8.1),  # observed peak 7.4 GiB (+10% safety)
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="lmcache does not support CUDA 13 as of v0.3.11",
-            ),
+            # pytest.mark.skipif(
+            #     _is_cuda13(),
+            #     reason="lmcache does not support CUDA 13 as of v0.3.11",
+            # ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -148,10 +148,10 @@ vllm_configs = {
             pytest.mark.max_vram_gib(8.1),  # observed peak 7.4 GiB (+10% safety)
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="lmcache does not support CUDA 13 as of v0.3.11",
-            ),
+            # pytest.mark.skipif(
+            #     _is_cuda13(),
+            #     reason="lmcache does not support CUDA 13 as of v0.3.11",
+            # ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
