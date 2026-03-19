@@ -2690,40 +2690,46 @@ mod tests {
     // ============================================================================
     // ENVIRONMENT CONFIGURATION TESTS
     // ============================================================================
-
     #[test]
     fn test_config_defaults() {
-        // Ensure that without env vars, we get the hardcoded defaults
-        unsafe { std::env::remove_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS") };
-        unsafe { std::env::remove_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE") };
-
-        assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
-        assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+        temp_env::with_vars(
+            vec![
+                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", None::<&str>),
+                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", None::<&str>),
+            ],
+            || {
+                assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
+                assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+            },
+        );
     }
 
     #[test]
     fn test_config_custom_values() {
-        unsafe { std::env::set_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", "64") };
-        unsafe { std::env::set_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", "128") };
-
-        assert_eq!(max_concurrent_transfers(), 64);
-        assert_eq!(max_transfer_batch_size(), 128);
-
-        unsafe { std::env::remove_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS") };
-        unsafe { std::env::remove_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE") };
+        temp_env::with_vars(
+            vec![
+                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", Some("64")),
+                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", Some("128")),
+            ],
+            || {
+                assert_eq!(max_concurrent_transfers(), 64);
+                assert_eq!(max_transfer_batch_size(), 128);
+            },
+        );
     }
 
     #[test]
     fn test_config_invalid_values_fallback() {
-        // Test non-numeric string
-        unsafe { std::env::set_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", "invalid") };
-        // Test zero
-        unsafe { std::env::set_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", "0") };
-
-        assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
-        assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
-
-        unsafe { std::env::remove_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS") };
-        unsafe { std::env::remove_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE") };
+        temp_env::with_vars(
+            vec![
+                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", Some("not_a_number")),
+                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", Some("0")),
+            ],
+            || {
+                // Should log a tracing::warn and return defaults
+                assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
+                assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+            },
+        );
     }
 }
