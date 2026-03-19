@@ -17,13 +17,19 @@
 #   4. On code change Tilt recompiles the binary and live-updates it into the
 #      running container — no full image rebuild needed.
 #
-# Prerequisites:
-#   - tilt (https://docs.tilt.dev/install.html)
-#   - kind, minikube, or any local cluster
-#   - helm v3
-#   - Go >= 1.25
-#   - The tilt restart_process extension (auto-fetched on first `tilt up`):
-#       tilt ext install restart_process
+# Prerequisites (must be in PATH):
+#   - Go >= 1.25        — compiles the manager binary locally
+#   - tilt              — live-reload orchestrator (https://docs.tilt.dev/install.html)
+#   - helm v3           — renders the platform Helm chart
+#   - kubectl >= 1.29   — applies CRDs and creates the namespace
+#   - docker            — builds the live-update container image
+#   - A Kubernetes cluster reachable via your current kubeconfig context
+#
+# Conditional (only when skip_codegen is false, the default):
+#   - yq v4+            — post-processes generated CRD YAML (run `make ensure-yq`)
+#   - python3 + pydantic — generates Pydantic models from Go types
+#
+# The tilt restart_process extension is auto-fetched on first `tilt up`.
 
 load('ext://restart_process', 'docker_build_with_restart')
 
@@ -114,7 +120,7 @@ local_resource(
         'go.mod',
         'go.sum',
     ],
-    ignore=['*/*/zz_generated.deepcopy.go'],
+    ignore=['**/zz_generated.deepcopy.go'],
     labels=['operator'],
 )
 
@@ -130,7 +136,7 @@ local_resource(
     'crds',
     _crd_cmd,
     deps=['api/'],
-    ignore=['*/*/zz_generated.deepcopy.go'],
+    ignore=['**/zz_generated.deepcopy.go'],
     labels=['operator'],
 )
 
