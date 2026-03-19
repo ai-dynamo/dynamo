@@ -120,6 +120,9 @@ func CreateOrGetAutoCheckpoint(
 			Labels: map[string]string{
 				consts.KubeLabelCheckpointHash: hash,
 			},
+			Annotations: map[string]string{
+				consts.KubeAnnotationCheckpointArtifactVersion: DefaultArtifactVersion,
+			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
 			Identity: identity,

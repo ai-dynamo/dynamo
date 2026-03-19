@@ -106,6 +106,7 @@ func ResolveCheckpointForService(
 
 func ResolveCheckpointStorage(
 	hash string,
+	version string,
 	config *configv1alpha1.CheckpointConfiguration,
 ) (string, nvidiacomv1alpha1.DynamoCheckpointStorageType, error) {
 	storageType := configv1alpha1.CheckpointStorageTypePVC
@@ -118,16 +119,25 @@ func ResolveCheckpointStorage(
 		if config == nil || config.Storage.S3.URI == "" {
 			return "", "", fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
 		}
-		return fmt.Sprintf("%s/%s.tar", config.Storage.S3.URI, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
+		if version == "" {
+			return fmt.Sprintf("%s/%s.tar", config.Storage.S3.URI, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
+		}
+		return fmt.Sprintf("%s/%s/versions/%s.tar", config.Storage.S3.URI, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
 	case configv1alpha1.CheckpointStorageTypeOCI:
 		if config == nil || config.Storage.OCI.URI == "" {
 			return "", "", fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
 		}
-		return fmt.Sprintf("%s:%s", config.Storage.OCI.URI, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
+		if version == "" {
+			return fmt.Sprintf("%s:%s", config.Storage.OCI.URI, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
+		}
+		return fmt.Sprintf("%s:%s-%s", config.Storage.OCI.URI, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
 	default:
 		if config == nil || config.Storage.PVC.BasePath == "" {
 			return "", "", fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
 		}
-		return fmt.Sprintf("%s/%s", config.Storage.PVC.BasePath, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
+		if version == "" {
+			return fmt.Sprintf("%s/%s", config.Storage.PVC.BasePath, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
+		}
+		return fmt.Sprintf("%s/%s/versions/%s", config.Storage.PVC.BasePath, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
 	}
 }
