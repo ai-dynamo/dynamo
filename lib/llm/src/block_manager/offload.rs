@@ -2717,10 +2717,9 @@ mod tests {
     fn test_config_invalid_values_fallback() {
         // Test non-numeric string
         unsafe { std::env::set_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", "invalid") };
-        // Test zero (your code explicitly warns and uses default if parsed == 0)
+        // Test zero
         unsafe { std::env::set_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", "0") };
 
-        // Should fall back to defaults
         assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
         assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
 
