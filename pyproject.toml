@@ -173,53 +173,47 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
-    "ignore:.*pkg_resources.*:DeprecationWarning",
-    "ignore:.*pkg_resources.*:UserWarning",
-    "ignore:.*multipart.*:PendingDeprecationWarning",
-    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
-    "ignore:.*unclosed.*socket.*:ResourceWarning", # Ignore unclosed socket warnings
-    "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
-    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
-    "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
-    "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning", # pandas 2.x concat deprecation in AIC SDK TODO: fix in AIC
-    "ignore:Automatic KV events configuration is deprecated.*:FutureWarning", # Ignore Dynamo's own KV events deprecation warning in tests
-    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning", # Python 3.12 SWIG extension warning from third-party tokenizer deps
-    # Pydantic V2 deprecation warnings from TRTLLM dependencies (raised at import time during collection)
+    # CUDA deprecation warnings from tensorrt_llm
+    "ignore:.*cuda*:DeprecationWarning",
+    # protobuf C extension warning
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
+    # unclosed socket/event loop warnings
+    "ignore:.*unclosed.*socket.*:ResourceWarning",
+    "ignore:.*unclosed event loop.*:ResourceWarning",
+    # unraisable exception warnings
+    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
+    # pynvml deprecation, temporary until upstream migrates to nvidia-ml-py
+    "ignore:The pynvml package is deprecated.*:FutureWarning",
+    # Dynamo's own KV events deprecation warning
+    "ignore:Automatic KV events configuration is deprecated.*:FutureWarning",
+    # Python 3.12 SWIG extension warning from third-party tokenizer deps
+    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning",
+    # Pydantic V2 deprecation warnings from TRTLLM dependencies
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
-    # Pydantic warning about field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
+    # Pydantic field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
     'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
-    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    # pytest-benchmark automatically disables when xdist is active
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
-
-    ################################################################################################
-    # vLLM
-    ################################################################################################
-    # vLLM tokenizer deprecation warning (AnyTokenizer moved to vllm.tokenizers.TokenizerLike)
-    "ignore:.*vllm\\.transformers_utils\\.tokenizer\\.AnyTokenizer.*has been moved.*:DeprecationWarning",
-
-    ################################################################################################
-    # TRT-LLM
-    ################################################################################################
-    # torchao sometimes emits SyntaxWarning from docstrings (e.g. invalid escape sequences) at import
-    # time; our global `error` policy would otherwise fail test collection. Do not rely on module=
-    # matching here because these can be raised during compilation where the module field may not
-    # match as expected.
+    # torchao invalid escape sequences in docstrings at import time
     "ignore:.*invalid escape sequence.*:SyntaxWarning",
-    # torchao deprecation warnings for import path changes (see https://github.com/pytorch/ao/issues/2752)
+    # torchao import path changes (https://github.com/pytorch/ao/issues/2752)
     "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
-    # nvidia-modelopt warning about transformers version incompatibility
+    # Triton CPU fallback warning on CPU-only runners
+    "ignore:Triton is not supported on current platform.*:UserWarning",
+    # torch.jit.script_method deprecation from torch.utils.mkldnn
+    "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
+    # nvidia-modelopt warning about transformers version (transitive dep from TRT-LLM)
     "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
+    # SGLang quantization warnings on CPU-only runners
+    "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
+    "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
 ]
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
-# IMPORTANT: tests/conftest.py also registers a subset of these markers for
-# environments where pyproject.toml is not available (e.g. some CI containers).
-# Keep the marker definitions here and in tests/conftest.py synchronized.
 markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
@@ -242,6 +236,7 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "lmcache: marks tests as requiring lmcache",
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",

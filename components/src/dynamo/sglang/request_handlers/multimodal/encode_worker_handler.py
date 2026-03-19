@@ -15,10 +15,9 @@ except (ImportError, OSError):
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
-import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
+from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -100,6 +99,16 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             self.image_token_id = token_id
 
         self.min_workers = 1
+
+        sender = EMBEDDING_SENDER_FACTORIES.get(
+            config.dynamo_args.embedding_transfer_mode
+        )
+        if sender is None:
+            raise ValueError(
+                "Invalid embedding transfer mode: "
+                f"{config.dynamo_args.embedding_transfer_mode}"
+            )
+        self.embedding_sender = sender()
 
     def cleanup(self) -> None:
         pass
@@ -231,9 +240,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 if mm_group.multimodal_input is not None:
                     mm_group.multimodal_input.image_url = None
 
-            # Store shared serialized tensor metadata at request level.
+            # Store shared tensor transfer metadata at request level.
             request.embeddings_shape = tuple(precomputed_embeddings.shape)  # type: ignore[assignment]
-            request.serialized_request = None
+            request.transfer_payload = None
 
             search_start = 0
             for num_image_tokens in token_counts:
@@ -253,31 +262,24 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 )
                 search_start = image_token_id_index + num_image_tokens
 
-            descriptor = connect.Descriptor(precomputed_embeddings)
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
+            with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
+                (
+                    transfer_request,
+                    transfer_future,
+                ) = await self.embedding_sender.send_embeddings(precomputed_embeddings)
+                request.transfer_payload = transfer_request
                 logger.debug(f"Request: {request.model_dump_json()}")
 
-                # Get the response generator from downstream worker
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
-                )
-                with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                    await readable.wait_for_completion()
+            # Get the response generator from downstream worker
+            response_generator = await self.pd_worker_client.round_robin(
+                request.model_dump_json()
+            )
 
-                async for response in response_generator:
-                    yield response.data() if hasattr(response, "data") else str(
-                        response
-                    )
+            async for response in response_generator:
+                yield response.data() if hasattr(response, "data") else str(response)
+
+            await transfer_future
 
         except Exception as e:
             logger.error(f"Error processing request: {e}")
             raise
-
-    async def async_init(self, runtime: DistributedRuntime) -> None:
-        logger.info("Startup started.")
-        # Create and initialize a dynamo connector for this worker.
-        # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector()
-
-        logger.info("Startup completed.")
