@@ -363,7 +363,7 @@ def _parse_runtime_cancellation_metric(
             parts = line.rsplit(None, 1)
             if len(parts) == 2:
                 try:
-                    return int(parts[1])
+                    return int(float(parts[1]))
                 except ValueError:
                     pass
 
