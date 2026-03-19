@@ -1,0 +1,13 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: 15846622-799e-4f20-bab6-acf3f5f220e2
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request 15846622-799e-4f20-bab6-acf3f5f220e2: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: 532257eb-4336-4be8-902a-e3a5f33afdee
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request 532257eb-4336-4be8-902a-e3a5f33afdee: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: 35cedc02-1735-4c49-94fd-9ca89e5fa191
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request 35cedc02-1735-4c49-94fd-9ca89e5fa191: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:244 Request 15846622-799e-4f20-bab6-acf3f5f220e2: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:299 Request 15846622-799e-4f20-bab6-acf3f5f220e2 completed in 0.10s
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:244 Request 532257eb-4336-4be8-902a-e3a5f33afdee: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:299 Request 532257eb-4336-4be8-902a-e3a5f33afdee completed in 0.20s
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:244 Request 35cedc02-1735-4c49-94fd-9ca89e5fa191: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:299 Request 35cedc02-1735-4c49-94fd-9ca89e5fa191 completed in 0.30s

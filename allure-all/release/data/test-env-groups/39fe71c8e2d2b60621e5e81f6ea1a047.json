@@ -1,1 +1,1 @@
-{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[agg-request-plane-http]","status":"passed","testResultsByEnv":{"default":"5924a0a86f070de32d11030e2b1e40f9"}}
+{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[disaggregated]","status":"passed","testResultsByEnv":{"default":"a4a56043499d1b52fb4ea4c9bf74b573"}}

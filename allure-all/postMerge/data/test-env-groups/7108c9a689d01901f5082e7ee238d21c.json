@@ -1,1 +1,1 @@
-{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[trtllm-agg]","status":"passed","testResultsByEnv":{"default":"feff03be7d740dc65008712b9ef04239"}}
+{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[vllm-disagg]","status":"failed","testResultsByEnv":{"default":"15cceb8f6e2c52874257543bf6e8eedd"}}

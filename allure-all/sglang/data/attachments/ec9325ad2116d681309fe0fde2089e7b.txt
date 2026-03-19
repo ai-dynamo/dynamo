@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+ERROR    dynamo.vllm.handlers:handlers.py:388 Failed to sleep engine: discovery backend down

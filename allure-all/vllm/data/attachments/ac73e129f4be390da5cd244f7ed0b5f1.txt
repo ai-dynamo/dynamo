@@ -1,0 +1,132 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4317 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4317
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4317
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2384 --advertise-client-urls http://0.0.0.0:2384 --listen-peer-urls http://0.0.0.0:2385 --initial-advertise-peer-urls http://localhost:2385 --initial-cluster default=http://localhost:2385 --data-dir /tmp/etcd_65d19crl in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2384
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2384
+INFO     test_deployment[epd_multimodal-2]:common.py:41 Starting epd_multimodal test_deployment
+INFO     test_deployment[epd_multimodal-2]:common.py:47 Using model: Qwen/Qwen3-VL-2B-Instruct
+INFO     test_deployment[epd_multimodal-2]:common.py:48 Script: epd_multimodal_image_and_embeddings.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/trtllm/launch/epd_multimodal_image_and_embeddings.sh in /workspace/examples/backends/trtllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8028/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8028
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8028 "GET /v1/models HTTP/1.1" 200 119
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8028/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1773879391,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8028/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8028
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8028 "GET /health HTTP/1.1" 200 679
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8028/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm_encode.generate"
+  ],
+  "instances": [
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2998162615061948429,
+      "transport": {
+        "tcp": "10.1.69.160:35249/299b9d03719fa80d/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2998162615061948425,
+      "transport": {
+        "tcp": "10.1.69.160:33663/299b9d03719fa809/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm_encode",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2998162615061948427,
+      "transport": {
+        "tcp": "10.1.69.160:40943/299b9d03719fa80b/generate"
+      }
+    }
+  ]
+}
+INFO     test_deployment[epd_multimodal-2]:common.py:100 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8028/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe what you see in this image."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 160,
+  "stream": false,
+  "logprobs": false,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8028
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8028 "POST /v1/chat/completions HTTP/1.1" 200 1226
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.56s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '1226', 'date': 'Thu, 19 Mar 2026 00:16:38 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-20170547-95dd-455c-820d-a34a0f7ff67a",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "This image captures a breathtaking, natural landscape dominated by a massive, iconic mountain. The central feature is a large, sheer rock formation, which is the famous Half Dome, a prominent landmark in Yosemite National Park, California. The mountain's face is a light gray, with a distinct, rounded peak and a steep, vertical face that rises dramatically from the surrounding terrain.\n\nThe scene is framed by the dark green, needle-like foliage of evergreen trees, which are positioned in the foreground and on the right side of the image. These trees create a natural frame, drawing the viewer's eye towards the mountain. The foreground is a wide, paved road that curves gently from the bottom left towards the center of the image, leading the eye into the scene. The road is bordered by rocks and some low-",
+        "role": "assistant",
+        "reasoning... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/4 expected keywords: ['mountain', 'rock', 'trees', 'road']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+This image captures a breathtaking, natural landscape dominated by a massive, iconic mountain. The central feature is a large, sheer rock formation, which is the famous Half Dome, a prominent landmark...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3778
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 2990
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 2991
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 2992
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 2866
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3319
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3320
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3321
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 2868 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 2868 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 2867 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 2867 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 2852
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 2853 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 2853 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 2840
+INFO     NatsServer:managed_process.py:31 Terminating PID: 2841 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 2841 sed

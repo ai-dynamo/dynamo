@@ -1,1 +1,1 @@
-{"id":"3349ae3246700782772d45d696808efb","fullName":"components.src.dynamo.vllm.tests.test_vllm_prompt_embeds.TestUsageStatistics#test_build_completion_usage","name":"test_build_completion_usage[text]","status":"passed","testResultsByEnv":{"default":"dc84f802dfd1886faba6b16a483fe038"}}
+{"id":"3349ae3246700782772d45d696808efb","fullName":"components.src.dynamo.vllm.tests.test_vllm_prompt_embeds.TestUsageStatistics#test_build_completion_usage","name":"test_build_completion_usage[zero-seq-len]","status":"passed","testResultsByEnv":{"default":"8ff409c4159eb3a787270277a2d06cfd"}}

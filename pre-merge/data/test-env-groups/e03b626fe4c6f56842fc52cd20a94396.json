@@ -1,1 +1,1 @@
-{"id":"e03b626fe4c6f56842fc52cd20a94396","fullName":"tests.kvbm_integration.test_kvbm_vllm_integration#test_new_request_interface","name":"test_new_request_interface","status":"passed","testResultsByEnv":{"default":"b2b7030a7a9dbc869feb19518fc6f8e3"}}
+{"id":"e03b626fe4c6f56842fc52cd20a94396","fullName":"tests.kvbm_integration.test_kvbm_vllm_integration#test_new_request_interface","name":"test_new_request_interface","status":"passed","testResultsByEnv":{"default":"8e24c91b1b07069e2d2839387ed845ef"}}
