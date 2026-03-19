@@ -1651,9 +1651,9 @@ mod tests {
     #[tokio::test]
     async fn test_transfer_batcher() -> Result<()> {
         let (offload_manager, device_pool, _, disk_pool) = build_pools(
-            2 * MAX_TRANSFER_BATCH_SIZE + 1,
+            2 * max_transfer_batch_size() + 1,
             None,
-            Some(2 * MAX_TRANSFER_BATCH_SIZE + 1),
+            Some(2 * max_transfer_batch_size() + 1),
             None,
         )?;
 
@@ -1662,7 +1662,7 @@ mod tests {
 
         let mut disk_blocks = Vec::new();
 
-        for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
+        for i in 0..2 * max_transfer_batch_size() + 1 {
             let disk_block = completed_block(disk_pool, [i as u32; 4]).await?;
             populate_block(&disk_block, i as u8)?;
             disk_blocks.push(disk_block);
@@ -1673,7 +1673,7 @@ mod tests {
         let device_blocks = offload_manager
             .onboard(immutable_disk_blocks.clone(), None)
             .await??;
-        assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
+        assert_eq!(device_blocks.len(), 2 * max_transfer_batch_size() + 1);
 
         for (i, device_block) in device_blocks.iter().enumerate() {
             let blocks = device_pool
@@ -2685,5 +2685,46 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // ============================================================================
+    // ENVIRONMENT CONFIGURATION TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_config_defaults() {
+        // Ensure that without env vars, we get the hardcoded defaults
+        unsafe { std::env::remove_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS") };
+        unsafe { std::env::remove_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE") };
+
+        assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
+        assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        unsafe { std::env::set_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", "64") };
+        unsafe { std::env::set_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", "128") };
+
+        assert_eq!(max_concurrent_transfers(), 64);
+        assert_eq!(max_transfer_batch_size(), 128);
+
+        unsafe { std::env::remove_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS") };
+        unsafe { std::env::remove_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE") };
+    }
+
+    #[test]
+    fn test_config_invalid_values_fallback() {
+        // Test non-numeric string
+        unsafe { std::env::set_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", "invalid") };
+        // Test zero (your code explicitly warns and uses default if parsed == 0)
+        unsafe { std::env::set_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", "0") };
+
+        // Should fall back to defaults
+        assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
+        assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+
+        unsafe { std::env::remove_var("DYN_KVBM_MAX_CONCURRENT_TRANSFERS") };
+        unsafe { std::env::remove_var("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE") };
     }
 }
