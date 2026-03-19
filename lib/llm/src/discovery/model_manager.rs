@@ -19,8 +19,9 @@ use dynamo_runtime::{
 
 use crate::{
     kv_router::{
-        KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
-        shared_cache::SharedKvCacheHttpClient,
+        KvRouter, router_endpoint_id,
+        scheduler::DefaultWorkerSelector,
+        shared_cache::{SharedKvCacheHttpClient, SharedKvCacheRequestPlaneClient},
     },
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
@@ -603,8 +604,16 @@ impl ModelManager {
         {
             tracing::info!(url, "Using shared KV cache (HTTP)");
             Some(Box::new(SharedKvCacheHttpClient::new(url.clone())))
+        } else if let Some(ref comp) = kv_router_config
+            .as_ref()
+            .and_then(|c| c.shared_cache_component.clone())
+        {
+            tracing::info!(shared_cache_component = %comp, "Using shared KV cache (request plane)");
+            let component = endpoint.component();
+            Some(Box::new(
+                SharedKvCacheRequestPlaneClient::new(component, comp).await?,
+            ))
         } else {
-            // TODO: shared_cache_component (request plane) support
             None
         };
 
@@ -824,6 +833,7 @@ impl ModelManager {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -831,6 +841,18 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    async fn make_test_endpoint(name: &str) -> Endpoint {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let namespace = drt.namespace(format!("test-ns-{name}")).unwrap();
+        let component = namespace
+            .component(format!("test-component-{name}"))
+            .unwrap();
+        component.endpoint("generate")
     }
 
     // -- CRUD delegation tests --
@@ -1160,6 +1182,57 @@ mod tests {
         assert_eq!(
             ModelManager::model_namespace_key("gpt-4", "default-abc"),
             "gpt-4:default-abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kv_chooser_for_accepts_shared_cache_url_config() {
+        let mm = ModelManager::new();
+        let endpoint = make_test_endpoint("shared-cache-url").await;
+        let config = KvRouterConfig {
+            overlap_score_weight: 0.0,
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            shared_cache_url: Some("http://127.0.0.1:8091/check_blocks".to_string()),
+            ..Default::default()
+        };
+
+        let chooser = mm
+            .kv_chooser_for(&endpoint, 2, Some(config), "decode", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            chooser.kv_router_config().shared_cache_url.as_deref(),
+            Some("http://127.0.0.1:8091/check_blocks")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kv_chooser_for_accepts_shared_cache_component_config() {
+        let mm = ModelManager::new();
+        let endpoint = make_test_endpoint("shared-cache-component").await;
+        let _shared_cache_component = endpoint
+            .component()
+            .namespace()
+            .component("shared-cache")
+            .unwrap();
+        let config = KvRouterConfig {
+            overlap_score_weight: 0.0,
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            shared_cache_component: Some("shared-cache".to_string()),
+            ..Default::default()
+        };
+
+        let chooser = mm
+            .kv_chooser_for(&endpoint, 2, Some(config), "decode", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            chooser.kv_router_config().shared_cache_component.as_deref(),
+            Some("shared-cache")
         );
     }
 }
