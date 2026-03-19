@@ -137,18 +137,22 @@ def test_kv_cache_behavior():
 
 The `max_vram_gib(N)` marker records how much GPU memory a test needs. The pytest invocation can use `--max-vram-gib=N` as a **selector** to run only tests that fit on the available GPU. Tests that exceed the budget are skipped at collection time (before any test starts). Tests without a `max_vram_gib` marker always run (no constraint assumed).
 
+This is for the following use cases:
+- **MIG partitioned GPUs:** when running tests in parallel on MIG slices (e.g., 2x 40 GiB partitions on an 80 GiB GPU), each slice has limited VRAM.
+- **Smaller CI GPUs:** some CI jobs use L4 GPUs with only 24 GiB of VRAM.
+
 Nothing prevents you from running without this flag — but if a test needs more VRAM than is physically available, it will OOM at runtime (e.g., vLLM raises `ValueError: No available memory for the cache blocks`).
 
 ```bash
-# Run only tests that fit on a 48 GiB GPU — tests needing >48 GiB are skipped
-python3 -m pytest --max-vram-gib=48 tests/
+# Preview which gpu_1 vllm tests fit on a 16 GiB MIG partition (no tests are executed)
+python3 -m pytest --max-vram-gib=16 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
+
+# Same, but for 24 GiB L4 CI GPUs
+python3 -m pytest --max-vram-gib=24 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
 
 # GPU tests that have no max_vram_gib marker yet — need profiling
 # TODO: profile these tests and add max_vram_gib markers
-python3 -m pytest -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/
-
-# No filter — run everything regardless of VRAM (tests that exceed available memory will OOM)
-python3 -m pytest tests/
+python3 -m pytest --dry-run -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/serve/test_vllm.py
 ```
 
 ### Lifecycle Marker Note

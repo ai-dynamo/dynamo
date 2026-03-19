@@ -23,3 +23,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     fi
 
 USER dynamo
+
+# Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
+COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
