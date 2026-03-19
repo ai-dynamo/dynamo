@@ -316,7 +316,7 @@ class EncodeWorkerHandler:
                     assert group.multimodal_input is not None
                     group.multimodal_input.image_url = None
                     group.image_grid_thw = embedding_item.image_grid_thw
-                    group.embeddings_shape = tuple(embedding_item.embeddings.shape)
+                    group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
                     group.serialized_request = transfer_request[0]
 
                     # Keep a reference of the embedding and only drop reference when the transfer is done

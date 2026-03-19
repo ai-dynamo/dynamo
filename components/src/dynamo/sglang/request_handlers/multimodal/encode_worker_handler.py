@@ -232,7 +232,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     mm_group.multimodal_input.image_url = None
 
             # Store shared serialized tensor metadata at request level.
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.embeddings_shape = tuple(precomputed_embeddings.shape)  # type: ignore[assignment]
             request.serialized_request = None
 
             search_start = 0
