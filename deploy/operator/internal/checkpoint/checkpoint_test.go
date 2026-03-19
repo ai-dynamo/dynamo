@@ -130,9 +130,8 @@ func TestHelpers(t *testing.T) {
 
 func TestArtifactVersionHelpers(t *testing.T) {
 	t.Run("new checkpoints default to version 1", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		assert.Equal(t, DefaultArtifactVersion, EffectiveArtifactVersion(ckpt))
-		assert.Equal(t, DefaultArtifactVersion, ObservedArtifactVersion(ckpt))
+		assert.Equal(t, DefaultArtifactVersion, ArtifactVersion(&nvidiacomv1alpha1.DynamoCheckpoint{}))
+		assert.Equal(t, CheckpointJobName(testHash, ""), CheckpointJobName(testHash, DefaultArtifactVersion))
 	})
 
 	t.Run("annotation overrides desired version", func(t *testing.T) {
@@ -143,36 +142,8 @@ func TestArtifactVersionHelpers(t *testing.T) {
 				},
 			},
 		}
-		assert.Equal(t, "3", EffectiveArtifactVersion(ckpt))
-		assert.Equal(t, "3", ObservedArtifactVersion(ckpt))
-	})
-
-	t.Run("legacy checkpoints stay legacy without annotation", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-				IdentityHash: testHash,
-				JobName:      CheckpointJobName(testHash, ""),
-				Location:     "/checkpoints/" + testHash,
-			},
-		}
-		assert.Equal(t, "", EffectiveArtifactVersion(ckpt))
-		assert.Equal(t, "", ObservedArtifactVersion(ckpt))
-	})
-
-	t.Run("job status version wins over a newer desired annotation", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					consts.KubeAnnotationCheckpointArtifactVersion: "2",
-				},
-			},
-			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-				IdentityHash: testHash,
-				JobName:      CheckpointJobName(testHash, "1"),
-			},
-		}
-		assert.Equal(t, "2", EffectiveArtifactVersion(ckpt))
-		assert.Equal(t, "1", ObservedArtifactVersion(ckpt))
+		assert.Equal(t, "3", ArtifactVersion(ckpt))
+		assert.Equal(t, CheckpointJobName(testHash, "3"), "checkpoint-job-"+testHash+"-3")
 	})
 }
 
@@ -181,7 +152,7 @@ func TestResolveCheckpointStorage(t *testing.T) {
 
 	location, storageType, err := ResolveCheckpointStorage(testHash, "", config)
 	require.NoError(t, err)
-	assert.Equal(t, "/checkpoints/"+testHash, location)
+	assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+DefaultArtifactVersion, location)
 	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), storageType)
 
 	location, storageType, err = ResolveCheckpointStorage(testHash, "7", config)
