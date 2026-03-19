@@ -154,6 +154,7 @@ runs:
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
+          --shm-size=200m \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
@@ -189,9 +190,13 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # Define common docker flags for stability (Shared memory & limits)
-        # --ipc=host is critical for parallel pytest workers to communicate fast
-        DOCKER_OPTS="--ipc=host --ulimit memlock=-1 --ulimit stack=67108864"
+        # /dev/shm sizing: NIXL uses UCX which allocates shared memory segments in /dev/shm
+        # via shm_open(). Each NIXL agent with num_threads=8 creates 9 UCX workers, each needing
+        # ~4.8MB of shm. Disaggregated tests use up to 3 agents (encode+prefill+decode) = ~130MB.
+        # Docker's default is 64MB, which is insufficient and causes segfaults.
+        # Do NOT use --ipc=host here — it overrides --shm-size with the host's /dev/shm
+        # (64MB in K8s pods by default), silently ignoring the size we set.
+        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
