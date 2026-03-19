@@ -39,18 +39,16 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Initialize builder
-      uses: ./.github/actions/init-dynamo-builder
-      with:
-        builder_name: compliance-${{ github.run_id }}-${{ github.run_attempt }}
-        flavor: general
-        arch: ${{ inputs.arch }}
-
     - name: Set up Python
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
       with:
         python-version: '3.12'
         pip-install: pyyaml
+
+    - name: Set builder name
+      id: builder
+      shell: bash
+      run: echo "name=compliance-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_OUTPUT
 
     - name: Resolve base image
       id: resolve-base
@@ -67,13 +65,19 @@ runs:
           BASE_IMAGE=$(python3 container/compliance/resolve_base_image.py ${RESOLVE_ARGS})
         fi
         echo "base_image=${BASE_IMAGE}" >> $GITHUB_OUTPUT
+    - name: Initialize builder
+      uses: ./.github/actions/init-dynamo-builder
+      with:
+        builder_name: ${{ steps.builder.outputs.name }}
+        flavor: general
+        arch: ${{ inputs.arch }}
 
     - name: Extract target image packages
       shell: bash
       run: |
         mkdir -p /tmp/compliance-target
         docker buildx build \
-          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --builder ${{ steps.builder.outputs.name }} \
           --platform linux/${{ inputs.arch }} \
           --build-arg TARGET_IMAGE="${{ inputs.image }}" \
           --output "type=local,dest=/tmp/compliance-target" \
@@ -83,13 +87,21 @@ runs:
           -f container/compliance/Dockerfile.extract \
           container/compliance/
 
+    - name: Refresh BuildKit builder
+      if: ${{ inputs.target != 'dev' }}
+      uses: ./.github/actions/builder-refresher
+      with:
+        builder_name: ${{ steps.builder.outputs.name }}
+        flavor: general
+        arch: ${{ inputs.arch }}
+
     - name: Extract base image packages
       if: steps.resolve-base.outputs.base_image != ''
       shell: bash
       run: |
         mkdir -p /tmp/compliance-base
         docker buildx build \
-          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --builder ${{ steps.builder.outputs.name }} \
           --platform linux/${{ inputs.arch }} \
           --build-arg TARGET_IMAGE="${{ steps.resolve-base.outputs.base_image }}" \
           --output "type=local,dest=/tmp/compliance-base" \
@@ -120,4 +132,4 @@ runs:
       if: always()
       shell: bash
       run: |
-        docker buildx rm compliance-${{ github.run_id }}-${{ github.run_attempt }} || true
+        docker buildx rm ${{ steps.builder.outputs.name }} || true

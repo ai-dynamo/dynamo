@@ -57,6 +57,13 @@ spec:
             spec:
               description: Spec defines the desired state for this graph deployment.
               properties:
+                annotations:
+                  additionalProperties:
+                    type: string
+                  description: |-
+                    Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+                    Service-level annotations take precedence over these values.
+                  type: object
                 backendFramework:
                   description: BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
                   enum:
@@ -213,6 +220,13 @@ spec:
                       - name
                     type: object
                   type: array
+                labels:
+                  additionalProperties:
+                    type: string
+                  description: |-
+                    Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+                    Service-level labels take precedence over these values.
+                  type: object
                 pvcs:
                   description: |-
                     PVCs defines a list of persistent volume claims that can be referenced by components.

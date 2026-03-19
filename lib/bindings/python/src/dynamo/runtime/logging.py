@@ -89,12 +89,15 @@ class VllmColorFormatter(logging.Formatter):
         else:
             target = record.module
         msg = record.getMessage()
-        return (
+        result = (
             f"{self._DIM}{ts}{self._RESET} "
             f"{color}{level:>5}{self._RESET} "
             f"{self._DIM}{target}{self._RESET}{self._DIM}:{self._RESET} "
             f"{msg}"
         )
+        if record.exc_info and record.exc_info[0] is not None:
+            result += "\n" + self.formatException(record.exc_info)
+        return result
 
 
 # Configure the Python logger to use the NimLogHandler

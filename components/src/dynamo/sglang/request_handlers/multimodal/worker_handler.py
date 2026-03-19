@@ -9,9 +9,9 @@ from typing import Any, AsyncIterator, Callable, Optional
 import sglang as sgl
 import torch
 
-import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
-from dynamo.common.constants import DisaggregationMode
+from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
+from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config
@@ -74,14 +74,17 @@ class SglangUtils:
 class EmbeddingsProcessor:
     """Handles multimodal embeddings processing and multimodal item creation"""
 
-    def __init__(self):
-        self._connector = None
+    def __init__(self, embedding_transfer_mode: EmbeddingTransferMode):
+        receiver = EMBEDDING_RECEIVER_FACTORIES.get(embedding_transfer_mode)
+        if receiver is None:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {embedding_transfer_mode}"
+            )
+        self.embedding_receiver = receiver()
 
-    async def initialize(self):
-        """Initialize the connector for embeddings processing"""
-        self._connector = connect.Connector()
-
-    async def process_embeddings(self, request: SglangMultimodalRequest):
+    async def process_embeddings(
+        self, request: SglangMultimodalRequest
+    ) -> tuple[torch.Tensor, int]:
         """Process one concatenated embedding tensor from serialized request."""
         logger.debug("Processing embeddings with shape: " f"{request.embeddings_shape}")
 
@@ -89,37 +92,26 @@ class EmbeddingsProcessor:
         if not multimodal_groups:
             raise ValueError("multimodal_inputs is required")
 
-        serialized_request = request.serialized_request
-        embeddings_shape = request.embeddings_shape
-        if serialized_request is None:
-            raise ValueError("serialized_request is required on request")
-        if embeddings_shape is None:
-            raise ValueError("embeddings_shape is required on request")
+        transfer_request = request.transfer_payload
+        if transfer_request is None:
+            raise ValueError("transfer_payload is required on request")
+
+        if not isinstance(transfer_request, TransferRequest):
+            transfer_request = TransferRequest.model_validate(transfer_request)
+
+        embeddings_shape = request.embeddings_shape or tuple(
+            transfer_request.embeddings_shape
+        )
         if len(embeddings_shape) < 2:
             raise ValueError(f"Invalid embeddings shape: {embeddings_shape}")
 
-        embeddings = torch.empty(
-            embeddings_shape,
-            dtype=MultimodalConfig.EMBEDDINGS_DTYPE,
-            device=MultimodalConfig.EMBEDDINGS_DEVICE,
+        tensor_id, embeddings = await self.embedding_receiver.receive_embeddings(
+            transfer_request
         )
+        return embeddings, tensor_id
 
-        descriptor = connect.Descriptor(embeddings)
-        if descriptor is None:
-            raise RuntimeError("Descriptor is None - cannot process embeddings")
-
-        if self._connector is None:
-            logger.warning(
-                "Connector is None - this should not happen after initialization"
-            )
-            self._connector = connect.Connector()
-
-        with _nvtx.annotate("mm:nixl:begin_read", color="blue"):
-            read_op = await self._connector.begin_read(serialized_request, descriptor)
-        with _nvtx.annotate("mm:nixl:wait_completion", color="cyan"):
-            await read_op.wait_for_completion()
-
-        return embeddings, descriptor
+    def release_embeddings(self, tensor_id: int) -> None:
+        self.embedding_receiver.release_tensor(tensor_id)
 
     @staticmethod
     def create_multimodal_item(embeddings: torch.Tensor, image_grid_thw) -> dict:
@@ -249,9 +241,9 @@ class ErrorResponseBuilder:
 
 async def _build_mm_items(
     request: SglangMultimodalRequest, embeddings_processor: EmbeddingsProcessor
-) -> tuple[list[dict], torch.Tensor]:
+) -> tuple[list[dict], torch.Tensor, int]:
     """Process embeddings and build a single multimodal item for SGLang."""
-    embeddings, _ = await embeddings_processor.process_embeddings(request)
+    embeddings, tensor_id = await embeddings_processor.process_embeddings(request)
 
     image_grid_thw_list = [group.image_grid_thw for group in request.multimodal_inputs]
     if any(item is None for item in image_grid_thw_list):
@@ -261,7 +253,7 @@ async def _build_mm_items(
         embeddings_processor.create_multimodal_item(embeddings, image_grid_thw_list)
     ]
 
-    return mm_items, embeddings
+    return mm_items, embeddings, tensor_id
 
 
 class MultimodalWorkerHandler(BaseWorkerHandler):
@@ -280,7 +272,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         super().__init__(engine, config, None, None, shutdown_event)
 
         # Initialize processors
-        self.embeddings_processor = EmbeddingsProcessor()
+        self.embeddings_processor = EmbeddingsProcessor(
+            config.dynamo_args.embedding_transfer_mode
+        )
 
         # Store serving mode and prefill client (like regular SGLang)
         self.serving_mode = config.serving_mode
@@ -295,10 +289,6 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             logger.info("Multimodal decode worker handler initialized")
         else:
             logger.info("Multimodal aggregated worker handler initialized")
-
-    async def async_init(self):
-        """Initialize async components"""
-        await self.embeddings_processor.initialize()
 
     def _validate_and_parse_request(self, request) -> SglangMultimodalRequest:
         """Validate and parse incoming request"""
@@ -408,11 +398,11 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         input_ids = request.request.token_ids
         if not input_ids:
             raise ValueError("input_ids is required")
-
+        tensor_id: int | None = None
         try:
             sampling_params = SglangUtils.build_sampling_params(request)
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
-                mm_items, combined_embeddings = await _build_mm_items(
+                mm_items, combined_embeddings, tensor_id = await _build_mm_items(
                     request, self.embeddings_processor
                 )
 
@@ -434,6 +424,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             try:
                 async for output in StreamProcessor.process_sglang_stream(agg_stream):
                     if first_token:
+                        if tensor_id is not None:
+                            self.embeddings_processor.release_embeddings(tensor_id)
+                            tensor_id = None
                         end_ttft()
                         _nvtx.end_range(rng_first)
                         first_token = False
@@ -461,6 +454,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 yield ErrorResponseBuilder.build_error_response(RuntimeError(error_msg))
             else:
                 yield ErrorResponseBuilder.build_error_response(e)
+        finally:
+            if tensor_id is not None:
+                self.embeddings_processor.release_embeddings(tensor_id)
 
     async def _get_bootstrap_from_prefill(
         self, request: SglangMultimodalRequest, sampling_params: dict
@@ -509,7 +505,9 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         super().__init__(engine, config, None, None, shutdown_event)
 
         # Initialize processors
-        self.embeddings_processor = EmbeddingsProcessor()
+        self.embeddings_processor = EmbeddingsProcessor(
+            config.dynamo_args.embedding_transfer_mode
+        )
 
         # Get bootstrap info using BootstrapManager
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(engine)
@@ -517,10 +515,6 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         logger.info(
             f"Multimodal prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
-
-    async def async_init(self):
-        """Initialize async components like connector"""
-        await self.embeddings_processor.initialize()
 
     async def generate(
         self, disagg_request: DisaggSglangMultimodalRequest, context: Context
@@ -592,10 +586,13 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         request = disagg_request.request
         input_ids = request.request.token_ids
         sampling_params = disagg_request.sampling_params
+        tensor_id: int | None = None
 
         # Process embeddings from encode worker using our embeddings processor
         with _nvtx.annotate("mm:prefill:load_multimodal", color="cyan"):
-            mm_items, _ = await _build_mm_items(request, self.embeddings_processor)
+            mm_items, _, tensor_id = await _build_mm_items(
+                request, self.embeddings_processor
+            )
 
         # Start SGLang prefill generation (like regular SGLang)
         with _nvtx.annotate("mm:prefill:engine_async_generate", color="blue"):
@@ -610,12 +607,19 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             )
 
         # Consume results without yielding (prefill doesn't return text, just coordinates)
-        asyncio.create_task(self._consume_results(results))
+        asyncio.create_task(self._consume_results(results, tensor_id))
 
-    async def _consume_results(self, results):
+    async def _consume_results(self, results, tensor_id: int):
         """Consume prefill results without returning them (like regular SGLang)"""
-        async for _ in results:
-            pass
+        released = False
+        try:
+            async for _ in results:
+                if not released:
+                    self.embeddings_processor.release_embeddings(tensor_id)
+                    released = True
+        finally:
+            if not released:
+                self.embeddings_processor.release_embeddings(tensor_id)
 
     def cleanup(self):
         super().cleanup()

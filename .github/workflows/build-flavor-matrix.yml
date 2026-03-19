@@ -66,11 +66,16 @@ on:
         required: false
         type: boolean
         default: false
-      auto_acr_deploy:
-        description: 'Also push the image directly to ACR using the same tag (mirrors copy-to-acr behavior)'
+      copy_to_acr:
+        description: 'Copy the built image from ECR to ACR using skopeo after the build'
         required: false
         type: boolean
         default: false
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy to ACR step'
+        required: false
+        type: number
+        default: 10
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -107,6 +112,7 @@ jobs:
         with:
           lfs: true
       - name: Build
+        id: build
         uses: ./.github/actions/build-flavor
         with:
           framework: ${{ inputs.framework }}
@@ -131,7 +137,6 @@ jobs:
           sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
           build_only: ${{ inputs.build_only }}
           show_summary: ${{ inputs.push_image }}
-          auto_acr_deploy: ${{ inputs.auto_acr_deploy }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' }}
         uses: ./.github/actions/builder-refresher
@@ -140,6 +145,22 @@ jobs:
           flavor: ${{ inputs.framework }}
           arch: ${{ matrix.platform }}
           cuda_version: ${{ matrix.cuda_version }}
+      - name: Copy image to ACR
+        if: inputs.copy_to_acr
+        timeout-minutes: ${{ inputs.copy_timeout_minutes }}
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ steps.build.outputs.target_tag_plain }}-cuda${{ steps.build.outputs.cuda_version_plain }}-${{ matrix.platform }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.build.outputs.target_tag_plain }}-cuda${{ steps.build.outputs.cuda_version_plain }}-${{ matrix.platform }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Calculate compliance image URI
         id: compliance-image
         if: inputs.run_compliance_scan

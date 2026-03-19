@@ -57,7 +57,7 @@ controls the *overall* VRAM budget (and thus whether the model fits), but the
 KV cache portion is pinned to the explicit byte value.
 
 Consequence for profiling: if a script uses `--kv-cache-memory-bytes`,
-changing `DYN_GPU_MEMORY_FRACTION_OVERRIDE` (which maps to
+changing `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` (which maps to
 `--gpu-memory-utilization`) won't change the KV cache size, only the leftover
 headroom for activations and overhead.
 
@@ -256,14 +256,13 @@ to get 10 GiB of KV cache with a 5 GiB model.
 The helper functions in `gpu_utils.sh` handle these differences:
 - `gpu_gb_to_total_fraction`: for vLLM/sglang (fraction of total VRAM)
 - `gpu_gb_to_free_fraction`: for TensorRT-LLM (fraction of free VRAM)
-- `gpu_worker_fraction <engine>`: unified wrapper — reads `_EW_*` vars from
-  `estimate_worker_vram` and calls the right function for the engine.
+- `gpu_worker_fraction <engine> <total_gib> <kv_gib>`: converts estimated GiB
+  into the engine-appropriate fraction (total for vllm/sglang, free for trtllm).
 
-Launch scripts use `gpu_worker_fraction` so they all follow the same pattern:
+Launch scripts use `build_gpu_mem_args` which calls these internally:
 
 ```bash
-estimate_worker_vram "$MODEL" "$SEQ_LEN" "$CONCURRENCY" trtllm
-GPU_MEM_FRACTION=$(gpu_worker_fraction trtllm)
+GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --max-model-len "$SEQ_LEN" --max-num-seqs "$CONCURRENCY")
 ```
 
 ---
@@ -291,7 +290,7 @@ kv_cache_gib = kv_bytes_per_token * max_model_len * max_concurrent_seqs / (1024^
 
 ---
 
-## `DYN_GPU_MEMORY_FRACTION_OVERRIDE`
+## `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE`
 
 Environment variable used by Dynamo's VRAM profiler to binary-search the minimum
 memory fraction a script needs.
@@ -299,8 +298,8 @@ memory fraction a script needs.
 - Maps to `--gpu-memory-utilization` in vLLM and `--mem-fraction-static` in sglang.
 - For TensorRT-LLM, maps to `kv_cache_config.free_gpu_memory_fraction` via
   `--override-engine-args`.
-- Launch scripts use `gpu_worker_fraction <engine>` to compute the default
-  fraction; the override bypasses this and splits the raw value between workers.
+- Launch scripts use `build_gpu_mem_args` to compute the default fraction;
+  the override bypasses the estimator and splits the raw value between workers.
 - Scripts that use `--kv-cache-memory-bytes` (vLLM) bypass the fraction-based KV
   cache sizing, making the profiler's fraction override ineffective for KV cache.
-  Those scripts should warn when `DYN_GPU_MEMORY_FRACTION_OVERRIDE` is set.
+  Those scripts should warn when `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is set.
