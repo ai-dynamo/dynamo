@@ -124,7 +124,7 @@ class DiffusionEngine:
         # Use PipelineLoader for the full loading flow:
         #   VisualGenArgs → DiffusionModelConfig → AutoPipeline → BasePipeline
         loader = PipelineLoader(diffusion_args)
-        self._pipeline = loader.load()
+        self._pipeline = loader.load(skip_warmup=self.config.skip_warmup)
 
         self._initialized = True
         logger.info(
