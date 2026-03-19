@@ -102,14 +102,14 @@ cat <<EOF
 
 Now build the project:
   cargo build --features dynamo-llm/block-manager
-  cd lib/bindings/python && maturin develop --uv && cd /workspace
-  uv pip install --no-deps -e /workspace
+  cd lib/bindings/python && maturin develop --uv && cd $WORKSPACE_DIR
+  uv pip install --no-deps -e $WORKSPACE_DIR
 
 Optional:
   uv pip install -e lib/gpu_memory_service  # GPU memory manager with C++ extension
   cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
 
 Verify with:
-  /workspace/deploy/sanity_check.py
+  $WORKSPACE_DIR/deploy/sanity_check.py
 ========================================
 EOF
