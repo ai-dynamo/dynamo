@@ -3,7 +3,7 @@
 
 """Shared KV router configuration ArgGroup.
 
-Defines the 17 KvRouterConfig parameters once so that both
+Defines the 20 KvRouterConfig parameters once so that both
 ``dynamo.frontend`` and ``dynamo.router`` can reuse them without duplication.
 Field names on ``KvRouterConfigBase`` match the ``KvRouterConfig`` Python
 constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
@@ -43,7 +43,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
 
 
 class KvRouterConfigBase(ConfigBase):
-    """Mixin carrying the 17 KvRouterConfig fields."""
+    """Mixin carrying the 20 KvRouterConfig fields."""
 
     overlap_score_weight: float
     router_temperature: float
@@ -73,7 +73,7 @@ class KvRouterConfigBase(ConfigBase):
 
 
 class KvRouterArgGroup(ArgGroup):
-    """CLI arguments for the 17 KvRouterConfig parameters."""
+    """CLI arguments for the 20 KvRouterConfig parameters."""
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
@@ -293,12 +293,12 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--shared-cache-multiplier",
             env_var="DYN_SHARED_CACHE_MULTIPLIER",
-            default=0.0,
+            default=0.5,
             help=(
                 "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
                 "Blocks in the shared cache are less valuable than device-local blocks. "
                 "E.g. 0.5 means each shared hit counts as half a device-local hit. "
-                "Default 0.0 (disabled)."
+                "Default 0.5."
             ),
             arg_type=float,
         )

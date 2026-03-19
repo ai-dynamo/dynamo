@@ -371,7 +371,7 @@ mod tests {
     ///   adjusted_prefill = isl - 0.5*2*1 = 4-1 = 3, logit = 1.0 * 3 + 0 = 3.0
     /// - Worker 1: device=[] (overlap=0), shared has [A,B,C,D] -> shared_beyond=4
     ///   adjusted_prefill = isl - 0.5*4*1 = 4-2 = 2, logit = 1.0 * 2 + 0 = 2.0
-    /// 
+    ///
     /// Worker 1 has lower logit (less work), so it wins.
     #[test]
     fn test_shared_cache_hits_scoring() {
