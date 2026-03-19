@@ -221,7 +221,6 @@ fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
         .map_err(kv_indexer_to_pyerr)
 }
 
-
 /// Log a message from Python with file and line info
 #[pyfunction]
 #[pyo3(text_signature = "(level, message, module, file, line)")]
