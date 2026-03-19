@@ -59,12 +59,9 @@ python3 -m dynamo.sglang \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
 
-# Wait for prefill worker to initialize before starting decode worker
-# This prevents both workers from competing for GPU memory simultaneously, which can cause OOM.
-# The prefill worker needs time to:
-# 1. Load model weights and allocate its memory fraction
-# 2. Initialize KV cache with --delete-ckpt-after-loading to free checkpoint memory
-# 3. Register with NATS service discovery so decode worker can find it
+# Wait for prefill worker to initialize before starting decode worker.
+# Both workers share one GPU with --delete-ckpt-after-loading; without this
+# sleep they compete for GPU memory during model loading and the scheduler OOMs.
 echo "Waiting for prefill worker to initialize..."
 sleep 5
 
