@@ -18,10 +18,13 @@ from .utils import (
     determine_request_receiving_worker,
     start_completion_request,
     validate_completion_response,
+    verify_migration_happened_after_grace_period,
     verify_migration_occurred,
 )
 
 logger = logging.getLogger(__name__)
+
+SGLANG_GRACEFUL_SHUTDOWN_TIMEOUT_SECS = 3
 
 pytestmark = [
     pytest.mark.sglang,
@@ -61,6 +64,11 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
+        env["DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT"] = str(
+            SGLANG_GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+        )
+        env.pop("SGL_FORCE_SHUTDOWN", None)
+        env.pop("SGLANG_FORCE_SHUTDOWN", None)
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
@@ -188,7 +196,7 @@ def test_request_migration_sglang_graceful_shutdown(
                     f"Gracefully shutting down {worker_name} with PID {worker.get_pid()} processing the request"
                 )
                 terminate_process_tree(
-                    worker.get_pid(), immediate_kill=False, timeout=10
+                    worker.get_pid(), immediate_kill=False, timeout=20
                 )
 
                 # Step 6: Validate the completion response
@@ -196,6 +204,11 @@ def test_request_migration_sglang_graceful_shutdown(
 
                 # Step 7: Verify migration occurred during graceful shutdown
                 verify_migration_occurred(frontend)
+                verify_migration_happened_after_grace_period(
+                    frontend,
+                    worker,
+                    expected_grace_period_secs=SGLANG_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                )
 
 
 def test_no_request_migration_sglang_worker_failure(
@@ -257,7 +270,6 @@ def test_no_request_migration_sglang_worker_failure(
                     ), f"Unexpected migration message: {e}"
 
 
-@pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
 def test_no_request_migration_sglang_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

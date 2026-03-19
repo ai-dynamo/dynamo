@@ -22,6 +22,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        shutdown_controller=None,
     ) -> None:
         """Initialize prefill worker handler.
 
@@ -33,7 +34,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, publisher)
+        super().__init__(
+            component,
+            engine,
+            config,
+            publisher,
+            shutdown_controller=shutdown_controller,
+        )
         self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -73,21 +80,26 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         yield bootstrap_info
-
-        input_param = self._get_input_param(request["request"])
-
-        results = await self.engine.async_generate(
-            **input_param,
-            sampling_params=request["sampling_params"],
-            stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
-            bootstrap_room=bootstrap_room,
+        task = asyncio.create_task(
+            self._run_request(request, context, bootstrap_room)
         )
-
-        task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
+
+    async def _run_request(
+        self, request: Dict[str, Any], context: Context, bootstrap_room: int
+    ) -> None:
+        async with self._track_active_request():
+            input_param = self._get_input_param(request["request"])
+            results = await self.engine.async_generate(
+                **input_param,
+                sampling_params=request["sampling_params"],
+                stream=True,
+                bootstrap_host=self.bootstrap_host,
+                bootstrap_port=self.bootstrap_port,
+                bootstrap_room=bootstrap_room,
+            )
+            await self._consume_results(results, context)
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
@@ -98,10 +110,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             results: Async generator from engine.async_generate.
             context: Context object for cancellation handling.
         """
-        # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         try:
-            async with self._cancellation_monitor(request_id_future, context):
+            async with self._cancellation_monitor(
+                request_id_future, context
+            ) as forced_shutdown_event:
                 async for res in results:
                     if hasattr(res, "is_error") and callable(getattr(res, "is_error")):
                         try:
@@ -128,9 +141,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                                 f"New Prefill Request ID: {sglang_request_id}"
                             )
 
-                    # Note: No explicit cancellation checks needed here.
-                    # When abort_request is called by the cancellation monitor,
-                    # SGLang will terminate this async generator automatically.
+                if forced_shutdown_event.is_set():
+                    raise GeneratorExit(
+                        "SGLang prefill request was aborted during forced worker shutdown."
+                    )
         except asyncio.CancelledError:
             raise GeneratorExit(
                 "SGLang prefill engine was shut down during token generation."

@@ -26,6 +26,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         publisher: DynamoSglangPublisher,
         prefill_client: Optional[Client] = None,
         prefill_router_client: Optional[Client] = None,
+        shutdown_controller=None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -46,6 +47,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
             prefill_client,
+            shutdown_controller=shutdown_controller,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             if self.prefill_client is None:
@@ -112,75 +114,76 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        sampling_params = self._build_sampling_params(request)
-        input_param = self._get_input_param(request)
+        async with self._track_active_request():
+            sampling_params = self._build_sampling_params(request)
+            input_param = self._get_input_param(request)
 
-        if self.serving_mode == DisaggregationMode.DECODE:
-            # request the bootstrap info from the target prefill worker
-            if (
-                self.prefill_router_client is not None
-                and self.prefill_router_client.instance_ids()
-            ):
-                token_ids = request["token_ids"]
-                stream = await self.prefill_router_client.generate(token_ids)
-                result = await anext(stream)
-                (
-                    worker_id,
-                    overlap,
-                ) = result.data()  # Returns tuple (worker_id, overlap_amount)
-                logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
+            if self.serving_mode == DisaggregationMode.DECODE:
+                # request the bootstrap info from the target prefill worker
+                if (
+                    self.prefill_router_client is not None
+                    and self.prefill_router_client.instance_ids()
+                ):
+                    token_ids = request["token_ids"]
+                    stream = await self.prefill_router_client.generate(token_ids)
+                    result = await anext(stream)
+                    (
+                        worker_id,
+                        overlap,
+                    ) = result.data()  # Returns tuple (worker_id, overlap_amount)
+                    logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
 
-                prefill_stream = await self.prefill_client.direct(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    worker_id,
+                    prefill_stream = await self.prefill_client.direct(
+                        DisaggPreprocessedRequest(
+                            request=request,
+                            sampling_params=sampling_params,
+                        ).model_dump(),
+                        worker_id,
+                    )
+                else:
+                    prefill_stream = await self.prefill_client.generate(
+                        DisaggPreprocessedRequest(
+                            request=request,
+                            sampling_params=sampling_params,
+                        ).model_dump(),
+                        context=context,
+                    )
+
+                bootstrap_info = None
+                async for info in prefill_stream:
+                    bootstrap_info = info.data()
+                    break
+
+                if not bootstrap_info:
+                    raise RuntimeError("No bootstrap info received from prefill worker")
+
+                decode = await self.engine.async_generate(
+                    **input_param,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    bootstrap_host=bootstrap_info["bootstrap_host"],
+                    bootstrap_port=bootstrap_info["bootstrap_port"],
+                    bootstrap_room=bootstrap_info["bootstrap_room"],
                 )
+
+                if self.skip_tokenizer_init:
+                    async for out in self._process_token_stream(decode, context):
+                        yield out
+                else:
+                    async for out in self._process_text_stream(decode, context):
+                        yield out
             else:
-                prefill_stream = await self.prefill_client.generate(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    context=context,
+                agg = await self.engine.async_generate(
+                    **input_param,
+                    sampling_params=sampling_params,
+                    stream=True,
                 )
-
-            bootstrap_info = None
-            async for info in prefill_stream:
-                bootstrap_info = info.data()
-                break
-
-            if not bootstrap_info:
-                raise RuntimeError("No bootstrap info received from prefill worker")
-
-            decode = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-            )
-
-            if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(decode, context):
-                    yield out
-            else:
-                async for out in self._process_text_stream(decode, context):
-                    yield out
-        else:
-            agg = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-            )
-            if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(agg, context):
-                    yield out
-            else:
-                async for out in self._process_text_stream(agg, context):
-                    yield out
+                if self.skip_tokenizer_init:
+                    async for out in self._process_token_stream(agg, context):
+                        yield out
+                else:
+                    async for out in self._process_text_stream(agg, context):
+                        yield out
 
     async def _process_token_stream(
         self,
@@ -198,10 +201,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         num_output_tokens_so_far = 0
 
-        # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         try:
-            async with self._cancellation_monitor(request_id_future, context):
+            async with self._cancellation_monitor(
+                request_id_future, context
+            ) as forced_shutdown_event:
                 async for res in stream_source:
                     if hasattr(res, "is_error") and callable(getattr(res, "is_error")):
                         try:
@@ -226,12 +230,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             request_id_future.set_result(sglang_request_id)
                             logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                    # Check cancellation before yielding to allow proper cleanup.
-                    # This lets SGLang proceed to the second token generation, which will
-                    # async context switch and allow the abort monitor to signal cancellation.
-                    # The loop should exit by itself when context.is_stopped() returns True.
                     out = {}
                     finish_reason = res["meta_info"]["finish_reason"]
+                    if forced_shutdown_event.is_set():
+                        raise GeneratorExit(
+                            "SGLang decode request was aborted during forced worker shutdown."
+                        )
                     if finish_reason:
                         out["finish_reason"] = finish_reason["type"]
 
@@ -262,6 +266,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         }
                     if not context.is_stopped():
                         yield out
+                if forced_shutdown_event.is_set():
+                    raise GeneratorExit(
+                        "SGLang decode request was aborted during forced worker shutdown."
+                    )
         except asyncio.CancelledError:
             raise GeneratorExit(
                 "SGLang decode engine was shut down during token generation."
@@ -283,10 +291,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         count = 0
 
-        # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         try:
-            async with self._cancellation_monitor(request_id_future, context):
+            async with self._cancellation_monitor(
+                request_id_future, context
+            ) as forced_shutdown_event:
                 async for res in stream_source:
                     if hasattr(res, "is_error") and callable(getattr(res, "is_error")):
                         try:
@@ -311,15 +320,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             request_id_future.set_result(sglang_request_id)
                             logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                    # Check cancellation before yielding to allow proper cleanup.
-                    # This lets SGLang proceed to the second token generation, which will
-                    # async context switch and allow the abort monitor to signal cancellation.
-                    # The loop should exit by itself when context.is_stopped() returns True.
-
                     index = res.get("index", 0)
                     text = res.get("text", "")
 
                     finish_reason = res["meta_info"]["finish_reason"]
+                    if forced_shutdown_event.is_set():
+                        raise GeneratorExit(
+                            "SGLang decode request was aborted during forced worker shutdown."
+                        )
                     finish_reason_type = (
                         finish_reason["type"] if finish_reason else None
                     )
@@ -342,6 +350,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if not context.is_stopped():
                         yield response
                     count = next_count
+                if forced_shutdown_event.is_set():
+                    raise GeneratorExit(
+                        "SGLang decode request was aborted during forced worker shutdown."
+                    )
         except asyncio.CancelledError:
             raise GeneratorExit(
                 "SGLang decode engine was shut down during token generation."

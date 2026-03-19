@@ -27,6 +27,7 @@ class BaseWorkerHandler(ABC):
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
         prefill_client: Optional[Client] = None,
+        shutdown_controller: Optional[Any] = None,
     ) -> None:
         """Initialize base worker handler.
 
@@ -47,6 +48,7 @@ class BaseWorkerHandler(ABC):
             self.metrics_publisher = None
             self.kv_publisher = None
         self.prefill_client = prefill_client
+        self.shutdown_controller = shutdown_controller
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
 
@@ -66,6 +68,16 @@ class BaseWorkerHandler(ABC):
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         pass
+
+    @asynccontextmanager
+    async def _track_active_request(self) -> AsyncGenerator[None, None]:
+        if self.shutdown_controller is not None:
+            self.shutdown_controller.start_request()
+        try:
+            yield
+        finally:
+            if self.shutdown_controller is not None:
+                self.shutdown_controller.finish_request()
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Get the appropriate input parameter for SGLang engine.
@@ -118,7 +130,10 @@ class BaseWorkerHandler(ABC):
         return bootstrap_host, bootstrap_port
 
     async def _handle_cancellation(
-        self, request_id_future: asyncio.Future, context: Context
+        self,
+        request_id_future: asyncio.Future,
+        context: Context,
+        forced_shutdown_event: asyncio.Event,
     ):
         """Background task to handle cancellation by monitoring context state.
 
@@ -130,14 +145,43 @@ class BaseWorkerHandler(ABC):
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
 
-            # Always wait for the request ID to ensure we can abort the request
-            sglang_request_id = await request_id_future
+            wait_tasks = {asyncio.ensure_future(context.async_killed_or_stopped()): "context"}
+            if self.shutdown_controller is not None:
+                wait_tasks[
+                    asyncio.ensure_future(
+                        self.shutdown_controller.force_shutdown_event.wait()
+                    )
+                ] = "shutdown"
+
+            done, pending = await asyncio.wait(
+                wait_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            shutdown_triggered = any(
+                wait_tasks[task] == "shutdown" for task in done if task in wait_tasks
+            )
+            if shutdown_triggered:
+                forced_shutdown_event.set()
+
+            if not request_id_future.done():
+                if shutdown_triggered:
+                    logging.warning(
+                        "Forced SGLang shutdown requested before request ID was available for Context: %s",
+                        context.id(),
+                    )
+                    return
+                sglang_request_id = await request_id_future
+            else:
+                sglang_request_id = request_id_future.result()
+
             logging.debug(
                 f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
             )
-            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
-
-            await context.async_killed_or_stopped()
 
             logging.info(
                 f"Cancellation signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
@@ -175,7 +219,7 @@ class BaseWorkerHandler(ABC):
     @asynccontextmanager
     async def _cancellation_monitor(
         self, request_id_future: asyncio.Future, context: Context
-    ) -> AsyncGenerator[asyncio.Task, None]:
+    ) -> AsyncGenerator[asyncio.Event, None]:
         """
         Context manager for monitoring request cancellation.
         Automatically creates a background task to monitor for cancellation and
@@ -187,17 +231,20 @@ class BaseWorkerHandler(ABC):
             context: Context object for cancellation handling
 
         Yields:
-            asyncio.Task: The cancellation monitoring task being managed
+            asyncio.Event: Cancellation state event
         """
         logging.debug(f"Creating cancellation monitor task for Context: {context.id()}")
+        forced_shutdown_event = asyncio.Event()
 
         # Start the cancellation monitoring task
         cancellation_task = asyncio.create_task(
-            self._handle_cancellation(request_id_future, context)
+            self._handle_cancellation(
+                request_id_future, context, forced_shutdown_event
+            )
         )
 
         try:
-            yield cancellation_task
+            yield forced_shutdown_event
         finally:
             # Clean up the background cancellation task
             request_id = "unknown"

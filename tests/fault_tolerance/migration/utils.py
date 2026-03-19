@@ -3,9 +3,11 @@
 
 import logging
 import os
+import re
 import shutil
 import threading
 import time
+from datetime import datetime, timezone
 
 import pytest
 import requests
@@ -232,3 +234,49 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
     assert (
         "Cannot recreate stream: " not in log_content
     ), "'Cannot recreate stream: ...' error found in logs"
+
+
+def _extract_timestamp_for_pattern(log_content: str, pattern: str) -> datetime:
+    timestamp_pattern = re.compile(
+        rf"(?P<ts>\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?Z).+{re.escape(pattern)}"
+    )
+    match = timestamp_pattern.search(log_content)
+    if match is None:
+        raise AssertionError(f"Pattern not found in logs: {pattern}")
+    return datetime.fromisoformat(match.group("ts").replace("Z", "+00:00")).astimezone(
+        timezone.utc
+    )
+
+
+def verify_migration_happened_after_grace_period(
+    frontend_process: DynamoFrontendProcess,
+    worker_process: ManagedProcess,
+    expected_grace_period_secs: float,
+    max_additional_delay_secs: float = 10.0,
+) -> None:
+    """Verify graceful-shutdown migration waited for the drain window before reconnecting."""
+
+    worker_log = worker_process.read_logs()
+    if not worker_log:
+        raise AssertionError(f"Worker log not available at path: {worker_process.log_path}")
+
+    frontend_log = frontend_process.read_logs()
+    if not frontend_log:
+        raise AssertionError(
+            f"Frontend log not available at path: {frontend_process.log_path}"
+        )
+
+    sigterm_ts = _extract_timestamp_for_pattern(worker_log, "SIGTERM received.")
+    disconnect_ts = _extract_timestamp_for_pattern(
+        frontend_log, "Stream disconnected... recreating stream..."
+    )
+
+    delay_secs = (disconnect_ts - sigterm_ts).total_seconds()
+    assert delay_secs >= expected_grace_period_secs, (
+        f"Migration happened too early: {delay_secs:.2f}s after SIGTERM, "
+        f"expected at least {expected_grace_period_secs:.2f}s"
+    )
+    assert delay_secs <= expected_grace_period_secs + max_additional_delay_secs, (
+        f"Migration happened too late: {delay_secs:.2f}s after SIGTERM, "
+        f"expected no more than {expected_grace_period_secs + max_additional_delay_secs:.2f}s"
+    )
