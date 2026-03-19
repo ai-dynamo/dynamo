@@ -25,6 +25,7 @@ import time
 from itertools import count
 from typing import TYPE_CHECKING
 
+import msgspec.structs
 import zmq
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -37,6 +38,7 @@ from dynamo.common.forward_pass_metrics import (
     WelfordAccumulator,
     encode,
 )
+from dynamo.runtime.logging import configure_dynamo_logging
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.structured_output import StructuredOutputManager
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
@@ -128,8 +131,10 @@ class _FpmPublisherThread:
                     continue
 
             try:
+                seq = next(self._seq)
+                metrics = msgspec.structs.replace(metrics, counter_id=seq)
                 payload = encode(metrics)
-                seq_bytes = next(self._seq).to_bytes(8, "big")
+                seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)
                 last_publish = time.monotonic()
             except zmq.Again:

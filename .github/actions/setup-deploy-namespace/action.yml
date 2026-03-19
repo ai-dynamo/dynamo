@@ -19,6 +19,14 @@ inputs:
     description: 'HuggingFace token for model access'
     required: false
     default: ''
+  dockerhub_username:
+    description: 'Docker Hub username for image pull secrets'
+    required: false
+    default: ''
+  dockerhub_password:
+    description: 'Docker Hub password for image pull secrets'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -75,9 +83,16 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         REGISTRY: ${{ inputs.registry }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
+        DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
+        DOCKERHUB_PASSWORD: ${{ inputs.dockerhub_password }}
       run: |
         echo "::group::Install Dynamo platform via Helm"
         set -x
+        if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_PASSWORD}" ]; then
+          echo "Logging into Docker Hub registry"
+          helm registry login registry-1.docker.io -u ${DOCKERHUB_USERNAME} -p ${DOCKERHUB_PASSWORD}
+        fi
+
         # Install Helm chart
         export VIRTUAL_ENV=/opt/dynamo/venv
         export KUBE_NS=$NAMESPACE
