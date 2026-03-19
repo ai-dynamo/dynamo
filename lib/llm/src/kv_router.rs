@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    ConcurrentRadixTree, ThreadPoolIndexer,
+    ConcurrentRadixTree, SharedKvCache, ThreadPoolIndexer,
     approx::PruneConfig,
     config::{KvRouterConfig, RouterConfigOverride},
     indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
@@ -43,6 +43,7 @@ pub mod recorder;
 pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;
+pub mod shared_cache;
 pub mod subscriber;
 pub mod worker_query;
 
@@ -304,6 +305,9 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
+    /// Optional external shared KV cache pool. When present, `find_best_match`
+    /// queries it in parallel with the indexer and factors shared hits into scoring.
+    shared_cache: Option<Box<dyn SharedKvCache>>,
 }
 
 impl KvRouter {
@@ -317,6 +321,7 @@ impl KvRouter {
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
         model_name: Option<String>,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -367,6 +372,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            shared_cache,
         })
     }
 
@@ -419,11 +425,36 @@ impl KvRouter {
         });
         let hash_elapsed = start.elapsed();
 
-        let overlap_scores = self
-            .indexer
-            .find_matches(block_hashes)
-            .instrument(tracing::info_span!("kv_router.find_matches"))
-            .await?;
+        // Query indexer and shared cache in parallel when shared cache is configured.
+        let (overlap_scores, shared_cache_hits) = if let Some(ref shared_cache) = self.shared_cache
+        {
+            let indexer_fut = self
+                .indexer
+                .find_matches(block_hashes.clone())
+                .instrument(tracing::info_span!("kv_router.find_matches"));
+            let shared_fut = shared_cache
+                .check_blocks(&block_hashes)
+                .instrument(tracing::info_span!("kv_router.shared_cache_check"));
+
+            let (indexer_result, shared_result) = tokio::join!(indexer_fut, shared_fut);
+            let overlaps = indexer_result?;
+            // Shared cache failure is non-fatal: log warning and fall back to empty hits.
+            let hits = match shared_result {
+                Ok(hits) => Some(hits),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Shared cache query failed, ignoring");
+                    None
+                }
+            };
+            (overlaps, hits)
+        } else {
+            let overlaps = self
+                .indexer
+                .find_matches(block_hashes)
+                .instrument(tracing::info_span!("kv_router.find_matches"))
+                .await?;
+            (overlaps, None)
+        };
         let find_matches_elapsed = start.elapsed();
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
@@ -450,6 +481,7 @@ impl KvRouter {
                 priority_jump,
                 expected_output_tokens,
                 allowed_worker_ids,
+                shared_cache_hits,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;

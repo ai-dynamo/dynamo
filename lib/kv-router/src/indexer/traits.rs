@@ -6,6 +6,21 @@ use async_trait::async_trait;
 use super::{KvRouterError, WorkerTask};
 use crate::protocols::*;
 
+/// Trait for querying an external shared KV cache pool.
+///
+/// Implementations check which blocks from a request exist in the shared cache.
+/// The shared cache server is responsible for coalescing individual block lookups
+/// into ranges before returning.
+#[async_trait]
+pub trait SharedKvCache: Send + Sync {
+    /// Query which blocks exist in the shared cache.
+    /// Returns ranges of contiguous block positions that exist.
+    async fn check_blocks(
+        &self,
+        block_hashes: &[LocalBlockHash],
+    ) -> Result<SharedCacheHits, KvRouterError>;
+}
+
 #[async_trait]
 pub trait KvIndexerInterface {
     /// Find matches for a given sequence of `LocalBlockHash`es.

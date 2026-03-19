@@ -18,7 +18,10 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
+        shared_cache::SharedKvCacheHttpClient,
+    },
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{
@@ -591,6 +594,20 @@ impl ModelManager {
             kv_router_config.clone(),
             worker_type,
         ));
+
+        // Build shared cache client from config if configured.
+        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if let Some(ref url) =
+            kv_router_config
+                .as_ref()
+                .and_then(|c| c.shared_cache_url.clone())
+        {
+            tracing::info!(url, "Using shared KV cache (HTTP)");
+            Some(Box::new(SharedKvCacheHttpClient::new(url.clone())))
+        } else {
+            // TODO: shared_cache_component (request plane) support
+            None
+        };
+
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
@@ -600,6 +617,7 @@ impl ModelManager {
             kv_router_config,
             worker_type,
             model_name,
+            shared_cache,
         )
         .await?;
         Ok(Arc::new(chooser))
