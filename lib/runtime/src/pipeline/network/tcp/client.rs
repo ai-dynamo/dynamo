@@ -243,14 +243,14 @@ async fn handle_reader(
 
                                 match msg {
                                     ControlMessage::Stop => {
-                                        if let Some(counter) = &cancellation_counter {
+                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
                                             counter.inc();
                                             cancellation_counted = true;
                                         }
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
-                                        if let Some(counter) = &cancellation_counter {
+                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
                                             counter.inc();
                                             cancellation_counted = true;
                                         }
