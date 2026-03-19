@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import AsyncIterator
 
 from vllm.inputs.data import TokensPrompt
 
@@ -20,7 +21,7 @@ from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_m
 logger = logging.getLogger(__name__)
 
 
-class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
+class MultimodalDecodeWorkerHandler(BaseWorkerHandler[vLLMMultimodalRequest, str]):
     """Decode worker for disaggregated multimodal serving"""
 
     def __init__(
@@ -55,7 +56,9 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         self._connector = connect.Connector()
         logger.info("Multimodal Decode Worker async initialization completed.")
 
-    async def generate(self, request: vLLMMultimodalRequest, context):
+    async def generate(
+        self, request: vLLMMultimodalRequest, context
+    ) -> AsyncIterator[str]:
         rng_decode = _nvtx.start_range("mm:decode_worker_generate", color="blue")
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):

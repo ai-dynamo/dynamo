@@ -14,6 +14,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.embedding_transfer import (
+    AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 IMAGE_URL_KEY = "image_url"
 
 
-class MultimodalPDWorkerHandler(BaseWorkerHandler):
+class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
     """Prefill/Decode or Prefill-only worker for multimodal serving"""
 
     def __init__(
@@ -88,7 +89,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         #    and used to determine whether remote encode is necessary for a given mm data.
         self.encode_worker_client = encode_worker_client
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_receiver = LocalEmbeddingReceiver()
+            self.embedding_receiver: AbstractEmbeddingReceiver = (
+                LocalEmbeddingReceiver()
+            )
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
             self.embedding_receiver = NixlWriteEmbeddingReceiver()
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
@@ -381,12 +384,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ) as decode_timer,
         ):
             num_output_tokens_so_far = 0
-            async for (
-                decode_response
-            ) in await self.decode_worker_client.round_robin(  # type: ignore
+            if self.decode_worker_client is None:
+                raise RuntimeError("Decode worker client is not configured.")
+            async for (decode_response) in await self.decode_worker_client.round_robin(
                 request.model_dump_json(), context=context
             ):
-                output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore
+                output = MyRequestOutput.model_validate_json(decode_response.data())
                 yield self._format_engine_output(output, num_output_tokens_so_far)
                 if output.outputs:
                     if num_output_tokens_so_far == 0:

@@ -34,6 +34,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -168,7 +169,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config, generate_endpoint: Endpoint, logger: logging.Logger
+    config: Config | OmniConfig, generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 

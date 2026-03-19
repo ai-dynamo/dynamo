@@ -262,6 +262,7 @@ class WorkerFactory:
             logger.info("Connected to decode worker for disaggregated mode")
 
         # Choose handler based on worker type
+        handler: MultimodalDecodeWorkerHandler | MultimodalPDWorkerHandler
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
                 runtime,
@@ -289,7 +290,7 @@ class WorkerFactory:
             config, generate_endpoint, vllm_config
         )
         if kv_publisher:
-            handler.kv_publisher = kv_publisher
+            handler.kv_publisher = kv_publisher  # type: ignore[attr-defined, union-attr]
 
         if not config.multimodal_decode_worker:
             model_type = parse_endpoint_types(config.endpoint_types)
@@ -357,7 +358,7 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(
-            config.engine_args, config.embedding_transfer_mode
+            config.engine_args, config.embedding_transfer_mode  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
         logger.info("Starting to serve the encode worker endpoint...")

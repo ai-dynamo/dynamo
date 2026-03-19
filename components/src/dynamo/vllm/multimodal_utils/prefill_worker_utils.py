@@ -204,6 +204,7 @@ async def _fetch_from_encode_workers(
         tasks = [
             asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
             for group in multimodal_groups
+            if group.serialized_request is not None
         ]
         loaded = await asyncio.gather(*tasks)
 

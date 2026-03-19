@@ -13,7 +13,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, Final
+from typing import Any, AsyncIterator, Dict, Final, Generic, TypeVar
 
 import torch
 from vllm.config import VllmConfig
@@ -23,6 +23,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo._core import Context
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
@@ -325,7 +326,11 @@ def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
         )
 
 
-class BaseWorkerHandler(ABC):
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+
+
+class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
     """
@@ -459,7 +464,7 @@ class BaseWorkerHandler(ABC):
                 return {"status": "error", "message": str(e)}
 
     @abstractmethod
-    async def generate(self, request, context) -> AsyncGenerator[dict, None]:
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):

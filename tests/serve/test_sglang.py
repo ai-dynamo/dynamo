@@ -168,9 +168,9 @@ sglang_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
-    "multimodal_epd_qwen": SGLangConfig(
+    "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
-        name="multimodal_epd_qwen",
+        name="multimodal_e_pd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
