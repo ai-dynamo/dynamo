@@ -404,7 +404,7 @@ class BaseWorkerHandler(ABC):
     ) -> MultiModalEmbeddingLoader | None:
         """Initialize the embedding loader with the given encode worker client."""
         # Without encode worker, the embedding will be generated internally by vLLM.
-        if encode_worker_client is None:
+        if encode_worker_client is None or config is None:
             return None
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
@@ -1796,7 +1796,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if kv_transfer_params is not None:
             disaggregated_params["kv_transfer_params"] = kv_transfer_params
         if embedding_params is not None:
-            disaggregated_params["embedding_transfer_params"] = embedding_params
+            disaggregated_params["embedding_params"] = embedding_params
 
         return disaggregated_params if disaggregated_params else None
 
