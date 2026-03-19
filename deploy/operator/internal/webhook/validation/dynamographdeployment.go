@@ -528,6 +528,19 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 			"when any topology constraint is set"))
 	}
 
+	// When spec-level packDomain is omitted, every service must carry its own topologyConstraint.
+	// Otherwise the service would have no pack domain despite TAS being active.
+	if specConstraint.PackDomain == "" {
+		for _, serviceName := range serviceNames {
+			service := v.deployment.Spec.Services[serviceName]
+			if service == nil || service.TopologyConstraint == nil {
+				errs = append(errs, fmt.Errorf("spec.services[%s].topologyConstraint is required "+
+					"because spec.topologyConstraint.packDomain is not set; either set a spec-level "+
+					"packDomain or provide a topologyConstraint for every service", serviceName))
+			}
+		}
+	}
+
 	// Validate domains and hierarchy against the framework's topology CRD (CREATE only).
 	// On UPDATE (Generation > 1) this is skipped because TAS fields are immutable.
 	// Skip when prior validation errors exist to avoid redundant "domain not found" messages.

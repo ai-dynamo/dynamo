@@ -11449,9 +11449,11 @@ spec:
                           packDomain:
                             description: |-
                               PackDomain is the topology domain to pack pods within. Must match a
-                              domain defined in the referenced ClusterTopology CR. Required at service level.
+                              domain defined in the referenced ClusterTopology CR.
                             pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                             type: string
+                        required:
+                          - packDomain
                         type: object
                       volumeMounts:
                         description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
@@ -11497,9 +11499,11 @@ spec:
                     topologyProfile:
                       description: |-
                         TopologyProfile is the name of the ClusterTopology CR that defines the
-                        topology hierarchy for this deployment. Required when any topology
-                        constraint is set (at spec or service level).
+                        topology hierarchy for this deployment.
+                      minLength: 1
                       type: string
+                  required:
+                    - topologyProfile
                   type: object
               type: object
             status:

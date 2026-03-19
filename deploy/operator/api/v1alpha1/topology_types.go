@@ -43,10 +43,9 @@ const (
 // optional default pack domain that services without their own constraint inherit.
 type SpecTopologyConstraint struct {
 	// TopologyProfile is the name of the ClusterTopology CR that defines the
-	// topology hierarchy for this deployment. Required when any topology
-	// constraint is set (at spec or service level).
-	// +optional
-	TopologyProfile string `json:"topologyProfile,omitempty"`
+	// topology hierarchy for this deployment.
+	// +kubebuilder:validation:MinLength=1
+	TopologyProfile string `json:"topologyProfile"`
 
 	// PackDomain is the default topology domain to pack pods within.
 	// Optional — omit when only services carry constraints.
@@ -59,9 +58,8 @@ type SpecTopologyConstraint struct {
 // only the pack domain is specified here.
 type TopologyConstraint struct {
 	// PackDomain is the topology domain to pack pods within. Must match a
-	// domain defined in the referenced ClusterTopology CR. Required at service level.
-	// +optional
-	PackDomain TopologyDomain `json:"packDomain,omitempty"`
+	// domain defined in the referenced ClusterTopology CR.
+	PackDomain TopologyDomain `json:"packDomain"`
 }
 
 // TopologyDomain is a free-form topology level identifier.

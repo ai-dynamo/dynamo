@@ -886,7 +886,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "spec-level with topologyProfile only (no packDomain) is valid when services carry constraints",
+			name: "spec-level with topologyProfile only (no packDomain) is rejected when service lacks constraint",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -909,7 +909,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "spec.services[Frontend].topologyConstraint is required because spec.topologyConstraint.packDomain is not set",
 		},
 		{
 			name: "spec-level set but service has no topology constraint is valid (inherits)",
@@ -1144,6 +1146,64 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "no spec packDomain but all services have topology constraint is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
+							},
+						},
+						"Frontend": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomain("zone"),
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "no spec packDomain and service missing topology constraint is rejected",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
+							},
+						},
+						"Frontend": {},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "spec.services[Frontend].topologyConstraint is required because spec.topologyConstraint.packDomain is not set",
 		},
 		{
 			name: "both annotations valid",
