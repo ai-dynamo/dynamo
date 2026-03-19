@@ -29,6 +29,10 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 
+from dynamo.sglang.multimodal_utils.routing_tokens import (
+    SglangMultimodalTokenExpander,
+)
+
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
     create_parsers,
@@ -88,6 +92,7 @@ def _map_finish_reason(raw: str | None) -> str | None:
 _w_tokenizer: Any = None
 _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
+_w_multimodal_token_expander: SglangMultimodalTokenExpander | None = None
 
 
 @dataclass
@@ -95,6 +100,7 @@ class SglangPreprocessWorkerResult:
     """Picklable return value from the SGLang preprocess worker."""
 
     prompt_token_ids: list[int]
+    routing_token_ids: list[int] | None
     dynamo_preproc: dict[str, Any]
     request: dict[str, Any]
 
@@ -106,9 +112,11 @@ def _init_worker(
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
+    global _w_multimodal_token_expander
     _w_tokenizer = get_tokenizer(model_path)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
+    _w_multimodal_token_expander = SglangMultimodalTokenExpander(model_path)
 
 
 def _preprocess_worker(
@@ -120,6 +128,7 @@ def _preprocess_worker(
     pre = preprocess_chat_request(
         request,
         tokenizer=_w_tokenizer,
+        multimodal_token_expander=_w_multimodal_token_expander,
         tool_call_parser_name=_w_tool_call_parser_name,
         reasoning_parser_name=_w_reasoning_parser_name,
     )
@@ -129,11 +138,20 @@ def _preprocess_worker(
         raise PreprocessError(_unsupported_n_error(n))
 
     dynamo_preproc = _build_dynamo_preproc(
-        request, pre.prompt_token_ids, model_name, eos_token_id
+        request,
+        pre.prompt_token_ids,
+        model_name,
+        eos_token_id,
+        multi_modal_data=pre.multi_modal_data,
     )
+    print(f"[++++] {pre.prompt_token_ids}", flush=True)
+    print(f"[++++] {dynamo_preproc['token_ids']}", flush=True)
+    if pre.routing_token_ids is not None:
+        print(f"[routing++++] {pre.routing_token_ids}", flush=True)
 
     return SglangPreprocessWorkerResult(
         prompt_token_ids=pre.prompt_token_ids,
+        routing_token_ids=pre.routing_token_ids,
         dynamo_preproc=dynamo_preproc,
         request=request,
     )
@@ -144,6 +162,8 @@ def _build_dynamo_preproc(
     prompt_token_ids: list[int],
     model_name: str,
     eos_token_id: int | None,
+    *,
+    multi_modal_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -167,7 +187,7 @@ def _build_dynamo_preproc(
     elif top_logprobs not in (None, 0):
         logprobs_val = top_logprobs
 
-    return {
+    dynamo_preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
         "stop_conditions": {
@@ -197,6 +217,9 @@ def _build_dynamo_preproc(
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
     }
+    if multi_modal_data:
+        dynamo_preproc["multi_modal_data"] = multi_modal_data
+    return dynamo_preproc
 
 
 class SglangProcessor:
@@ -204,9 +227,11 @@ class SglangProcessor:
         self,
         tokenizer,
         router,  # Client or KvRouter
+        multimodal_token_expander: SglangMultimodalTokenExpander | None,
         tool_call_parser_name: str | None,
         reasoning_parser_name: str | None,
         eos_token_id: int | None,
+        kv_block_size: int,
         debug_perf: bool = False,
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
@@ -215,9 +240,11 @@ class SglangProcessor:
         self.tokenizer = tokenizer
         self.router = router
         self.is_kv_router = isinstance(router, KvRouter)
+        self.multimodal_token_expander = multimodal_token_expander
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
         self.eos_token_id = eos_token_id
+        self.kv_block_size = kv_block_size
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
@@ -269,6 +296,7 @@ class SglangProcessor:
             pre = preprocess_chat_request(
                 request,
                 tokenizer=self.tokenizer,
+                multimodal_token_expander=self.multimodal_token_expander,
                 tool_call_parser_name=self.tool_call_parser_name,
                 reasoning_parser_name=self.reasoning_parser_name,
             )
@@ -282,6 +310,9 @@ class SglangProcessor:
                 )
 
             tokens = pre.prompt_token_ids
+            routing_tokens = pre.routing_token_ids or tokens
+            if pre.routing_token_ids is not None:
+                print(f"[routing++++] {pre.routing_token_ids}", flush=True)
 
             n = request.get("n", 1)
             if n != 1:
@@ -290,7 +321,11 @@ class SglangProcessor:
                 return
 
             dynamo_preproc = _build_dynamo_preproc(
-                request, tokens, request["model"], self.eos_token_id
+                request,
+                tokens,
+                request["model"],
+                self.eos_token_id,
+                multi_modal_data=pre.multi_modal_data,
             )
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
@@ -309,7 +344,7 @@ class SglangProcessor:
         )
 
         async for item in self._generate_and_stream(
-            request_id, request, dynamo_preproc, tokens, post
+            request_id, request, dynamo_preproc, tokens, routing_tokens, post
         ):
             yield item
 
@@ -331,6 +366,16 @@ class SglangProcessor:
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
+                print(f"[++++] {preproc_result.prompt_token_ids}", flush=True)
+                print(
+                    f"[++++] {preproc_result.dynamo_preproc['token_ids']}",
+                    flush=True,
+                )
+                if preproc_result.routing_token_ids is not None:
+                    print(
+                        f"[routing++++] {preproc_result.routing_token_ids}",
+                        flush=True,
+                    )
         except PreprocessError as exc:
             yield exc.error_dict
             return
@@ -364,6 +409,7 @@ class SglangProcessor:
             request,
             preproc_result.dynamo_preproc,
             preproc_result.prompt_token_ids,
+            preproc_result.routing_token_ids or preproc_result.prompt_token_ids,
             post,
         ):
             yield item
@@ -374,6 +420,7 @@ class SglangProcessor:
         request: dict[str, Any],
         dynamo_preproc: dict[str, Any],
         tokens: list[int],
+        routing_tokens: list[int],
         post: SglangStreamingPostProcessor,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
@@ -384,12 +431,25 @@ class SglangProcessor:
 
         try:
             if self.is_kv_router:
+                generate_kwargs: dict[str, Any] = {
+                    "token_ids": tokens,
+                    "model": dynamo_preproc["model"],
+                    "stop_conditions": dynamo_preproc["stop_conditions"],
+                    "sampling_options": dynamo_preproc["sampling_options"],
+                    "output_options": dynamo_preproc["output_options"],
+                }
+                if multi_modal_data := dynamo_preproc.get("multi_modal_data"):
+                    generate_kwargs["multi_modal_data"] = multi_modal_data
+                if routing_tokens != tokens:
+                    num_blocks = (len(routing_tokens) + self.kv_block_size - 1) // (
+                        self.kv_block_size
+                    )
+                    generate_kwargs["mm_routing_info"] = {
+                        "routing_token_ids": routing_tokens,
+                        "block_mm_infos": [None] * num_blocks,
+                    }
                 dynamo_stream = await self.router.generate(
-                    token_ids=tokens,
-                    model=dynamo_preproc["model"],
-                    stop_conditions=dynamo_preproc["stop_conditions"],
-                    sampling_options=dynamo_preproc["sampling_options"],
-                    output_options=dynamo_preproc["output_options"],
+                    **generate_kwargs,
                 )
             else:
                 dynamo_stream = await self.router.generate(
@@ -528,6 +588,7 @@ class SglangEngineFactory:
 
         logger.info("Loading SGLang tokenizer from %s", source_path)
         tokenizer = get_tokenizer(source_path)
+        multimodal_token_expander = SglangMultimodalTokenExpander(source_path)
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
@@ -598,9 +659,11 @@ class SglangEngineFactory:
         gen = SglangProcessor(
             tokenizer,
             router,
+            multimodal_token_expander,
             tool_call_parser_name,
             reasoning_parser_name,
             eos_token_id,
+            self.config.kv_cache_block_size or 16,
             debug_perf=self.debug_perf,
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
