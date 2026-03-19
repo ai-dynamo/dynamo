@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod tensor_kernels;
+pub mod ze_vectorized_copy;
 
 // Always available - core transfer functionality
 pub use tensor_kernels::{

@@ -2004,6 +2004,7 @@ dependencies = [
  "indicatif 0.18.4",
  "insta",
  "json-five",
+ "kvbm-kernels",
  "lazy_static",
  "memfile",
  "minijinja",
@@ -3981,6 +3982,7 @@ dependencies = [
  "half 2.7.1",
  "ndarray 0.17.2",
  "rand 0.9.2",
+ "syclrc",
 ]
 
 [[package]]
