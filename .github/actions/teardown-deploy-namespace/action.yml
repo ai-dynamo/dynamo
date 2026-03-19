@@ -57,5 +57,5 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
         echo "::group::Delete namespace $NAMESPACE"
-        kubectl delete namespace $NAMESPACE --timeout=120s
+        kubectl delete namespace $NAMESPACE --ignore-not-found --timeout=120s
         echo "::endgroup::"
