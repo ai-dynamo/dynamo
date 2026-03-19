@@ -1655,11 +1655,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
     ):
-        if encode_worker_client is not None:
-            raise NotImplementedError(
-                "'encode_worker_client' is provided which indicates remote "
-                "multimodal encode is configured, this is not currently supported."
-            )
         super().__init__(
             runtime,
             engine,
@@ -1671,6 +1666,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
+            encode_worker_client,
         )
 
     async def generate(self, request, context):
