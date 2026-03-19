@@ -387,7 +387,6 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(19.4),  # observed peak 17.6 GiB (+10% safety)
             pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
