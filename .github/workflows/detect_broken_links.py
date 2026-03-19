@@ -289,14 +289,13 @@ def find_markdown_files(root_dir: str, logger: logging.Logger) -> List[Path]:
         logger.error(error_msg)
         raise ValueError(error_msg)
 
-    # Patterns for files to skip (attribution files, generated references, etc.)
+    # Patterns for files to skip (attribution files, etc.)
     skip_patterns = [
         "ATTRIBUTION",
         "ATTRIBUTIONS",
         "THIRD_PARTY",
         "THIRD-PARTY",
         "LICENSES",
-        "API-REFERENCE",
     ]
 
     md_files = []
@@ -346,8 +345,13 @@ def extract_markdown_links(
     # This captures the link text and URL, excluding image links (![text](url))
     link_pattern = r"(?<!\!)\[([^\]]+)\]\(([^)]+)\)"
 
+    # Pattern to strip inline code spans so regex/code inside backticks
+    # is not misinterpreted as markdown links.
+    inline_code_pattern = r"`[^`]+`"
+
     for line_num, line in enumerate(content.split("\n"), 1):
-        matches = re.finditer(link_pattern, line)
+        stripped_line = re.sub(inline_code_pattern, "", line)
+        matches = re.finditer(link_pattern, stripped_line)
         for match in matches:
             link_text = match.group(1)
             link_url = match.group(2)
