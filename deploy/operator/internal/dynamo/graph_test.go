@@ -7521,7 +7521,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      v1alpha1.TopologyDomain("zone"),
 					},
@@ -7552,7 +7552,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      v1alpha1.TopologyDomain("zone"),
 					},
@@ -7574,10 +7574,8 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				PackDomain: grovev1alpha1.TopologyDomain("zone"),
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker-rank0": nil,
-				"worker-rank1": nil,
-				"worker-rank2": nil,
-				"worker-rank3": nil,
+				"worker-ldr": nil,
+				"worker-wkr": nil,
 			},
 			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
@@ -7609,10 +7607,14 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
 			}
 
-			// Verify clique-level TopologyConstraints
+			// Verify clique-level TopologyConstraints (exhaustive)
+			assert.Equal(t, len(tt.wantCliqueTC), len(pcs.Spec.Template.Cliques), "clique count mismatch")
+			actualCliqueNames := make(map[string]struct{}, len(pcs.Spec.Template.Cliques))
 			for _, clique := range pcs.Spec.Template.Cliques {
+				actualCliqueNames[clique.Name] = struct{}{}
 				expectedTC, ok := tt.wantCliqueTC[clique.Name]
 				if !ok {
+					t.Errorf("unexpected clique %q in PCS", clique.Name)
 					continue
 				}
 				if expectedTC == nil {
@@ -7622,20 +7624,34 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
 				}
 			}
+			for expectedName := range tt.wantCliqueTC {
+				if _, found := actualCliqueNames[expectedName]; !found {
+					t.Errorf("expected clique %q not found in PCS", expectedName)
+				}
+			}
 
-			// Verify PCSG-level TopologyConstraints
+			// Verify PCSG-level TopologyConstraints (exhaustive)
 			assert.Equal(t, tt.wantPCSGCount, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs), "PCSG count mismatch")
+			actualPCSGNames := make(map[string]struct{}, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs))
 			for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+				actualPCSGNames[pcsg.Name] = struct{}{}
 				if tt.wantPCSGTC != nil {
 					expectedTC, ok := tt.wantPCSGTC[pcsg.Name]
-					if ok {
-						if expectedTC == nil {
-							assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
-						} else {
-							assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
-							assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
-						}
+					if !ok {
+						t.Errorf("unexpected PCSG %q in PCS", pcsg.Name)
+						continue
 					}
+					if expectedTC == nil {
+						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
+					} else {
+						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
+						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+					}
+				}
+			}
+			for expectedName := range tt.wantPCSGTC {
+				if _, found := actualPCSGNames[expectedName]; !found {
+					t.Errorf("expected PCSG %q not found in PCS", expectedName)
 				}
 			}
 		})

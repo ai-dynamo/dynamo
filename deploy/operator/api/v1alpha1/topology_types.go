@@ -33,20 +33,33 @@ const (
 	// ConditionReasonTopologyDefinitionNotFound indicates the topology definition
 	// resource was not found by the framework.
 	ConditionReasonTopologyDefinitionNotFound = "TopologyDefinitionNotFound"
+	// ConditionReasonTopologyConditionPending indicates the scheduling framework
+	// has not yet reported a topology condition.
+	ConditionReasonTopologyConditionPending = "TopologyConditionPending"
 )
 
-// TopologyConstraint defines topology placement requirements for a deployment or service.
-type TopologyConstraint struct {
+// SpecTopologyConstraint defines deployment-level topology placement requirements.
+// It carries both the topology profile (which ClusterTopology CR to use) and an
+// optional default pack domain that services without their own constraint inherit.
+type SpecTopologyConstraint struct {
 	// TopologyProfile is the name of the ClusterTopology CR that defines the
-	// topology hierarchy for this deployment. Required at spec level when any
-	// topology constraint is set. Must not be set at service level (inherited).
+	// topology hierarchy for this deployment. Required when any topology
+	// constraint is set (at spec or service level).
 	// +optional
 	TopologyProfile string `json:"topologyProfile,omitempty"`
 
+	// PackDomain is the default topology domain to pack pods within.
+	// Optional — omit when only services carry constraints.
+	// +optional
+	PackDomain TopologyDomain `json:"packDomain,omitempty"`
+}
+
+// TopologyConstraint defines service-level topology placement requirements.
+// The topology profile is inherited from the deployment-level SpecTopologyConstraint;
+// only the pack domain is specified here.
+type TopologyConstraint struct {
 	// PackDomain is the topology domain to pack pods within. Must match a
-	// domain defined in the referenced ClusterTopology CR.
-	// Optional at spec level (when only providing the profile for service-level
-	// constraints); required at service level.
+	// domain defined in the referenced ClusterTopology CR. Required at service level.
 	// +optional
 	PackDomain TopologyDomain `json:"packDomain,omitempty"`
 }
@@ -54,11 +67,12 @@ type TopologyConstraint struct {
 // TopologyDomain is a free-form topology level identifier.
 // Domain names are defined by the cluster admin in the ClusterTopology CR.
 // Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
-// Must match the regex ^[a-z0-9]+[a-z0-9-]*$ (lowercase alphanumeric, may contain hyphens).
-// +kubebuilder:validation:Pattern=`^[a-z0-9]+[a-z0-9-]*$`
+// Must match the regex ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ (lowercase alphanumeric,
+// may contain hyphens but must not start or end with one).
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 type TopologyDomain string
 
-var topologyDomainRegex = regexp.MustCompile(`^[a-z0-9]+[a-z0-9-]*$`)
+var topologyDomainRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // IsValidTopologyDomainFormat returns true if the domain matches the allowed format.
 func IsValidTopologyDomainFormat(d TopologyDomain) bool {

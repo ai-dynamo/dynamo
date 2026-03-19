@@ -12,14 +12,14 @@ TAS is **opt-in**. Existing deployments without topology constraints continue to
 
 | Requirement | Details |
 |-------------|---------|
-| **Grove** | Installed on the cluster. See the [Grove Installation Guide](https://github.com/ai-dynamo/grove/blob/main/docs/installation.md). |
-| **ClusterTopology CR** | A cluster-scoped `ClusterTopology` resource configured by the cluster admin, mapping topology domain names to node labels. See [Grove documentation](https://github.com/ai-dynamo/grove) for setup instructions. |
+| **Grove** | Installed on the cluster. See the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md). |
+| **ClusterTopology CR** | A cluster-scoped `ClusterTopology` resource configured by the cluster admin, mapping topology domain names to node labels. See [Grove documentation](https://github.com/NVIDIA/grove) for setup instructions. |
 | **KAI Scheduler** | [KAI Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is required by Grove for topology-aware pod placement. |
 | **Dynamo operator** | The latest Dynamo operator Helm chart includes read-only RBAC for `clustertopologies.grove.io` via a dedicated ClusterRole. This works for both cluster-wide and namespace-restricted operator deployments — no extra configuration is needed. |
 
 ## Topology Domains
 
-Topology domains are **free-form** identifiers defined by the cluster admin in the `ClusterTopology` CR. Common examples include `region`, `zone`, `datacenter`, `block`, `rack`, `host`, and `numa`, but any name matching the pattern `^[a-z0-9]+[a-z0-9-]*$` is valid.
+Topology domains are **free-form** identifiers defined by the cluster admin in the `ClusterTopology` CR. Common examples include `region`, `zone`, `datacenter`, `block`, `rack`, `host`, and `numa`, but any name matching the pattern `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` is valid (no leading or trailing hyphens).
 
 Domain names must match exactly what is configured in the `ClusterTopology` CR referenced by `topologyProfile`. During DGD creation, the Dynamo webhook validates that every `packDomain` exists in the referenced `ClusterTopology`.
 
@@ -183,7 +183,7 @@ When only one level is set (deployment-level only or service-level only), no hie
 | Field | Level | Required | Description |
 |-------|-------|----------|-------------|
 | `topologyProfile` | `spec.topologyConstraint` | Yes (when any constraint is set) | Name of the `ClusterTopology` CR defining the topology hierarchy. |
-| `topologyProfile` | service-level `topologyConstraint` | Forbidden | Inherited from `spec.topologyConstraint`. Must not be set at service level. |
+| `topologyProfile` | service-level `topologyConstraint` | N/A (not in schema) | Inherited from `spec.topologyConstraint`. The service-level type does not include this field. |
 | `packDomain` | `spec.topologyConstraint` | Optional | Default pack domain for services that don't specify their own. |
 | `packDomain` | service-level `topologyConstraint` | Required | Pack domain for this service. Must match a level in the `ClusterTopology` CR. |
 
@@ -255,7 +255,7 @@ When topology levels become unavailable, Dynamo emits a **Warning** event on the
 
 The Dynamo webhook validates that the `ClusterTopology` CR referenced by `topologyProfile` exists when any topology constraint is set. If it cannot read the `ClusterTopology` CR:
 
-- Verify that the cluster admin has created the `ClusterTopology` resource named in `topologyProfile`. See the [Grove documentation](https://github.com/ai-dynamo/grove) for setup.
+- Verify that the cluster admin has created the `ClusterTopology` resource named in `topologyProfile`. See the [Grove documentation](https://github.com/NVIDIA/grove) for setup.
 - Verify that the Dynamo operator has RBAC to read `clustertopologies.grove.io` (included in the default Helm chart).
 
 ### DGD rejected: "packDomain not found in cluster topology"

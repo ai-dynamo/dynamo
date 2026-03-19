@@ -2417,18 +2417,18 @@ func TestPropagateTopologyCondition(t *testing.T) {
 					Annotations: map[string]string{commonconsts.KubeAnnotationEnableGrove: "false"},
 				},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
 			},
 			groveEnabled:  false,
 			wantCondition: false,
 		},
 		{
-			name: "topology set, PCS has no topology condition - assume healthy",
+			name: "topology set, PCS has no topology condition - unknown",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
 			},
 			pcs: &grovev1alpha1.PodCliqueSet{
@@ -2437,15 +2437,15 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			},
 			groveEnabled:  true,
 			wantCondition: true,
-			wantStatus:    metav1.ConditionTrue,
-			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+			wantStatus:    metav1.ConditionUnknown,
+			wantReason:    v1alpha1.ConditionReasonTopologyConditionPending,
 		},
 		{
 			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyLevelsUnavailable",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
 			},
 			pcs: &grovev1alpha1.PodCliqueSet{
@@ -2472,7 +2472,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
 			},
 			pcs: &grovev1alpha1.PodCliqueSet{
@@ -2499,7 +2499,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
 			},
 			pcs: &grovev1alpha1.PodCliqueSet{
@@ -2525,7 +2525,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology"},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology"},
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomain("rack")},
@@ -2539,15 +2539,15 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			},
 			groveEnabled:  true,
 			wantCondition: true,
-			wantStatus:    metav1.ConditionTrue,
-			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+			wantStatus:    metav1.ConditionUnknown,
+			wantReason:    v1alpha1.ConditionReasonTopologyConditionPending,
 		},
 		{
 			name: "PCS not found yet - no condition added",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.TopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
 			},
 			pcs:           nil,

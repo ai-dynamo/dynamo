@@ -90,7 +90,7 @@ type DynamoGraphDeploymentSpec struct {
 	// packDomain is optional here — it can be omitted when only services carry constraints.
 	// Services without their own topologyConstraint inherit from this value.
 	// +optional
-	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 }
 
 type Restart struct {

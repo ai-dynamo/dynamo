@@ -144,8 +144,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
 
-	// TopologyConstraint for this service. topologyProfile is inherited from
-	// spec.topologyConstraint and must not be set here. packDomain is required.
+	// TopologyConstraint for this service. packDomain is required.
 	// When both this and spec.topologyConstraint.packDomain are set, packDomain
 	// must be narrower than or equal to the spec-level packDomain.
 	// +optional

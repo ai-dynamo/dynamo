@@ -865,7 +865,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
 					},
@@ -896,7 +896,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 					},
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -922,7 +922,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
 					},
@@ -944,7 +944,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("INVALID!"),
 					},
@@ -972,7 +972,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("rack"),
 					},
@@ -998,7 +998,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
 					},
@@ -1049,7 +1049,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						PackDomain: nvidiacomv1alpha1.TopologyDomain("zone"),
 					},
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1066,35 +1066,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "topologyProfile is required",
 		},
 		{
-			name: "topologyProfile set at service level is rejected",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								TopologyProfile: "other-topology",
-								PackDomain:      nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "topologyProfile must not be set",
-		},
-		{
 			name: "service-level topologyConstraint without packDomain is rejected",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1105,7 +1076,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
 					},
@@ -1131,7 +1102,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
 					},
@@ -1159,7 +1130,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
 						TopologyProfile: "test-topology",
 						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
 					},

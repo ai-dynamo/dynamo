@@ -482,7 +482,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 	if specConstraint != nil {
 		if specConstraint.PackDomain != "" && !nvidiacomv1alpha1.IsValidTopologyDomainFormat(specConstraint.PackDomain) {
 			errs = append(errs, fmt.Errorf("spec.topologyConstraint.packDomain %q is not a valid topology domain; "+
-				"must match ^[a-z0-9]+[a-z0-9-]*$", specConstraint.PackDomain))
+				"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", specConstraint.PackDomain))
 		}
 	}
 
@@ -501,12 +501,6 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 		hasAnyConstraint = true
 		fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
 
-		// topologyProfile must not be set at service level
-		if service.TopologyConstraint.TopologyProfile != "" {
-			errs = append(errs, fmt.Errorf("%s.topologyConstraint.topologyProfile must not be set; "+
-				"topologyProfile is inherited from spec.topologyConstraint", fieldPath))
-		}
-
 		// packDomain is required at service level
 		if service.TopologyConstraint.PackDomain == "" {
 			errs = append(errs, fmt.Errorf("%s.topologyConstraint.packDomain is required", fieldPath))
@@ -515,7 +509,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 
 		if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(service.TopologyConstraint.PackDomain) {
 			errs = append(errs, fmt.Errorf("%s.topologyConstraint.packDomain %q is not a valid topology domain; "+
-				"must match ^[a-z0-9]+[a-z0-9-]*$", fieldPath, service.TopologyConstraint.PackDomain))
+				"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", fieldPath, service.TopologyConstraint.PackDomain))
 		}
 	}
 
@@ -536,7 +530,8 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 
 	// Validate domains and hierarchy against the framework's topology CRD (CREATE only).
 	// On UPDATE (Generation > 1) this is skipped because TAS fields are immutable.
-	if v.mgr != nil && v.isGrovePathway() && v.deployment.Generation == 1 {
+	// Skip when prior validation errors exist to avoid redundant "domain not found" messages.
+	if len(errs) == 0 && v.mgr != nil && v.isGrovePathway() && v.deployment.Generation == 1 {
 		if err := v.validateTopologyDomainsAgainstGroveClusterTopology(ctx); err != nil {
 			errs = append(errs, err)
 		}
@@ -651,13 +646,20 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraintImmutability(
 	newTC := v.deployment.Spec.TopologyConstraint
 
 	// Check spec-level topology constraint immutability
-	if !topologyConstraintsEqual(oldTC, newTC) {
+	if !specTopologyConstraintsEqual(oldTC, newTC) {
 		errs = append(errs, fmt.Errorf("spec.topologyConstraint is immutable and cannot be added, removed, or changed after creation; "+
 			"delete and recreate the DynamoGraphDeployment to change topology constraints"))
 	}
 
-	// Check per-service topology constraint immutability
-	for serviceName, newService := range v.deployment.Spec.Services {
+	// Check per-service topology constraint immutability (sorted for deterministic errors)
+	serviceNames := make([]string, 0, len(v.deployment.Spec.Services))
+	for name := range v.deployment.Spec.Services {
+		serviceNames = append(serviceNames, name)
+	}
+	sort.Strings(serviceNames)
+
+	for _, serviceName := range serviceNames {
+		newService := v.deployment.Spec.Services[serviceName]
 		oldService, exists := old.Spec.Services[serviceName]
 		if !exists {
 			continue
@@ -680,8 +682,8 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraintImmutability(
 	return errors.Join(errs...)
 }
 
-// topologyConstraintsEqual returns true if two TopologyConstraint pointers are semantically equal.
-func topologyConstraintsEqual(a, b *nvidiacomv1alpha1.TopologyConstraint) bool {
+// specTopologyConstraintsEqual returns true if two SpecTopologyConstraint pointers are semantically equal.
+func specTopologyConstraintsEqual(a, b *nvidiacomv1alpha1.SpecTopologyConstraint) bool {
 	if a == nil && b == nil {
 		return true
 	}
@@ -689,6 +691,17 @@ func topologyConstraintsEqual(a, b *nvidiacomv1alpha1.TopologyConstraint) bool {
 		return false
 	}
 	return a.TopologyProfile == b.TopologyProfile && a.PackDomain == b.PackDomain
+}
+
+// topologyConstraintsEqual returns true if two service-level TopologyConstraint pointers are semantically equal.
+func topologyConstraintsEqual(a, b *nvidiacomv1alpha1.TopologyConstraint) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.PackDomain == b.PackDomain
 }
 
 func getUnique[T comparable](slice []T) []T {
