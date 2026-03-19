@@ -5,6 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 export AWS_ENDPOINT=http://localhost:9000
@@ -22,7 +23,7 @@ mkdir -p $DYN_LORA_PATH
 MODEL="Qwen/Qwen3-0.6B"
 # --block-size 64 is required for XPU; on CUDA vLLM uses its default
 if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
-    BLOCK_SIZE_ARG=(--block-size "${DYN_BLOCK_SIZE:-64}")
+    BLOCK_SIZE_ARG=(--block-size "${BLOCK_SIZE:-64}")
 else
     BLOCK_SIZE_ARG=()
 fi
@@ -64,12 +65,18 @@ echo "=========================================="
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var.
 python -m dynamo.frontend &
 
-# run worker
-# --enforce-eager is added for quick deployment. for production use, need to remove this flag
+# ---- Tunable (override via env vars) ----
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
-    python -m dynamo.vllm --model "$MODEL" \
+    python -m dynamo.vllm --model "$MODEL" --enforce-eager \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     "${BLOCK_SIZE_ARG[@]}" \
-    --enforce-eager \
+    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
     --enable-lora \
     --max-lora-rank 64 &
 

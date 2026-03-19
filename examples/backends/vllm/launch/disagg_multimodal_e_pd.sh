@@ -82,6 +82,7 @@ EXTRA_ARGS=""
 export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
+# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}

@@ -1068,19 +1068,19 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
-	// Restore labels are operator-controlled. Clear any stale/user-provided
-	// value after metadata merge; the controller re-adds it only when the
-	// checkpoint contract below is satisfied.
-	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
-
-	// Explicit restore orchestration contract:
-	// only mark pods as restore targets when checkpoint material is ready.
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		podLabels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
-		if checkpointInfo.Hash != "" {
-			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
-		}
+	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
 	}
+	if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
+		podLabels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
+	}
+	if workerHash := opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	// Restore labels are operator-controlled state. Clear stale values after
+	// metadata merge and only reapply them when checkpoint material is ready.
+	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart

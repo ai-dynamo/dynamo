@@ -1,4 +1,4 @@
-package orchestrate
+package executor
 
 import (
 	"bytes"
@@ -24,12 +24,13 @@ import (
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointHash string
-	CheckpointBase string
-	NSRestorePath  string
-	PodName        string
-	PodNamespace   string
-	ContainerName  string
+	CheckpointHash        string
+	CheckpointLocation    string
+	CheckpointStorageType string
+	NSRestorePath         string
+	PodName               string
+	PodNamespace          string
+	ContainerName         string
 }
 
 // Restore performs external restore for the given request.
@@ -72,8 +73,15 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 }
 
 func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
-	checkpointPath := filepath.Join(req.CheckpointBase, req.CheckpointHash)
-	baseAbs, err := filepath.Abs(req.CheckpointBase)
+	if req.CheckpointStorageType != "pvc" {
+		return nil, fmt.Errorf("checkpoint storage type %q is not supported", req.CheckpointStorageType)
+	}
+	if req.CheckpointLocation == "" {
+		return nil, fmt.Errorf("checkpoint location is required")
+	}
+
+	checkpointPath := req.CheckpointLocation
+	baseAbs, err := filepath.Abs(filepath.Dir(checkpointPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve checkpoint base path: %w", err)
 	}

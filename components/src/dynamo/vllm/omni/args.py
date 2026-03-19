@@ -258,6 +258,10 @@ def parse_omni_args() -> OmniConfig:
     args, unknown = parser.parse_known_args()
     config = OmniConfig.from_cli_args(args)
 
+    # Default endpoint to "generate" if not explicitly provided by user
+    if config.endpoint is None:
+        config.endpoint = "generate"
+
     vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
 

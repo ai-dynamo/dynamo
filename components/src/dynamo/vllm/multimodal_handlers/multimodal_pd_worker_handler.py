@@ -4,14 +4,12 @@
 import copy
 import logging
 import uuid
-from collections import defaultdict
 from typing import Any
 
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
-import dynamo.nixl_connect as connect
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -34,7 +32,7 @@ from ..multimodal_utils import (
     vLLMMultimodalRequest,
 )
 from ..multimodal_utils.model import is_qwen_vl_model
-from ..multimodal_utils.prefill_worker_utils import load_multimodal_embeddings
+from ..multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 logger = logging.getLogger(__name__)
 
@@ -71,17 +69,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         )
 
         self.config = config
-        self.encode_worker_client = encode_worker_client
         self.decode_worker_client = decode_worker_client
         self.enable_disagg = config.disaggregation_mode == DisaggregationMode.PREFILL
-        self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
-        if config.multimodal_embedding_cache_capacity_gb > 0:
-            capacity_bytes = int(
-                config.multimodal_embedding_cache_capacity_gb * 1024**3
-            )
-            self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
-                capacity_bytes
-            )
 
         # Initialize multimodal-specific components
         logger.info("Multimodal PD Worker startup started.")
@@ -91,12 +80,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         else:
             self.EMBEDDINGS_DTYPE = torch.float16
 
-        # Create and initialize a dynamo connector for this worker.
-        # We'll need this to move data between this worker and remote workers efficiently.
-        # Note: This is synchronous initialization, async initialization happens in async_init
-        self._connector: connect.Connector | None = (
-            None  # Will be initialized in async_init
-        )
+        # Embedding loader consist of two main components:
+        # 1) An remote encode worker client and matching embedding receiver,
+        #    which can request remote encode and handle the transfer of embeddings
+        #    from the encode worker to this prefill worker.
+        # 2) A local embedding cache manager, which can store previously fetched embeddings
+        #    and used to determine whether remote encode is necessary for a given mm data.
+        self.encode_worker_client = encode_worker_client
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_receiver = LocalEmbeddingReceiver()
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
@@ -109,13 +99,24 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             raise ValueError(
                 f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
             )
+        self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
+        if config.multimodal_embedding_cache_capacity_gb > 0:
+            capacity_bytes = int(
+                config.multimodal_embedding_cache_capacity_gb * 1024**3
+            )
+            self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
+                capacity_bytes
+            )
+        self.embedding_loader = MultiModalEmbeddingLoader(
+            encode_worker_client=self.encode_worker_client,  # type: ignore
+            receiver=self.embedding_receiver,
+            embedding_cache_manager=self.embedding_cache_manager,
+        )
 
         logger.info("Multimodal PD Worker has been initialized")
 
     async def async_init(self, runtime: DistributedRuntime):
         """Async initialization for connector that requires async setup"""
-        # Initialize the connector asynchronously
-        self._connector = connect.Connector()
         logger.info("Multimodal PD Worker async initialization completed.")
 
     def _parse_frontend_request(
@@ -164,17 +165,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         Returns an empty dict when no encode worker is configured or no images
         are present.
         """
-        if not self.encode_worker_client or not image_urls:
-            return defaultdict(list)
 
-        return await load_multimodal_embeddings(
-            self.encode_worker_client,  # type: ignore[arg-type]
+        return await self.embedding_loader.load_multimodal_embeddings(
             image_urls,
             request_id,
-            self.embedding_receiver,
             model=self.config.model,
             embeddings_dtype=self.EMBEDDINGS_DTYPE,
-            cache=self.embedding_cache_manager,
             context=context,
         )
 
@@ -212,10 +208,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 if not value:
                     del multi_modal_data[key]
                 else:
-                    # [gluo FIXME] should be mindful to default dict, move this evaluation logic to here
-                    # so that we don't accidentally add empty keys to the dict which causes vLLM misbehavior
                     logger.debug(
-                        f"Prepared multimodal data size: {len(multi_modal_data[key])}"
+                        f"Prepared multimodal data key {key}, number of items: {len(multi_modal_data[key])}"
                     )
 
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
