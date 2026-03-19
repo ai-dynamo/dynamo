@@ -22,8 +22,11 @@ volumes:
 services:
   # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
   # dcgm-exporter is a tool from NVIDIA that exposes DCGM metrics in Prometheus format.
+  # Requires NVIDIA GPU and runtime. Enable with: docker compose --profile nvidia -f deploy/docker-observability.yml up -d
   dcgm-exporter:
     image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
+    profiles:
+      - nvidia
     ports:
       # Expose dcgm-exporter on port 9401 both inside and outside the container
       # to avoid conflicts with other dcgm-exporter instances in distributed environments.
@@ -64,6 +67,7 @@ services:
     container_name: prometheus
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./observability/xpu-alert-rules.yml:/etc/prometheus/xpu-alert-rules.yml
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -81,7 +85,6 @@ services:
     extra_hosts:
     - "host.docker.internal:host-gateway"
     depends_on:
-      - dcgm-exporter
       - nats-prometheus-exporter
 
   # Loki - Log aggregation backend
@@ -149,7 +152,8 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
-      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      # grafana-piechart-panel is built-in since Grafana v8+, no install needed
+      - GF_INSTALL_PLUGINS=
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
       # Disable password change requirement

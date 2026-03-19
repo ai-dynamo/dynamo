@@ -17,6 +17,9 @@ global:
   scrape_interval: 10s
   evaluation_interval: 10s
 
+rule_files:
+  - "/etc/prometheus/xpu-alert-rules.yml"
+
 scrape_configs:
   - job_name: 'nats-prometheus-exporter'
     scrape_interval: 2s
@@ -54,6 +57,16 @@ scrape_configs:
     scrape_interval: 2s
     static_configs:
       - targets: ['host.docker.internal:6880']
+
+  - job_name: 'xpu-smi-exporter'
+    scrape_interval: 5s
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ['host.docker.internal:9966']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'xpu-host'
 
   # Uncomment to see its own Prometheus metrics
   # - job_name: 'prometheus'
