@@ -16,13 +16,18 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import os
-import sys
 
 import msgspec
 
 from dynamo.common.forward_pass_metrics import decode
+from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import DistributedRuntime
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -54,8 +59,6 @@ def main() -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
-    from dynamo.llm import FpmEventSubscriber
-
     loop = asyncio.get_running_loop()
     event_plane = os.environ.get("DYN_EVENT_PLANE", "nats")
     enable_nats = args.request_plane == "nats" or event_plane == "nats"
@@ -67,26 +70,32 @@ async def run(args: argparse.Namespace) -> None:
     subscriber = FpmEventSubscriber(endpoint)
     json_encoder = msgspec.json.Encoder()
 
-    print(
-        f"Subscribed to forward-pass-metrics via event plane "
-        f"(namespace={args.namespace}, component={args.component})  "
-        f"Ctrl+C to stop",
-        file=sys.stderr,
+    logger.info(
+        "Subscribed to forward-pass-metrics via event plane "
+        "(namespace=%s, component=%s)  Ctrl+C to stop",
+        args.namespace,
+        args.component,
     )
 
-    seq = 0
     try:
         while True:
             data = await asyncio.to_thread(subscriber.recv)
             if data is None:
-                print("Stream closed.", file=sys.stderr)
+                logger.info("Stream closed.")
                 break
             metrics = decode(data)
+            if metrics is None:
+                continue
             pretty = json.loads(json_encoder.encode(metrics))
-            print(f"[seq={seq}] {json.dumps(pretty, indent=2)}", flush=True)
-            seq += 1
+            logger.info(
+                "[worker=%s dp=%d counter=%d] %s",
+                metrics.worker_id,
+                metrics.dp_rank,
+                metrics.counter_id,
+                json.dumps(pretty, indent=2),
+            )
     except KeyboardInterrupt:
-        print("\nStopped.", file=sys.stderr)
+        logger.info("Stopped.")
     finally:
         subscriber.shutdown()
 

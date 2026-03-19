@@ -36,7 +36,13 @@ TODO: planner consuming these metrics instead of frontend/router metrics
 
 from __future__ import annotations
 
+import logging
+
 import msgspec
+
+logger = logging.getLogger(__name__)
+
+FPM_VERSION: int = 1
 
 
 class WelfordAccumulator:
@@ -156,11 +162,20 @@ class ForwardPassMetrics(
     engine transitions from active to idle.
     """
 
+    # Schema version. Consumers must check this before interpreting
+    # the remaining fields. Bump when the schema changes incompatibly.
+    version: int = FPM_VERSION
+
     # Unique worker identifier (Dynamo runtime connection_id).
     worker_id: str = ""
 
     # Data parallel rank. Each DP rank has its own scheduler and ZMQ port.
     dp_rank: int = 0
+
+    # Monotonically increasing sequence number per (worker_id, dp_rank).
+    # Set by _FpmPublisherThread before encoding; 0 for messages that
+    # have not been stamped (e.g. unit-test fixtures).
+    counter_id: int = 0
 
     # Wall-clock time of this iteration: from schedule() to update_from_output().
     # Covers scheduling + model forward pass + output processing.
@@ -182,5 +197,27 @@ def encode(metrics: ForwardPassMetrics) -> bytes:
     return _encoder.encode(metrics)
 
 
-def decode(data: bytes) -> ForwardPassMetrics:
-    return _decoder.decode(data)
+class UnsupportedFpmVersionError(Exception):
+    """Raised when a ForwardPassMetrics message has an unrecognised version."""
+
+
+def decode(data: bytes) -> ForwardPassMetrics | None:
+    """Decode a ForwardPassMetrics message, returning None for unknown versions.
+
+    Returns None (and logs a warning) if the message cannot be decoded or
+    carries a version this code does not understand, so callers can simply
+    skip unsupported messages without crashing.
+    """
+    try:
+        metrics = _decoder.decode(data)
+    except Exception:
+        logger.warning("Failed to decode ForwardPassMetrics message, skipping")
+        return None
+    if metrics.version != FPM_VERSION:
+        logger.warning(
+            "Unsupported ForwardPassMetrics version %d (expected %d), skipping",
+            metrics.version,
+            FPM_VERSION,
+        )
+        return None
+    return metrics
