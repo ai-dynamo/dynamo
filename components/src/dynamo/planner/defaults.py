@@ -74,6 +74,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
     throughput_metrics_source = "frontend"  # "frontend" | "router"
+    nan_scaledown_threshold = 3  # consecutive invalid intervals before scaling to min
 
     # Scaling mode flags
     enable_throughput_scaling = True

@@ -96,6 +96,14 @@ class PlannerConfig(BaseModel):
     throughput_metrics_source: Literal[
         "frontend", "router"
     ] = SLAPlannerDefaults.throughput_metrics_source
+    nan_scaledown_threshold: int = Field(
+        default=SLAPlannerDefaults.nan_scaledown_threshold,
+        ge=1,
+        description=(
+            "Number of consecutive invalid throughput metric intervals before "
+            "forcing scale-down to min_endpoint."
+        ),
+    )
 
     no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None
