@@ -168,6 +168,84 @@ def download_models(model_list=None, ignore_weights=False):
         )
 
 
+def _enable_offline_with_mistral_patch():
+    """Set HF_HUB_OFFLINE=1 and work around a transformers 4.57.3 regression.
+
+    transformers 4.57.3 (PR #42389) introduced _patch_mistral_regex which calls
+    huggingface_hub.model_info() unconditionally for every tokenizer load — even
+    non-Mistral models with fully cached weights. This API call fails when
+    HF_HUB_OFFLINE=1.
+
+    Since tests launch TRT-LLM workers as subprocesses that inherit env vars but
+    not in-process monkey-patches, we inject the fix via a sitecustomize.py on
+    PYTHONPATH so every subprocess auto-applies it at startup.
+
+    Upstream bug: https://github.com/huggingface/transformers/issues/44843
+
+    TODO: Remove this workaround once transformers ships a fix and TRT-LLM (or
+    any other dependency) upgrades to that fixed version.
+    """
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    # Apply the patch in this process
+    try:
+        from huggingface_hub.errors import OfflineModeIsEnabled
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+        original = PreTrainedTokenizerBase._patch_mistral_regex
+
+        @classmethod  # type: ignore[misc]
+        def _safe_patch(cls, tokenizer, *args, **kwargs):
+            try:
+                return original.__func__(cls, tokenizer, *args, **kwargs)
+            except OfflineModeIsEnabled:
+                return tokenizer
+
+        PreTrainedTokenizerBase._patch_mistral_regex = _safe_patch
+    except (ImportError, AttributeError):
+        return  # transformers version without _patch_mistral_regex — nothing to do
+
+    # Write a sitecustomize.py so subprocesses also get the patch
+    patch_dir = os.path.join(tempfile.gettempdir(), "dynamo_test_hf_patch")
+    os.makedirs(patch_dir, exist_ok=True)
+    with open(os.path.join(patch_dir, "sitecustomize.py"), "w") as f:
+        f.write(
+            "import os\n"
+            "if os.environ.get('HF_HUB_OFFLINE') == '1':\n"
+            "    try:\n"
+            "        from transformers.tokenization_utils_base import"
+            " PreTrainedTokenizerBase as _T\n"
+            "        from huggingface_hub.errors import"
+            " OfflineModeIsEnabled as _E\n"
+            "        _orig = _T._patch_mistral_regex\n"
+            "        @classmethod\n"
+            "        def _safe(cls, tokenizer, *a, **kw):\n"
+            "            try:\n"
+            "                return _orig.__func__(cls, tokenizer, *a, **kw)\n"
+            "            except _E:\n"
+            "                return tokenizer\n"
+            "        _T._patch_mistral_regex = _safe\n"
+            "    except (ImportError, AttributeError):\n"
+            "        pass\n"
+        )
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
+    logging.info(
+        "Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround "
+        "(see https://github.com/huggingface/transformers/issues/44843)"
+    )
+
+
+def _disable_offline_with_mistral_patch():
+    """Undo _enable_offline_with_mistral_patch."""
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    patch_dir = os.path.join(tempfile.gettempdir(), "dynamo_test_hf_patch")
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = pythonpath.replace(f"{patch_dir}:", "").replace(
+        patch_dir, ""
+    )
+
+
 @pytest.fixture(scope="session")
 def predownload_models(pytestconfig):
     """Fixture wrapper around download_models for models used in collected tests"""
@@ -182,9 +260,9 @@ def predownload_models(pytestconfig):
         # Fallback to original behavior if extraction failed
         download_models()
 
-    os.environ["HF_HUB_OFFLINE"] = "1"
+    _enable_offline_with_mistral_patch()
     yield
-    os.environ.pop("HF_HUB_OFFLINE", None)
+    _disable_offline_with_mistral_patch()
 
 
 @pytest.fixture(scope="session")
@@ -204,9 +282,9 @@ def predownload_tokenizers(pytestconfig):
     # Skip redundant HuggingFace API calls in worker subprocesses since
     # tokenizers are already cached. This avoids flaky timeouts from slow
     # HF API responses (the RepoInfo fetch still happens even for cached models).
-    os.environ["HF_HUB_OFFLINE"] = "1"
+    _enable_offline_with_mistral_patch()
     yield
-    os.environ.pop("HF_HUB_OFFLINE", None)
+    _disable_offline_with_mistral_patch()
 
 
 @pytest.fixture(autouse=True)
