@@ -221,6 +221,14 @@ runs:
         extra_build_args: |
           DYNAMO_COMMIT_SHA=${{ github.sha }}
           ${{ inputs.extra_build_args }}
+    - name: Refresh BuildKit builder
+      if: ${{ inputs.target != 'dev' }}
+      uses: ./.github/actions/builder-refresher
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        flavor: ${{ inputs.framework }}
+        arch: ${{ inputs.platform }}
+        cuda_version: ${{ inputs.cuda_version }}
     - name: Build and Push Test Image
       if: ${{ inputs.target != 'dev' }}
       shell: bash
