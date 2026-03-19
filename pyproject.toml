@@ -44,13 +44,13 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc7",
+    "tensorrt-llm==1.3.0rc8",
 ]
 
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai]==0.17.1",
+    "vllm[flashinfer,runai,otel]==0.17.1",
     # vllm-omni 0.16.0 is now on PyPI; install only future rc builds from source in container builds
     # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
     # not include vllm-omni — install it separately from source if needed.
@@ -149,14 +149,13 @@ minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
-# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
-# pytest overrides the default mypy exclude configuration and so we exclude here as well
+# Keep these ignores in pytest collection to avoid duplicate-module collection
+# errors (for example, backend trees that include multiple model.py files).
 addopts = [
     "-ra",
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
@@ -174,53 +173,47 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
-    "ignore:.*pkg_resources.*:DeprecationWarning",
-    "ignore:.*pkg_resources.*:UserWarning",
-    "ignore:.*multipart.*:PendingDeprecationWarning",
-    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
-    "ignore:.*unclosed.*socket.*:ResourceWarning", # Ignore unclosed socket warnings
-    "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
-    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
-    "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
-    "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning", # pandas 2.x concat deprecation in AIC SDK TODO: fix in AIC
-    "ignore:Automatic KV events configuration is deprecated.*:FutureWarning", # Ignore Dynamo's own KV events deprecation warning in tests
-    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning", # Python 3.12 SWIG extension warning from third-party tokenizer deps
-    # Pydantic V2 deprecation warnings from TRTLLM dependencies (raised at import time during collection)
+    # CUDA deprecation warnings from tensorrt_llm
+    "ignore:.*cuda*:DeprecationWarning",
+    # protobuf C extension warning
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
+    # unclosed socket/event loop warnings
+    "ignore:.*unclosed.*socket.*:ResourceWarning",
+    "ignore:.*unclosed event loop.*:ResourceWarning",
+    # unraisable exception warnings
+    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
+    # pynvml deprecation, temporary until upstream migrates to nvidia-ml-py
+    "ignore:The pynvml package is deprecated.*:FutureWarning",
+    # Dynamo's own KV events deprecation warning
+    "ignore:Automatic KV events configuration is deprecated.*:FutureWarning",
+    # Python 3.12 SWIG extension warning from third-party tokenizer deps
+    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning",
+    # Pydantic V2 deprecation warnings from TRTLLM dependencies
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
-    # Pydantic warning about field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
+    # Pydantic field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
     'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
-    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    # pytest-benchmark automatically disables when xdist is active
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
-
-    ################################################################################################
-    # vLLM
-    ################################################################################################
-    # vLLM tokenizer deprecation warning (AnyTokenizer moved to vllm.tokenizers.TokenizerLike)
-    "ignore:.*vllm\\.transformers_utils\\.tokenizer\\.AnyTokenizer.*has been moved.*:DeprecationWarning",
-
-    ################################################################################################
-    # TRT-LLM
-    ################################################################################################
-    # torchao sometimes emits SyntaxWarning from docstrings (e.g. invalid escape sequences) at import
-    # time; our global `error` policy would otherwise fail test collection. Do not rely on module=
-    # matching here because these can be raised during compilation where the module field may not
-    # match as expected.
+    # torchao invalid escape sequences in docstrings at import time
     "ignore:.*invalid escape sequence.*:SyntaxWarning",
-    # torchao deprecation warnings for import path changes (see https://github.com/pytorch/ao/issues/2752)
+    # torchao import path changes (https://github.com/pytorch/ao/issues/2752)
     "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
-    # nvidia-modelopt warning about transformers version incompatibility
+    # Triton CPU fallback warning on CPU-only runners
+    "ignore:Triton is not supported on current platform.*:UserWarning",
+    # torch.jit.script_method deprecation from torch.utils.mkldnn
+    "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
+    # nvidia-modelopt warning about transformers version (transitive dep from TRT-LLM)
     "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
+    # SGLang quantization warnings on CPU-only runners
+    "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
+    "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
 ]
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
-# IMPORTANT: tests/conftest.py also registers a subset of these markers for
-# environments where pyproject.toml is not available (e.g. some CI containers).
-# Keep the marker definitions here and in tests/conftest.py synchronized.
 markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
@@ -243,6 +236,7 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "lmcache: marks tests as requiring lmcache",
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
@@ -298,17 +292,33 @@ venv = ".venv"
 #   tensorrt_llm and vllm are both named common.
 explicit_package_bases = true
 
-# --ignore-missing-imports: WAR too many errors when developing outside
-#   of container environment with PYTHONPATH set and packages installed.
-#   NOTE: Can possibly move mypy from pre-commit to a github action run only in
-#   a container with the expected environment and PYTHONPATH setup.
-ignore_missing_imports = true
-
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-# Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
+# _version.py is generated at build time and does not exist in the source tree.
+module = ["dynamo.*._version"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Skip type checking for test files.
+module = ["dynamo.*.tests.*", "dynamo.*.tests"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Skip mypy analysis on backend framework internals.
+# ignore_missing_imports silences import-not-found only when the backend
+# is not installed (e.g. sglang/trtllm missing in the vllm container).
+module = ["vllm", "vllm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sglang", "sglang.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tensorrt_llm", "tensorrt_llm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
@@ -317,6 +327,95 @@ ignore_missing_imports = true
 # "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Third-party libs without type stubs or optional internal deps
+# TODO: fix the ones that do have stub package
+module = [
+    "nvtx",
+    "fsspec",
+    "fsspec.*",
+    "kubernetes",
+    "kubernetes.*",
+    "scipy",
+    "scipy.*",
+    "sklearn",
+    "sklearn.*",
+    "pandas",
+    "pandas.*",
+    "pmdarima",
+    "pmdarima.*",
+    "filterpy",
+    "filterpy.*",
+    "prophet",
+    "prophet.*",
+    "msgpack",
+    "nixl",
+    "nixl.*",
+    "imageio",
+    "imageio.*",
+    "yaml",
+    "prometheus_api_client",
+    "prometheus_api_client.*",
+    "aiohttp",
+    "aiohttp.*",
+    "vllm_omni",
+    "vllm_omni.*",
+    "modelexpress",
+    "modelexpress.*",
+    "kvbm",
+    "kvbm.*",
+    "diffusers",
+    "diffusers.*",
+    "PIL",
+    "PIL.*",
+    "torch",
+    "torch.*",
+    "transformers",
+    "transformers.*",
+    "cupy",
+    "cupy.*",
+    "gpu_memory_service",
+    "gpu_memory_service.*",
+    "pydantic",
+    "pydantic.*",
+    "uvloop",
+    "prometheus_client",
+    "prometheus_client.*",
+    "pybase64",
+    "blake3",
+    "cupy_backends",
+    "cupy_backends.*",
+    "huggingface_hub",
+    "huggingface_hub.*",
+    "httpx",
+    "httpx.*",
+    "zmq",
+    "zmq.*",
+    "safetensors",
+    "safetensors.*",
+    "gradio",
+    "gradio.*",
+    "kubernetes_asyncio",
+    "kubernetes_asyncio.*",
+    "pydantic_core",
+    "aiconfigurator",
+    "aiconfigurator.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# msgspec.Struct uses custom __init_subclass__ kwargs (frozen, gc) that mypy
+# cannot resolve without the msgspec package installed.
+module = ["msgspec", "msgspec.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Profiler module was never previously type-checked and has many
+# union-attr / attr-defined issues. Skip errors for now.
+module = ["dynamo.profiler.*"]
+ignore_errors = true
 
 [tool.sphinx]
 

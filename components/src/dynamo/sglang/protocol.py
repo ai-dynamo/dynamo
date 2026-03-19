@@ -6,7 +6,7 @@ from typing import Any, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal import TransferRequest
 
 TokenIdType = int
 
@@ -129,7 +129,7 @@ class SglangMultimodalRequest(BaseModel):
     embeddings_shape: Optional[
         Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata] = None
+    transfer_payload: Optional[TransferRequest] = None
 
 
 class DisaggSglangMultimodalRequest(BaseModel):
