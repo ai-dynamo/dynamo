@@ -1433,13 +1433,13 @@ async fn find_prefill_endpoint(
     let mut logged_waiting = false;
 
     loop {
-        if let Some(dl) = deadline {
-            if tokio::time::Instant::now() >= dl {
-                tracing::info!(
-                    "No prefill workers found after 5 minutes, proceeding in aggregated mode"
-                );
-                return None;
-            }
+        if let Some(dl) = deadline
+            && tokio::time::Instant::now() >= dl
+        {
+            tracing::info!(
+                "No prefill workers found after 5 minutes, proceeding in aggregated mode"
+            );
+            return None;
         }
 
         let instances = match discovery.list(DiscoveryQuery::AllModels).await {
