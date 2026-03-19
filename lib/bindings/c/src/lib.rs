@@ -740,38 +740,39 @@ pub unsafe extern "C" fn create_routers(
             }
         }
 
-        let prefill_router = match find_prefill_endpoint(&drt, &namespace_str, enforce_disagg).await {
-            Some(prefill_endpoint) => {
-                tracing::info!("Prefill worker found, running in disaggregated mode");
-                let mut prefill_config = kv_router_config;
-                prefill_config.router_track_active_blocks = false;
+        let prefill_router =
+            match find_prefill_endpoint(&drt, &actual_namespace, enforce_disagg).await {
+                Some(prefill_endpoint) => {
+                    tracing::info!("Prefill worker found, running in disaggregated mode");
+                    let mut prefill_config = kv_router_config;
+                    prefill_config.router_track_active_blocks = false;
 
-                // Create immediately-resolved channel to activate router
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = tx.send(prefill_endpoint);
+                    // Create immediately-resolved channel to activate router
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = tx.send(prefill_endpoint);
 
-                PrefillRouter::new(
-                    rx,
-                    model_manager.clone(),
-                    RouterMode::KV,
-                    block_size,
-                    Some(prefill_config),
-                    enforce_disagg,
-                    model_name.clone(),
-                    namespace_str.clone(),
-                )
-            }
-            None if enforce_disagg => {
-                tracing::error!(
-                    "Prefill workers required but none found (enforce_disagg is enabled)"
-                );
-                return Err(QueryRouterResult::ErrDisaggEnforced);
-            }
-            None => {
-                tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
-            }
-        };
+                    PrefillRouter::new(
+                        rx,
+                        model_manager.clone(),
+                        RouterMode::KV,
+                        block_size,
+                        Some(prefill_config),
+                        enforce_disagg,
+                        model_name.clone(),
+                        namespace_str.clone(),
+                    )
+                }
+                None if enforce_disagg => {
+                    tracing::error!(
+                        "Prefill workers required but none found (enforce_disagg is enabled)"
+                    );
+                    return Err(QueryRouterResult::ErrDisaggEnforced);
+                }
+                None => {
+                    tracing::info!("No prefill workers found, running in aggregated mode");
+                    PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+                }
+            };
 
         Ok((
             prefill_router,
@@ -1467,7 +1468,10 @@ async fn find_prefill_endpoint(
                     Err(_) => continue,
                 };
 
-                if !card.model_type.supports_prefill() {
+                if !card.model_type.supports_prefill()
+                    || card.model_type.supports_chat()
+                    || card.model_type.supports_completions()
+                {
                     continue;
                 }
 
@@ -1491,9 +1495,7 @@ async fn find_prefill_endpoint(
                      (no timeout - controlled by K8s StartupProbe)..."
                 );
             } else {
-                tracing::info!(
-                    "Waiting up to 5 minutes for prefill workers to register..."
-                );
+                tracing::info!("Waiting up to 5 minutes for prefill workers to register...");
             }
             logged_waiting = true;
         }
