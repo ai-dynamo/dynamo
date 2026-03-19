@@ -298,11 +298,22 @@ trtllm_configs = {
     ),
     # TensorRT-LLM video diffusion test using Wan2.1-T2V-1.3B model.
     # Validates the end-to-end video generation pipeline (frontend → worker → /v1/videos).
-    # Uses small resolution (480x272) and few steps (10) for fast CI execution.
+    # Uses --disable-torch-compile and small default resolution (480x272, 17 frames)
+    # so the warmup fits in 22 GB (L4 GPU). torch.compile triggers a warmup pass in
+    # PipelineLoader.load() even when skip_warmup=True.
     "video_diffusion": TRTLLMConfig(
         name="video_diffusion",
         directory=trtllm_dir,
         script_name="agg_video_diffusion.sh",
+        script_args=[
+            "--disable-torch-compile",
+            "--default-height",
+            "272",
+            "--default-width",
+            "480",
+            "--default-num-frames",
+            "17",
+        ],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
