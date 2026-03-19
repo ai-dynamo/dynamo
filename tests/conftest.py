@@ -270,9 +270,7 @@ def _enable_offline_with_mistral_patch():
             "        pass\n"
         )
     pythonpath = os.environ.get("PYTHONPATH", "")
-    os.environ["PYTHONPATH"] = (
-        f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
-    )
+    os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
     logging.info(
         "Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround "
         "(see https://github.com/huggingface/transformers/issues/44843)"
