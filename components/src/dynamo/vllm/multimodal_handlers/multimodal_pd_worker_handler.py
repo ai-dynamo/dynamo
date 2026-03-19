@@ -14,6 +14,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.embedding_transfer import (
+    AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
@@ -88,7 +89,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
         #    and used to determine whether remote encode is necessary for a given mm data.
         self.encode_worker_client = encode_worker_client
         if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_receiver = LocalEmbeddingReceiver()
+            self.embedding_receiver: AbstractEmbeddingReceiver = (
+                LocalEmbeddingReceiver()
+            )
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
             self.embedding_receiver = NixlWriteEmbeddingReceiver()
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
