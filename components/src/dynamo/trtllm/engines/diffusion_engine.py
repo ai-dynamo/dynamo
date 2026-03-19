@@ -167,7 +167,7 @@ class DiffusionEngine:
             device=self.device,
             dtype=self.config.torch_dtype,
             skip_components=self.config.skip_components,
-            skip_warmup=(self.config.warmup_steps == 0),
+            skip_warmup=self.config.skip_warmup,
             pipeline=PipelineConfig(
                 fuse_qkv=self.config.fuse_qkv,
                 enable_layerwise_nvtx_marker=self.config.enable_layerwise_nvtx_marker,

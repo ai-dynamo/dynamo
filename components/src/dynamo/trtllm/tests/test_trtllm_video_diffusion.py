@@ -109,7 +109,7 @@ class TestDiffusionConfig:
         assert config.attn_backend == "VANILLA"
         assert config.quant_algo is None
         assert config.enable_cuda_graph is False
-        assert config.warmup_steps == 1
+        assert config.skip_warmup is False
         assert config.fuse_qkv is True
 
         # Parallelism defaults

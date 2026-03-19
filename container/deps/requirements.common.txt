@@ -27,3 +27,7 @@ tensorboardX==2.6.2.2
 # Using >=4.56.0 to satisfy all frameworks
 transformers>=4.56.0
 uvicorn==0.38.0
+
+# Video generation: encode frames to MP4 (used by TRT-LLM, vLLM-Omni, SGLang diffusion)
+imageio>=2.37.0
+imageio-ffmpeg>=0.6.0
