@@ -35,15 +35,28 @@ permute_kernels = []
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]
 
+# Enable kvbench_xpu example (pulls in clap + syclrc for Level Zero)
+kvbench-xpu = ["dep:clap", "dep:syclrc", "level-zero"]
+
+# Expose SPIR-V vectorized_copy kernel for Level Zero / Intel XPU.
+# The ze_vectorized_copy module is always compiled (it has no external deps),
+# but this feature is provided so consumers can express the intent.
+level-zero = []
+
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]
+
+[[example]]
+name = "kvbench_xpu"
+required-features = ["kvbench-xpu"]
 
 [dependencies]
 cudarc = { workspace = true }
 
 # kvbench
 clap = { version = "4", features = ["derive"], optional = true }
+syclrc = { path = "../../../zxue2_syclrc", optional = true }
 
 [dev-dependencies]
 ndarray = "0.17.2"
