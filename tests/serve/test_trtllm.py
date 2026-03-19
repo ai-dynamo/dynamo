@@ -318,7 +318,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(1200),  # Video generation is slow even at small resolution
+            pytest.mark.timeout(
+                1200
+            ),  # Video generation is slow even at small resolution
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         frontend_port=DefaultPort.FRONTEND.value,
