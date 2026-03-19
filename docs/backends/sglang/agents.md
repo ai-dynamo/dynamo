@@ -35,7 +35,6 @@ python -m dynamo.sglang \
 | Flag | Description |
 |------|-------------|
 | `--enable-priority-scheduling` | Enables priority-based request scheduling instead of FCFS. |
-| `--schedule-low-priority-values-first` | Optional. Inverts priority ordering so lower values are scheduled first. Without this flag, higher values = higher priority. |
 
 When priority scheduling is enabled, the engine uses the `priority` field from `nvext.agent_hints` to order requests in its internal queue. Requests with higher effective priority are scheduled before lower-priority ones. Ties are broken by arrival time.
 
