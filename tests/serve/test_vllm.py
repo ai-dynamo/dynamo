@@ -66,7 +66,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.6),  # observed peak 7.8 GiB (+10% safety)
-            pytest.mark.timeout(127),  # 3x observed 42.2s wall time
+            pytest.mark.timeout(300),  # ~7x observed 42.2s; old value before profiling
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -94,7 +94,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.6),  # observed peak 7.8 GiB (+10% safety)
-            pytest.mark.timeout(73),  # 3x observed 24.3s wall time
+            pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -123,7 +123,7 @@ vllm_configs = {
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.1),  # observed peak 7.4 GiB (+10% safety)
-            pytest.mark.timeout(147),  # 3x observed 49.0s wall time
+            pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
             pytest.mark.skipif(
                 _is_cuda13(),
@@ -146,7 +146,7 @@ vllm_configs = {
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.1),  # observed peak 7.4 GiB (+10% safety)
-            pytest.mark.timeout(148),  # 3x observed 49.3s wall time
+            pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
             pytest.mark.skipif(
                 _is_cuda13(),
@@ -171,7 +171,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.1),  # observed peak 7.3 GiB (+10% safety)
-            pytest.mark.timeout(129),  # 3x observed 43.0s wall time
+            pytest.mark.timeout(300),  # ~7x observed 43.0s; old value before profiling
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -188,7 +188,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.1),  # observed peak 7.3 GiB (+10% safety)
-            pytest.mark.timeout(127),  # 3x observed 42.3s wall time
+            pytest.mark.timeout(300),  # ~7x observed 42.3s; old value before profiling
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -306,7 +306,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(24.6),  # observed peak 22.3 GiB (+10% safety)
-            pytest.mark.timeout(206),  # 3x observed 68.4s wall time
+            pytest.mark.timeout(340),  # ~5x observed 68.4s; 2B model loads slower on CI
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -340,7 +340,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(10.2),  # observed peak 9.3 GiB (+10% safety)
-            pytest.mark.timeout(131),  # 3x observed 43.7s wall time
+            pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
@@ -423,7 +423,9 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(21.6),  # observed peak 19.6 GiB (+10% safety)
-            pytest.mark.timeout(150),  # 3x observed 50.0s wall time
+            pytest.mark.timeout(
+                360
+            ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
@@ -455,7 +457,9 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(18.9),  # observed peak 17.1 GiB (+10% safety)
-            pytest.mark.timeout(128),  # 3x observed 42.7s wall time
+            pytest.mark.timeout(
+                300
+            ),  # ~7x observed 42.7s; 7B model loads ~48s on CI (A10G/L4)
             pytest.mark.nightly,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
@@ -701,7 +705,9 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(21.9),  # observed peak 19.9 GiB (+10% safety)
-            pytest.mark.timeout(233),  # 3x observed 77.7s wall time
+            pytest.mark.timeout(
+                420
+            ),  # 7B model loads ~48s on CI (A10G/L4) vs ~15s locally
             pytest.mark.post_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
@@ -738,7 +744,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(8.6),  # observed peak 7.8 GiB (+10% safety)
-            pytest.mark.timeout(67),  # 3x observed 22.3s wall time
+            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",

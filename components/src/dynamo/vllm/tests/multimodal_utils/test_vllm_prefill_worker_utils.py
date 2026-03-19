@@ -26,7 +26,7 @@ MODEL = "test-model"
 DTYPE = torch.float16
 
 
-class TestLoadMultimodalEmbeddings:
+class TestMultimodalEmbeddingsLoader:
     @pytest.mark.asyncio
     async def test_all_cached(self):
         """All URLs cached -> no encode worker call, returns accumulated mm_data."""
@@ -42,14 +42,12 @@ class TestLoadMultimodalEmbeddings:
             "_fetch_from_encode_workers",
             new_callable=AsyncMock,
         ) as mock_fetch:
-            mm_data = await mod.load_multimodal_embeddings(
-                AsyncMock(),
+            embedding_loader = mod.MultiModalEmbeddingLoader(AsyncMock(), None, cache)
+            mm_data = await embedding_loader.load_multimodal_embeddings(
                 [url],
                 "req-1",
-                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
-                cache=cache,
             )
 
         mock_fetch.assert_not_awaited()
@@ -73,14 +71,12 @@ class TestLoadMultimodalEmbeddings:
             new_callable=AsyncMock,
             return_value=([fake_group], None),
         ) as mock_fetch:
-            mm_data = await mod.load_multimodal_embeddings(
-                AsyncMock(),
+            embedding_loader = mod.MultiModalEmbeddingLoader(AsyncMock(), None, cache)
+            mm_data = await embedding_loader.load_multimodal_embeddings(
                 [url],
                 "req-1",
-                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
-                cache=cache,
             )
 
         mock_fetch.assert_awaited_once()
@@ -107,14 +103,12 @@ class TestLoadMultimodalEmbeddings:
             new_callable=AsyncMock,
             return_value=([fake_group], None),
         ) as mock_fetch:
-            mm_data = await mod.load_multimodal_embeddings(
-                AsyncMock(),
+            embedding_loader = mod.MultiModalEmbeddingLoader(AsyncMock(), None, None)
+            mm_data = await embedding_loader.load_multimodal_embeddings(
                 [url],
                 "req-1",
-                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
-                cache=None,
             )
 
         mock_fetch.assert_awaited_once()
@@ -145,14 +139,12 @@ class TestLoadMultimodalEmbeddings:
             new_callable=AsyncMock,
             return_value=([fake_group], None),
         ) as mock_fetch:
-            mm_data = await mod.load_multimodal_embeddings(
-                AsyncMock(),
+            embedding_loader = mod.MultiModalEmbeddingLoader(AsyncMock(), None, cache)
+            mm_data = await embedding_loader.load_multimodal_embeddings(
                 [url_cached, url_miss],
                 "req-1",
-                None,
                 model=MODEL,
                 embeddings_dtype=DTYPE,
-                cache=cache,
             )
 
         mock_fetch.assert_awaited_once()
