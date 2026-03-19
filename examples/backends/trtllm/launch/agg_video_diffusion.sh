@@ -61,7 +61,6 @@ python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality video_diffusion \
   --media-output-fs-url "$MEDIA_OUTPUT_FS_URL" \
-  --skip-warmup \
   "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

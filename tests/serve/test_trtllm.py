@@ -35,7 +35,7 @@ class VideoGenerationPayload(BasePayload):
     """Payload for /v1/videos endpoint (TRT-LLM video diffusion)."""
 
     endpoint: str = "/v1/videos"
-    timeout: int = 600
+    timeout: int = 300
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -298,14 +298,15 @@ trtllm_configs = {
     ),
     # TensorRT-LLM video diffusion test using Wan2.1-T2V-1.3B model.
     # Validates the end-to-end video generation pipeline (frontend → worker → /v1/videos).
-    # Uses --disable-torch-compile and small default resolution (480x272, 17 frames)
-    # so the warmup fits in 22 GB (L4 GPU). torch.compile triggers a warmup pass in
-    # PipelineLoader.load() even when skip_warmup=True.
+    # Uses --skip-warmup (warmup at default resolution OOMs on 22 GB L4 GPU),
+    # --disable-torch-compile, and small default resolution (480x272, 17 frames)
+    # to fit within CI GPU memory constraints.
     "video_diffusion": TRTLLMConfig(
         name="video_diffusion",
         directory=trtllm_dir,
         script_name="agg_video_diffusion.sh",
         script_args=[
+            "--skip-warmup",
             "--disable-torch-compile",
             "--default-height",
             "272",
@@ -319,12 +320,12 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
             pytest.mark.timeout(
-                1200
+                600
             ),  # Video generation is slow even at small resolution
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         frontend_port=DefaultPort.FRONTEND.value,
-        timeout=900,
+        timeout=300,
         delayed_start=60,  # Model loading takes time
         request_payloads=[
             VideoGenerationPayload(
