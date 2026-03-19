@@ -154,6 +154,7 @@ runs:
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
+          --shm-size=100m \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
@@ -249,6 +250,7 @@ runs:
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+          --shm-size=100m \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
