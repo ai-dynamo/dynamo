@@ -759,7 +759,7 @@ pub unsafe extern "C" fn create_routers(
                         Some(prefill_config),
                         enforce_disagg,
                         model_name.clone(),
-                        namespace_str.clone(),
+                        actual_namespace.clone(),
                     )
                 }
                 None if enforce_disagg => {
@@ -1459,7 +1459,7 @@ async fn find_prefill_endpoint(
                 ..
             } = &instance
             {
-                if !namespace.starts_with(target_namespace) {
+                if namespace != target_namespace {
                     continue;
                 }
 
