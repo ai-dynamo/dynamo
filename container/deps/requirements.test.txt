@@ -13,7 +13,9 @@ filelock==3.25.1
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0
 matplotlib==3.10.7
+matplotlib-stubs
 mistral-common==1.9.1
+mypy==1.18.2
 # For NATS object store verification in router tests
 nats-py==2.12.0
 psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)
