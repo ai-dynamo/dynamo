@@ -133,6 +133,7 @@
 //! | `ApplyError::TokenOnNonFinalChunk` | Token provided on non-final prefill chunk |
 //! | `ApplyError::MissingTokenOnFinalChunk` | Final prefill chunk missing token    |
 //! | `ApplyError::AcceptedExceedsScheduled` | More accepted than draft tokens     |
+//! | `ApplyError::AppendExceedsRemaining` | `append_tokens` exceeds output budget |
 //!
 //! ## Event delegate
 //!
@@ -338,6 +339,8 @@ pub enum ApplyError {
     AcceptedExceedsScheduled { accepted: usize, scheduled: usize },
     #[error("final prefill chunk requires a generated token")]
     MissingTokenOnFinalChunk,
+    #[error("append requested {requested} tokens but only {remaining} remain")]
+    AppendExceedsRemaining { requested: usize, remaining: usize },
 }
 
 // =============================================================================
@@ -836,12 +839,13 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
     /// Requires Idle state.
     pub fn append_tokens(&mut self, tokens: &[Token]) -> Result<(), ApplyError> {
         self.require_idle_for_apply()?;
-        assert!(
-            tokens.len() <= self.inner.remaining_tokens(),
-            "append_tokens: {} tokens exceeds remaining budget of {}",
-            tokens.len(),
-            self.inner.remaining_tokens()
-        );
+        let remaining = self.inner.remaining_tokens();
+        if tokens.len() > remaining {
+            return Err(ApplyError::AppendExceedsRemaining {
+                requested: tokens.len(),
+                remaining,
+            });
+        }
         for &token in tokens {
             self.inner.append_token(token);
         }
@@ -2005,6 +2009,26 @@ mod tests {
         seq.apply_decode(101, &manager).unwrap();
         assert_eq!(seq.tail_tokens(), 1);
         assert_eq!(seq.kv_position(), 1);
+    }
+
+    #[test]
+    fn test_append_tokens_exceeding_remaining_returns_error_without_mutation() {
+        let mut seq = SchedulableSequence::<TestMeta>::new(vec![], 1, BLOCK_SIZE, noop_delegate());
+
+        let err = seq.append_tokens(&[100, 101]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApplyError::AppendExceedsRemaining {
+                requested: 2,
+                remaining: 1,
+            }
+        ));
+        assert_eq!(seq.generated_tokens(), 0);
+        assert_eq!(seq.remaining_tokens(), 1);
+        assert_eq!(seq.total_tokens(), 0);
+        assert_eq!(seq.tail_tokens(), 0);
+        assert_eq!(seq.kv_position(), 0);
     }
 
     #[test]
