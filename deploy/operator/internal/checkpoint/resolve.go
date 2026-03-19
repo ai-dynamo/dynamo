@@ -24,6 +24,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -112,7 +113,7 @@ func ResolveCheckpointStorage(
 ) (string, nvidiacomv1alpha1.DynamoCheckpointStorageType, error) {
 	version = strings.TrimSpace(version)
 	if version == "" {
-		version = DefaultArtifactVersion
+		version = consts.DefaultCheckpointArtifactVersion
 	}
 
 	storageType := configv1alpha1.CheckpointStorageTypePVC

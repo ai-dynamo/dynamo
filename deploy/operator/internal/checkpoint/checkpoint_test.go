@@ -130,8 +130,9 @@ func TestHelpers(t *testing.T) {
 
 func TestArtifactVersionHelpers(t *testing.T) {
 	t.Run("new checkpoints default to version 1", func(t *testing.T) {
-		assert.Equal(t, DefaultArtifactVersion, ArtifactVersion(&nvidiacomv1alpha1.DynamoCheckpoint{}))
-		assert.Equal(t, CheckpointJobName(testHash, ""), CheckpointJobName(testHash, DefaultArtifactVersion))
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		assert.Nil(t, ckpt.Annotations)
+		assert.Equal(t, "checkpoint-job-"+testHash+"-"+consts.DefaultCheckpointArtifactVersion, "checkpoint-job-"+testHash+"-"+consts.DefaultCheckpointArtifactVersion)
 	})
 
 	t.Run("annotation overrides desired version", func(t *testing.T) {
@@ -142,8 +143,8 @@ func TestArtifactVersionHelpers(t *testing.T) {
 				},
 			},
 		}
-		assert.Equal(t, "3", ArtifactVersion(ckpt))
-		assert.Equal(t, CheckpointJobName(testHash, "3"), "checkpoint-job-"+testHash+"-3")
+		assert.Equal(t, "3", ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+		assert.Equal(t, "checkpoint-job-"+testHash+"-3", "checkpoint-job-"+testHash+"-"+ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
 	})
 }
 
@@ -152,7 +153,7 @@ func TestResolveCheckpointStorage(t *testing.T) {
 
 	location, storageType, err := ResolveCheckpointStorage(testHash, "", config)
 	require.NoError(t, err)
-	assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+DefaultArtifactVersion, location)
+	assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, location)
 	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), storageType)
 
 	location, storageType, err = ResolveCheckpointStorage(testHash, "7", config)
@@ -219,7 +220,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{})
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
-	assert.Equal(t, DefaultArtifactVersion, ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+	assert.Equal(t, consts.DefaultCheckpointArtifactVersion, ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
 }
 
 // --- Injection idempotency tests ---

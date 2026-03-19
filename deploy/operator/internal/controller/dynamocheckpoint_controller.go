@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -133,8 +134,14 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ckpt.Status.Message = fmt.Sprintf("checkpoint identity hash %s is already owned by %s", identityHash, existing.Name)
 		needsStatusUpdate = true
 	}
-	desiredVersion := checkpoint.ArtifactVersion(ckpt)
-	desiredJobName := checkpoint.CheckpointJobName(identityHash, desiredVersion)
+	desiredVersion := consts.DefaultCheckpointArtifactVersion
+	if ckpt.Annotations != nil {
+		version := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+		if version != "" {
+			desiredVersion = version
+		}
+	}
+	desiredJobName := "checkpoint-job-" + identityHash + "-" + desiredVersion
 	switch ckpt.Status.Phase {
 	case "", nvidiacomv1alpha1.DynamoCheckpointPhasePending, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
 	default:
@@ -198,8 +205,14 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
 		}
 	}
-	version := checkpoint.ArtifactVersion(ckpt)
-	jobName := checkpoint.CheckpointJobName(hash, version)
+	version := consts.DefaultCheckpointArtifactVersion
+	if ckpt.Annotations != nil {
+		annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+		if annotatedVersion != "" {
+			version = annotatedVersion
+		}
+	}
+	jobName := "checkpoint-job-" + hash + "-" + version
 	location, storageType, err := checkpoint.ResolveCheckpointStorage(hash, version, &r.Config.Checkpoint)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -360,9 +373,16 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", "Checkpoint creation completed successfully")
 
 		if ckpt.Status.Location == "" || ckpt.Status.StorageType == "" {
+			version := consts.DefaultCheckpointArtifactVersion
+			if ckpt.Annotations != nil {
+				annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+				if annotatedVersion != "" {
+					version = annotatedVersion
+				}
+			}
 			location, storageType, err := checkpoint.ResolveCheckpointStorage(
 				ckpt.Status.IdentityHash,
-				checkpoint.ArtifactVersion(ckpt),
+				version,
 				&r.Config.Checkpoint,
 			)
 			if err != nil {
@@ -450,6 +470,13 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if hash == "" {
 		hash, _ = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
 	}
+	version := consts.DefaultCheckpointArtifactVersion
+	if ckpt.Annotations != nil {
+		annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+		if annotatedVersion != "" {
+			version = annotatedVersion
+		}
+	}
 
 	// Add checkpoint-related labels
 	if podTemplate.Labels == nil {
@@ -460,7 +487,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	}
 	location, storageType, err := checkpoint.ResolveCheckpointStorage(
 		hash,
-		checkpoint.ArtifactVersion(ckpt),
+		version,
 		&r.Config.Checkpoint,
 	)
 	if err != nil {
