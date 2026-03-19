@@ -80,6 +80,23 @@ func checkpointLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
 	return now.After(leaseTime.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
 }
 
+func desiredArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+	version := consts.DefaultCheckpointArtifactVersion
+	if ckpt.Annotations == nil {
+		return version
+	}
+
+	annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+	if annotatedVersion != "" {
+		version = annotatedVersion
+	}
+	return version
+}
+
+func desiredCheckpointJobName(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, identityHash string) string {
+	return "checkpoint-job-" + identityHash + "-" + desiredArtifactVersion(ckpt)
+}
+
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
@@ -131,17 +148,16 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if existing != nil {
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+		ckpt.Status.JobName = ""
+		ckpt.Status.CreatedAt = nil
 		ckpt.Status.Message = fmt.Sprintf("checkpoint identity hash %s is already owned by %s", identityHash, existing.Name)
-		needsStatusUpdate = true
-	}
-	desiredVersion := consts.DefaultCheckpointArtifactVersion
-	if ckpt.Annotations != nil {
-		version := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
-		if version != "" {
-			desiredVersion = version
+		if err := r.Status().Update(ctx, ckpt); err != nil {
+			logger.Error(err, "Failed to mark duplicate DynamoCheckpoint as failed")
+			return ctrl.Result{}, err
 		}
+		return ctrl.Result{}, nil
 	}
-	desiredJobName := "checkpoint-job-" + identityHash + "-" + desiredVersion
+	desiredJobName := desiredCheckpointJobName(ckpt, identityHash)
 	switch ckpt.Status.Phase {
 	case "", nvidiacomv1alpha1.DynamoCheckpointPhasePending, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
 	default:
@@ -205,14 +221,8 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
 		}
 	}
-	version := consts.DefaultCheckpointArtifactVersion
-	if ckpt.Annotations != nil {
-		annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
-		if annotatedVersion != "" {
-			version = annotatedVersion
-		}
-	}
-	jobName := "checkpoint-job-" + hash + "-" + version
+	version := desiredArtifactVersion(ckpt)
+	jobName := desiredCheckpointJobName(ckpt, hash)
 	location, storageType, err := checkpoint.ResolveCheckpointStorage(hash, version, &r.Config.Checkpoint)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -373,13 +383,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", "Checkpoint creation completed successfully")
 
 		if ckpt.Status.Location == "" || ckpt.Status.StorageType == "" {
-			version := consts.DefaultCheckpointArtifactVersion
-			if ckpt.Annotations != nil {
-				annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
-				if annotatedVersion != "" {
-					version = annotatedVersion
-				}
-			}
+			version := desiredArtifactVersion(ckpt)
 			location, storageType, err := checkpoint.ResolveCheckpointStorage(
 				ckpt.Status.IdentityHash,
 				version,
@@ -470,13 +474,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if hash == "" {
 		hash, _ = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
 	}
-	version := consts.DefaultCheckpointArtifactVersion
-	if ckpt.Annotations != nil {
-		annotatedVersion := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
-		if annotatedVersion != "" {
-			version = annotatedVersion
-		}
-	}
+	version := desiredArtifactVersion(ckpt)
 
 	// Add checkpoint-related labels
 	if podTemplate.Labels == nil {

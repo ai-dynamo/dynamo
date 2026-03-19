@@ -396,8 +396,10 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		primary.Name = "friendly-primary"
 		primary.Status.IdentityHash = testHash
 		primary.Status.JobName = defaultCheckpointJobName
-		duplicate := makeTestCheckpoint("")
+		duplicate := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
 		duplicate.Name = "friendly-duplicate"
+		duplicate.Status.IdentityHash = testHash
+		duplicate.Status.JobName = "checkpoint-job-" + testHash + "-2"
 
 		r := makeCheckpointReconciler(s, primary, duplicate)
 		_, err := r.Reconcile(ctx, ctrl.Request{
