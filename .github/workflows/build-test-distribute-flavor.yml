@@ -262,6 +262,7 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
+
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)

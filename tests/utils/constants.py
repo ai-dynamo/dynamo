@@ -10,6 +10,8 @@ avoid importing from conftest and to keep values consistent.
 import os
 from enum import IntEnum
 
+CI_MODELS_DIR = os.environ.get("CI_MODELS_DIR", "/models/ci/models")
+
 QWEN = "Qwen/Qwen3-0.6B"
 LLAMA = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # on an l4 gpu, must limit --max-seq-len, otherwise it will not fit
 GPT_OSS = "openai/gpt-oss-20b"
