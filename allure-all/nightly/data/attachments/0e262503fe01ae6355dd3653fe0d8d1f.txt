@@ -1,0 +1,82 @@
+[2m2026-03-19T20:59:38.177887Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4312 in /workspace
+[2m2026-03-19T20:59:38.178877Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4312
+[2m2026-03-19T20:59:38.279598Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4312
+[2m2026-03-19T20:59:38.279891Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-19T20:59:38.281897Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-19T20:59:38.282679Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2444 --advertise-client-urls http://0.0.0.0:2444 --listen-peer-urls http://0.0.0.0:2445 --initial-advertise-peer-urls http://localhost:2445 --initial-cluster default=http://localhost:2445 --data-dir /tmp/etcd_pysiayc2 in /workspace
+[2m2026-03-19T20:59:38.283533Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2444
+[2m2026-03-19T20:59:38.384185Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2444
+[2m2026-03-19T20:59:38.387967Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting omni_i2v test_deployment
+[2m2026-03-19T20:59:38.388037Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+[2m2026-03-19T20:59:38.388087Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_omni_i2v.sh
+[2m2026-03-19T20:59:38.388270Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_omni_i2v.sh --vae-use-slicing --vae-use-tiling --enforce-eager --enable-cpu-offload in /workspace/examples/backends/vllm
+[2m2026-03-19T20:59:38.389760Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8075/v1/models
+[2m2026-03-19T21:00:00.413192Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8075/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-03-19T21:00:20.433478Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8075/v1/models (custom check failed) (attempt=22, elapsed=41.0s)
+[2m2026-03-19T21:00:40.456492Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8075/v1/models (custom check failed) (attempt=32, elapsed=61.1s)
+[2m2026-03-19T21:00:58.479864Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8075/v1/models (attempt=41, elapsed=79.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+      "object": "model",
+      "created": 1773954057,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-19T21:00:58.480005Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8075/health
+[2m2026-03-19T21:00:59.485050Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8075/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7113889743650143241,
+      "transport": {
+        "tcp": "10.1.85.172:46741/62b99d07e58fbc09/generate"
+      }
+    }
+  ]
+}
+[2m2026-03-19T21:00:59.485279Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: I2VPayload
+[2m2026-03-19T21:00:59.485518Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8075/v1/videos" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Make it dance",
+  "size": "320x192",
+  "response_format": "url",
+  "nvext": {
+    "num_inference_steps": 5,
+    "num_frames": 9,
+    "guidance_scale": 1.0,
+    "boundary_ratio": 0.875,
+    "guidance_scale_2": 1.0,
+    "seed": 42
+  },
+  "input_reference": "/tmp/tmp_qt08pct/input.png",
+  "model": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+}'
+[2m2026-03-19T21:01:24.617715Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=25.13s
+[2m2026-03-19T21:01:24.618364Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+file:///tmp/dynamo_media/videos/a313e4e7-a245-4021-b47b-e27271f72b74.mp4
+[2m2026-03-19T21:01:24.620004Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6685
+[2m2026-03-19T21:01:32.729900Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6687 name: tee
+[2m2026-03-19T21:01:32.730061Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6687 tee
+[2m2026-03-19T21:01:32.731136Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6686 name: sed
+[2m2026-03-19T21:01:32.731229Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6686 sed
+[2m2026-03-19T21:01:32.736022Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6672
+[2m2026-03-19T21:01:32.837383Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6673 name: sed
+[2m2026-03-19T21:01:32.837489Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6673 sed
+[2m2026-03-19T21:01:32.840681Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6659
+[2m2026-03-19T21:01:32.942001Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6660 name: sed
+[2m2026-03-19T21:01:32.942105Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6660 sed

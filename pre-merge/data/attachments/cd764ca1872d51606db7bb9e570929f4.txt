@@ -1,0 +1,91 @@
+[2m2026-03-19T20:32:54.243987Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4297 in /workspace
+[2m2026-03-19T20:32:54.245032Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4297
+[2m2026-03-19T20:32:54.345685Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4297
+[2m2026-03-19T20:32:54.345967Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-19T20:32:54.347762Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-19T20:32:54.348518Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2432 --advertise-client-urls http://0.0.0.0:2432 --listen-peer-urls http://0.0.0.0:2433 --initial-advertise-peer-urls http://localhost:2433 --initial-cluster default=http://localhost:2433 --data-dir /tmp/etcd_ejgr31ff in /workspace
+[2m2026-03-19T20:32:54.349398Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2432
+[2m2026-03-19T20:32:54.450092Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2432
+[2m2026-03-19T20:32:54.454245Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting multimodal_agg_qwen test_deployment
+[2m2026-03-19T20:32:54.454325Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-03-19T20:32:54.454377Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-03-19T20:32:54.454569Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/sglang/launch/agg.sh --model-path Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl in /workspace/examples/backends/sglang
+[2m2026-03-19T20:32:54.455739Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8031/v1/models
+[2m2026-03-19T20:33:16.477999Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8031/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-03-19T20:33:36.498868Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8031/v1/models (custom check failed) (attempt=22, elapsed=41.0s)
+[2m2026-03-19T20:33:54.515998Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8031/v1/models (attempt=31, elapsed=59.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "object": "model",
+      "created": 1773952433,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-19T20:33:54.516151Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8031/health
+[2m2026-03-19T20:33:55.518385Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8031/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1240069929241566985,
+      "transport": {
+        "tcp": "10.1.69.87:35843/11359d07cd165f09/generate"
+      }
+    }
+  ]
+}
+[2m2026-03-19T20:33:55.518634Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-03-19T20:33:55.518893Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8031/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct"
+}'
+[2m2026-03-19T20:34:03.407792Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=7.89s
+[2m2026-03-19T20:34:03.408059Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['image']
+[2m2026-03-19T20:34:03.408135Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+The image shows a streetcar or trolleybus parked on a street, with the words "OUT OF SERVICE" displayed prominently on its front electronic sign. The vehicle appears to be stationary, and the street i...
+[2m2026-03-19T20:34:03.413258Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5561
+[2m2026-03-19T20:34:11.527560Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5563 name: tee
+[2m2026-03-19T20:34:11.527725Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5563 tee
+[2m2026-03-19T20:34:11.531437Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5562 name: sed
+[2m2026-03-19T20:34:11.531550Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5562 sed
+[2m2026-03-19T20:34:11.537270Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5548
+[2m2026-03-19T20:34:11.641294Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5549 name: sed
+[2m2026-03-19T20:34:11.641404Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5549 sed
+[2m2026-03-19T20:34:11.645458Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5536
+[2m2026-03-19T20:34:11.750157Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5537 name: sed
+[2m2026-03-19T20:34:11.750302Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5537 sed

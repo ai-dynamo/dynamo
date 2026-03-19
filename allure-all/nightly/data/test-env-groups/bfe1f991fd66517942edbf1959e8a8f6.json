@@ -1,1 +1,1 @@
-{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[disaggregated_logprobs-2]","status":"passed","testResultsByEnv":{"default":"614214582423b14e733147a20b09cf2e"}}
+{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[epd_multimodal-2]","status":"passed","testResultsByEnv":{"default":"1994da1a72dd9c1d225ea66653ade31f"}}

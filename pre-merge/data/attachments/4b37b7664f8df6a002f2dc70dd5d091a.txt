@@ -1,0 +1,73 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4240 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4240
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4240
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2382 --advertise-client-urls http://0.0.0.0:2382 --listen-peer-urls http://0.0.0.0:2383 --initial-advertise-peer-urls http://localhost:2383 --initial-cluster default=http://localhost:2383 --data-dir /tmp/etcd_loexvk0z in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2382
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2382
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:397 Starting SGLang router prefix reuse test with two workers
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:239 Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8138, kv_port=8123) with endpoint: dyn://test-namespace-gqlddnnqer.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:239 Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8139, kv_port=8124) with endpoint: dyn://test-namespace-gqlddnnqer.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:253 [SGLangProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:259 [SGLangProcess] Starting SGLang worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:273 [SGLangProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8123"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:277 [SGLangProcess] Worker 0 launched with PID: 1363
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:286 [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:259 [SGLangProcess] Starting SGLang worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:273 [SGLangProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8124"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:277 [SGLangProcess] Worker 1 launched with PID: 1400
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:302 [SGLangProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:305 [SGLangProcess] Waiting for health checks to complete...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:309 [SGLangProcess] Checking health for worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:314 [SGLangProcess] Worker 0 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:309 [SGLangProcess] Checking health for worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:314 [SGLangProcess] Worker 1 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:321 [SGLangProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:408 Starting 2 SGLang worker processes on single GPU (mem_frac=0.4)
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:409 All SGLang workers using namespace: test-namespace-gqlddnnqer
+INFO     tests.router.helper:helper.py:263 Waiting for workers to be ready
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [2772138227398157580]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [2772138227398157580]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [2772138227398157580]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [2772138227398157580]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [2772138227398157580]
+INFO     tests.router.helper:helper.py:275 Found 2 instance(s): [2772138227398157580, 2772138227398157582]
+INFO     tests.router.helper:helper.py:291 Sending warmup request with 4 tokens
+INFO     tests.router.helper:helper.py:308 All 2 workers are ready
+INFO     tests.router.common:common.py:1503 Workers ready: [2772138227398157580, 2772138227398157582]
+INFO     tests.router.common:common.py:1521 Routing targets: worker_a=(id=2772138227398157580, dp_rank=None), worker_b=(id=2772138227398157582, dp_rank=None)
+INFO     tests.router.common:common.py:1564 Sending request 1/5 with 32 tokens - FORCING worker_id=2772138227398157580
+INFO     tests.router.common:common.py:1582 Request 1 response: prefill_worker_id=2772138227398157580, decode_worker_id=2772138227398157580, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1564 Sending request 2/5 with 48 tokens - FORCING worker_id=2772138227398157580
+INFO     tests.router.common:common.py:1582 Request 2 response: prefill_worker_id=2772138227398157580, decode_worker_id=2772138227398157580, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1564 Sending request 3/5 with 48 tokens - FORCING worker_id=2772138227398157582
+INFO     tests.router.common:common.py:1582 Request 3 response: prefill_worker_id=2772138227398157582, decode_worker_id=2772138227398157582, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1564 Sending request 4/5 with 64 tokens
+INFO     tests.router.common:common.py:1582 Request 4 response: prefill_worker_id=2772138227398157580, decode_worker_id=2772138227398157580, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1564 Sending request 5/5 with 48 tokens
+INFO     tests.router.common:common.py:1582 Request 5 response: prefill_worker_id=2772138227398157582, decode_worker_id=2772138227398157582, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1636 Response routing verified: req4 → worker_a (id=2772138227398157580, dp_rank=None), req5 → worker_b (id=2772138227398157582, dp_rank=None)
+INFO     tests.router.common:common.py:1654 Events by (worker_id, dp_rank): [((2772138227398157582, 0), 4), ((2772138227398157580, 0), 5)]
+INFO     tests.router.common:common.py:1674 Successfully verified cross-worker routing: worker_a (2772138227398157580, 0) has 5 events, worker_b (2772138227398157582, 0) has 4 events
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:329 Stopping SGLang worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 1363
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1365 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1365 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1364 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1364 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:329 Stopping SGLang worker 1
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 1400
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1402 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1402 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1401 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1401 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:334 Waiting for SGLang worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 1349
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1350 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1350 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 1337
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1338 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1338 sed

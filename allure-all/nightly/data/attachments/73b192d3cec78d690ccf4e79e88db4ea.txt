@@ -1,0 +1,13 @@
+INFO     root:conftest.py:205 Downloading 5 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'}
+INFO     root:conftest.py:142 HF_TOKEN found in environment
+INFO     root:conftest.py:159 Pre-downloading model: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:186 Successfully pre-downloaded: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:159 Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+INFO     root:conftest.py:186 Successfully pre-downloaded: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+INFO     root:conftest.py:159 Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+INFO     root:conftest.py:186 Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+INFO     root:conftest.py:159 Pre-downloading model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+INFO     root:conftest.py:186 Successfully pre-downloaded: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+INFO     root:conftest.py:159 Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+INFO     root:conftest.py:186 Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
