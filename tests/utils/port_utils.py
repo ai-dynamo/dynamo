@@ -38,6 +38,7 @@ class ServicePorts:
 
     frontend_port: int
     system_ports: list[int]
+    kv_event_port: int = 0
 
 
 def _load_port_registry() -> dict:
