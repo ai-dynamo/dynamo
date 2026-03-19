@@ -289,13 +289,14 @@ def find_markdown_files(root_dir: str, logger: logging.Logger) -> List[Path]:
         logger.error(error_msg)
         raise ValueError(error_msg)
 
-    # Patterns for files to skip (attribution files, etc.)
+    # Patterns for files to skip (attribution files, generated references, etc.)
     skip_patterns = [
         "ATTRIBUTION",
         "ATTRIBUTIONS",
         "THIRD_PARTY",
         "THIRD-PARTY",
         "LICENSES",
+        "API-REFERENCE",
     ]
 
     md_files = []

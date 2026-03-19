@@ -26,6 +26,7 @@ import (
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -472,8 +473,11 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			Message:            groveTopoCond.Message,
 			LastTransitionTime: metav1.Now(),
 		}
-		logger.Info("Topology constraints no longer enforced", "reason", reason, "message", groveTopoCond.Message)
-		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
+		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable)
+		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
+			logger.Info("Topology constraints no longer enforced", "reason", reason, "message", groveTopoCond.Message)
+			r.Recorder.Eventf(dgd, corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
+		}
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
 		dynamoCond = metav1.Condition{
