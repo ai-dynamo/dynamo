@@ -168,9 +168,9 @@ sglang_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
-    "multimodal_epd_qwen": SGLangConfig(
+    "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
-        name="multimodal_epd_qwen",
+        name="multimodal_e_pd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
@@ -182,8 +182,6 @@ sglang_configs = {
             "DYN_WORKER_GPU": "0",
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
-            # FIXME: NIXL Agent Initialization (shared memory interface) causes segfault
-            "UCX_TLS": "^mm",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -220,10 +218,7 @@ sglang_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
-        env={
-            # FIXME: NIXL Agent Initialization (shared memory interface) causes segfault
-            "UCX_TLS": "^mm",
-        },
+        env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(

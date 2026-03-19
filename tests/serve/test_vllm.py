@@ -299,8 +299,8 @@ vllm_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
-    "multimodal_disagg_qwen3vl_2b_e_pd": VLLMConfig(
-        name="multimodal_disagg_qwen3vl_2b_e_pd",
+    "multimodal_e_pd_qwen": VLLMConfig(
+        name="multimodal_e_pd_qwen",
         directory=vllm_dir,
         script_name="disagg_multimodal_e_pd.sh",
         marks=[
@@ -311,6 +311,9 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        env={
+            "DYN_VLLM_EMBEDDING_TRANSFER_MODE": "nixl-write",
+        },
         request_payloads=[
             chat_payload(
                 [
@@ -376,8 +379,8 @@ vllm_configs = {
     # so _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE has no effect. Regardless of GPU_MEM
     # fractions (0.1/0.4/0.4), the 3 workers combined consistently use ~17.6 GiB
     # total on this GPU.
-    "multimodal_disagg_qwen3vl_2b_epd": VLLMConfig(
-        name="multimodal_disagg_qwen3vl_2b_epd",
+    "multimodal_disagg_qwen": VLLMConfig(
+        name="multimodal_disagg_qwen",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
         marks=[

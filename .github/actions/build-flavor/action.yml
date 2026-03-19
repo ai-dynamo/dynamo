@@ -87,10 +87,6 @@ inputs:
     description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) forwarded to docker-remote-build'
     required: false
     default: ''
-  auto_acr_deploy:
-    description: 'Also push the image directly to ACR using the same tag (mirrors copy-to-acr behavior)'
-    required: false
-    default: 'false'
 outputs:
   target_tag_plain:
     description: 'Target tag (without registry prefix)'
@@ -98,6 +94,9 @@ outputs:
   test_tag_plain:
     description: 'Test tag (without registry prefix)'
     value: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
+  cuda_version_plain:
+    description: 'CUDA major version (e.g., 12 from 12.9)'
+    value: ${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
 
 runs:
   using: "composite"
@@ -153,9 +152,6 @@ runs:
               RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
             fi
           done <<< "$EXTRA_TAGS"
-        fi
-        if [ "${{ inputs.auto_acr_deploy }}" == "true" ]; then
-          RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
         fi
         if [ "${{ inputs.build_only }}" == "true" ]; then
           if [ -z "${{ inputs.sanitized_ref_name }}" ]; then
