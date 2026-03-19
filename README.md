@@ -126,7 +126,7 @@ Also available: [`tensorrtllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/res
 pip install "ai-dynamo[sglang]"   # or [vllm] or [trtllm]
 ```
 
-Then start the frontend and a worker as shown above. See the [full installation guide](https://docs.nvidia.com/dynamo/getting-started/quickstart) for system dependencies and backend-specific notes.
+Then start the frontend and a worker as shown above. See the [full installation guide](docs/getting-started/local-installation.md) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 
@@ -159,7 +159,7 @@ See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS
 
 ## Building from Source
 
-For contributors who want to build and develop locally. See the [full build guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide#building-from-source) for details.
+For contributors who want to build and develop locally. See the [full build guide](docs/getting-started/building-from-source.md) for details.
 
 ```bash
 # Install system deps (Ubuntu 24.04)

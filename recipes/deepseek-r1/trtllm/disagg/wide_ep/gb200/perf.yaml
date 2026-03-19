@@ -13,6 +13,7 @@ spec:
       labels:
         app: deepseek-r1-bench
     spec:
+      tolerations: []
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

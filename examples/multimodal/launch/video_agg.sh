@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../common/gpu_utils.sh"
+
 # Default values
 MODEL_NAME="llava-hf/LLaVA-NeXT-Video-7B-hf"
 PROMPT_TEMPLATE="USER: <video>\n<prompt> ASSISTANT:"
@@ -16,8 +19,10 @@ python -m dynamo.frontend --http-port=8000 &
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME")
+
 CUDA_VISIBLE_DEVICES=0 python3 components/video_encode_worker.py --model $MODEL_NAME --num-frames-to-sample $NUM_FRAMES_TO_SAMPLE &
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
 
 # Wait for all background processes to complete
 wait

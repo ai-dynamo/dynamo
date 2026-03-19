@@ -24,6 +24,10 @@ navigation:
         path: getting-started/quickstart.md
       - page: Introduction
         path: getting-started/introduction.md
+      - page: Local Installation
+        path: getting-started/local-installation.md
+      - page: Building from Source
+        path: getting-started/building-from-source.md
       - page: Contribution Guide
         path: contribution-guide.md
 
@@ -93,6 +97,10 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - section: Testing
+        contents:
+          - page: Mocker
+            path: mocker/mocker.md
       - section: Multimodal
         path: features/multimodal/README.md
         contents:

@@ -15,7 +15,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
 )
 
-// RestoreLogFilename is the CRIU restore log filename (also used by orchestrate/restore.go).
+// RestoreLogFilename is the CRIU restore log filename (also used by executor/restore.go).
 const RestoreLogFilename = "restore.log"
 
 const (

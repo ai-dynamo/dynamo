@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/orchestrate"
 )
 
 func main() {
@@ -25,13 +25,13 @@ func main() {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
 
-	opts := orchestrate.RestoreOptions{
+	opts := executor.RestoreOptions{
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 	}
 
-	restoredPID, err := orchestrate.RestoreInNamespace(context.Background(), opts, log)
+	restoredPID, err := executor.RestoreInNamespace(context.Background(), opts, log)
 	if err != nil {
 		fatal(log, err, "restore failed")
 	}

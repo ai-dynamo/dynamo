@@ -144,17 +144,14 @@ const (
 	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
 
 	// Kubernetes labels
-	KubeLabelIsCheckpointSource = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointHash     = "nvidia.com/snapshot-checkpoint-hash"      // Checkpoint identity hash (= DynamoCheckpoint CR name)
-	KubeLabelIsRestoreTarget    = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
+	KubeLabelIsCheckpointSource         = "nvidia.com/snapshot-is-checkpoint-source"    // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash             = "nvidia.com/snapshot-checkpoint-hash"         // Checkpoint identity hash used for lookup/reuse (may differ from DynamoCheckpoint metadata.name)
+	KubeLabelIsRestoreTarget            = "nvidia.com/snapshot-is-restore-target"       // Pod label that triggers DaemonSet auto-restore
+	KubeAnnotationCheckpointLocation    = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
+	KubeAnnotationCheckpointStorageType = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
 
 	// Environment variables injected into pods
-	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
-	EnvCheckpointLocation     = "DYN_CHECKPOINT_LOCATION"       // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
-	EnvCheckpointPath         = "DYN_CHECKPOINT_PATH"           // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
-	EnvCheckpointHash         = "DYN_CHECKPOINT_HASH"           // Identity hash — all checkpoint-related pods
 	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
-	EnvSkipWaitForCheckpoint  = "SKIP_WAIT_FOR_CHECKPOINT"      // Skip polling, check once — restored/DGD pods
 	// Checkpoint pod-internal constants
 	CheckpointVolumeName = "checkpoint-storage" // Pod-internal volume name for checkpoint PVC
 
@@ -173,19 +170,12 @@ const (
 	PodInfoFieldPodUID       = "metadata.uid"
 	PodInfoFieldPodNamespace = "metadata.namespace"
 
-	// Downward API file names for DGD annotations
-	PodInfoFileDynNamespace        = "dyn_namespace"
-	PodInfoFileDynComponent        = "dyn_component"
-	PodInfoFileDynParentDGDName    = "dyn_parent_dgd_name"
-	PodInfoFileDynParentDGDNS      = "dyn_parent_dgd_namespace"
-	PodInfoFileDynDiscoveryBackend = "dyn_discovery_backend"
-
-	// Annotation keys for DGD info (exposed via Downward API)
-	AnnotationDynNamespace        = "nvidia.com/dyn-namespace"
-	AnnotationDynComponent        = "nvidia.com/dyn-component"
-	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
-	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
-	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
+	// Downward API file names for restore identity
+	PodInfoFileDynNamespace             = "dyn_namespace"
+	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
+	PodInfoFileDynComponent             = "dyn_component"
+	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
+	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
 	// Rolling update annotations
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"

@@ -1,80 +1,203 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Shared GPU utility functions for launch scripts.
 #
-# Usage:
+# CLI:
+#   ./gpu_utils.sh <engine> --model <name> [options...]   Print GPU fraction
+#   ./gpu_utils.sh --self-test                            Run self-test suite
+#
+# Source:
 #   source "$(dirname "$(readlink -f "$0")")/../common/gpu_utils.sh"
 #   # or with SCRIPT_DIR already set:
 #   source "$SCRIPT_DIR/../common/gpu_utils.sh"
 #
-# Functions:
-#   get_model_params <model>           Set _MP_* vars for a known model's architecture
-#   estimate_worker_vram <model> ...   Set _EW_* vars with per-worker VRAM estimate
-#   gpu_worker_fraction <engine>       Convert _EW_* estimate → engine-appropriate fraction
-#   gpu_gb_to_total_fraction <gib>     Convert absolute GiB → fraction of TOTAL VRAM (vLLM/sglang)
-#   gpu_gb_to_free_fraction <gib>      Convert absolute GiB → fraction of FREE VRAM (TensorRT-LLM)
+# Functions (all return via stdout — no hidden globals):
+#   build_gpu_mem_args <engine> <model> ...     Prints fraction (or empty)
+#   get_model_params <model>                    Prints "pb wb layers kvh hd"
+#   estimate_worker_vram <model> ...            Prints "w_gib kv_gib oh_gib total_gib"
+#   gpu_worker_fraction <engine> <total> <kv>   Prints engine-appropriate fraction
+#   gpu_peak_to_engine_fraction <engine> <peak> Prints fraction (subtracts engine overhead)
+#   gpu_gb_to_total_fraction <gib>              Prints fraction of TOTAL VRAM (vLLM/sglang)
+#   gpu_gb_to_free_fraction <gib>               Prints fraction of FREE VRAM (TensorRT-LLM)
+
+# build_gpu_mem_args <engine> [options...]
+#
+# Prints the computed memory fraction to stdout (empty line if none).
+# Callers capture with:  GPU_MEM_FRACTION=$(build_gpu_mem_args ...)
+#
+# Priority:
+#   1. _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE  (profiler binary search)
+#   2. Engine flag passed to this function  (user already chose a value)
+#   3. estimate_worker_vram + gpu_worker_fraction  (model architecture)
+#   4. Empty  (let engine use its own default)
+#
+# Options (each flag accepts engine-specific aliases):
+#   --model NAME                 Model name (required).
+#     aliases: --model-path        (sglang, trtllm)
+#   --max-model-len N            Max tokens per sequence (default: 4096).
+#     aliases: --context-length    (sglang)
+#              --max-seq-len       (trtllm)
+#   --max-num-seqs N             Concurrent sequences to budget for (default: 2).
+#     aliases: --max-running-requests (sglang)
+#              --max-batch-size       (trtllm)
+#   --gpu-memory-utilization F   User override (vllm flag name).  Skipped when empty.
+#   --mem-fraction-static F      User override (sglang flag name).
+#   --workers-per-gpu N          Divide the fraction by N (for shared-GPU disagg).
+#
+# Usage:
+#   # Simple single-worker (agg.sh)
+#   GPU_MEM_FRACTION=$(build_gpu_mem_args vllm \
+#       --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+#   python -m dynamo.vllm --model "$MODEL" \
+#       ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
+#
+#   # Two workers sharing one GPU (disagg_same_gpu.sh)
+#   GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --workers-per-gpu 2)
+#   python -m dynamo.vllm ... --gpu-memory-utilization "${GPU_MEM_FRACTION}" &
+#
+#   # sglang
+#   GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --workers-per-gpu 2)
+#   python -m dynamo.sglang ... --mem-fraction-static "${GPU_MEM_FRACTION}" &
+#
+#   # trtllm (fraction goes into JSON, not CLI)
+#   GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --workers-per-gpu 2)
+#   OVERRIDE_ARGS=(--override-engine-args "{\"kv_cache_config\":{\"free_gpu_memory_fraction\":${GPU_MEM_FRACTION}}}")
+build_gpu_mem_args() {
+    local engine="${1:?usage: build_gpu_mem_args <engine> --model <name> [options...]}"
+    shift
+
+    local model=""
+    local max_model_len="4096"
+    local max_seqs="2"
+    local workers_per_gpu=1
+    local user_frac=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model|--model-path)
+                                model="$2";           shift 2 ;;
+            --max-model-len|--context-length|--max-seq-len)
+                                max_model_len="$2";   shift 2 ;;
+            --max-num-seqs|--max-running-requests|--max-batch-size)
+                                max_seqs="$2";        shift 2 ;;
+            --gpu-memory-utilization|--mem-fraction-static)
+                                user_frac="$2";       shift 2 ;;
+            --workers-per-gpu)  workers_per_gpu="$2"; shift 2 ;;
+            *) echo "build_gpu_mem_args: unknown option '$1'" >&2; return 1 ;;
+        esac
+    done
+
+    if [[ -z "$model" ]]; then
+        echo "build_gpu_mem_args: --model is required" >&2
+        return 1
+    fi
+
+    local frac=""
+    local from_estimator=false
+    local est_w="" est_kv="" est_oh="" est_total=""
+    if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
+        frac="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE"
+    elif [[ -n "$user_frac" ]]; then
+        frac="$user_frac"
+    elif read -r est_w est_kv est_oh est_total <<< "$(estimate_worker_vram "$model" "$max_model_len" "$max_seqs" "$engine" 2>/dev/null)" && [[ -n "$est_total" ]]; then
+        frac=$(gpu_worker_fraction "$engine" "$est_total" "$est_kv")
+        from_estimator=true
+    fi
+
+    # --workers-per-gpu divides profiler/user/estimator results only
+    if [[ -n "$frac" && "$workers_per_gpu" -gt 1 ]]; then
+        frac=$(awk -v f="$frac" -v n="$workers_per_gpu" 'BEGIN { printf "%.2f", f / n }')
+    fi
+
+    echo "$frac"
+}
 
 # get_model_params <model_name>
 #
-# Sets _MP_* variables for a known model's architecture:
-#   _MP_PARAMS_B       Total parameters in billions (all experts for MoE)
-#   _MP_WEIGHT_BYTES   Bytes per weight element (2=BF16/FP16, 1=FP8)
-#   _MP_LAYERS         Number of transformer layers
-#   _MP_KV_HEADS       Number of key-value heads (GQA groups)
-#   _MP_HEAD_DIM       Dimension per attention head
+# Prints "params_b weight_bytes layers kv_heads head_dim" to stdout.
+# Returns 1 (prints nothing) if the model is unknown.
+#
+# Fields:
+#   params_b       Total parameters in billions (all experts for MoE)
+#   weight_bytes   Bytes per weight element (2=BF16/FP16, 1=FP8)
+#   layers         Number of transformer layers
+#   kv_heads       Number of key-value heads (GQA groups)
+#   head_dim       Dimension per attention head
 #
 # KV cache is assumed BF16 (2 bytes per element) regardless of weight dtype,
 # since FP8 KV cache (--kv-cache-dtype fp8) is opt-in and not the default.
 #
-# To add a model: look up config.json on HuggingFace for num_hidden_layers,
-# num_key_value_heads, and head_dim. For VL/multimodal models, use the
-# text_config section. For MoE, _MP_PARAMS_B is the TOTAL param count
-# (all experts are loaded into VRAM).
+# To add a model:
+#   1. Find config.json at  https://huggingface.co/<model>/raw/main/config.json
+#      For VL/multimodal models, architecture params are under text_config.
+#   2. Map fields:
+#        layers    ← num_hidden_layers
+#        kv_heads  ← num_key_value_heads
+#        head_dim  ← head_dim  (or hidden_size / num_attention_heads)
+#   3. params_b: total parameter count in billions.  Derive from:
+#        - safetensors file size:  size_bytes / weight_bytes / 1e9
+#          (single file: ls -l model.safetensors; sharded: metadata.total_size
+#          in model.safetensors.index.json)
+#        - or the model card / paper
+#      For MoE: params_b is the TOTAL count (all experts loaded into VRAM).
+#   4. weight_bytes: 2 for BF16/FP16, 1 for FP8/INT8.
 #
 # Usage:
-#   get_model_params "Qwen/Qwen3-0.6B"
-#   echo "$_MP_LAYERS layers, $_MP_KV_HEADS KV heads"
+#   read -r pb wb layers kvh hd <<< "$(get_model_params "Qwen/Qwen3-0.6B")"
+#   echo "$layers layers, $kvh KV heads"
 get_model_params() {
     local model="${1:?usage: get_model_params <model_name>}"
+    local pb wb layers kvh hd
     case "$model" in
+        # https://huggingface.co/Qwen/Qwen3-0.6B/raw/main/config.json
         Qwen/Qwen3-0.6B)
-            _MP_PARAMS_B=0.6;  _MP_WEIGHT_BYTES=2
-            _MP_LAYERS=28;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+            pb=0.6;  wb=2; layers=28; kvh=8;  hd=128 ;;
+        # https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/raw/main/config.json  (text_config)
+        # params_b from model.safetensors.index.json metadata.total_size / 2 / 1e9
+        Qwen/Qwen2-VL-2B-Instruct)
+            pb=2.2;  wb=2; layers=28; kvh=2;  hd=128 ;;
+        # https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct/raw/main/config.json  (text_config)
         Qwen/Qwen2.5-VL-7B-Instruct)
-            _MP_PARAMS_B=8.3;  _MP_WEIGHT_BYTES=2
-            _MP_LAYERS=28;  _MP_KV_HEADS=4;   _MP_HEAD_DIM=128 ;;
+            pb=8.3;  wb=2; layers=28; kvh=4;  hd=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/raw/main/config.json  (text_config)
+        # params_b from model.safetensors size / 2 / 1e9
+        Qwen/Qwen3-VL-2B-Instruct)
+            pb=2.1;  wb=2; layers=28; kvh=8;  hd=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/raw/main/config.json  (text_config)
         Qwen/Qwen3-VL-8B-Instruct)
-            _MP_PARAMS_B=9.2;  _MP_WEIGHT_BYTES=2
-            _MP_LAYERS=36;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+            pb=9.2;  wb=2; layers=36; kvh=8;  hd=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-30B-A3B/raw/main/config.json
         Qwen/Qwen3-30B-A3B|\
         Qwen/Qwen3-30B-A3B-Instruct)
-            _MP_PARAMS_B=30.5; _MP_WEIGHT_BYTES=2
-            _MP_LAYERS=48;  _MP_KV_HEADS=4;   _MP_HEAD_DIM=128 ;;
+            pb=30.5; wb=2; layers=48; kvh=4;  hd=128 ;;
+        # Same architecture as Qwen3-30B-A3B but FP8 quantized (1 byte per weight)
         Qwen/Qwen3-VL-30B-A3B-Instruct-FP8)
-            _MP_PARAMS_B=30.5; _MP_WEIGHT_BYTES=1
-            _MP_LAYERS=48;  _MP_KV_HEADS=4;   _MP_HEAD_DIM=128 ;;
+            pb=30.5; wb=1; layers=48; kvh=4;  hd=128 ;;
+        # https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct/raw/main/config.json
         meta-llama/Meta-Llama-3.1-8B-Instruct)
-            _MP_PARAMS_B=8.0;  _MP_WEIGHT_BYTES=2
-            _MP_LAYERS=32;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+            pb=8.0;  wb=2; layers=32; kvh=8;  hd=128 ;;
+        # https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/raw/main/config.json
+        # MHA (not GQA): num_key_value_heads == num_attention_heads == 32
+        deepseek-ai/deepseek-llm-7b-base)
+            pb=6.9;  wb=2; layers=30; kvh=32; hd=128 ;;
+        # https://huggingface.co/llava-hf/llava-1.5-7b-hf/raw/main/config.json  (text_config)
+        # MHA: num_key_value_heads == num_attention_heads == 32
         llava-hf/llava-1.5-7b-hf)
-            _MP_PARAMS_B=7.1;  _MP_WEIGHT_BYTES=2
-            _MP_LAYERS=32;  _MP_KV_HEADS=32;  _MP_HEAD_DIM=128 ;;
+            pb=7.1;  wb=2; layers=32; kvh=32; hd=128 ;;
         *)
             echo "get_model_params: unknown model '$model'" >&2
             echo "Add it to get_model_params() in gpu_utils.sh" >&2
             return 1 ;;
     esac
+    echo "$pb $wb $layers $kvh $hd"
 }
 
 # estimate_worker_vram <model> [max_model_len] [max_concurrent_seqs] [engine_or_overhead]
 #
-# Calls get_model_params, then sets:
-#   _EW_WEIGHTS_GIB    Estimated model weight memory
-#   _EW_KV_GIB         Estimated KV cache memory
-#   _EW_OVERHEAD_GIB   Overhead used (auto-computed or explicit)
-#   _EW_TOTAL_GIB      Estimated total per-worker VRAM (weights + kv + overhead)
+# Prints "weights_gib kv_gib overhead_gib total_gib" to stdout.
+# Returns 1 (prints nothing) if the model is unknown to get_model_params.
 #
 # Formula:
 #   weights = params_b * 1e9 * weight_bytes
@@ -102,72 +225,109 @@ get_model_params() {
 # See examples/common/gpu_utils.md for the full derivation.
 #
 # Usage:
-#   estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 vllm      # auto overhead
-#   estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 trtllm     # auto overhead
-#   estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 3.5        # explicit 3.5 GiB
-#   estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2            # default 2.0 GiB
-#   echo "$_EW_TOTAL_GIB GiB (w=$_EW_WEIGHTS_GIB kv=$_EW_KV_GIB oh=$_EW_OVERHEAD_GIB)"
+#   read -r w kv oh total <<< "$(estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 vllm)"
+#   echo "$total GiB (w=$w kv=$kv oh=$oh)"
 estimate_worker_vram() {
     local model="${1:?usage: estimate_worker_vram <model> [seq_len] [seqs] [engine_or_overhead]}"
     local seqlen="${2:-4096}"
     local seqs="${3:-2}"
     local engine_or_overhead="${4:-2.0}"
 
-    get_model_params "$model" || return 1
+    local mp_out
+    mp_out=$(get_model_params "$model") || return 1
+    local pb wb layers kvh hd
+    read -r pb wb layers kvh hd <<< "$mp_out"
 
     local overhead
     case "$engine_or_overhead" in
-        vllm)   overhead=$(awk -v p="$_MP_PARAMS_B" 'BEGIN { printf "%.1f", 1.2 + 1.0 * sqrt(p) }') ;;
-        sglang) overhead=$(awk -v p="$_MP_PARAMS_B" 'BEGIN { printf "%.1f", 2.5 + 1.5 * sqrt(p) }') ;;
-        trtllm) overhead=$(awk -v p="$_MP_PARAMS_B" 'BEGIN { printf "%.1f", 2.0 + 1.2 * sqrt(p) }') ;;
+        vllm)   overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 1.2 + 1.0 * sqrt(p) }') ;;
+        sglang) overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 2.5 + 1.5 * sqrt(p) }') ;;
+        trtllm) overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 2.0 + 1.2 * sqrt(p) }') ;;
         *)      overhead="$engine_or_overhead" ;;
     esac
 
-    _EW_OVERHEAD_GIB="$overhead"
-    read -r _EW_WEIGHTS_GIB _EW_KV_GIB _EW_TOTAL_GIB <<< "$(awk \
-        -v pb="$_MP_PARAMS_B" -v wbytes="$_MP_WEIGHT_BYTES" \
-        -v layers="$_MP_LAYERS" -v heads="$_MP_KV_HEADS" -v dim="$_MP_HEAD_DIM" \
+    awk -v pb="$pb" -v wbytes="$wb" \
+        -v layers="$layers" -v heads="$kvh" -v dim="$hd" \
         -v seqlen="$seqlen" -v seqs="$seqs" -v overhead="$overhead" \
         'BEGIN {
             gib = 1024 * 1024 * 1024
             w   = pb * 1e9 * wbytes / gib
             kv  = 2 * layers * heads * dim * 2 * seqlen * seqs / gib
-            printf "%.1f %.1f %.1f", w, kv, w + kv + overhead
-        }')"
+            printf "%.1f %.1f %.1f %.1f", w, kv, overhead, w + kv + overhead
+        }'
 }
 
-# gpu_worker_fraction <engine> [gpu_index]
+# gpu_worker_fraction <engine> <total_gib> <kv_gib> [gpu_index]
 #
-# Unified fraction calculator for all engines.  Reads the _EW_* variables
-# set by estimate_worker_vram and returns the engine-appropriate fraction.
+# Convert estimated GiB into the engine-appropriate GPU memory fraction.
 #
 # Engine semantics (see examples/common/gpu_utils.md):
-#   vllm/sglang  — fraction of TOTAL VRAM.  The engine budgets weights + KV +
-#                  activations inside this limit.  We pass _EW_TOTAL_GIB.
-#   trtllm       — fraction of FREE VRAM (after model load).  The engine uses
-#                  this only for KV cache.  We pass _EW_KV_GIB.
-#
-# This lets every launch script use the same pattern:
-#   estimate_worker_vram "$MODEL" "$SEQ_LEN" "$CONCURRENCY" "$OVERHEAD_GIB"
-#   GPU_MEM_FRACTION=$(gpu_worker_fraction "<engine>")
+#   vllm/sglang  — fraction of TOTAL VRAM (uses total_gib).
+#   trtllm       — fraction of FREE VRAM after model load (uses kv_gib).
 #
 # Usage:
-#   gpu_worker_fraction vllm        # uses _EW_TOTAL_GIB, fraction of total
-#   gpu_worker_fraction sglang      # same as vllm
-#   gpu_worker_fraction trtllm      # uses _EW_KV_GIB, fraction of free
-#   gpu_worker_fraction trtllm 1    # query GPU index 1
+#   gpu_worker_fraction vllm   4.0 0.9      # fraction of total
+#   gpu_worker_fraction trtllm 4.0 0.9      # fraction of free
+#   gpu_worker_fraction trtllm 4.0 0.9 1    # query GPU index 1
 gpu_worker_fraction() {
-    local engine="${1:?usage: gpu_worker_fraction <engine> [gpu_index]}"
-    local gpu_idx="${2:-0}"
+    local engine="${1:?usage: gpu_worker_fraction <engine> <total_gib> <kv_gib> [gpu_index]}"
+    local total_gib="${2:?usage: gpu_worker_fraction <engine> <total_gib> <kv_gib>}"
+    local kv_gib="${3:?usage: gpu_worker_fraction <engine> <total_gib> <kv_gib>}"
+    local gpu_idx="${4:-0}"
     case "$engine" in
         vllm|sglang)
-            gpu_gb_to_total_fraction "$_EW_TOTAL_GIB" "$gpu_idx" ;;
+            gpu_gb_to_total_fraction "$total_gib" "$gpu_idx" ;;
         trtllm)
-            gpu_gb_to_free_fraction "$_EW_KV_GIB" "$gpu_idx" ;;
+            gpu_gb_to_free_fraction "$kv_gib" "$gpu_idx" ;;
         *)
             echo "gpu_worker_fraction: unknown engine '$engine'" >&2
             echo "Supported: vllm, sglang, trtllm" >&2
             return 1 ;;
+    esac
+}
+
+# gpu_peak_to_engine_fraction <engine> <peak_gib> [gpu_index]
+#
+# Convert a measured/profiled GPU peak (total VRAM including CUDA context,
+# activations, etc.) into the engine-specific memory fraction flag.
+#
+# Each engine's fraction controls only a SUBSET of GPU memory (e.g. vLLM's
+# --gpu-memory-utilization covers weights + KV cache but not CUDA context).
+# This function subtracts the engine-specific overhead so the fraction
+# targets the right internal budget, keeping the real peak stable across
+# re-profiles.
+#
+# Overhead constants (GiB outside the engine's budget):
+#   vllm   2.0   CUDA ctx ~0.6 + activations/sampler ~0.5 + PyTorch alloc ~0.5
+#   sglang 2.0   (assumed same as vllm; refine when profiled)
+#   trtllm 0.0   free-fraction is measured after model load, no subtraction needed
+#
+# Usage:
+#   gpu_peak_to_engine_fraction vllm 8.6       # on 48 GiB → 0.14
+#   gpu_peak_to_engine_fraction vllm 20.9      # on 48 GiB → 0.40
+#   gpu_peak_to_engine_fraction vllm 8.6 1     # query GPU index 1
+gpu_peak_to_engine_fraction() {
+    local engine=${1:?usage: gpu_peak_to_engine_fraction <engine> <peak_gib> [gpu_index]}
+    local peak_gib=${2:?usage: gpu_peak_to_engine_fraction <engine> <peak_gib> [gpu_index]}
+    local gpu_idx=${3:-0}
+
+    local overhead
+    case "$engine" in
+        vllm|sglang) overhead=2.0 ;;
+        trtllm)      overhead=0.0 ;;
+        *)
+            echo "gpu_peak_to_engine_fraction: unknown engine '$engine'" >&2
+            echo "Supported: vllm, sglang, trtllm" >&2
+            return 1 ;;
+    esac
+
+    local budget
+    budget=$(awk -v g="$peak_gib" -v oh="$overhead" \
+        'BEGIN { b = g - oh; if (b < 1) b = 1; printf "%.1f", b }')
+
+    case "$engine" in
+        vllm|sglang) gpu_gb_to_total_fraction "$budget" "$gpu_idx" ;;
+        trtllm)      gpu_gb_to_free_fraction  "$budget" "$gpu_idx" ;;
     esac
 }
 
@@ -298,3 +458,189 @@ gpu_gb_to_free_fraction() {
     }'
 }
 
+# ---------------------------------------------------------------------------
+# Self-test: bash gpu_utils.sh --self-test
+# ---------------------------------------------------------------------------
+_gpu_utils_self_test() {
+    local pass=0 fail=0
+    _assert() {
+        local label="$1" expected="$2" actual="$3"
+        if [[ "$expected" == "$actual" ]]; then
+            ((pass++))
+            echo "  PASS  $label"
+        else
+            ((fail++))
+            echo "  FAIL  $label  (expected='$expected'  actual='$actual')"
+        fi
+    }
+
+    echo "=== get_model_params ==="
+
+    local out
+    out=$(get_model_params "Qwen/Qwen3-0.6B")
+    _assert "known model returns 5 fields" "0.6 2 28 8 128" "$out"
+
+    out=$(get_model_params "nope/unknown" 2>/dev/null)
+    _assert "unknown model returns empty" "" "$out"
+
+    get_model_params "nope/unknown" >/dev/null 2>&1
+    _assert "unknown model exits 1" "1" "$?"
+
+    echo ""
+    echo "=== estimate_worker_vram ==="
+
+    out=$(estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 vllm)
+    _assert "returns 4 space-separated fields" "4" "$(echo "$out" | wc -w | tr -d ' ')"
+
+    local w kv oh total
+    read -r w kv oh total <<< "$out"
+    _assert "weights > 0" "yes" "$(awk -v v="$w" 'BEGIN { print (v > 0) ? "yes" : "no" }')"
+    _assert "total > weights" "yes" "$(awk -v t="$total" -v w="$w" 'BEGIN { print (t > w) ? "yes" : "no" }')"
+
+    out=$(estimate_worker_vram "nope/unknown" 2>/dev/null)
+    _assert "unknown model returns empty" "" "$out"
+
+    local out_vllm out_sglang
+    out_vllm=$(estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 vllm)
+    out_sglang=$(estimate_worker_vram "Qwen/Qwen3-0.6B" 4096 2 sglang)
+    _assert "sglang overhead > vllm overhead" "yes" \
+        "$(awk -v v="$out_vllm" -v s="$out_sglang" 'BEGIN {
+            split(v, a); split(s, b); print (b[3]+0 > a[3]+0) ? "yes" : "no"
+        }')"
+
+    echo ""
+    echo "=== build_gpu_mem_args: estimator path (known model) ==="
+
+    local frac
+    frac=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --max-model-len 4096 --max-num-seqs 2)
+    _assert "FRACTION non-empty" "yes" "$([[ -n "$frac" ]] && echo yes || echo no)"
+
+    echo ""
+    echo "=== build_gpu_mem_args: unknown model, no default ==="
+
+    frac=$(build_gpu_mem_args vllm --model "nope/unknown")
+    _assert "FRACTION empty" "" "$frac"
+
+    echo ""
+    echo "=== build_gpu_mem_args: profiler wins over all ==="
+
+    frac=$(_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.55 \
+        build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --gpu-memory-utilization 0.70)
+    _assert "FRACTION = profiler (beats user flag)" "0.55" "$frac"
+
+    echo ""
+    echo "=== build_gpu_mem_args: user flag wins over estimator ==="
+
+    frac=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --gpu-memory-utilization 0.70)
+    _assert "FRACTION = user flag" "0.70" "$frac"
+
+    echo ""
+    echo "=== build_gpu_mem_args: empty user flag falls through ==="
+
+    frac=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --max-model-len 4096 --max-num-seqs 2 --gpu-memory-utilization "")
+    _assert "FRACTION = estimator" "yes" "$([[ -n "$frac" ]] && echo yes || echo no)"
+
+    echo ""
+    echo "=== build_gpu_mem_args: --workers-per-gpu divides estimator ==="
+
+    local undivided
+    undivided=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --max-model-len 4096 --max-num-seqs 2)
+    frac=$(build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --max-model-len 4096 --max-num-seqs 2 --workers-per-gpu 2)
+    local expected_half
+    expected_half=$(awk -v f="$undivided" 'BEGIN { printf "%.2f", f / 2 }')
+    _assert "FRACTION halved" "$expected_half" "$frac"
+
+    echo ""
+    echo "=== build_gpu_mem_args: --workers-per-gpu divides profiler ==="
+
+    frac=$(_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.80 \
+        build_gpu_mem_args vllm --model "Qwen/Qwen3-0.6B" --workers-per-gpu 2)
+    _assert "FRACTION = 0.80/2 = 0.40" "0.40" "$frac"
+
+    echo ""
+    echo "=== build_gpu_mem_args: sglang engine (sglang flag names) ==="
+
+    frac=$(build_gpu_mem_args sglang --model-path "Qwen/Qwen3-0.6B" --context-length 4096 --max-running-requests 2)
+    _assert "sglang FRACTION non-empty" "yes" "$([[ -n "$frac" ]] && echo yes || echo no)"
+
+    echo ""
+    echo "=== build_gpu_mem_args: trtllm engine (trtllm flag names) ==="
+
+    frac=$(build_gpu_mem_args trtllm --model-path "Qwen/Qwen3-0.6B" --max-seq-len 4096 --max-batch-size 2)
+    _assert "trtllm FRACTION non-empty" "yes" "$([[ -n "$frac" ]] && echo yes || echo no)"
+
+    echo ""
+    echo "=== build_gpu_mem_args: --mem-fraction-static user flag (sglang) ==="
+
+    frac=$(build_gpu_mem_args sglang --model-path "Qwen/Qwen3-0.6B" --mem-fraction-static 0.60)
+    _assert "FRACTION = user flag" "0.60" "$frac"
+
+    echo ""
+    echo "=== build_gpu_mem_args: missing --model ==="
+
+    build_gpu_mem_args vllm 2>/dev/null
+    _assert "missing --model exits 1" "1" "$?"
+
+    echo ""
+    echo "=== gpu_worker_fraction: explicit args ==="
+
+    local frac
+    frac=$(gpu_worker_fraction vllm 4.0 0.9)
+    _assert "vllm returns non-empty" "yes" "$([[ -n "$frac" ]] && echo yes || echo no)"
+
+    frac=$(gpu_worker_fraction trtllm 4.0 0.9)
+    _assert "trtllm returns non-empty" "yes" "$([[ -n "$frac" ]] && echo yes || echo no)"
+
+    gpu_worker_fraction badengine 4.0 0.9 >/dev/null 2>&1
+    _assert "bad engine exits 1" "1" "$?"
+
+    echo ""
+    echo "=========================================="
+    echo "Results: $pass passed, $fail failed"
+    echo "=========================================="
+    [[ "$fail" -eq 0 ]]
+}
+
+# CLI mode: only when executed directly (not sourced by another script)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    if [[ "${1:-}" == "--self-test" ]]; then
+        _gpu_utils_self_test
+        exit $?
+    fi
+    if [[ $# -gt 0 ]]; then
+        build_gpu_mem_args "$@"
+        exit $?
+    fi
+
+    cat <<'HELP'
+gpu_utils.sh — GPU memory fraction estimator
+
+Usage:
+  ./gpu_utils.sh <engine> --model <name> [options...]
+  ./gpu_utils.sh --self-test
+
+Engines: vllm, sglang, trtllm
+
+Examples:
+  ./gpu_utils.sh vllm --model Qwen/Qwen3-0.6B
+  ./gpu_utils.sh vllm --model Qwen/Qwen3-0.6B --max-model-len 4096 --max-num-seqs 2
+  ./gpu_utils.sh vllm --model Qwen/Qwen3-0.6B --workers-per-gpu 2
+  ./gpu_utils.sh sglang --model Qwen/Qwen3-0.6B --context-length 8192
+  ./gpu_utils.sh trtllm --model meta-llama/Meta-Llama-3.1-8B-Instruct --max-seq-len 4096
+
+Options:
+  --model NAME               Model name (required)
+    aliases: --model-path
+  --max-model-len N          Max sequence length (default: 4096)
+    aliases: --context-length, --max-seq-len
+  --max-num-seqs N           Concurrent sequences (default: 2)
+    aliases: --max-running-requests, --max-batch-size
+  --gpu-memory-utilization F Override fraction (vllm flag)
+    aliases: --mem-fraction-static
+  --workers-per-gpu N        Divide fraction by N (shared-GPU disagg)
+  --self-test                Run built-in test suite
+
+Output: prints the fraction to stdout (empty if model is unknown).
+HELP
+    exit 0
+fi
