@@ -37,11 +37,11 @@ pub struct CommonArgs {
     pub test: bool,
 
     /// Number of GPU blocks available in the mock engine's KV cache.
-    #[clap(long, default_value = "16384")]
+    #[clap(long, default_value = "1048576")]
     pub num_gpu_blocks: usize,
 
     /// Number of tokens per KV cache block.
-    #[clap(long, default_value = "128")]
+    #[clap(long, default_value = "512")]
     pub block_size: u32,
 
     /// Wall-clock duration (ms) over which the trace is replayed during event generation.
@@ -53,7 +53,7 @@ pub struct CommonArgs {
     pub benchmark_duration_ms: u64,
 
     /// Number of unique simulated inference workers.
-    #[clap(short, long, default_value = "1000")]
+    #[clap(short, long, default_value = "256")]
     pub num_unique_inference_workers: usize,
 
     /// How many times to duplicate unique workers during the benchmark phase.
