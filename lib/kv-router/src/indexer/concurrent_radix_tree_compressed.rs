@@ -527,6 +527,42 @@ impl ConcurrentRadixTreeCompressed {
                     }
                 };
 
+                // Verify the worker still covers parent_hash. A prior removal may
+                // have reduced the worker's cutoff past this position, leaving a
+                // stale entry in the lookup map.
+                {
+                    let guard = node.read();
+                    if let Some(&pos_u16) = guard.edge_index.get(&parent_hash) {
+                        let pos = pos_u16 as usize;
+                        let is_full = guard.full_edge_workers.contains(&worker);
+                        let cutoff = if is_full {
+                            guard.edge.len()
+                        } else {
+                            guard
+                                .worker_cutoffs
+                                .get(&worker)
+                                .copied()
+                                .map(|k| k as usize)
+                                .unwrap_or(0)
+                        };
+                        if pos >= cutoff {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                parent_hash = ?parent_hash,
+                                pos,
+                                cutoff,
+                                "Stale parent: worker no longer covers parent_hash; rejecting store"
+                            );
+                            drop(guard);
+                            let wl = lookup.get_mut(&worker).unwrap();
+                            wl.remove(&parent_hash);
+                            return Err(KvCacheEventError::ParentBlockNotFound);
+                        }
+                    }
+                }
+
                 // If parent_hash is not the tail of the node's edge, split so it becomes tail.
                 let split_data = {
                     let mut guard = node.write();
