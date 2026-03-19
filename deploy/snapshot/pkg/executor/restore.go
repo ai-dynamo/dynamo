@@ -32,6 +32,7 @@ type RestoreRequest struct {
 	PodName               string
 	PodNamespace          string
 	ContainerName         string
+	Clientset             kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.

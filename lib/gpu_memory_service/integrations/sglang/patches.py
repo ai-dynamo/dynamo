@@ -190,7 +190,14 @@ def patch_static_state_for_gms() -> None:
     multiprocessing spawn).  It is triggered by the GMSModelLoader import
     in model_loader.py, which executes at module level in the child.
     """
+    import os
+
     global _static_state_patched
+    logger.info(
+        "[GMS] patch_static_state_for_gms called (pid=%d, already_patched=%s)",
+        os.getpid(),
+        _static_state_patched,
+    )
     if _static_state_patched:
         return
 
@@ -210,10 +217,10 @@ def patch_static_state_for_gms() -> None:
         _static_state_patched = True
         logger.info(
             "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
-            __import__("os").getpid(),
+            os.getpid(),
         )
-    except ImportError:
+    except Exception:
         logger.warning(
-            "[GMS] Could not import scheduler_update_weights_mixin, "
-            "skipping static state patch"
+            "[GMS] Could not patch scheduler_update_weights_mixin: ",
+            exc_info=True,
         )
