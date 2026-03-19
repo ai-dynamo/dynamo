@@ -2755,3 +2755,276 @@ frontend 进程启动
   - `run_input(runtime, "http", engine)`
 - 而你下一步真正要追的处理逻辑，在：
   - `components/src/dynamo/frontend/sglang_processor.py`
+
+### 问题 19
+
+问题：
+
+函数：
+
+```python
+engine = await make_engine(runtime, e)
+```
+
+这里的 `make_engine` 为什么找不到具体的 Python 实现？
+
+详细回答：
+
+因为 `make_engine` **不是普通 Python 函数**，它是：
+
+- 通过 PyO3 暴露给 Python 的 **Rust 扩展函数**
+
+所以你用：
+
+- `rg "def make_engine"`
+
+在 Python 目录里找，大概率是找不到实现体的。
+
+这不是代码丢了，而是它本来就不在 Python 里。
+
+#### 一、先看 Python 导入链
+
+在：
+
+- `components/src/dynamo/frontend/main.py`
+
+里你看到的是：
+
+```python
+from dynamo.llm import make_engine
+```
+
+但 `dynamo.llm` 本身不是纯 Python 实现，它在：
+
+- `lib/bindings/python/src/dynamo/llm/__init__.py`
+
+里只是做了一层 re-export：
+
+```python
+from dynamo._core import make_engine
+```
+
+这里已经把事情暴露得很清楚了：
+
+- `make_engine` 不是在 `dynamo.llm/__init__.py` 里定义的
+- 它只是从：
+  - `dynamo._core`
+
+导入出来的
+
+所以你如果一直在 Python 包里找 `def make_engine`，当然会找不到。
+
+#### 二、`dynamo._core` 是什么
+
+`dynamo._core` 不是普通 Python 包，而是一个：
+
+- Rust 编译出来的 Python 扩展模块
+
+它的注册入口在：
+
+- `lib/bindings/python/rust/lib.rs`
+
+这里有：
+
+```rust
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    ...
+    m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
+    ...
+}
+```
+
+这段代码的意思是：
+
+- Rust 里有一个函数 `llm::entrypoint::make_engine`
+- 通过 PyO3 把它注册成 Python 模块 `_core` 里的函数
+
+所以从 Python 视角看：
+
+- `dynamo._core.make_engine(...)`
+
+像普通 Python 函数一样能调用，  
+但它背后实际执行的是 Rust 代码。
+
+#### 三、真正实现在哪里
+
+真正实现就在：
+
+- `lib/bindings/python/rust/llm/entrypoint.rs`
+
+里面这段：
+
+```rust
+#[pyfunction]
+#[pyo3(signature = (distributed_runtime, args))]
+pub fn make_engine<'p>(
+    py: Python<'p>,
+    distributed_runtime: super::DistributedRuntime,
+    args: EntrypointArgs,
+) -> PyResult<Bound<'p, PyAny>> {
+    ...
+}
+```
+
+所以你以后要找这类“Python 能 import，但搜不到 def 实现”的函数，优先怀疑：
+
+- 是不是从 `_core` 之类的原生扩展模块导进来的
+
+这个项目里很多底层关键 API 都是这种模式。
+
+#### 四、为什么你会“看起来像 Python API”，但实现却在 Rust
+
+这是因为这个项目用了一个很典型的绑定分层：
+
+```text
+Python 业务代码
+  -> dynamo.llm
+  -> dynamo._core
+  -> Rust 实现
+```
+
+其中：
+
+- `dynamo.llm` 是给 Python 开发者看的友好 API 层
+- `dynamo._core` 是 Rust 暴露出来的绑定模块
+
+所以在 Python 代码里用起来很自然：
+
+```python
+from dynamo.llm import make_engine
+```
+
+但真正重活是在 Rust 里做。
+
+#### 五、那 `_core.pyi` 又是什么
+
+你搜索结果里还会看到：
+
+- `lib/bindings/python/src/dynamo/_core.pyi`
+
+里面有：
+
+```python
+async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig:
+```
+
+这个文件也不是实现，它只是：
+
+- 类型声明文件
+- 给 IDE / 类型检查器 / 阅读者看的接口说明
+
+所以：
+
+- `.pyi` 不是实现
+- Rust 里的 `#[pyfunction]` 才是实现
+
+这也是为什么：
+
+- 你能搜到函数签名
+- 但搜不到 Python 函数体
+
+#### 六、`make_engine(...)` 在 Rust 里大概做什么
+
+它不是一个很薄的 wrapper，而是相当核心的一层。
+
+从 Rust 实现里看，它大概负责：
+
+1. 根据 `EntrypointArgs` 构造 `LocalModelBuilder`
+2. 处理模型路径和必要的下载逻辑
+3. 构建 `LocalModel`
+4. 根据 `EngineType` 选择具体 engine
+5. 如果是 `Dynamic` engine，就把 Python 传进来的：
+   - `chat_engine_factory`
+   转成 Rust 可调用的 callback
+
+也就是说，它本质上是：
+
+- frontend Python 配置
+- Rust engine/runtime 框架
+
+之间的桥梁。
+
+#### 七、为什么 `chat_engine_factory` 明明是 Python，Rust 还能调
+
+这个点特别值得你注意。
+
+在 `entrypoint.rs` 里还有一段：
+
+- `py_engine_factory_to_callback(...)`
+
+它的作用是：
+
+- 把 Python 的异步 `chat_engine_factory`
+- 包装成 Rust 侧的 callback
+
+这样 Rust runtime 在模型发现后，就能反过来调用 Python：
+
+- `SglangEngineFactory.chat_engine_factory(...)`
+
+然后再从 Python 拿回：
+
+- `PythonAsyncEngine`
+
+所以这里不是简单“Python 调 Rust”，而是一个双向桥接：
+
+```text
+frontend/main.py
+  -> make_engine(...)   # Python 调 Rust
+  -> Rust engine/runtime 建框架
+  -> Rust 再回调 Python chat_engine_factory
+  -> Python 返回 PythonAsyncEngine
+  -> Rust 持有并驱动它
+```
+
+这也是这个项目阅读起来会有点“像 Python，又不像纯 Python”的原因。
+
+#### 八、你以后怎么快速判断“这是不是 Rust 绑定函数”
+
+有几个很实用的信号：
+
+##### 1. 来自 `dynamo._core`
+
+如果在 `dynamo.llm/__init__.py` 里看到：
+
+```python
+from dynamo._core import xxx
+```
+
+那大概率就不是 Python 实现。
+
+##### 2. 只有 `.pyi`，没有 `.py`
+
+如果你只能找到：
+
+- `_core.pyi`
+
+而找不到同名 Python 函数体，那通常就是原生扩展导出的接口。
+
+##### 3. 在 Rust 里能搜到 `#[pyfunction]` 或 `m.add_function(...)`
+
+这通常就是 PyO3 暴露给 Python 的入口。
+
+#### 九、最短结论
+
+`make_engine` 找不到具体 Python 实现，是因为它：
+
+- **不是 Python 写的**
+- **而是 Rust 里的 PyO3 绑定函数**
+
+导入链是：
+
+```text
+frontend/main.py
+  -> from dynamo.llm import make_engine
+  -> dynamo.llm.__init__.py
+  -> from dynamo._core import make_engine
+  -> Rust: lib/bindings/python/rust/llm/entrypoint.rs
+```
+
+#### 一句话总结
+
+`make_engine` 看起来像 Python API，但实际上是：
+
+- **Rust 实现**
+- **Python 只是在用绑定层把它导出来**
