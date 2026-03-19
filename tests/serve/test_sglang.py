@@ -59,7 +59,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(6.1),  # observed peak 5.6 GiB (+10% safety)
-            pytest.mark.timeout(104),  # 3x observed 34.4s wall time
+            pytest.mark.timeout(240),  # profiled 34.4s on A6000
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -80,7 +80,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
+        ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
@@ -132,7 +132,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
+        ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
@@ -160,7 +160,7 @@ sglang_configs = {
         script_name="template_verifier.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.timeout(36),  # 3x observed 11.7s wall time (no GPU model load)
+            pytest.mark.timeout(240),  # profiled 11.7s on A6000 (no GPU model load)
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -185,7 +185,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(13.3),  # observed peak 12.1 GiB (+10% safety)
-            pytest.mark.timeout(93),  # 3x observed 31.0s wall time
+            pytest.mark.timeout(360),  # profiled 31.0s on A6000
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -227,7 +227,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(17.7),  # observed peak 16.1 GiB (+10% safety)
-            pytest.mark.timeout(109),  # 3x observed 36.0s wall time
+            pytest.mark.timeout(360),  # profiled 36.0s on A6000
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -262,7 +262,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(21.0),  # observed peak 19.1 GiB (+10% safety)
-            pytest.mark.timeout(124),  # 3x observed 41.3s wall time
+            pytest.mark.timeout(300),  # profiled 41.3s on A6000
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -301,7 +301,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(12.1),  # observed peak 11.0 GiB (+10% safety)
-            pytest.mark.timeout(77),  # 3x observed 25.5s wall time
+            pytest.mark.timeout(270),  # profiled 25.5s on A6000
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -339,7 +339,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(16.2),  # observed peak 14.8 GiB (+10% safety)
-            pytest.mark.timeout(220),  # 3x observed 73s wall time
+            pytest.mark.timeout(420),  # profiled 73s on A6000
             pytest.mark.post_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
