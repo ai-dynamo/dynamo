@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::protocols::SharedCacheHits;
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
@@ -184,6 +185,7 @@ impl KvScheduler {
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
@@ -202,6 +204,7 @@ impl KvScheduler {
             priority_jump,
             expected_output_tokens,
             allowed_worker_ids,
+            shared_cache_hits,
             resp_tx: Some(resp_tx),
         };
 

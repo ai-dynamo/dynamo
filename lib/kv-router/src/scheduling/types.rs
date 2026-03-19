@@ -7,7 +7,7 @@ use dynamo_tokens::SequenceHash;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
-use crate::protocols::{DpRank, OverlapScores, WorkerId, WorkerWithDpRank};
+use crate::protocols::{DpRank, OverlapScores, SharedCacheHits, WorkerId, WorkerWithDpRank};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
@@ -52,6 +52,10 @@ pub struct SchedulingRequest {
     pub expected_output_tokens: Option<u32>,
     /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+    /// Shared cache hit information from an external shared KV cache pool.
+    /// When present, the selector adjusts prefill cost by weighting shared hits
+    /// beyond each worker's device prefix.
+    pub shared_cache_hits: Option<SharedCacheHits>,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 
