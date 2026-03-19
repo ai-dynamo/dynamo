@@ -11,14 +11,6 @@ export default defineConfig({
   output: "./allure-report",
   historyPath: "./history.jsonl",
   plugins: {
-    dashboard: {
-      options: {
-        reportName: "Dashboard",
-        singleFile: false,
-        reportLanguage: "en",
-        publish: false,
-      },
-    },
     pr: {
       import: "@allurereport/plugin-awesome",
       options: {
