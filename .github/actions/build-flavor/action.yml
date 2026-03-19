@@ -94,6 +94,9 @@ outputs:
   test_tag_plain:
     description: 'Test tag (without registry prefix)'
     value: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
+  cuda_version_plain:
+    description: 'CUDA major version (e.g., 12 from 12.9)'
+    value: ${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
 
 runs:
   using: "composite"
