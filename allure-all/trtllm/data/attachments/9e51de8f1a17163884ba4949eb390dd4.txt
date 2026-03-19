@@ -1,8 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-DEBUG    dynamo.vllm.engine_monitor:engine_monitor.py:158 Error in periodic stats logging
-Traceback (most recent call last):
-  File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/engine_monitor.py", line 154, in _periodic_log_stats
-    await self.engine_client.do_log_stats()
-  File "/workspace/components/src/dynamo/vllm/tests/test_vllm_engine_monitor_stats.py", line 118, in flaky_log_stats
-    raise RuntimeError("transient error")
-RuntimeError: transient error

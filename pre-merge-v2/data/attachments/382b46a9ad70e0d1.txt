@@ -1,0 +1,44 @@
+INFO     tests.deploy.test_deploy:test_deploy.py:144 Starting deployment test for trtllm-agg (source: examples, model: Qwen/Qwen3-0.6B, namespace: gh-id-23308976545-pr-6903-dt)
+INFO     tests.deploy.test_deploy:test_deploy.py:148 Log directory: test_deployment[trtllm-agg]
+INFO     ManagedDeployment:managed_deployment.py:491 Loading kubeconfig from KUBECONFIG: /home/runner/_work/dynamo/dynamo/.kubeconfig
+INFO     ManagedDeployment:managed_deployment.py:494 Successfully loaded kubeconfig from KUBECONFIG
+INFO     ManagedDeployment:managed_deployment.py:689 Starting Deployment trtllm-agg with spec <tests.utils.managed_deployment.DeploymentSpec object at 0xffffa08f7920>
+INFO     ManagedDeployment:managed_deployment.py:702 {'apiVersion': 'nvidia.com/v1alpha1', 'kind': 'DynamoGraphDeployment', 'metadata': {'name': 'trtllm-agg', 'namespace': 'gh-id-23308976545-pr-6903-dt'}, 'spec': {'services': {'Frontend': {'componentType': 'frontend', 'replicas': 1, 'extraPodSpec': {'mainContainer': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:b344eba77c2f72efaa0465b2dcc9d5fe15c16fe7-trtllm-runtime-cuda13-amd64', 'args': []}}}, 'TRTLLMWorker': {'envFromSecret': 'hf-token-secret', 'componentType': 'worker', 'replicas': 1, 'resources': {'limits': {'gpu': '1'}, 'requests': {'custom': {'ephemeral-storage': '2Gi'}}}, 'extraPodSpec': {'mainContainer': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:b344eba77c2f72efaa0465b2dcc9d5fe15c16fe7-trtllm-runtime-cuda13-amd64', 'workingDir': '/workspace/', 'command': ['python3', '-m', 'dynamo.trtllm'], 'args': ['--model-path', 'Qwen/Qwen3-0.6B', '--served-model-name', 'Qwen/Qwen3-0.6B', '--extra-engine-args', './examples/backends/trtllm/engine_configs/qwen3/agg.yaml']}}}}}}
+INFO     ManagedDeployment:managed_deployment.py:703 Deployment Started trtllm-agg
+INFO     ManagedDeployment:managed_deployment.py:593 Waiting for Deployment trtllm-agg to have Ready condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:644 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:645 Current conditions: [{'lastTransitionTime': '2026-03-19T18:16:40Z', 'message': 'Resources not ready: trtllm-agg-frontend: Component deployment not ready - Available condition not true; trtllm-agg-trtllmworker-571cf89b: Component deployment not ready - Available condition not true', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:646 Elapsed time: 63.0s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:649 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:644 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:645 Current conditions: [{'lastTransitionTime': '2026-03-19T18:16:40Z', 'message': 'Resources not ready: trtllm-agg-frontend: Component deployment not ready - Available condition not true; trtllm-agg-trtllmworker-571cf89b: Component deployment not ready - Available condition not true', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:646 Elapsed time: 127.0s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:649 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:644 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:645 Current conditions: [{'lastTransitionTime': '2026-03-19T18:19:01Z', 'message': 'Resources not ready: trtllm-agg-frontend: Component deployment not ready - Available condition not true', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:646 Elapsed time: 191.1s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:649 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:644 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:645 Current conditions: [{'lastTransitionTime': '2026-03-19T18:19:01Z', 'message': 'Resources not ready: trtllm-agg-frontend: Component deployment not ready - Available condition not true', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:646 Elapsed time: 255.0s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:649 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:644 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:645 Current conditions: [{'lastTransitionTime': '2026-03-19T18:21:53Z', 'message': 'Resources not ready: trtllm-agg-frontend: Component deployment not ready - Available condition not true', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:646 Elapsed time: 319.0s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:649 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:632 Current deployment state: successful
+INFO     ManagedDeployment:managed_deployment.py:633 Current conditions: [{'lastTransitionTime': '2026-03-19T18:22:20Z', 'message': 'All resources are ready', 'reason': 'all_resources_are_ready', 'status': 'True', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:634 Elapsed time: 341.4s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:638 Deployment trtllm-agg has Ready condition True and state successful
+INFO     tests.deploy.test_deploy:test_deploy.py:166 Found frontend pod: trtllm-agg-frontend-79d9fdc555-4drcp
+WARNING  ManagedDeployment:managed_deployment.py:941 Connection test failed for pod trtllm-agg-frontend-79d9fdc555-4drcp (attempt 1/3): HTTPConnectionPool(host='localhost', port=18986): Read timed out. (read timeout=5)
+WARNING  ManagedDeployment:managed_deployment.py:941 Connection test failed for pod trtllm-agg-frontend-79d9fdc555-4drcp (attempt 2/3): HTTPConnectionPool(host='localhost', port=18986): Read timed out. (read timeout=5)
+WARNING  ManagedDeployment:managed_deployment.py:941 Connection test failed for pod trtllm-agg-frontend-79d9fdc555-4drcp (attempt 3/3): HTTPConnectionPool(host='localhost', port=18986): Read timed out. (read timeout=5)
+WARNING  ManagedDeployment:managed_deployment.py:958 Port forward failed after 3 attempts for pod trtllm-agg-frontend-79d9fdc555-4drcp
+ERROR    ManagedDeployment:managed_deployment.py:822 container "main" in pod "trtllm-agg-frontend-79d9fdc555-4drcp" is terminated
+WARNING  ManagedDeployment:managed_deployment.py:941 Connection test failed for pod trtllm-agg-frontend-79d9fdc555-4drcp (attempt 1/3): HTTPConnectionPool(host='localhost', port=30872): Read timed out. (read timeout=5)
+WARNING  ManagedDeployment:managed_deployment.py:941 Connection test failed for pod trtllm-agg-frontend-79d9fdc555-4drcp (attempt 2/3): HTTPConnectionPool(host='localhost', port=30872): Read timed out. (read timeout=5)
+WARNING  ManagedDeployment:managed_deployment.py:941 Connection test failed for pod trtllm-agg-frontend-79d9fdc555-4drcp (attempt 3/3): HTTPConnectionPool(host='localhost', port=30872): Read timed out. (read timeout=5)
+WARNING  ManagedDeployment:managed_deployment.py:958 Port forward failed after 3 attempts for pod trtllm-agg-frontend-79d9fdc555-4drcp
+ERROR    ManagedDeployment:managed_deployment.py:857 Unable to get metrics for Frontend
+INFO     ManagedDeployment:managed_deployment.py:977 Cleaning up 1 active port forwards

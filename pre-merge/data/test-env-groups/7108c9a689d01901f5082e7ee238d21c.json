@@ -1,1 +1,1 @@
-{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[vllm-disagg]","status":"failed","testResultsByEnv":{"default":"15cceb8f6e2c52874257543bf6e8eedd"}}
+{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[sglang-agg]","status":"failed","testResultsByEnv":{"default":"d101c35502a7ba61179fc300292997bd"}}

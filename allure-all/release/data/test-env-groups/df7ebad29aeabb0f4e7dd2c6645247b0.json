@@ -1,1 +1,1 @@
-{"id":"df7ebad29aeabb0f4e7dd2c6645247b0","fullName":"tests.test_predownload_models#test_predownload_models","name":"test_predownload_models[predownload_models_sglang_gpu1]","status":"passed","testResultsByEnv":{"default":"36d0c015ca30e8f061140e0f4cf08cc7"}}
+{"id":"df7ebad29aeabb0f4e7dd2c6645247b0","fullName":"tests.test_predownload_models#test_predownload_models","name":"test_predownload_models[predownload_models_vllm_gpu1]","status":"passed","testResultsByEnv":{"default":"5058e0be6343c17876996e9ac72120ae"}}

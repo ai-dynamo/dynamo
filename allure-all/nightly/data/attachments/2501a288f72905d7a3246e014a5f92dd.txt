@@ -1,6 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: e7a92fdc-7ece-4611-b104-423b87662eab
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request e7a92fdc-7ece-4611-b104-423b87662eab: prompt='a test video...', size=832x480, frames=81, steps=50
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:244 Request e7a92fdc-7ece-4611-b104-423b87662eab: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:299 Request e7a92fdc-7ece-4611-b104-423b87662eab completed in 0.00s

@@ -1,0 +1,4 @@
+[2m2026-03-19T17:57:21.961017Z[0m [33m WARN[0m [2mvideo_handler._parse_size[0m[2m:[0m Invalid size format: 832480, using defaults
+[2m2026-03-19T17:57:21.961157Z[0m [33m WARN[0m [2mvideo_handler._parse_size[0m[2m:[0m Invalid size format: 832, using defaults
+[2m2026-03-19T17:57:21.961218Z[0m [33m WARN[0m [2mvideo_handler._parse_size[0m[2m:[0m Invalid size format: widthxheight, using defaults
+[2m2026-03-19T17:57:21.961267Z[0m [33m WARN[0m [2mvideo_handler._parse_size[0m[2m:[0m Invalid size format: 832x, using defaults

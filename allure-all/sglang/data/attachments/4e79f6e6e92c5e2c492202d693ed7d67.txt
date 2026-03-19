@@ -1,0 +1,146 @@
+[2m2026-03-19T18:07:31.777765Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4234 in /workspace
+[2m2026-03-19T18:07:31.778962Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4234
+[2m2026-03-19T18:07:31.879709Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4234
+[2m2026-03-19T18:07:31.880080Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-19T18:07:31.882124Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-19T18:07:31.884323Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2459 --advertise-client-urls http://0.0.0.0:2459 --listen-peer-urls http://0.0.0.0:2460 --initial-advertise-peer-urls http://localhost:2460 --initial-cluster default=http://localhost:2460 --data-dir /tmp/etcd_f5992fq0 in /workspace
+[2m2026-03-19T18:07:31.885758Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2459
+[2m2026-03-19T18:07:31.986341Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2459
+[2m2026-03-19T18:07:31.989839Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated_logprobs test_deployment
+[2m2026-03-19T18:07:31.989915Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-03-19T18:07:31.989967Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-03-19T18:07:31.990202Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/trtllm/launch/agg.sh in /workspace/examples/backends/trtllm
+[2m2026-03-19T18:07:31.991606Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8005/v1/models
+[2m2026-03-19T18:07:54.012963Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8005/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-03-19T18:08:10.028285Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8005/v1/models (attempt=20, elapsed=37.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1773943689,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-19T18:08:10.028736Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8005/health
+[2m2026-03-19T18:08:11.031398Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8005/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate"
+  ],
+  "instances": [
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8339431789604782089,
+      "transport": {
+        "tcp": "10.1.75.243:41275/73bb9d0747fe4009/generate"
+      }
+    }
+  ]
+}
+[2m2026-03-19T18:08:11.031833Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayloadWithLogprobs
+[2m2026-03-19T18:08:11.032382Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8005/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 300,
+  "stream": false,
+  "logprobs": true,
+  "top_logprobs": 5,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-19T18:08:13.098286Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=2.07s
+[2m2026-03-19T18:08:13.110860Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 300 tokens with logprobs
+[2m2026-03-19T18:08:13.111038Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-19T18:08:13.111100Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-03-19T18:08:13.111260Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8005/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 300,
+  "stream": false,
+  "logprobs": false,
+  "top_logprobs": 5,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-19T18:08:15.003934Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=1.89s
+[2m2026-03-19T18:08:15.004301Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-19T18:08:15.004389Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayloadWithLogprobs
+[2m2026-03-19T18:08:15.004546Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8005/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 300,
+  "stream": false,
+  "logprobs": true,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-19T18:08:16.950508Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=1.95s
+[2m2026-03-19T18:08:16.956298Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 300 tokens with logprobs
+[2m2026-03-19T18:08:16.956430Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-19T18:08:16.956494Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayloadWithLogprobs
+[2m2026-03-19T18:08:16.956649Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8005/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 300,
+  "stream": false,
+  "logprobs": true,
+  "top_logprobs": 0,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-19T18:08:18.904919Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=1.95s
+[2m2026-03-19T18:08:18.910667Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 300 tokens with logprobs
+[2m2026-03-19T18:08:18.910808Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-19T18:08:18.911814Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1762
+[2m2026-03-19T18:08:18.911981Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1566
+[2m2026-03-19T18:08:18.912064Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1655
+[2m2026-03-19T18:08:27.022548Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1568 name: tee
+[2m2026-03-19T18:08:27.022736Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1568 tee
+[2m2026-03-19T18:08:27.023800Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1567 name: sed
+[2m2026-03-19T18:08:27.023916Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1567 sed
+[2m2026-03-19T18:08:27.027378Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1552
+[2m2026-03-19T18:08:27.128510Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1553 name: sed
+[2m2026-03-19T18:08:27.128673Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1553 sed
+[2m2026-03-19T18:08:27.129928Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1540
+[2m2026-03-19T18:08:27.231284Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1541 name: sed
+[2m2026-03-19T18:08:27.231395Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1541 sed

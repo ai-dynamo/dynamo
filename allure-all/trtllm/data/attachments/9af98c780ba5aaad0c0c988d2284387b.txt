@@ -1,3 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-INFO     dynamo.vllm.handlers:handlers.py:371 [Sleep] Unregistered endpoint from discovery - worker removed from routing pool
-INFO     dynamo.vllm.handlers:handlers.py:413 [Wake] Re-registered endpoint to discovery - worker added back to routing pool

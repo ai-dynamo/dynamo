@@ -1,1 +1,1 @@
-{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[aggregated_multimodal_router-2]","status":"passed","testResultsByEnv":{"default":"83d187daf91746f3282142157e0e8878"}}
+{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[disaggregated_logprobs-2]","status":"passed","testResultsByEnv":{"default":"614214582423b14e733147a20b09cf2e"}}
