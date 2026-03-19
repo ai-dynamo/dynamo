@@ -1,19 +1,30 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! KVBM transfer bandwidth benchmark.
+//! KVBM transfer bandwidth benchmark with full Leader+Worker architecture.
 //!
-//! Measures effective bandwidth of KV cache block transfers across the KVBM tiered
-//! storage hierarchy: G1 (GPU HBM), G2 (pinned DRAM), G3 (NVMe).
+//! Uses production-fidelity InstanceLeader, VeloWorkerService/Client, SpmdParallelWorkers,
+//! and optionally OffloadEngine pipelines. Each worker runs on a NUMA-pinned thread with
+//! its own tokio runtime and NixlAgent.
 //!
 //! # Usage
 //! ```bash
+//! # Direct transfer benchmark:
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
-//!     --devices 0 --page-sizes 32,64,128 --concurrency 1,2,4 --iterations 50
+//!     --devices 0 --page-sizes 32,64 --concurrency 1,2 --iterations 10 --skip-disk --skip-gds
+//!
+//! # With offload pipeline:
+//! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
+//!     --devices 0 --page-sizes 64 --concurrency 1 --iterations 10 --skip-disk --skip-gds \
+//!     --offload --offload-batch-sizes 8,32 --offload-concurrency 1,2
+//!
+//! # Multi-GPU:
+//! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
+//!     --devices 0,1 --page-sizes 128 --concurrency 1,2,4 --iterations 50
 //! ```
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
@@ -22,16 +33,31 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
-use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
-use kvbm_physical::manager::LayoutHandle;
-use kvbm_physical::transfer::{
-    BounceBuffer, NixlAgent, TransferCompleteNotification, TransferManager, TransferOptions,
+use kvbm_engine::{
+    BlockId, G1, G2, G3, LogicalLayoutHandle,
+    leader::InstanceLeader,
+    offload::{
+        ExternalBlock, OffloadEngine, PipelineBuilder, PresenceFilter, SourceBlocks,
+    },
+    testing::{
+        TestRegistryBuilder, TestManagerBuilder,
+        create_messenger_tcp,
+        token_blocks,
+        managers::populate_manager_with_blocks,
+    },
+    worker::{
+        DirectWorker, Worker, WorkerTransfers,
+    },
 };
+use kvbm_logical::blocks::BlockRegistry;
+use kvbm_logical::manager::BlockManager;
+use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
+use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "bench_engine", about = "KVBM transfer bandwidth benchmark")]
+#[command(name = "bench_engine", about = "KVBM transfer bandwidth benchmark (leader+worker architecture)")]
 struct Cli {
     /// GPU device IDs (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = "0")]
@@ -93,6 +119,18 @@ struct Cli {
     #[arg(long)]
     bidir_only: bool,
 
+    /// Enable offload pipeline benchmarks (phase 3)
+    #[arg(long)]
+    offload: bool,
+
+    /// Offload pipeline batch sizes to sweep
+    #[arg(long, value_delimiter = ',', default_values_t = vec![8, 16, 32, 64])]
+    offload_batch_sizes: Vec<usize>,
+
+    /// Max concurrent transfers for offload pipeline
+    #[arg(long, value_delimiter = ',', default_values_t = vec![1, 2, 4])]
+    offload_concurrency: Vec<usize>,
+
     /// Base directory for output (default: current directory)
     #[arg(long, short)]
     output: Option<PathBuf>,
@@ -121,6 +159,9 @@ struct BenchConfig {
     skip_gds: bool,
     isolated_only: bool,
     bidir_only: bool,
+    offload: bool,
+    offload_batch_sizes: Vec<usize>,
+    offload_concurrency: Vec<usize>,
     output: Option<PathBuf>,
 }
 
@@ -142,6 +183,9 @@ impl From<Cli> for BenchConfig {
             skip_gds: cli.skip_gds,
             isolated_only: cli.isolated_only,
             bidir_only: cli.bidir_only,
+            offload: cli.offload,
+            offload_batch_sizes: cli.offload_batch_sizes,
+            offload_concurrency: cli.offload_concurrency,
             output: cli.output,
         }
     }
@@ -211,127 +255,6 @@ struct BenchResult {
     aggregate_bandwidth_gbs: f64,
 }
 
-// ─── Layout Helpers ────────────────────────────────────────────────────────────
-
-struct TierHandles {
-    g1: LayoutHandle,
-    g2: LayoutHandle,
-    g3: Option<LayoutHandle>,
-}
-
-fn create_layouts(
-    manager: &TransferManager,
-    agent: &NixlAgent,
-    device_id: u32,
-    page_size: usize,
-    config: &BenchConfig,
-) -> Result<TierHandles> {
-    let layout_config = LayoutConfig::builder()
-        .num_blocks(config.num_blocks)
-        .num_layers(config.num_layers)
-        .outer_dim(2) // K + V
-        .page_size(page_size)
-        .inner_dim(config.inner_dim)
-        .dtype_width_bytes(2) // fp16
-        .build()?;
-
-    let g1 = PhysicalLayout::builder(agent.clone())
-        .with_config(layout_config.clone())
-        .fully_contiguous()
-        .allocate_device(device_id)
-        .build()?;
-    let g1_handle = manager.register_layout(g1)?;
-
-    let g2 = PhysicalLayout::builder(agent.clone())
-        .with_config(layout_config.clone())
-        .fully_contiguous()
-        .allocate_pinned(Some(device_id))
-        .build()?;
-    let g2_handle = manager.register_layout(g2)?;
-
-    let g3_handle = if !config.skip_disk {
-        let g3 = PhysicalLayout::builder(agent.clone())
-            .with_config(layout_config)
-            .fully_contiguous()
-            .allocate_disk(config.disk_path.clone())
-            .build()?;
-        Some(manager.register_layout(g3)?)
-    } else {
-        None
-    };
-
-    Ok(TierHandles {
-        g1: g1_handle,
-        g2: g2_handle,
-        g3: g3_handle,
-    })
-}
-
-// ─── Transfer Execution ────────────────────────────────────────────────────────
-
-async fn run_concurrent_batch(
-    manager: &TransferManager,
-    src: LayoutHandle,
-    dst: LayoutHandle,
-    blocks_per_batch: usize,
-    concurrency: usize,
-    options_fn: &dyn Fn() -> TransferOptions,
-) -> Result<()> {
-    let mut notifications: Vec<TransferCompleteNotification> = Vec::with_capacity(concurrency);
-    for slot in 0..concurrency {
-        let offset = slot * blocks_per_batch;
-        let block_ids: Vec<usize> = (offset..offset + blocks_per_batch).collect();
-        let notif = manager.execute_transfer(src, &block_ids, dst, &block_ids, options_fn())?;
-        notifications.push(notif);
-    }
-    for notif in notifications {
-        notif.await?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn bench_transfers(
-    manager: &TransferManager,
-    src: LayoutHandle,
-    dst: LayoutHandle,
-    blocks_per_batch: usize,
-    concurrency: usize,
-    warmup: usize,
-    iterations: usize,
-    options_fn: impl Fn() -> TransferOptions,
-) -> Result<Vec<Duration>> {
-    // Warmup
-    for _ in 0..warmup {
-        run_concurrent_batch(
-            manager,
-            src,
-            dst,
-            blocks_per_batch,
-            concurrency,
-            &options_fn,
-        )
-        .await?;
-    }
-
-    // Measure
-    let mut latencies = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let start = Instant::now();
-        run_concurrent_batch(
-            manager,
-            src,
-            dst,
-            blocks_per_batch,
-            concurrency,
-            &options_fn,
-        )
-        .await?;
-        latencies.push(start.elapsed());
-    }
-    Ok(latencies)
-}
-
 fn compute_bytes_per_block(config: &BenchConfig, page_size: usize) -> usize {
     config.num_layers * 2 * page_size * config.inner_dim * 2
 }
@@ -349,7 +272,8 @@ fn make_result(
     let bytes_per_iter = bytes_per_block * config.blocks_per_batch * concurrency;
     let stats = LatencyStats::from_durations(latencies);
     let bandwidth_gbs = bytes_per_iter as f64 / (stats.mean_us * 1e3); // bytes / ns = GB/s
-    let aggregate_bandwidth_gbs = bandwidth_gbs;
+    let num_devices = config.devices.len();
+    let aggregate_bandwidth_gbs = bandwidth_gbs * num_devices as f64;
 
     BenchResult {
         test: test.to_string(),
@@ -368,7 +292,7 @@ fn make_result(
 
 fn print_result_stderr(r: &BenchResult) {
     eprintln!(
-        "[GPU {}] {} | page={} conc={}{} | {:.1} GB/s (agg) | p50={:.0}us p99={:.0}us",
+        "[GPU {}] {} | page={} conc={}{} | {:.1} GB/s (per-dev) {:.1} GB/s (agg) | p50={:.0}us p99={:.0}us",
         r.device_id,
         r.test,
         r.page_size,
@@ -376,469 +300,66 @@ fn print_result_stderr(r: &BenchResult) {
         r.bounce_blocks
             .map(|b| format!(" bounce={b}"))
             .unwrap_or_default(),
+        r.bandwidth_gbs,
         r.aggregate_bandwidth_gbs,
         r.latency_us.p50_us,
         r.latency_us.p99_us,
     );
 }
 
-// ─── Phase 1: Isolated Transfers ───────────────────────────────────────────────
+// ─── Worker Thread Infrastructure ──────────────────────────────────────────────
 
-async fn run_isolated_benchmarks(
+struct WorkerHandle {
+    worker: Arc<DirectWorker>,
+    join_handle: std::thread::JoinHandle<()>,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Spawn a long-lived worker thread for a single GPU device.
+///
+/// The worker thread:
+/// 1. Pins to the device's NUMA node
+/// 2. Creates its own tokio runtime (2 worker threads)
+/// 3. Creates NixlAgent, TransferManager
+/// 4. Creates G1/G2/G3 PhysicalLayouts and registers them (NUMA-local allocations)
+/// 5. Builds DirectWorker and sends Arc back to leader
+/// 6. Waits on shutdown signal (keeps runtime alive for transfers)
+fn spawn_worker_thread(
     device_id: u32,
-    manager: &TransferManager,
-    agent: &NixlAgent,
+    page_size: usize,
     config: &BenchConfig,
-) -> Result<Vec<BenchResult>> {
-    let mut results = Vec::new();
+) -> Result<WorkerHandle> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-    for &page_size in &config.page_sizes {
-        eprintln!("[GPU {device_id}] Allocating layouts for page_size={page_size}...");
-        let handles = create_layouts(manager, agent, device_id, page_size, config)?;
+    let num_blocks = config.num_blocks;
+    let num_layers = config.num_layers;
+    let inner_dim = config.inner_dim;
+    let skip_disk = config.skip_disk;
+    let skip_gds = config.skip_gds;
+    let disk_path = config.disk_path.clone();
 
-        for &conc in &config.concurrency {
-            // G1→G2 (D2H offload)
-            let latencies = bench_transfers(
-                manager,
-                handles.g1,
-                handles.g2,
-                config.blocks_per_batch,
-                conc,
-                config.warmup,
-                config.iterations,
-                TransferOptions::default,
-            )
-            .await?;
-            let r = make_result(
-                "g1_to_g2", device_id, page_size, conc, None, config, latencies,
-            );
-            print_result_stderr(&r);
-            results.push(r);
-
-            // G2→G1 (H2D onboard)
-            let latencies = bench_transfers(
-                manager,
-                handles.g2,
-                handles.g1,
-                config.blocks_per_batch,
-                conc,
-                config.warmup,
-                config.iterations,
-                TransferOptions::default,
-            )
-            .await?;
-            let r = make_result(
-                "g2_to_g1", device_id, page_size, conc, None, config, latencies,
-            );
-            print_result_stderr(&r);
-            results.push(r);
-
-            // G2↔G3 tests (if disk enabled)
-            if let Some(g3) = handles.g3 {
-                // G2→G3 (host→disk)
-                let latencies = bench_transfers(
-                    manager,
-                    handles.g2,
-                    g3,
-                    config.blocks_per_batch,
-                    conc,
-                    config.warmup,
-                    config.iterations,
-                    TransferOptions::default,
-                )
-                .await?;
-                let r = make_result(
-                    "g2_to_g3", device_id, page_size, conc, None, config, latencies,
-                );
-                print_result_stderr(&r);
-                results.push(r);
-
-                // G3→G2 (disk→host)
-                let latencies = bench_transfers(
-                    manager,
-                    g3,
-                    handles.g2,
-                    config.blocks_per_batch,
-                    conc,
-                    config.warmup,
-                    config.iterations,
-                    TransferOptions::default,
-                )
-                .await?;
-                let r = make_result(
-                    "g3_to_g2", device_id, page_size, conc, None, config, latencies,
-                );
-                print_result_stderr(&r);
-                results.push(r);
-            }
-        }
-
-        // Bounce buffer sweep for staged G1↔G3
-        // G2 IS the bounce buffer — use tail blocks of the G2 layout so they
-        // don't overlap with the transfer block range [0..max_conc*bpb).
-        if let Some(g3) = handles.g3 {
-            for &num_bounce in &config.bounce_blocks {
-                eprintln!(
-                    "[GPU {device_id}] Bounce buffer sweep: page_size={page_size} bounce_blocks={num_bounce}"
-                );
-                let bounce_start = config.num_blocks - num_bounce;
-                let bounce_block_ids: Vec<usize> = (bounce_start..config.num_blocks).collect();
-
-                for &conc in &config.concurrency {
-                    let bounce = BounceBuffer::from_handle(handles.g2, bounce_block_ids.clone());
-
-                    // G1→G3 staged (via bounce)
-                    let latencies = bench_transfers(
-                        manager,
-                        handles.g1,
-                        g3,
-                        config.blocks_per_batch,
-                        conc,
-                        config.warmup,
-                        config.iterations,
-                        || {
-                            TransferOptions::builder()
-                                .bounce_buffer(bounce.clone())
-                                .build()
-                                .unwrap()
-                        },
-                    )
-                    .await?;
-                    let r = make_result(
-                        "g1_to_g3_staged",
-                        device_id,
-                        page_size,
-                        conc,
-                        Some(num_bounce),
-                        config,
-                        latencies,
-                    );
-                    print_result_stderr(&r);
-                    results.push(r);
-
-                    // G3→G1 staged (via bounce)
-                    let bounce = BounceBuffer::from_handle(handles.g2, bounce_block_ids.clone());
-                    let latencies = bench_transfers(
-                        manager,
-                        g3,
-                        handles.g1,
-                        config.blocks_per_batch,
-                        conc,
-                        config.warmup,
-                        config.iterations,
-                        || {
-                            TransferOptions::builder()
-                                .bounce_buffer(bounce.clone())
-                                .build()
-                                .unwrap()
-                        },
-                    )
-                    .await?;
-                    let r = make_result(
-                        "g3_to_g1_staged",
-                        device_id,
-                        page_size,
-                        conc,
-                        Some(num_bounce),
-                        config,
-                        latencies,
-                    );
-                    print_result_stderr(&r);
-                    results.push(r);
-                }
-            }
-
-            // GDS direct tests (G1↔G3 without bounce)
-            if !config.skip_gds {
-                for &conc in &config.concurrency {
-                    // G1→G3 direct (GDS)
-                    match bench_transfers(
-                        manager,
-                        handles.g1,
-                        g3,
-                        config.blocks_per_batch,
-                        conc,
-                        config.warmup,
-                        config.iterations,
-                        TransferOptions::default,
-                    )
-                    .await
-                    {
-                        Ok(latencies) => {
-                            let r = make_result(
-                                "g1_to_g3_gds",
-                                device_id,
-                                page_size,
-                                conc,
-                                None,
-                                config,
-                                latencies,
-                            );
-                            print_result_stderr(&r);
-                            results.push(r);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[GPU {device_id}] GDS g1_to_g3 failed (GDS may not be available): {e}"
-                            );
-                        }
-                    }
-
-                    // G3→G1 direct (GDS)
-                    match bench_transfers(
-                        manager,
-                        g3,
-                        handles.g1,
-                        config.blocks_per_batch,
-                        conc,
-                        config.warmup,
-                        config.iterations,
-                        TransferOptions::default,
-                    )
-                    .await
-                    {
-                        Ok(latencies) => {
-                            let r = make_result(
-                                "g3_to_g1_gds",
-                                device_id,
-                                page_size,
-                                conc,
-                                None,
-                                config,
-                                latencies,
-                            );
-                            print_result_stderr(&r);
-                            results.push(r);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[GPU {device_id}] GDS g3_to_g1 failed (GDS may not be available): {e}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-// ─── Phase 2: Bidirectional Contention ─────────────────────────────────────────
-
-async fn run_bidir_benchmarks(
-    device_id: u32,
-    manager: &TransferManager,
-    agent: &NixlAgent,
-    config: &BenchConfig,
-) -> Result<Vec<BenchResult>> {
-    let mut results = Vec::new();
-
-    // Use limited concurrency for bidir to keep block counts reasonable
-    let bidir_concurrencies: Vec<usize> = config
-        .concurrency
-        .iter()
-        .copied()
-        .filter(|&c| c <= 4)
-        .collect();
-
-    for &page_size in &config.page_sizes {
-        eprintln!("[GPU {device_id}] Bidirectional tests for page_size={page_size}...");
-        let handles = create_layouts(manager, agent, device_id, page_size, config)?;
-
-        for &conc in &bidir_concurrencies {
-            // Need separate block ranges for D2H and H2D to avoid contention
-            let d2h_blocks_per_slot = config.blocks_per_batch;
-            let h2d_blocks_per_slot = config.blocks_per_batch;
-            let total_blocks_needed = (d2h_blocks_per_slot + h2d_blocks_per_slot) * conc;
-
-            if total_blocks_needed > config.num_blocks {
-                eprintln!(
-                    "[GPU {device_id}] Skipping bidir page_size={page_size} conc={conc}: \
-                     need {total_blocks_needed} blocks but only have {}",
-                    config.num_blocks
-                );
-                continue;
-            }
-
-            // Warmup
-            for _ in 0..config.warmup {
-                run_bidir_batch(manager, &handles, config, conc).await?;
-            }
-
-            // Measure
-            let mut d2h_latencies = Vec::with_capacity(config.iterations);
-            let mut h2d_latencies = Vec::with_capacity(config.iterations);
-
-            for _ in 0..config.iterations {
-                let (d2h_dur, h2d_dur) = run_bidir_batch(manager, &handles, config, conc).await?;
-                d2h_latencies.push(d2h_dur);
-                h2d_latencies.push(h2d_dur);
-            }
-
-            // D2H direction result
-            let r = make_result(
-                "bidir_g1_to_g2",
-                device_id,
-                page_size,
-                conc,
-                None,
-                config,
-                d2h_latencies,
-            );
-            print_result_stderr(&r);
-            results.push(r);
-
-            // H2D direction result
-            let r = make_result(
-                "bidir_g2_to_g1",
-                device_id,
-                page_size,
-                conc,
-                None,
-                config,
-                h2d_latencies,
-            );
-            print_result_stderr(&r);
-            results.push(r);
-        }
-    }
-
-    Ok(results)
-}
-
-async fn run_bidir_batch(
-    manager: &TransferManager,
-    handles: &TierHandles,
-    config: &BenchConfig,
-    concurrency: usize,
-) -> Result<(Duration, Duration)> {
-    let bpb = config.blocks_per_batch;
-
-    // D2H uses blocks [0..conc*bpb), H2D uses blocks [conc*bpb..2*conc*bpb)
-    let d2h_start = Instant::now();
-    let h2d_start = Instant::now();
-
-    // Launch all D2H and H2D transfers concurrently
-    let mut notifications = Vec::new();
-    // D2H: G1→G2
-    for slot in 0..concurrency {
-        let offset = slot * bpb;
-        let block_ids: Vec<usize> = (offset..offset + bpb).collect();
-        let notif = manager.execute_transfer(
-            handles.g1,
-            &block_ids,
-            handles.g2,
-            &block_ids,
-            TransferOptions::default(),
-        )?;
-        notifications.push(("d2h", notif));
-    }
-    // H2D: G2→G1 (different block range)
-    for slot in 0..concurrency {
-        let offset = (concurrency + slot) * bpb;
-        let block_ids: Vec<usize> = (offset..offset + bpb).collect();
-        let notif = manager.execute_transfer(
-            handles.g2,
-            &block_ids,
-            handles.g1,
-            &block_ids,
-            TransferOptions::default(),
-        )?;
-        notifications.push(("h2d", notif));
-    }
-
-    let mut d2h_done = false;
-    let mut h2d_done = false;
-    let mut d2h_elapsed = Duration::ZERO;
-    let mut h2d_elapsed = Duration::ZERO;
-
-    for (direction, notif) in notifications {
-        notif.await?;
-        match direction {
-            "d2h" if !d2h_done => {
-                // Only record when last D2H completes - but we don't track per-notification.
-                // Simplification: record after all d2h notifications resolve
-            }
-            "h2d" if !h2d_done => {}
-            _ => {}
-        }
-        // Track last completion per direction
-        if direction == "d2h" {
-            d2h_elapsed = d2h_start.elapsed();
-            d2h_done = true;
-        } else {
-            h2d_elapsed = h2d_start.elapsed();
-            h2d_done = true;
-        }
-    }
-
-    Ok((d2h_elapsed, h2d_elapsed))
-}
-
-// ─── Per-Device Worker ─────────────────────────────────────────────────────────
-
-async fn run_device_benchmarks(device_id: u32, config: &BenchConfig) -> Result<Vec<BenchResult>> {
-    eprintln!("[GPU {device_id}] Initializing NixlAgent and TransferManager...");
-
-    let agent_name = format!("bench-gpu-{device_id}");
-
-    // Create NixlAgent with available backends
-    let mut agent = NixlAgent::new(&agent_name)?;
-    // Try POSIX for disk transfers
-    if !config.skip_disk && agent.add_backend("POSIX").is_err() {
-        eprintln!("[GPU {device_id}] POSIX backend unavailable");
-    }
-    // Try GDS for direct GPU↔disk
-    if !config.skip_gds && !config.skip_disk && agent.add_backend("GDS_MT").is_err() {
-        eprintln!("[GPU {device_id}] GDS_MT backend unavailable");
-    }
-
-    let manager = TransferManager::builder()
-        .nixl_agent(agent.clone())
-        .cuda_device_id(device_id as usize)
-        .build()?;
-
-    let mut all_results = Vec::new();
-
-    if !config.bidir_only {
-        eprintln!("[GPU {device_id}] === Phase 1: Isolated Transfers ===");
-        let isolated = run_isolated_benchmarks(device_id, &manager, &agent, config).await?;
-        all_results.extend(isolated);
-    }
-
-    if !config.isolated_only {
-        eprintln!("[GPU {device_id}] === Phase 2: Bidirectional Contention ===");
-        let bidir = run_bidir_benchmarks(device_id, &manager, &agent, config).await?;
-        all_results.extend(bidir);
-    }
-
-    Ok(all_results)
-}
-
-fn spawn_device_worker(device_id: u32, config: BenchConfig, tx: mpsc::Sender<Vec<BenchResult>>) {
-    std::thread::Builder::new()
+    let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
         .spawn(move || {
-            // Try to pin to the device's NUMA-subdivided CPU set
+            // Pin to device's NUMA node
             if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
                 eprintln!(
-                    "[GPU {device_id}] Pinning to CPUs: {}",
+                    "[GPU {device_id}] Worker pinned to CPUs: {}",
                     format_cpu_set(&cpus)
                 );
                 pin_thread_to_cpus(&cpus);
             } else {
-                // Fallback: pin to device's NUMA node
                 let node = dynamo_memory::numa::get_device_numa_node(device_id);
                 if !node.is_unknown() {
-                    eprintln!("[GPU {device_id}] Pinning to NUMA node {node}");
+                    eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
                     let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
                 } else {
                     eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
                 }
             }
 
-            // Build a tokio runtime for this device
+            // Build tokio runtime on this NUMA-pinned thread
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -846,20 +367,671 @@ fn spawn_device_worker(device_id: u32, config: BenchConfig, tx: mpsc::Sender<Vec
                 .build()
                 .expect("failed to build tokio runtime");
 
-            let results = rt.block_on(async { run_device_benchmarks(device_id, &config).await });
+            let result = rt.block_on(async {
+                // Create a local EventManager for this worker's transfer notifications
+                let event_system = Arc::new(velo::EventManager::local());
 
-            match results {
-                Ok(r) => {
-                    tx.send(r).ok();
+                // Create NixlAgent with available backends
+                let agent_name = format!("bench-gpu-{device_id}");
+                let mut agent = NixlAgent::new(&agent_name)?;
+                if !skip_disk && agent.add_backend("POSIX").is_err() {
+                    eprintln!("[GPU {device_id}] POSIX backend unavailable");
                 }
-                Err(e) => {
-                    eprintln!("[GPU {device_id}] ERROR: {e:#}");
-                    tx.send(Vec::new()).ok();
+                if !skip_gds && !skip_disk && agent.add_backend("GDS_MT").is_err() {
+                    eprintln!("[GPU {device_id}] GDS_MT backend unavailable");
                 }
+
+                // Create TransferManager
+                let manager = TransferManager::builder()
+                    .event_system(event_system)
+                    .nixl_agent(agent.clone())
+                    .cuda_device_id(device_id as usize)
+                    .build()?;
+
+                // Build layout config
+                let layout_config = LayoutConfig::builder()
+                    .num_blocks(num_blocks)
+                    .num_layers(num_layers)
+                    .outer_dim(2) // K + V
+                    .page_size(page_size)
+                    .inner_dim(inner_dim)
+                    .dtype_width_bytes(2) // fp16
+                    .build()?;
+
+                // Allocate G1 (GPU device memory) — NUMA-local allocation
+                let g1 = PhysicalLayout::builder(agent.clone())
+                    .with_config(layout_config.clone())
+                    .fully_contiguous()
+                    .allocate_device(device_id)
+                    .build()?;
+                let g1_handle = manager.register_layout(g1)?;
+
+                // Allocate G2 (pinned host memory) — NUMA-local allocation
+                let g2 = PhysicalLayout::builder(agent.clone())
+                    .with_config(layout_config.clone())
+                    .fully_contiguous()
+                    .allocate_pinned(Some(device_id))
+                    .build()?;
+                let g2_handle = manager.register_layout(g2)?;
+
+                // Allocate G3 (disk) if enabled
+                let g3_handle = if !skip_disk {
+                    let g3 = PhysicalLayout::builder(agent.clone())
+                        .with_config(layout_config)
+                        .fully_contiguous()
+                        .allocate_disk(disk_path)
+                        .build()?;
+                    Some(manager.register_layout(g3)?)
+                } else {
+                    None
+                };
+
+                // Build DirectWorker (PhysicalWorker)
+                let mut worker_builder = DirectWorker::builder()
+                    .manager(manager)
+                    .g1_handle(g1_handle)
+                    .g2_handle(g2_handle);
+                if let Some(g3) = g3_handle {
+                    worker_builder = worker_builder.g3_handle(g3);
+                }
+                let worker = Arc::new(worker_builder.build()?);
+
+                ready_tx.send(Ok(worker.clone())).ok();
+
+                // Keep runtime alive so TransferManager notification threads stay running
+                let _ = shutdown_rx.await;
+
+                Ok::<(), anyhow::Error>(())
+            });
+
+            if let Err(e) = result {
+                ready_tx.send(Err(e)).ok();
             }
         })
-        .expect("failed to spawn device worker thread");
+        .expect("failed to spawn worker thread");
+
+    // Wait for worker to be ready
+    let worker = ready_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("Worker thread died before sending ready signal"))??;
+
+    Ok(WorkerHandle {
+        worker,
+        join_handle,
+        shutdown_tx,
+    })
 }
+
+// ─── BenchInstance: Full Leader+Worker Setup ───────────────────────────────────
+
+struct BenchInstance {
+    leader: InstanceLeader,
+    #[allow(dead_code)]
+    registry: BlockRegistry,
+    g2_manager: Arc<BlockManager<G2>>,
+    #[allow(dead_code)]
+    g3_manager: Option<Arc<BlockManager<G3>>>,
+    offload_engine: Option<OffloadEngine>,
+    worker_handles: Vec<WorkerHandle>,
+    config: BenchConfig,
+    page_size: usize,
+}
+
+impl BenchInstance {
+    /// Create a full leader+worker bench instance for a given page_size.
+    ///
+    /// One leader with SpmdParallelWorkers, N DirectWorkers (one per GPU device),
+    /// each on a NUMA-pinned thread with its own tokio runtime and TransferManager.
+    async fn new(config: BenchConfig, page_size: usize) -> Result<Self> {
+        let num_devices = config.devices.len();
+        eprintln!(
+            "Setting up BenchInstance: page_size={page_size}, {} device(s)",
+            num_devices
+        );
+
+        // Spawn worker threads (one per device)
+        let mut worker_handles = Vec::with_capacity(num_devices);
+        for &device_id in &config.devices {
+            let handle = spawn_worker_thread(device_id, page_size, &config)?;
+            eprintln!("[GPU {device_id}] Worker ready");
+            worker_handles.push(handle);
+        }
+
+        // Collect DirectWorker references for the leader
+        let worker_refs: Vec<Arc<dyn Worker>> = worker_handles
+            .iter()
+            .map(|wh| wh.worker.clone() as Arc<dyn Worker>)
+            .collect();
+
+        // Create leader Messenger (needed by InstanceLeader for event system)
+        let leader_messenger = create_messenger_tcp().await?;
+
+        // Build BlockRegistry and BlockManagers
+        let registry = TestRegistryBuilder::new().build();
+        let g2_manager = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(config.num_blocks)
+                .block_size(page_size)
+                .registry(registry.clone())
+                .build(),
+        );
+        let g3_manager = if !config.skip_disk {
+            Some(Arc::new(
+                TestManagerBuilder::<G3>::new()
+                    .block_count(config.num_blocks)
+                    .block_size(page_size)
+                    .registry(registry.clone())
+                    .build(),
+            ))
+        } else {
+            None
+        };
+
+        // Build InstanceLeader with direct worker references
+        let mut leader_builder = InstanceLeader::builder()
+            .messenger(leader_messenger)
+            .registry(registry.clone())
+            .g2_manager(g2_manager.clone())
+            .workers(worker_refs);
+
+        if let Some(ref g3m) = g3_manager {
+            leader_builder = leader_builder.g3_manager(g3m.clone());
+        }
+
+        let leader = leader_builder.build()?;
+
+        // Build OffloadEngine if requested
+        let offload_engine = if config.offload {
+            let mut engine_builder = OffloadEngine::builder(Arc::new(leader.clone()))
+                .with_registry(Arc::new(registry.clone()))
+                .with_g2_manager(g2_manager.clone())
+                .with_runtime(tokio::runtime::Handle::current());
+
+            if let Some(ref g3m) = g3_manager {
+                engine_builder = engine_builder.with_g3_manager(g3m.clone());
+            }
+
+            // Configure G1→G2 pipeline with a pass-through presence filter
+            let g1_to_g2_config = PipelineBuilder::<G1, G2>::new()
+                .policy(Arc::new(PresenceFilter::<G1, G2>::new(Arc::new(registry.clone()))))
+                .batch_size(64)
+                .max_concurrent_transfers(4)
+                .build();
+            engine_builder = engine_builder.with_g1_to_g2_pipeline(g1_to_g2_config);
+
+            // Configure G2→G3 pipeline if disk enabled
+            if g3_manager.is_some() {
+                let g2_to_g3_config = PipelineBuilder::<G2, G3>::new()
+                    .policy(Arc::new(PresenceFilter::<G2, G3>::new(Arc::new(registry.clone()))))
+                    .batch_size(64)
+                    .max_concurrent_transfers(4)
+                    .build();
+                engine_builder = engine_builder.with_g2_to_g3_pipeline(g2_to_g3_config);
+            }
+
+            Some(engine_builder.build()?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            leader,
+            registry,
+            g2_manager,
+            g3_manager,
+            offload_engine,
+            worker_handles,
+            config,
+            page_size,
+        })
+    }
+
+    /// Run all benchmark phases and return results.
+    async fn run_benchmarks(&self) -> Result<Vec<BenchResult>> {
+        let mut results = Vec::new();
+
+        if !self.config.bidir_only {
+            eprintln!("=== Phase 1: Isolated Transfers (page_size={}) ===", self.page_size);
+            results.extend(self.bench_isolated_transfers().await?);
+        }
+
+        if !self.config.isolated_only {
+            eprintln!("=== Phase 2: Bidirectional Contention (page_size={}) ===", self.page_size);
+            results.extend(self.bench_bidir_transfers().await?);
+        }
+
+        if self.config.offload && self.offload_engine.is_some() {
+            eprintln!("=== Phase 3: Offload Pipeline (page_size={}) ===", self.page_size);
+            results.extend(self.bench_offload_pipeline().await?);
+        }
+
+        Ok(results)
+    }
+
+    // ─── Phase 1: Isolated Transfers ───────────────────────────────────────
+
+    async fn bench_isolated_transfers(&self) -> Result<Vec<BenchResult>> {
+        let mut results = Vec::new();
+        let device_id = self.config.devices[0]; // Report results under first device
+        let parallel_worker = self.leader.parallel_worker()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker available"))?;
+
+        for &conc in &self.config.concurrency {
+            let bpb = self.config.blocks_per_batch;
+            let block_ids: Arc<[BlockId]> = Arc::from(
+                (0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
+            );
+
+            // G1→G2 (D2H offload)
+            let latencies = self.bench_transfer(
+                &*parallel_worker,
+                LogicalLayoutHandle::G1,
+                LogicalLayoutHandle::G2,
+                block_ids.clone(),
+                block_ids.clone(),
+            ).await?;
+            let r = make_result(
+                "g1_to_g2", device_id, self.page_size, conc, None, &self.config, latencies,
+            );
+            print_result_stderr(&r);
+            results.push(r);
+
+            // G2→G1 (H2D onboard)
+            let latencies = self.bench_transfer(
+                &*parallel_worker,
+                LogicalLayoutHandle::G2,
+                LogicalLayoutHandle::G1,
+                block_ids.clone(),
+                block_ids.clone(),
+            ).await?;
+            let r = make_result(
+                "g2_to_g1", device_id, self.page_size, conc, None, &self.config, latencies,
+            );
+            print_result_stderr(&r);
+            results.push(r);
+
+            // G2↔G3 tests (if disk enabled)
+            if !self.config.skip_disk {
+                // G2→G3
+                let latencies = self.bench_transfer(
+                    &*parallel_worker,
+                    LogicalLayoutHandle::G2,
+                    LogicalLayoutHandle::G3,
+                    block_ids.clone(),
+                    block_ids.clone(),
+                ).await?;
+                let r = make_result(
+                    "g2_to_g3", device_id, self.page_size, conc, None, &self.config, latencies,
+                );
+                print_result_stderr(&r);
+                results.push(r);
+
+                // G3→G2
+                let latencies = self.bench_transfer(
+                    &*parallel_worker,
+                    LogicalLayoutHandle::G3,
+                    LogicalLayoutHandle::G2,
+                    block_ids.clone(),
+                    block_ids.clone(),
+                ).await?;
+                let r = make_result(
+                    "g3_to_g2", device_id, self.page_size, conc, None, &self.config, latencies,
+                );
+                print_result_stderr(&r);
+                results.push(r);
+            }
+        }
+
+        // G1↔G3 direct tests (GDS or bounce-buffer-free path)
+        if !self.config.skip_disk {
+            // GDS direct tests (G1↔G3 without bounce)
+            if !self.config.skip_gds {
+                for &conc in &self.config.concurrency {
+                    let bpb = self.config.blocks_per_batch;
+                    let block_ids: Arc<[BlockId]> = Arc::from(
+                        (0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
+                    );
+
+                    // G1→G3 direct (GDS)
+                    match self.bench_transfer(
+                        &*parallel_worker,
+                        LogicalLayoutHandle::G1,
+                        LogicalLayoutHandle::G3,
+                        block_ids.clone(),
+                        block_ids.clone(),
+                    ).await {
+                        Ok(latencies) => {
+                            let r = make_result(
+                                "g1_to_g3_gds", device_id, self.page_size, conc,
+                                None, &self.config, latencies,
+                            );
+                            print_result_stderr(&r);
+                            results.push(r);
+                        }
+                        Err(e) => {
+                            eprintln!("GDS g1_to_g3 failed (GDS may not be available): {e}");
+                        }
+                    }
+
+                    // G3→G1 direct (GDS)
+                    match self.bench_transfer(
+                        &*parallel_worker,
+                        LogicalLayoutHandle::G3,
+                        LogicalLayoutHandle::G1,
+                        block_ids.clone(),
+                        block_ids.clone(),
+                    ).await {
+                        Ok(latencies) => {
+                            let r = make_result(
+                                "g3_to_g1_gds", device_id, self.page_size, conc,
+                                None, &self.config, latencies,
+                            );
+                            print_result_stderr(&r);
+                            results.push(r);
+                        }
+                        Err(e) => {
+                            eprintln!("GDS g3_to_g1 failed (GDS may not be available): {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    // ─── Phase 2: Bidirectional Contention ─────────────────────────────────
+
+    async fn bench_bidir_transfers(&self) -> Result<Vec<BenchResult>> {
+        let mut results = Vec::new();
+        let device_id = self.config.devices[0];
+        let parallel_worker = self.leader.parallel_worker()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker available"))?;
+
+        let bidir_concurrencies: Vec<usize> = self.config
+            .concurrency
+            .iter()
+            .copied()
+            .filter(|&c| c <= 4)
+            .collect();
+
+        for &conc in &bidir_concurrencies {
+            let bpb = self.config.blocks_per_batch;
+            let total_blocks_needed = 2 * conc * bpb;
+
+            if total_blocks_needed > self.config.num_blocks {
+                eprintln!(
+                    "Skipping bidir page_size={} conc={conc}: need {total_blocks_needed} blocks but only have {}",
+                    self.page_size, self.config.num_blocks
+                );
+                continue;
+            }
+
+            // D2H block range: [0..conc*bpb)
+            let d2h_ids: Arc<[BlockId]> = Arc::from(
+                (0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
+            );
+            // H2D block range: [conc*bpb..2*conc*bpb)
+            let h2d_ids: Arc<[BlockId]> = Arc::from(
+                (conc * bpb..2 * conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
+            );
+
+            // Warmup
+            for _ in 0..self.config.warmup {
+                let d2h_notif = parallel_worker.execute_local_transfer(
+                    LogicalLayoutHandle::G1, LogicalLayoutHandle::G2,
+                    d2h_ids.clone(), d2h_ids.clone(), TransferOptions::default(),
+                )?;
+                let h2d_notif = parallel_worker.execute_local_transfer(
+                    LogicalLayoutHandle::G2, LogicalLayoutHandle::G1,
+                    h2d_ids.clone(), h2d_ids.clone(), TransferOptions::default(),
+                )?;
+                d2h_notif.await?;
+                h2d_notif.await?;
+            }
+
+            // Measure
+            let mut d2h_latencies = Vec::with_capacity(self.config.iterations);
+            let mut h2d_latencies = Vec::with_capacity(self.config.iterations);
+
+            for _ in 0..self.config.iterations {
+                let start = Instant::now();
+
+                let d2h_notif = parallel_worker.execute_local_transfer(
+                    LogicalLayoutHandle::G1, LogicalLayoutHandle::G2,
+                    d2h_ids.clone(), d2h_ids.clone(), TransferOptions::default(),
+                )?;
+                let h2d_notif = parallel_worker.execute_local_transfer(
+                    LogicalLayoutHandle::G2, LogicalLayoutHandle::G1,
+                    h2d_ids.clone(), h2d_ids.clone(), TransferOptions::default(),
+                )?;
+
+                d2h_notif.await?;
+                let d2h_elapsed = start.elapsed();
+                h2d_notif.await?;
+                let h2d_elapsed = start.elapsed();
+
+                d2h_latencies.push(d2h_elapsed);
+                h2d_latencies.push(h2d_elapsed);
+            }
+
+            let r = make_result(
+                "bidir_g1_to_g2", device_id, self.page_size, conc,
+                None, &self.config, d2h_latencies,
+            );
+            print_result_stderr(&r);
+            results.push(r);
+
+            let r = make_result(
+                "bidir_g2_to_g1", device_id, self.page_size, conc,
+                None, &self.config, h2d_latencies,
+            );
+            print_result_stderr(&r);
+            results.push(r);
+        }
+
+        Ok(results)
+    }
+
+    // ─── Phase 3: Offload Pipeline ─────────────────────────────────────────
+
+    async fn bench_offload_pipeline(&self) -> Result<Vec<BenchResult>> {
+        let mut results = Vec::new();
+        let device_id = self.config.devices[0];
+        let engine = self.offload_engine.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("OffloadEngine not configured"))?;
+
+        // Populate G2 manager with test blocks so the registry has entries
+        let token_seq = token_blocks::create_token_sequence(
+            self.config.num_blocks, self.page_size, 0,
+        );
+        let seq_hashes = populate_manager_with_blocks(&self.g2_manager, token_seq.blocks())?;
+
+        for &batch_size in &self.config.offload_batch_sizes {
+            if batch_size > self.config.num_blocks {
+                eprintln!(
+                    "Skipping offload batch_size={batch_size}: exceeds num_blocks={}",
+                    self.config.num_blocks
+                );
+                continue;
+            }
+
+            for &conc in &self.config.offload_concurrency {
+                eprintln!(
+                    "Offload G1→G2 pipeline: batch_size={batch_size} concurrency={conc}"
+                );
+
+                // Warmup
+                for _ in 0..self.config.warmup {
+                    let blocks: Vec<ExternalBlock<G1>> = (0..batch_size)
+                        .map(|i| ExternalBlock::new(i as BlockId, seq_hashes[i]))
+                        .collect();
+                    let mut handle = engine.enqueue_g1_to_g2(SourceBlocks::External(blocks))?;
+                    handle.wait().await?;
+                }
+
+                // Measure
+                let mut latencies = Vec::with_capacity(self.config.iterations);
+                for _ in 0..self.config.iterations {
+                    let blocks: Vec<ExternalBlock<G1>> = (0..batch_size)
+                        .map(|i| ExternalBlock::new(i as BlockId, seq_hashes[i]))
+                        .collect();
+
+                    let start = Instant::now();
+                    let mut handle = engine.enqueue_g1_to_g2(SourceBlocks::External(blocks))?;
+                    handle.wait().await?;
+                    latencies.push(start.elapsed());
+                }
+
+                let bytes_per_block = compute_bytes_per_block(&self.config, self.page_size);
+                let bytes_per_iter = bytes_per_block * batch_size;
+                let stats = LatencyStats::from_durations(latencies);
+                let bandwidth_gbs = bytes_per_iter as f64 / (stats.mean_us * 1e3);
+                let num_devices = self.config.devices.len();
+
+                let r = BenchResult {
+                    test: "offload_g1_to_g2_pipeline".to_string(),
+                    device_id,
+                    page_size: self.page_size,
+                    blocks_per_batch: batch_size,
+                    concurrency: conc,
+                    bounce_blocks: None,
+                    bytes_per_iter,
+                    iterations: self.config.iterations,
+                    latency_us: stats,
+                    bandwidth_gbs,
+                    aggregate_bandwidth_gbs: bandwidth_gbs * num_devices as f64,
+                };
+                print_result_stderr(&r);
+                results.push(r);
+            }
+        }
+
+        // G2→G3 pipeline if disk enabled
+        if !self.config.skip_disk && engine.has_g2_to_g3() {
+            for &batch_size in &self.config.offload_batch_sizes {
+                if batch_size > self.config.num_blocks {
+                    continue;
+                }
+
+                for &conc in &self.config.offload_concurrency {
+                    eprintln!(
+                        "Offload G2→G3 pipeline: batch_size={batch_size} concurrency={conc}"
+                    );
+
+                    // Get immutable blocks from g2_manager for SourceBlocks::Strong
+                    let matched = self.g2_manager.match_blocks(&seq_hashes[..batch_size]);
+
+                    // Warmup
+                    for _ in 0..self.config.warmup {
+                        let mut handle = engine.enqueue_g2_to_g3(
+                            SourceBlocks::Strong(matched.clone()),
+                        )?;
+                        handle.wait().await?;
+                    }
+
+                    // Measure
+                    let mut latencies = Vec::with_capacity(self.config.iterations);
+                    for _ in 0..self.config.iterations {
+                        let start = Instant::now();
+                        let mut handle = engine.enqueue_g2_to_g3(
+                            SourceBlocks::Strong(matched.clone()),
+                        )?;
+                        handle.wait().await?;
+                        latencies.push(start.elapsed());
+                    }
+
+                    let bytes_per_block = compute_bytes_per_block(&self.config, self.page_size);
+                    let bytes_per_iter = bytes_per_block * batch_size;
+                    let stats = LatencyStats::from_durations(latencies);
+                    let bandwidth_gbs = bytes_per_iter as f64 / (stats.mean_us * 1e3);
+                    let num_devices = self.config.devices.len();
+
+                    let r = BenchResult {
+                        test: "offload_g2_to_g3_pipeline".to_string(),
+                        device_id,
+                        page_size: self.page_size,
+                        blocks_per_batch: batch_size,
+                        concurrency: conc,
+                        bounce_blocks: None,
+                        bytes_per_iter,
+                        iterations: self.config.iterations,
+                        latency_us: stats,
+                        bandwidth_gbs,
+                        aggregate_bandwidth_gbs: bandwidth_gbs * num_devices as f64,
+                    };
+                    print_result_stderr(&r);
+                    results.push(r);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    // ─── Transfer Helpers ──────────────────────────────────────────────────
+
+    /// Benchmark a single transfer direction via the parallel worker (SPMD).
+    async fn bench_transfer(
+        &self,
+        parallel_worker: &dyn WorkerTransfers,
+        src: LogicalLayoutHandle,
+        dst: LogicalLayoutHandle,
+        src_block_ids: Arc<[BlockId]>,
+        dst_block_ids: Arc<[BlockId]>,
+    ) -> Result<Vec<Duration>> {
+        self.bench_transfer_with_options(
+            parallel_worker, src, dst, src_block_ids, dst_block_ids,
+            TransferOptions::default(),
+        ).await
+    }
+
+    /// Benchmark a transfer with custom TransferOptions (e.g., bounce buffer).
+    async fn bench_transfer_with_options(
+        &self,
+        parallel_worker: &dyn WorkerTransfers,
+        src: LogicalLayoutHandle,
+        dst: LogicalLayoutHandle,
+        src_block_ids: Arc<[BlockId]>,
+        dst_block_ids: Arc<[BlockId]>,
+        options: TransferOptions,
+    ) -> Result<Vec<Duration>> {
+        // Warmup
+        for _ in 0..self.config.warmup {
+            let notif = parallel_worker.execute_local_transfer(
+                src, dst,
+                src_block_ids.clone(), dst_block_ids.clone(),
+                options.clone(),
+            )?;
+            notif.await?;
+        }
+
+        // Measure
+        let mut latencies = Vec::with_capacity(self.config.iterations);
+        for _ in 0..self.config.iterations {
+            let start = Instant::now();
+            let notif = parallel_worker.execute_local_transfer(
+                src, dst,
+                src_block_ids.clone(), dst_block_ids.clone(),
+                options.clone(),
+            )?;
+            notif.await?;
+            latencies.push(start.elapsed());
+        }
+
+        Ok(latencies)
+    }
+
+    /// Shutdown all workers.
+    fn shutdown(self) {
+        for handle in self.worker_handles {
+            handle.shutdown_tx.send(()).ok();
+            handle.join_handle.join().ok();
+        }
+    }
+}
+
+// ─── NUMA Pinning Helpers ──────────────────────────────────────────────────────
 
 fn pin_thread_to_cpus(cpus: &[usize]) {
     unsafe {
@@ -951,6 +1123,18 @@ fn validate_config(config: &BenchConfig) -> Result<()> {
         );
     }
 
+    // Validate offload config
+    if config.offload {
+        ensure!(
+            !config.offload_batch_sizes.is_empty(),
+            "offload enabled but no batch sizes specified"
+        );
+        ensure!(
+            !config.offload_concurrency.is_empty(),
+            "offload enabled but no concurrency levels specified"
+        );
+    }
+
     Ok(())
 }
 
@@ -964,7 +1148,7 @@ fn main() -> Result<()> {
     let config = build_config(cli)?;
     validate_config(&config)?;
 
-    eprintln!("KVBM Engine Benchmark");
+    eprintln!("KVBM Engine Benchmark (Leader+Worker Architecture)");
     eprintln!("  Devices: {:?}", config.devices);
     eprintln!("  Page sizes: {:?}", config.page_sizes);
     eprintln!("  Concurrency: {:?}", config.concurrency);
@@ -980,35 +1164,44 @@ fn main() -> Result<()> {
     );
     eprintln!(
         "  Disk: {}",
-        if config.skip_disk {
-            "disabled"
-        } else {
-            "enabled"
-        }
+        if config.skip_disk { "disabled" } else { "enabled" }
     );
     eprintln!(
         "  GDS: {}",
-        if config.skip_gds {
-            "disabled"
-        } else {
-            "enabled"
-        }
+        if config.skip_gds { "disabled" } else { "enabled" }
     );
+    if config.offload {
+        eprintln!("  Offload: enabled");
+        eprintln!("    Batch sizes: {:?}", config.offload_batch_sizes);
+        eprintln!("    Concurrency: {:?}", config.offload_concurrency);
+    }
     eprintln!();
 
-    let (tx, rx) = mpsc::channel();
+    // Build a main-thread tokio runtime for the leader
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .thread_name("bench-leader-tokio")
+        .build()?;
 
-    // Spawn a worker thread per device
-    for &device_id in &config.devices {
-        spawn_device_worker(device_id, config.clone(), tx.clone());
-    }
-    drop(tx); // Close sender so rx iterator ends when all workers finish
+    let all_results = rt.block_on(async {
+        let mut all_results: Vec<BenchResult> = Vec::new();
 
-    // Collect results from all devices
-    let mut all_results: Vec<BenchResult> = Vec::new();
-    for device_results in rx {
-        all_results.extend(device_results);
-    }
+        // Page-size sweep: rebuild full worker stack per page_size
+        // (mirrors production where model config determines page_size at startup)
+        for &page_size in &config.page_sizes {
+            eprintln!("\n{}", "=".repeat(72));
+            eprintln!("Page size: {page_size}");
+            eprintln!("{}", "=".repeat(72));
+
+            let instance = BenchInstance::new(config.clone(), page_size).await?;
+            let results = instance.run_benchmarks().await?;
+            all_results.extend(results);
+            instance.shutdown();
+        }
+
+        Ok::<_, anyhow::Error>(all_results)
+    })?;
 
     // Build timestamped output directory: <cwd>/YYMMDD-HH:MM:SS-bench-engine/
     let now = chrono::Local::now();

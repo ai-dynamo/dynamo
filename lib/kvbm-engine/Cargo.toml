@@ -71,7 +71,7 @@ nats = ["dep:async-nats", "dep:flume"]
 testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
 testing-s3 = ["s3", "testing"]
 nvtx = ["kvbm-config/nvtx"]
-bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:chrono"]
+bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:chrono", "testing"]
 
 [[bin]]
 name = "bench_engine"
