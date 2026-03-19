@@ -56,6 +56,10 @@ tokio-rayon = { version = "2", optional = true }
 chrono = { version = "0.4", optional = true }
 async-nats = { workspace = true, optional = true }
 flume = { version = "0.11", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+figment = { version = "0.10", features = ["env", "toml"], optional = true }
+libc = { version = "0.2", optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 default = ["s3"]
@@ -67,3 +71,9 @@ nats = ["dep:async-nats", "dep:flume"]
 testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
 testing-s3 = ["s3", "testing"]
 nvtx = ["kvbm-config/nvtx"]
+bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:chrono"]
+
+[[bin]]
+name = "bench_engine"
+path = "bin/bench_engine.rs"
+required-features = ["bench"]
