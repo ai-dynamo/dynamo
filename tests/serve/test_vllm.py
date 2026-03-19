@@ -688,8 +688,8 @@ vllm_configs = {
         ],
     ),
     # TODO: Enable this test case when we have 4 GPUs runners.
-    # "multimodal_disagg_qwen": VLLMConfig(
-    #     name="multimodal_disagg_qwen",
+    # "multimodal_disagg": VLLMConfig(
+    #     name="multimodal_disagg",
     #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
