@@ -311,9 +311,6 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        env={
-            "DYN_VLLM_EMBEDDING_TRANSFER_MODE": "nixl-write",
-        },
         request_payloads=[
             chat_payload(
                 [
