@@ -23,6 +23,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -31,7 +32,6 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
 )
-from dynamo._core import Context
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
