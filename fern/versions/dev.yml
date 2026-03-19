@@ -41,6 +41,8 @@ navigation:
         path: ../pages-dev/reference/release-artifacts.md
       - page: Examples
         path: ../pages-dev/getting-started/examples.md
+      - page: Glossary
+        path: ../pages-dev/reference/glossary.md
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
@@ -332,8 +334,6 @@ navigation:
       - page: Model Caching with Fluid
         path: ../pages-dev/kubernetes/model-caching-with-fluid.md
       # -- Reference --
-      - page: Glossary
-        path: ../pages-dev/reference/glossary.md
       - page: Tuning Disaggregated Performance
         path: ../pages-dev/performance/tuning.md
       # -- Frontend (hidden sub-pages) --
