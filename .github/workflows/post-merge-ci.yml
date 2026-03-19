@@ -96,7 +96,7 @@ jobs:
   # ============================================================================
   vllm-dev-pipeline:
     name: vllm-dev
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor-matrix.yml
     with:
       framework: vllm
       target: dev
@@ -104,14 +104,14 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      run_cpu_only_tests: false
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
+      push_image: true
+      run_compliance_scan: true
+      copy_to_acr: true
     secrets: inherit
 
   sglang-dev-pipeline:
     name: sglang-dev
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor-matrix.yml
     with:
       framework: sglang
       target: dev
@@ -119,14 +119,14 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      run_cpu_only_tests: false
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
+      push_image: true
+      run_compliance_scan: true
+      copy_to_acr: true
     secrets: inherit
 
   trtllm-dev-pipeline:
     name: trtllm-dev
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor-matrix.yml
     with:
       framework: trtllm
       target: dev
@@ -134,9 +134,9 @@ jobs:
       cuda_versions: '["13.1"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
-      run_cpu_only_tests: false
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
+      push_image: true
+      run_compliance_scan: true
+      copy_to_acr: true
     secrets: inherit
 
   # ============================================================================
@@ -335,6 +335,8 @@ jobs:
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         operator_tag: ${{ steps.operator-tag.outputs.tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   # ============================================================================
   # End-to-end tests for each framework with various deployment profiles
@@ -370,6 +372,8 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
@@ -403,6 +407,8 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
@@ -440,6 +446,8 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
@@ -514,7 +522,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"

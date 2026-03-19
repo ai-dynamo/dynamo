@@ -35,26 +35,17 @@
 //! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
 //! implementation of the main block manager.
 use crate::cache::HashCache;
+use crate::common::kv_cache_trace;
 use crate::common::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
 use crate::common::sequence::ActiveSequence;
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use dynamo_runtime::config::environment_names::mocker;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use std::collections::HashMap;
-use std::env;
-use std::sync::{Arc, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Check the env var to enable KV cache allocation/eviction trace logs.
-static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
-    env::var(mocker::DYN_MOCKER_KV_CACHE_TRACE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-});
+use std::sync::Arc;
 
 pub struct KvManager {
     cache: HashCache,
@@ -104,32 +95,14 @@ impl KvManager {
             return;
         }
 
-        if *KV_CACHE_TRACE_ENABLED {
-            let active_len = self.cache.num_active();
-            let inactive_len = self.cache.num_inactive();
-            let free_blocks = self
-                .cache
-                .max_capacity()
-                .saturating_sub(active_len)
-                .saturating_sub(inactive_len);
-            let event = if is_store { "allocation" } else { "eviction" };
-            let timestamp_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            tracing::info!(
-                event,
-                timestamp_ms,
-                block_ids = ?&full_blocks,
-                block_size = self.block_size,
-                free_blocks_after = free_blocks,
-                active_blocks = active_len,
-                inactive_blocks = inactive_len,
-                total_blocks = self.cache.max_capacity(),
-                dp_rank = self.dp_rank,
-                "KV cache trace"
-            );
-        }
+        kv_cache_trace::log_vllm_trace(
+            if is_store { "allocation" } else { "eviction" },
+            self.dp_rank,
+            self.block_size,
+            self.cache.num_active(),
+            self.cache.num_inactive(),
+            self.cache.max_capacity(),
+        );
 
         let Some(ref sink) = self.kv_event_sink else {
             return;

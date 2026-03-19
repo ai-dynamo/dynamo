@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -80,32 +81,101 @@ func testInfo() *CheckpointInfo {
 	return &CheckpointInfo{Enabled: true, Hash: testHash}
 }
 
-// --- Helper function tests ---
+type createHookClient struct {
+	client.Client
+	onCreate func(ctx context.Context, obj client.Object) error
+}
+
+func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if c.onCreate != nil {
+		if err := c.onCreate(ctx, obj); err != nil {
+			return err
+		}
+		c.onCreate = nil
+	}
+
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// --- Resource helper tests ---
 
 func TestHelpers(t *testing.T) {
-	// GetPVCBasePath
-	assert.Equal(t, "", GetPVCBasePath(nil))
-	assert.Equal(t, "/checkpoints", GetPVCBasePath(testPVCConfig()))
-
-	// getCheckpointInfoFromCheckpoint — ready
+	// checkpointInfoFromObject — ready
+	hash, err := ComputeIdentityHash(testIdentity())
+	require.NoError(t, err)
 	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "ckpt-abc"},
+		ObjectMeta: metav1.ObjectMeta{Name: hash},
 		Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
 		Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-			Phase: nvidiacomv1alpha1.DynamoCheckpointPhaseReady, IdentityHash: testHash,
-			Location: "/checkpoints/" + testHash, StorageType: "pvc",
+			Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+			IdentityHash: hash,
+			Location:     "/checkpoints/" + hash,
+			StorageType:  "pvc",
 		},
 	}
-	info := getCheckpointInfoFromCheckpoint(ckpt)
+	info, err := checkpointInfoFromObject(ckpt)
+	require.NoError(t, err)
 	assert.True(t, info.Enabled)
 	assert.True(t, info.Ready)
-	assert.Equal(t, testHash, info.Hash)
-	assert.Equal(t, "/checkpoints/"+testHash, info.Location)
+	assert.Equal(t, hash, info.Hash)
+	assert.Equal(t, "/checkpoints/"+hash, info.Location)
+	assert.Equal(t, ckpt.Name, info.CheckpointName)
 
-	// getCheckpointInfoFromCheckpoint — not ready
+	// checkpointInfoFromObject — not ready
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
-	info = getCheckpointInfoFromCheckpoint(ckpt)
+	info, err = checkpointInfoFromObject(ckpt)
+	require.NoError(t, err)
 	assert.False(t, info.Ready)
+}
+
+func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+
+	identity := testIdentity()
+	hash, err := ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	friendly := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "friendly-checkpoint",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				consts.KubeLabelCheckpointHash: hash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{},
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+			Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		},
+	}
+
+	baseClient := fake.NewClientBuilder().WithScheme(s).Build()
+	c := &createHookClient{
+		Client: baseClient,
+		onCreate: func(ctx context.Context, obj client.Object) error {
+			_, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
+			if !ok {
+				return nil
+			}
+			return baseClient.Create(ctx, friendly.DeepCopy())
+		},
+	}
+
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{})
+	require.NoError(t, err)
+	assert.Equal(t, friendly.Name, ckpt.Name)
+
+	list := &nvidiacomv1alpha1.DynamoCheckpointList{}
+	require.NoError(t, baseClient.List(ctx, list))
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, friendly.Name, list.Items[0].Name)
 }
 
 // --- Injection idempotency tests ---
@@ -126,87 +196,40 @@ func TestInjectionIdempotency(t *testing.T) {
 	assert.Len(t, container.VolumeMounts, 2)
 }
 
-// --- InjectCheckpointEnvVars tests ---
+func TestApplyCheckpointPodMetadata(t *testing.T) {
+	t.Run("checkpoint source metadata uses annotations for location and storage", func(t *testing.T) {
+		labels := map[string]string{}
+		annotations := map[string]string{}
 
-func TestInjectCheckpointEnvVars(t *testing.T) {
-	t.Run("PVC storage injects PATH and HASH", func(t *testing.T) {
-		container := &corev1.Container{}
-		InjectCheckpointEnvVars(container, testInfo(), testPVCConfig())
+		ApplyCheckpointSourcePodMetadata(labels, annotations, testHash, "/checkpoints/"+testHash, "pvc")
 
-		envMap := make(map[string]string, len(container.Env))
-		for _, e := range container.Env {
-			envMap[e.Name] = e.Value
+		assert.Equal(t, consts.KubeLabelValueTrue, labels[consts.KubeLabelIsCheckpointSource])
+		assert.Equal(t, testHash, labels[consts.KubeLabelCheckpointHash])
+		assert.Equal(t, "/checkpoints/"+testHash, annotations[consts.KubeAnnotationCheckpointLocation])
+		assert.Equal(t, "pvc", annotations[consts.KubeAnnotationCheckpointStorageType])
+	})
+
+	t.Run("restore metadata clears stale values when checkpoint is not ready", func(t *testing.T) {
+		labels := map[string]string{
+			consts.KubeLabelIsRestoreTarget: consts.KubeLabelValueTrue,
+			consts.KubeLabelCheckpointHash:  "stale-hash",
 		}
-		assert.Equal(t, "/checkpoints", envMap[consts.EnvCheckpointPath])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
-		_, hasLocation := envMap[consts.EnvCheckpointLocation]
+		annotations := map[string]string{
+			consts.KubeAnnotationCheckpointLocation:    "/checkpoints/stale-hash",
+			consts.KubeAnnotationCheckpointStorageType: "pvc",
+		}
+
+		ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: true, Ready: false})
+
+		_, hasRestoreTarget := labels[consts.KubeLabelIsRestoreTarget]
+		_, hasCheckpointHash := labels[consts.KubeLabelCheckpointHash]
+		_, hasLocation := annotations[consts.KubeAnnotationCheckpointLocation]
+		_, hasStorageType := annotations[consts.KubeAnnotationCheckpointStorageType]
+		assert.False(t, hasRestoreTarget)
+		assert.False(t, hasCheckpointHash)
 		assert.False(t, hasLocation)
+		assert.False(t, hasStorageType)
 	})
-
-	t.Run("S3 storage injects LOCATION and HASH", func(t *testing.T) {
-		container := &corev1.Container{}
-		info := &CheckpointInfo{Enabled: true, Hash: testHash, Location: "s3://bucket/" + testHash + ".tar"}
-		config := &configv1alpha1.CheckpointConfiguration{
-			Storage: configv1alpha1.CheckpointStorageConfiguration{
-				Type: configv1alpha1.CheckpointStorageTypeS3,
-				S3:   configv1alpha1.CheckpointS3Config{URI: "s3://bucket"},
-			},
-		}
-		InjectCheckpointEnvVars(container, info, config)
-
-		envMap := make(map[string]string, len(container.Env))
-		for _, e := range container.Env {
-			envMap[e.Name] = e.Value
-		}
-		assert.Equal(t, "s3://bucket/"+testHash+".tar", envMap[consts.EnvCheckpointLocation])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
-	})
-
-	t.Run("disabled is a no-op", func(t *testing.T) {
-		container := &corev1.Container{}
-		InjectCheckpointEnvVars(container, &CheckpointInfo{Enabled: false}, testPVCConfig())
-		assert.Empty(t, container.Env)
-	})
-
-	t.Run("preserves existing env vars", func(t *testing.T) {
-		container := &corev1.Container{Env: []corev1.EnvVar{{Name: "EXISTING", Value: "keep"}}}
-		InjectCheckpointEnvVars(container, testInfo(), testPVCConfig())
-
-		envMap := make(map[string]string, len(container.Env))
-		for _, e := range container.Env {
-			envMap[e.Name] = e.Value
-		}
-		assert.Equal(t, "keep", envMap["EXISTING"])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
-	})
-}
-
-// --- InjectCheckpointLabelsFromConfig tests ---
-
-func TestInjectCheckpointLabelsFromConfig(t *testing.T) {
-	// Disabled/nil configs are no-ops
-	for _, cfg := range []*nvidiacomv1alpha1.ServiceCheckpointConfig{nil, {Enabled: false}} {
-		labels := map[string]string{"existing": "value"}
-		result, err := InjectCheckpointLabelsFromConfig(labels, cfg)
-		require.NoError(t, err)
-		assert.Equal(t, map[string]string{"existing": "value"}, result)
-	}
-
-	// Enabled with identity adds hash label
-	identity := testIdentity()
-	result, err := InjectCheckpointLabelsFromConfig(nil, &nvidiacomv1alpha1.ServiceCheckpointConfig{
-		Enabled: true, Identity: &identity,
-	})
-	require.NoError(t, err)
-	hash, ok := result[consts.KubeLabelCheckpointHash]
-	assert.True(t, ok)
-	assert.Len(t, hash, 16)
-
-	// Enabled without identity does not add hash
-	result, err = InjectCheckpointLabelsFromConfig(map[string]string{}, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
-	require.NoError(t, err)
-	_, ok = result[consts.KubeLabelCheckpointHash]
-	assert.False(t, ok)
 }
 
 // --- InjectCheckpointIntoPodSpec tests ---
@@ -251,7 +274,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NotNil(t, podSpec.SecurityContext.SeccompProfile)
 	})
 
-	t.Run("PVC storage injects volumes, mounts, and env vars", func(t *testing.T) {
+	t.Run("PVC storage injects volumes and mounts", func(t *testing.T) {
 		podSpec := testPodSpec()
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, testInfo(), testPVCConfig()))
 
@@ -261,6 +284,20 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			volNames[v.Name] = true
 			if v.Name == consts.CheckpointVolumeName {
 				assert.Equal(t, "snapshot-pvc", v.PersistentVolumeClaim.ClaimName)
+			}
+			if v.Name == consts.PodInfoVolumeName {
+				require.NotNil(t, v.DownwardAPI)
+				fieldPaths := map[string]string{}
+				for _, item := range v.DownwardAPI.Items {
+					if item.FieldRef != nil {
+						fieldPaths[item.Path] = item.FieldRef.FieldPath
+					}
+				}
+				assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fieldPaths[consts.PodInfoFileDynNamespace])
+				assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fieldPaths[consts.PodInfoFileDynNamespaceWorkerSuffix])
+				assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fieldPaths[consts.PodInfoFileDynComponent])
+				assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fieldPaths[consts.PodInfoFileDynParentDGDName])
+				assert.Equal(t, consts.PodInfoFieldPodNamespace, fieldPaths[consts.PodInfoFileDynParentDGDNamespace])
 			}
 		}
 		assert.True(t, volNames[consts.CheckpointVolumeName])
@@ -273,14 +310,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		assert.Equal(t, "/checkpoints", mountPaths[consts.CheckpointVolumeName])
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
-
-		// Env
-		envMap := make(map[string]string, len(podSpec.Containers[0].Env))
-		for _, e := range podSpec.Containers[0].Env {
-			envMap[e.Name] = e.Value
-		}
-		assert.Equal(t, "/checkpoints", envMap[consts.EnvCheckpointPath])
-		assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
 	})
 
 	t.Run("computes hash from identity when hash is empty", func(t *testing.T) {
@@ -328,9 +357,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"PVC name missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
 			}, "no PVC name"},
-			{"PVC base path missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{PVCName: "snapshot-pvc"}},
-			}, "no PVC base path"},
 			{"S3 URI missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "s3"},
 			}, "S3"},
@@ -370,39 +396,48 @@ func TestResolveCheckpointForService(t *testing.T) {
 	})
 
 	t.Run("checkpointRef resolves ready CR", func(t *testing.T) {
+		hash, err := ComputeIdentityHash(testIdentity())
+		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: "my-ckpt", Namespace: testNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
 			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-				Phase: nvidiacomv1alpha1.DynamoCheckpointPhaseReady, IdentityHash: testHash,
-				Location: "/checkpoints/" + testHash, StorageType: "pvc",
+				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+				IdentityHash: hash,
+				Location:     "/checkpoints/" + hash,
+				StorageType:  "pvc",
 			},
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
-		ref := "my-ckpt"
+		ref := hash
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
 		})
 		require.NoError(t, err)
+		assert.True(t, info.Exists)
 		assert.True(t, info.Ready)
-		assert.Equal(t, testHash, info.Hash)
-		assert.Equal(t, "/checkpoints/"+testHash, info.Location)
+		assert.Equal(t, hash, info.Hash)
+		assert.Equal(t, "/checkpoints/"+hash, info.Location)
+		assert.Equal(t, hash, info.CheckpointName)
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {
+		hash, err := ComputeIdentityHash(testIdentity())
+		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: "pending-ckpt", Namespace: testNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
 			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
 			Status:     nvidiacomv1alpha1.DynamoCheckpointStatus{Phase: nvidiacomv1alpha1.DynamoCheckpointPhaseCreating},
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
-		ref := "pending-ckpt"
+		ref := hash
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
 		})
 		require.NoError(t, err)
+		assert.True(t, info.Exists)
 		assert.False(t, info.Ready)
 	})
 
@@ -415,20 +450,40 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.ErrorContains(t, err, "nonexistent")
 	})
 
-	t.Run("identity lookup finds existing checkpoint by label", func(t *testing.T) {
+	t.Run("checkpointRef resolves human-readable checkpoint names", func(t *testing.T) {
+		hash, err := ComputeIdentityHash(testIdentity())
+		require.NoError(t, err)
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "not-the-hash", Namespace: testNamespace},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
+			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+				IdentityHash: hash,
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
+		ref := "not-the-hash"
+
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true, CheckpointRef: &ref,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "not-the-hash", info.CheckpointName)
+		assert.Equal(t, hash, info.Hash)
+	})
+
+	t.Run("identity lookup finds existing checkpoint by identity hash", func(t *testing.T) {
 		identity := testIdentity()
 		hash, err := ComputeIdentityHash(identity)
 		require.NoError(t, err)
 
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: hash, Namespace: testNamespace,
-				Labels: map[string]string{consts.KubeLabelCheckpointHash: hash},
-			},
-			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: identity},
+			ObjectMeta: metav1.ObjectMeta{Name: "friendly-name", Namespace: testNamespace},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: identity},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-				Phase: nvidiacomv1alpha1.DynamoCheckpointPhaseReady, IdentityHash: hash,
-				Location: "/checkpoints/" + hash, StorageType: "pvc",
+				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+				IdentityHash: hash,
+				Location:     "/checkpoints/" + hash,
+				StorageType:  "pvc",
 			},
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
@@ -437,7 +492,33 @@ func TestResolveCheckpointForService(t *testing.T) {
 			Enabled: true, Identity: &identity,
 		})
 		require.NoError(t, err)
+		assert.True(t, info.Exists)
 		assert.True(t, info.Ready)
+		assert.Equal(t, hash, info.Hash)
+		assert.Equal(t, "friendly-name", info.CheckpointName)
+	})
+
+	t.Run("identity lookup returns existing not-ready checkpoint", func(t *testing.T) {
+		identity := testIdentity()
+		hash, err := ComputeIdentityHash(identity)
+		require.NoError(t, err)
+
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "friendly-name", Namespace: testNamespace},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseCreating,
+				IdentityHash: hash,
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
+
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true, Identity: &identity,
+		})
+		require.NoError(t, err)
+		assert.True(t, info.Exists)
+		assert.False(t, info.Ready)
 		assert.Equal(t, hash, info.Hash)
 	})
 
@@ -448,6 +529,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 			Enabled: true, Identity: &identity,
 		})
 		require.NoError(t, err)
+		assert.False(t, info.Exists)
 		assert.False(t, info.Ready)
 		assert.Len(t, info.Hash, 16)
 	})
