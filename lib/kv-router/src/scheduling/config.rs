@@ -54,6 +54,16 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub assume_kv_reuse: Option<bool>,
+
+    /// Per-request override for HostPinned cache hit weight (0.0-1.0).
+    #[builder(default)]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub tier_weight_host_pinned: Option<f64>,
+
+    /// Per-request override for Disk cache hit weight (0.0-1.0).
+    #[builder(default)]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub tier_weight_disk: Option<f64>,
 }
 
 /// KV Router configuration parameters
@@ -141,6 +151,14 @@ pub struct KvRouterConfig {
     /// The standalone indexer handles its own event subscription and discovery.
     #[serde(default)]
     pub remote_indexer_component: Option<String>,
+
+    /// Weight for HostPinned cache hits (0.0-1.0, default 0.5). Device is always 1.0.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub tier_weight_host_pinned: f64,
+
+    /// Weight for Disk cache hits (0.0-1.0, default 0.1). Device is always 1.0.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub tier_weight_disk: f64,
 }
 
 impl Default for KvRouterConfig {
@@ -165,6 +183,8 @@ impl Default for KvRouterConfig {
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
+            tier_weight_host_pinned: 0.5,
+            tier_weight_disk: 0.1,
         }
     }
 }

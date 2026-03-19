@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::protocols::*;
 
@@ -33,13 +33,18 @@ pub(crate) type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 pub(crate) struct RadixBlock {
     /// A map of child blocks, keyed by their local block hash.
     pub(crate) children: FxHashMap<LocalBlockHash, SharedRadixBlock>,
-    /// The set of workers that have this block cached.
-    pub(crate) workers: FxHashSet<WorkerWithDpRank>,
+    /// Map of workers that have this block cached to their tier set.
+    pub(crate) workers: FxHashMap<WorkerWithDpRank, TierSet>,
     /// The external sequence block hash for this block (None for root).
     /// This is the same for all workers under the simplifying assumption.
     pub(crate) block_hash: Option<ExternalSequenceBlockHash>,
     /// A buffer of times that this block was last traversed
     pub(crate) recent_uses: VecDeque<Instant>,
+    /// Bitwise OR of all workers' TierSet values. Over-approximation:
+    /// bits are set on insert and only cleared on full worker removal.
+    /// Used by find_matches to skip per-worker tier lookups when all
+    /// workers are on the same tier (the common all-Device case).
+    pub(crate) tier_union: u8,
 }
 
 impl RadixBlock {
@@ -51,9 +56,10 @@ impl RadixBlock {
     pub fn new() -> Self {
         Self {
             children: FxHashMap::default(),
-            workers: FxHashSet::default(),
+            workers: FxHashMap::default(),
             block_hash: None,
             recent_uses: VecDeque::new(),
+            tier_union: 0,
         }
     }
 
@@ -65,9 +71,10 @@ impl RadixBlock {
     pub fn with_hash(block_hash: ExternalSequenceBlockHash) -> Self {
         Self {
             children: FxHashMap::default(),
-            workers: FxHashSet::default(),
+            workers: FxHashMap::default(),
             block_hash: Some(block_hash),
             recent_uses: VecDeque::new(),
+            tier_union: 0,
         }
     }
 }
@@ -153,6 +160,20 @@ impl RadixTree {
     /// ### Returns
     ///
     /// An `OverlapScores` representing the match scores.
+    /// Flush `deferred_device` depth into all active workers' overlaps.
+    #[inline]
+    fn flush_deferred(
+        active: &mut FxHashMap<WorkerWithDpRank, TieredOverlap>,
+        deferred_device: &mut u32,
+    ) {
+        if *deferred_device > 0 {
+            for (_, overlap) in active.iter_mut() {
+                overlap.device += *deferred_device;
+            }
+            *deferred_device = 0;
+        }
+    }
+
     pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
         let mut scores = OverlapScores::new();
 
@@ -177,11 +198,37 @@ impl RadixTree {
             return scores;
         };
 
-        // Initialize active worker set from first child.
-        let (mut active, mut active_count) = {
+        // Initialize active workers with default overlaps.
+        // The first block's tier contribution is handled via deferred_device
+        // or an explicit per-worker scan below.
+        let (mut active, mut active_count, first_tier_union) = {
             let borrow = first_child.borrow();
-            (borrow.workers.clone(), borrow.workers.len())
+            let map: FxHashMap<WorkerWithDpRank, TieredOverlap> = borrow
+                .workers
+                .keys()
+                .map(|w| (*w, TieredOverlap::default()))
+                .collect();
+            let count = map.len();
+            (map, count, borrow.tier_union)
         };
+
+        // Account for the first block's tier contribution.
+        let mut deferred_device: u32 = 0;
+        let device_only_bits = StorageTier::Device.bit();
+        if first_tier_union == device_only_bits {
+            deferred_device = 1;
+        } else {
+            // Mixed tiers at first block — per-worker scan.
+            let borrow = first_child.borrow();
+            for (w, overlap) in active.iter_mut() {
+                if let Some(tier_set) = borrow.workers.get(w) {
+                    if let Some(best) = tier_set.best_tier() {
+                        overlap.add(best, 1);
+                    }
+                }
+            }
+        }
+        let mut prev_tier_union = first_tier_union;
 
         // Frequency tracking for first child.
         if let Some(expiration_duration) = self.expiration_duration {
@@ -202,8 +249,9 @@ impl RadixTree {
         }
 
         if early_exit && active_count == 1 {
-            for worker in &active {
-                scores.scores.insert(*worker, 1);
+            Self::flush_deferred(&mut active, &mut deferred_device);
+            for (worker, overlap) in active {
+                scores.scores.insert(worker, overlap);
             }
             for worker in scores.scores.keys() {
                 let tree_size = self
@@ -217,7 +265,6 @@ impl RadixTree {
         }
 
         let mut current = first_child;
-        let mut matched_depth = 1u32;
 
         // Traverse remaining levels. In a clean tree, workers at a child node
         // are always a subset of the parent (along the same path), so:
@@ -229,7 +276,7 @@ impl RadixTree {
         // entries from an ancestor remove whose descendant remove events
         // haven't arrived yet). We detect this via child_count > active_count
         // and fall back to a full membership check.
-        for (idx, item) in sequence.iter().enumerate().skip(1) {
+        for (_idx, item) in sequence.iter().enumerate().skip(1) {
             let next_block = {
                 let current_borrow = current.borrow();
                 current_borrow.children.get(item).cloned()
@@ -243,28 +290,43 @@ impl RadixTree {
                 let borrow = block.borrow();
                 let child_count = borrow.workers.len();
 
-                if child_count < active_count {
-                    // Workers dropped out. Record scores for those that left.
-                    // Score = matched_depth (number of nodes they were present at).
-                    for worker in &active {
-                        if !borrow.workers.contains(worker) {
-                            scores.scores.insert(*worker, matched_depth);
+                if child_count == active_count {
+                    // All workers remain. Check if tier distribution changed.
+                    if borrow.tier_union == prev_tier_union
+                        && borrow.tier_union == device_only_bits
+                    {
+                        // All device — O(1) deferred increment.
+                        deferred_device += 1;
+                    } else {
+                        // Tier boundary — flush deferred, then per-worker scan.
+                        Self::flush_deferred(&mut active, &mut deferred_device);
+                        for (worker, overlap) in active.iter_mut() {
+                            if let Some(tier_set) = borrow.workers.get(worker) {
+                                if let Some(best) = tier_set.best_tier() {
+                                    overlap.add(best, 1);
+                                }
+                            }
+                        }
+                        prev_tier_union = borrow.tier_union;
+                    }
+                } else {
+                    // Workers changed (dropout or stale entries).
+                    // Flush deferred first, then per-worker membership check.
+                    Self::flush_deferred(&mut active, &mut deferred_device);
+                    let mut new_active = FxHashMap::default();
+                    for (worker, mut overlap) in active.drain() {
+                        if let Some(tier_set) = borrow.workers.get(&worker) {
+                            if let Some(best) = tier_set.best_tier() {
+                                overlap.add(best, 1);
+                            }
+                            new_active.insert(worker, overlap);
+                        } else {
+                            scores.scores.insert(worker, overlap);
                         }
                     }
-                    active.clone_from(&borrow.workers);
-                    active_count = child_count;
-                } else if child_count > active_count {
-                    // Stale entries: child retains workers already removed from
-                    // an ancestor. Fall back to full membership check.
-                    active.retain(|w| {
-                        if borrow.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
-                        }
-                    });
+                    active = new_active;
                     active_count = active.len();
+                    prev_tier_union = borrow.tier_union;
                 }
             }
 
@@ -287,17 +349,18 @@ impl RadixTree {
             }
 
             if early_exit && active_count == 1 {
-                matched_depth = (idx + 1) as u32;
                 break;
             }
 
             current = block;
-            matched_depth = (idx + 1) as u32;
         }
 
+        // Flush any remaining deferred device depth.
+        Self::flush_deferred(&mut active, &mut deferred_device);
+
         // Record scores for workers that survived through the deepest matched level.
-        for worker in &active {
-            scores.scores.insert(*worker, matched_depth);
+        for (worker, overlap) in active {
+            scores.scores.insert(worker, overlap);
         }
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
@@ -321,7 +384,7 @@ impl RadixTree {
     ///
     /// * `event` - The `RouterEvent` to apply.
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        let (worker_id, kv_event) = (event.worker_id, event.event);
+        let (worker_id, storage_tier, kv_event) = (event.worker_id, event.storage_tier, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
         // Construct WorkerWithDpRank from worker_id and dp_rank from the event
@@ -361,7 +424,8 @@ impl RadixTree {
                     let mut parent_mut = current.borrow_mut();
 
                     if needs_worker_insert {
-                        parent_mut.workers.insert(worker);
+                        parent_mut.workers.entry(worker).or_default().insert(storage_tier);
+                        parent_mut.tier_union |= storage_tier.bit();
                     }
                     needs_worker_insert = true;
 
@@ -416,7 +480,9 @@ impl RadixTree {
 
                 // Insert worker into the last child.
                 if needs_worker_insert {
-                    current.borrow_mut().workers.insert(worker);
+                    let mut last = current.borrow_mut();
+                    last.workers.entry(worker).or_default().insert(storage_tier);
+                    last.tier_union |= storage_tier.bit();
                 }
 
                 Ok(())
@@ -446,13 +512,26 @@ impl RadixTree {
                     };
 
                     let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker);
+                    // Remove the specific tier from this worker's TierSet.
+                    let should_remove_worker = if let Some(tier_set) = guard.workers.get_mut(&worker) {
+                        tier_set.remove(storage_tier);
+                        tier_set.is_empty()
+                    } else {
+                        false
+                    };
+                    if should_remove_worker {
+                        guard.workers.remove(&worker);
+                        // Recompute tier_union from remaining workers.
+                        guard.tier_union = guard.workers.values().fold(0u8, |acc, ts| acc | ts.0);
+                    }
                     if guard.workers.is_empty() {
                         // if no workers are using this block, that is true for all children
                         guard.children.clear();
                     }
-                    // remove the block from the worker's lookup table
-                    worker_lookup.remove(&block);
+                    // remove the block from the worker's lookup table only if fully removed
+                    if should_remove_worker {
+                        worker_lookup.remove(&block);
+                    }
                 }
                 kv_cache_err.map_or(Ok(()), Err)
             }
@@ -553,11 +632,12 @@ impl RadixTree {
                 .expect("non-root block must have block_hash");
 
             // For each worker that has this block
-            for worker in &current_borrow.workers {
-                // Create a store event for this worker
+            for (worker, tier_set) in &current_borrow.workers {
+                // Use the best (fastest) tier for the dump event
+                let tier = tier_set.best_tier().unwrap_or(StorageTier::Device);
                 let event = RouterEvent {
                     worker_id: worker.worker_id,
-                    storage_tier: crate::protocols::StorageTier::Device,
+                    storage_tier: tier,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -613,8 +693,9 @@ mod tests {
             scores
                 .scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
+                .unwrap()
+                .total(),
+            3
         );
 
         assert_eq!(trie.lookup.len(), 1);
@@ -661,15 +742,17 @@ mod tests {
             scores
                 .scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
+                .unwrap()
+                .total(),
+            3
         );
         assert_eq!(
             scores
                 .scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap(),
-            &1
+                .unwrap()
+                .total(),
+            1
         );
 
         assert_eq!(trie.lookup.len(), 2);
@@ -813,15 +896,17 @@ mod tests {
             scores
                 .scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
+                .unwrap()
+                .total(),
+            3
         );
         assert_eq!(
             scores
                 .scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap(),
-            &2
+                .unwrap()
+                .total(),
+            2
         );
 
         assert_eq!(trie.lookup.len(), 2);
@@ -949,8 +1034,8 @@ mod tests {
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
         assert!(
             result.len() == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
-                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)].total() == 1
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)].total() == 1
         );
 
         trie.clear_all_blocks(worker_0);
@@ -969,7 +1054,7 @@ mod tests {
             .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)].total(), 2);
         let result = trie
             .find_matches(
                 vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
@@ -977,7 +1062,7 @@ mod tests {
             )
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)].total(), 1);
 
         // Test re-adding blocks after clearing worker
         trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None))
@@ -986,7 +1071,7 @@ mod tests {
             .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_0)], 2);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_0)].total(), 2);
 
         // Test multiple clears
         trie.clear_all_blocks(worker_0);
@@ -1027,7 +1112,7 @@ mod tests {
         );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)].total(), 1);
 
         // Test clearing a worker that doesn't exist
         let worker_fake = 2;
@@ -1048,7 +1133,7 @@ mod tests {
         );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)].total(), 1);
     }
 
     #[test]
@@ -1096,19 +1181,19 @@ mod tests {
             block_1
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_0))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         assert!(
             block_1
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_1))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
         );
         assert!(
             block_1
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_2))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_2))
         );
 
         // Remove worker_0
@@ -1134,19 +1219,19 @@ mod tests {
             !block_1
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_0))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         assert!(
             block_1
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_1))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
         );
         assert!(
             block_1
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_2))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_2))
         );
 
         // Verify that blocks with no remaining workers have their children cleared
@@ -1162,7 +1247,7 @@ mod tests {
             block_2
                 .borrow()
                 .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_1))
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
         );
 
         // Verify match results no longer include worker_0

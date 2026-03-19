@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -46,10 +46,15 @@ type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedBlock>;
 struct Block {
     /// A map of child blocks, keyed by their local block hash.
     children: FxHashMap<LocalBlockHash, SharedBlock>,
-    /// The set of workers that have this block cached.
-    workers: FxHashSet<WorkerWithDpRank>,
+    /// Map of workers that have this block cached to their storage tiers.
+    workers: FxHashMap<WorkerWithDpRank, TierSet>,
     /// The external sequence block hash for this block (None for root).
     block_hash: Option<ExternalSequenceBlockHash>,
+    /// Bitwise OR of all workers' TierSet values. Over-approximation:
+    /// bits are set on insert and only cleared on full worker removal.
+    /// Used by find_matches to skip per-worker tier lookups when all
+    /// workers are on the same tier (the common all-Device case).
+    tier_union: u8,
     // NOTE: No recent_uses field.
     // Frequency tracking is not supported - keeps find_matches fully read-only.
 }
@@ -59,8 +64,9 @@ impl Block {
     fn new() -> Self {
         Self {
             children: FxHashMap::default(),
-            workers: FxHashSet::default(),
+            workers: FxHashMap::default(),
             block_hash: None,
+            tier_union: 0,
         }
     }
 
@@ -68,8 +74,9 @@ impl Block {
     fn with_hash(block_hash: ExternalSequenceBlockHash) -> Self {
         Self {
             children: FxHashMap::default(),
-            workers: FxHashSet::default(),
+            workers: FxHashMap::default(),
             block_hash: Some(block_hash),
+            tier_union: 0,
         }
     }
 }
@@ -141,6 +148,20 @@ impl ConcurrentRadixTree {
         }
     }
 
+    /// Flush `deferred_device` depth into all active workers' overlaps.
+    #[inline]
+    fn flush_deferred(
+        active: &mut FxHashMap<WorkerWithDpRank, TieredOverlap>,
+        deferred_device: &mut u32,
+    ) {
+        if *deferred_device > 0 {
+            for (_, overlap) in active.iter_mut() {
+                overlap.device += *deferred_device;
+            }
+            *deferred_device = 0;
+        }
+    }
+
     /// Traverse the radix tree to find the best match for a given sequence of [`LocalBlockHash`]es.
     ///
     /// This operation is thread-safe and can run concurrently with other `find_matches` calls.
@@ -176,19 +197,46 @@ impl ConcurrentRadixTree {
             return scores;
         };
 
-        // Initialize active worker set from first child.
-        let (mut active, mut active_count) = {
+        // Initialize active workers with default overlaps.
+        // The first block's tier contribution is handled via deferred_device
+        // or an explicit per-worker scan below.
+        let (mut active, mut active_count, first_tier_union) = {
             let guard = first_child.read();
-            (guard.workers.clone(), guard.workers.len())
+            let map: FxHashMap<WorkerWithDpRank, TieredOverlap> = guard
+                .workers
+                .keys()
+                .map(|w| (*w, TieredOverlap::default()))
+                .collect();
+            let count = map.len();
+            (map, count, guard.tier_union)
         };
+
+        // Account for the first block's tier contribution.
+        let mut deferred_device: u32 = 0;
+        let device_only_bits = StorageTier::Device.bit();
+        if first_tier_union == device_only_bits {
+            deferred_device = 1;
+        } else {
+            // Mixed tiers at first block — per-worker scan.
+            let guard = first_child.read();
+            for (w, overlap) in active.iter_mut() {
+                if let Some(tier_set) = guard.workers.get(w) {
+                    if let Some(best) = tier_set.best_tier() {
+                        overlap.add(best, 1);
+                    }
+                }
+            }
+        }
+        let mut prev_tier_union = first_tier_union;
 
         if active.is_empty() {
             return scores;
         }
 
         if early_exit && active_count == 1 {
-            for worker in &active {
-                scores.scores.insert(*worker, 1);
+            Self::flush_deferred(&mut active, &mut deferred_device);
+            for (worker, overlap) in active.drain() {
+                scores.scores.insert(worker, overlap);
             }
             for worker in scores.scores.keys() {
                 if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
@@ -201,7 +249,6 @@ impl ConcurrentRadixTree {
         }
 
         let mut current = first_child;
-        let mut matched_depth = 1u32;
 
         // Traverse remaining levels. In a clean tree, workers at a child node
         // are always a subset of the parent (along the same path), so:
@@ -213,7 +260,7 @@ impl ConcurrentRadixTree {
         // entries from an ancestor remove whose descendant remove events
         // haven't arrived yet). We detect this via child_count > active_count
         // and fall back to a full membership check.
-        for (idx, local_hash) in sequence.iter().enumerate().skip(1) {
+        for local_hash in sequence.iter().skip(1) {
             let next_block = {
                 let guard = current.read();
                 guard.children.get(local_hash).cloned()
@@ -227,42 +274,64 @@ impl ConcurrentRadixTree {
                 let guard = block.read();
                 let child_count = guard.workers.len();
 
-                if child_count != active_count {
-                    // Workers changed: either dropped out (child < active) or
-                    // stale entries exist (child > active). In both cases,
-                    // retain only workers present in the child, scoring dropouts.
-                    active.retain(|w| {
-                        if guard.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
+                if child_count == active_count {
+                    // All workers remain. Check if tier distribution changed.
+                    if guard.tier_union == prev_tier_union
+                        && guard.tier_union == device_only_bits
+                    {
+                        // All device — O(1) deferred increment.
+                        deferred_device += 1;
+                    } else {
+                        // Tier boundary — flush deferred, then per-worker scan.
+                        Self::flush_deferred(&mut active, &mut deferred_device);
+                        for (worker, overlap) in active.iter_mut() {
+                            if let Some(tier_set) = guard.workers.get(worker) {
+                                if let Some(best) = tier_set.best_tier() {
+                                    overlap.add(best, 1);
+                                }
+                            }
                         }
-                    });
-                    active_count = active.len();
-
-                    if active_count == 0 {
-                        break;
+                        prev_tier_union = guard.tier_union;
                     }
+                } else {
+                    // Workers changed (dropout or stale entries).
+                    // Flush deferred first, then per-worker membership check.
+                    Self::flush_deferred(&mut active, &mut deferred_device);
+                    let mut new_active: FxHashMap<WorkerWithDpRank, TieredOverlap> =
+                        FxHashMap::default();
+                    for (w, mut overlap) in active.drain() {
+                        if let Some(tier_set) = guard.workers.get(&w) {
+                            if let Some(best) = tier_set.best_tier() {
+                                overlap.add(best, 1);
+                            }
+                            new_active.insert(w, overlap);
+                        } else {
+                            scores.scores.insert(w, overlap);
+                        }
+                    }
+                    active = new_active;
+                    active_count = active.len();
+                    prev_tier_union = guard.tier_union;
                 }
-                // child_count == active_count: fast path, sets are identical
-                // (or, in the rare edge case, different membership with same
-                // cardinality -- accepted as a transient routing quality
-                // degradation that resolves once pending remove events arrive).
+
+                if active_count == 0 {
+                    break;
+                }
 
                 if early_exit && active_count == 1 {
-                    matched_depth = (idx + 1) as u32;
                     break;
                 }
             }
 
             current = block;
-            matched_depth = (idx + 1) as u32;
         }
 
+        // Flush any remaining deferred device depth.
+        Self::flush_deferred(&mut active, &mut deferred_device);
+
         // Record scores for workers that survived through the deepest matched level.
-        for worker in &active {
-            scores.scores.insert(*worker, matched_depth);
+        for (worker, overlap) in active.drain() {
+            scores.scores.insert(worker, overlap);
         }
 
         // Get tree sizes from lookup.
@@ -290,15 +359,20 @@ impl ConcurrentRadixTree {
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         event: RouterEvent,
     ) -> Result<(), KvCacheEventError> {
-        let (worker_id, kv_event) = (event.worker_id, event.event);
+        let (worker_id, storage_tier, kv_event) =
+            (event.worker_id, event.storage_tier, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
         // Construct WorkerWithDpRank from worker_id and dp_rank from the event
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
-            KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
+            KvCacheEventData::Stored(op) => {
+                self.apply_stored(lookup, worker, op, id, storage_tier)
+            }
+            KvCacheEventData::Removed(op) => {
+                self.apply_removed(lookup, worker, op, id, storage_tier)
+            }
             KvCacheEventData::Cleared => {
                 // Ensure the worker is tracked in lookup before clearing,
                 // matching RadixTree behavior where `lookup.entry(worker).or_default()`
@@ -320,6 +394,7 @@ impl ConcurrentRadixTree {
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
+        storage_tier: StorageTier,
     ) -> Result<(), KvCacheEventError> {
         // Ensure this worker has an entry in the outer map.
         let worker_lookup = lookup.entry(worker).or_default();
@@ -357,7 +432,12 @@ impl ConcurrentRadixTree {
                 // previous iteration (skip for the initial parent, which is
                 // not one of the blocks being stored).
                 if needs_worker_insert {
-                    parent_guard.workers.insert(worker);
+                    parent_guard
+                        .workers
+                        .entry(worker)
+                        .or_default()
+                        .insert(storage_tier);
+                    parent_guard.tier_union |= storage_tier.bit();
                 }
                 needs_worker_insert = true;
 
@@ -413,7 +493,9 @@ impl ConcurrentRadixTree {
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
         if needs_worker_insert {
-            current.write().workers.insert(worker);
+            let mut last = current.write();
+            last.workers.entry(worker).or_default().insert(storage_tier);
+            last.tier_union |= storage_tier.bit();
         }
 
         Ok(())
@@ -432,6 +514,7 @@ impl ConcurrentRadixTree {
         worker: WorkerWithDpRank,
         op: KvCacheRemoveData,
         id: u64,
+        storage_tier: StorageTier,
     ) -> Result<(), KvCacheEventError> {
         let Some(worker_lookup) = lookup.get_mut(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
@@ -440,22 +523,40 @@ impl ConcurrentRadixTree {
         let mut num_removed = 0;
 
         for block_hash in op.block_hashes {
-            let Some(block) = worker_lookup.remove(&block_hash) else {
-                tracing::debug!(
-                    worker_id = worker.worker_id.to_string(),
-                    dp_rank = worker.dp_rank,
-                    id,
-                    block_hash = ?block_hash,
-                    "Block not found during remove; skipping"
-                );
-                continue;
+            let block = match worker_lookup.get(&block_hash) {
+                Some(block) => block.clone(),
+                None => {
+                    tracing::debug!(
+                        worker_id = worker.worker_id.to_string(),
+                        dp_rank = worker.dp_rank,
+                        id,
+                        block_hash = ?block_hash,
+                        "Block not found during remove; skipping"
+                    );
+                    continue;
+                }
             };
 
-            // Remove the worker from this block's worker set.
+            // Remove the tier from this worker's tier set for this block.
             let mut guard = block.write();
-            guard.workers.remove(&worker);
+            let should_remove = if let Some(tier_set) = guard.workers.get_mut(&worker) {
+                tier_set.remove(storage_tier);
+                tier_set.is_empty()
+            } else {
+                false
+            };
+            if should_remove {
+                guard.workers.remove(&worker);
+                // Recompute tier_union from remaining workers.
+                guard.tier_union = guard.workers.values().fold(0u8, |acc, ts| acc | ts.0);
+            }
             if guard.workers.is_empty() {
                 guard.children.clear();
+            }
+
+            // Only remove from worker_lookup if fully removed
+            if should_remove {
+                worker_lookup.remove(&block_hash);
             }
 
             num_removed += 1;
@@ -586,11 +687,11 @@ impl ConcurrentRadixTree {
                 .expect("non-root block must have block_hash");
 
             // For each worker that has this block
-            for worker in &current_guard.workers {
+            for (worker, tier_set) in &current_guard.workers {
                 // Create a store event for this worker
                 let event = RouterEvent {
                     worker_id: worker.worker_id,
-                    storage_tier: crate::protocols::StorageTier::Device,
+                    storage_tier: tier_set.best_tier().unwrap_or(StorageTier::Device),
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {

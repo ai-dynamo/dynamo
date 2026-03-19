@@ -128,7 +128,7 @@ pub struct IndexerQueryRequest {
 /// to vecs of tuples for the wire protocol.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WireOverlapScores {
-    pub scores: Vec<(WorkerWithDpRank, u32)>,
+    pub scores: Vec<(WorkerWithDpRank, TieredOverlap)>,
     pub frequencies: Vec<usize>,
     pub tree_sizes: Vec<(WorkerWithDpRank, usize)>,
 }

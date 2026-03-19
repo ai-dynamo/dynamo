@@ -118,7 +118,7 @@ async fn replay_gap(
                 WorkerWithDpRank::new(worker_id, effective_dp_rank),
                 warning_count,
             );
-            if !placement_event.placement.is_local_gpu() {
+            if !placement_event.placement.is_local_cache() {
                 continue;
             }
             let router_event = placement_event
@@ -398,7 +398,7 @@ async fn zmq_recv_loop(
                         WorkerWithDpRank::new(worker_id, effective_dp_rank),
                         &warning_count,
                     );
-                    if !placement_event.placement.is_local_gpu() {
+                    if !placement_event.placement.is_local_cache() {
                         continue;
                     }
                     let router_event = placement_event

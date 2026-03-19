@@ -647,7 +647,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let mut potential_tokens = HashMap::with_capacity(table.slots.len());
 
         for (worker, lock) in &table.slots {
-            let overlap = *overlaps.scores.get(worker).unwrap_or(&0);
+            let overlap = overlaps.scores.get(worker).map(|t| t.total()).unwrap_or(0);
 
             let (blocks, tokens) =
                 lock.read()

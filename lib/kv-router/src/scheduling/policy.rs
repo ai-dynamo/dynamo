@@ -61,7 +61,13 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let max_overlap = request.overlaps.scores.values().copied().max().unwrap_or(0) as usize;
+        let max_overlap = request
+            .overlaps
+            .scores
+            .values()
+            .map(|t| t.total())
+            .max()
+            .unwrap_or(0) as usize;
         let cached_tokens = max_overlap * self.block_size;
         let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
         OrderedFloat(weight / new_tokens as f64)
@@ -103,7 +109,7 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
-    use crate::protocols::{OverlapScores, WorkerWithDpRank};
+    use crate::protocols::{OverlapScores, TieredOverlap, WorkerWithDpRank};
 
     fn request_with(
         isl_tokens: usize,
@@ -130,7 +136,7 @@ mod tests {
     fn overlaps_from(scores: &[(u64, u32)]) -> OverlapScores {
         let mut map = FxHashMap::default();
         for &(worker_id, score) in scores {
-            map.insert(WorkerWithDpRank::new(worker_id, 0), score);
+            map.insert(WorkerWithDpRank::new(worker_id, 0), TieredOverlap::device_only(score));
         }
         OverlapScores {
             scores: map,

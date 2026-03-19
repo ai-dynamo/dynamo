@@ -21,14 +21,14 @@
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use rustc_hash::{FxBuildHasher, FxHashMap};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use super::{SyncIndexer, WorkerTask};
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
-    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
-    WorkerWithDpRank,
+    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent,
+    StorageTier, TierSet, TieredOverlap, WorkerId, WorkerWithDpRank,
 };
 
 /// Entry for the innermost level of the index.
@@ -38,47 +38,106 @@ use crate::protocols::{
 #[derive(Debug, Clone)]
 enum SeqEntry {
     /// Single seq_hash -> workers mapping (common case, no HashMap allocation)
-    Single(ExternalSequenceBlockHash, FxHashSet<WorkerWithDpRank>),
+    Single(ExternalSequenceBlockHash, FxHashMap<WorkerWithDpRank, TierSet>),
     /// Multiple seq_hash -> workers mappings (rare case, different prefixes)
-    Multi(FxHashMap<ExternalSequenceBlockHash, FxHashSet<WorkerWithDpRank>>),
+    Multi(FxHashMap<ExternalSequenceBlockHash, FxHashMap<WorkerWithDpRank, TierSet>>),
 }
 
 impl SeqEntry {
     /// Create a new entry with a single worker.
-    fn new(seq_hash: ExternalSequenceBlockHash, worker: WorkerWithDpRank) -> Self {
-        let mut workers = FxHashSet::default();
-        workers.insert(worker);
+    fn new(
+        seq_hash: ExternalSequenceBlockHash,
+        worker: WorkerWithDpRank,
+        tier: StorageTier,
+    ) -> Self {
+        let mut workers = FxHashMap::default();
+        let mut tier_set = TierSet::default();
+        tier_set.insert(tier);
+        workers.insert(worker, tier_set);
         Self::Single(seq_hash, workers)
     }
 
     /// Insert a worker for a given seq_hash, upgrading to Multi if needed.
-    fn insert(&mut self, seq_hash: ExternalSequenceBlockHash, worker: WorkerWithDpRank) {
+    fn insert(
+        &mut self,
+        seq_hash: ExternalSequenceBlockHash,
+        worker: WorkerWithDpRank,
+        tier: StorageTier,
+    ) {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
-                workers.insert(worker);
+                workers.entry(worker).or_default().insert(tier);
             }
             Self::Single(existing_hash, existing_workers) => {
                 // Upgrade to Multi
                 let mut map = FxHashMap::with_capacity_and_hasher(2, FxBuildHasher);
                 map.insert(*existing_hash, std::mem::take(existing_workers));
-                map.entry(seq_hash).or_default().insert(worker);
+                map.entry(seq_hash)
+                    .or_default()
+                    .entry(worker)
+                    .or_default()
+                    .insert(tier);
                 *self = Self::Multi(map);
             }
             Self::Multi(map) => {
-                map.entry(seq_hash).or_default().insert(worker);
+                map.entry(seq_hash)
+                    .or_default()
+                    .entry(worker)
+                    .or_default()
+                    .insert(tier);
             }
         }
     }
 
-    /// Remove a worker from a given seq_hash.
+    /// Remove a specific tier from a worker for a given seq_hash.
     /// Returns true if the entry is now completely empty and should be removed.
-    fn remove(&mut self, seq_hash: ExternalSequenceBlockHash, worker: WorkerWithDpRank) -> bool {
+    fn remove(
+        &mut self,
+        seq_hash: ExternalSequenceBlockHash,
+        worker: WorkerWithDpRank,
+        tier: StorageTier,
+    ) -> bool {
+        match self {
+            Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
+                if let Some(tier_set) = workers.get_mut(&worker) {
+                    tier_set.remove(tier);
+                    if tier_set.is_empty() {
+                        workers.remove(&worker);
+                    }
+                }
+                workers.is_empty()
+            }
+            Self::Single(_, _) => false, // Different hash, nothing to remove
+            Self::Multi(map) => {
+                if let Some(workers) = map.get_mut(&seq_hash) {
+                    if let Some(tier_set) = workers.get_mut(&worker) {
+                        tier_set.remove(tier);
+                        if tier_set.is_empty() {
+                            workers.remove(&worker);
+                        }
+                    }
+                    if workers.is_empty() {
+                        map.remove(&seq_hash);
+                    }
+                }
+                map.is_empty()
+            }
+        }
+    }
+
+    /// Remove a worker entirely from a given seq_hash (all tiers).
+    /// Returns true if the entry is now completely empty and should be removed.
+    fn remove_worker(
+        &mut self,
+        seq_hash: ExternalSequenceBlockHash,
+        worker: WorkerWithDpRank,
+    ) -> bool {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
                 workers.remove(&worker);
                 workers.is_empty()
             }
-            Self::Single(_, _) => false, // Different hash, nothing to remove
+            Self::Single(_, _) => false,
             Self::Multi(map) => {
                 if let Some(workers) = map.get_mut(&seq_hash) {
                     workers.remove(&worker);
@@ -92,7 +151,10 @@ impl SeqEntry {
     }
 
     /// Get workers for a specific seq_hash.
-    fn get(&self, seq_hash: ExternalSequenceBlockHash) -> Option<&FxHashSet<WorkerWithDpRank>> {
+    fn get(
+        &self,
+        seq_hash: ExternalSequenceBlockHash,
+    ) -> Option<&FxHashMap<WorkerWithDpRank, TierSet>> {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => Some(workers),
             Self::Single(_, _) => None,
@@ -112,6 +174,11 @@ pub struct PositionalIndexer {
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
 
+    /// OR of all `StorageTier::bit()` values ever inserted into this indexer.
+    /// When equal to `StorageTier::Device.bit()`, all blocks are device-only
+    /// and we can skip per-worker tier lookups in find_matches.
+    tier_union: AtomicU8,
+
     jump_size: usize,
 }
 
@@ -128,6 +195,7 @@ impl PositionalIndexer {
         Self {
             index: DashMap::with_hasher(FxBuildHasher),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            tier_union: AtomicU8::new(0),
             jump_size,
         }
     }
@@ -187,7 +255,8 @@ impl PositionalIndexer {
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
         event: RouterEvent,
     ) -> Result<(), KvCacheEventError> {
-        let (worker_id, kv_event) = (event.worker_id, event.event);
+        let (worker_id, storage_tier, kv_event) =
+            (event.worker_id, event.storage_tier, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
@@ -200,12 +269,18 @@ impl PositionalIndexer {
 
         match op {
             KvCacheEventData::Stored(store_data) => {
-                self.store_blocks_impl(worker_blocks, worker, store_data, id)?;
+                self.store_blocks_impl(worker_blocks, worker, store_data, id, storage_tier)?;
 
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes, id)?;
+                self.remove_blocks_impl(
+                    worker_blocks,
+                    worker,
+                    &remove_data.block_hashes,
+                    id,
+                    storage_tier,
+                )?;
                 Ok(())
             }
             KvCacheEventData::Cleared => {
@@ -221,6 +296,7 @@ impl PositionalIndexer {
         worker: WorkerWithDpRank,
         store_data: KvCacheStoreData,
         event_id: u64,
+        storage_tier: StorageTier,
     ) -> Result<(), KvCacheEventError> {
         let worker_map = worker_blocks.entry(worker).or_default();
         // Determine starting position based on parent_hash
@@ -252,12 +328,15 @@ impl PositionalIndexer {
 
             self.index
                 .entry((position, local_hash))
-                .and_modify(|entry| entry.insert(seq_hash, worker))
-                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+                .and_modify(|entry| entry.insert(seq_hash, worker, storage_tier))
+                .or_insert_with(|| SeqEntry::new(seq_hash, worker, storage_tier));
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             worker_blocks_entry.insert(seq_hash, (position, local_hash));
         }
+
+        self.tier_union
+            .fetch_or(storage_tier.bit(), Ordering::Relaxed);
 
         match self.tree_sizes.get(&worker) {
             Some(size) => {
@@ -278,6 +357,7 @@ impl PositionalIndexer {
         worker: WorkerWithDpRank,
         seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
+        storage_tier: StorageTier,
     ) -> Result<(), KvCacheEventError> {
         let worker_map = worker_blocks.get_mut(&worker).ok_or_else(|| {
             tracing::warn!(
@@ -310,7 +390,7 @@ impl PositionalIndexer {
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
-                let _ = entry.remove(*seq_hash, worker);
+                let _ = entry.remove(*seq_hash, worker, storage_tier);
             }
 
             num_removed_blocks += 1;
@@ -343,7 +423,7 @@ impl PositionalIndexer {
         if let Some(worker_map) = worker_blocks.remove(&key) {
             for (seq_hash, (position, local_hash)) in worker_map.iter() {
                 if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
-                    let _ = entry.remove(*seq_hash, key);
+                    let _ = entry.remove_worker(*seq_hash, key);
                 }
             }
             self.tree_sizes.remove(&key);
@@ -369,7 +449,7 @@ impl PositionalIndexer {
             if let Some(worker_map) = worker_blocks.remove(&worker) {
                 for (seq_hash, (position, local_hash)) in worker_map.iter() {
                     if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
-                        let _ = entry.remove(*seq_hash, worker);
+                        let _ = entry.remove_worker(*seq_hash, worker);
                     }
                 }
             }
@@ -460,15 +540,14 @@ impl PositionalIndexer {
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
-    /// Score all active workers at the given position and clear the active set.
+    /// Score all active workers at the given position and drain into scores.
     #[inline]
     fn drain_active(
-        active: &mut FxHashSet<WorkerWithDpRank>,
+        active: &mut FxHashMap<WorkerWithDpRank, TieredOverlap>,
         scores: &mut OverlapScores,
-        pos: usize,
     ) {
-        for worker in active.drain() {
-            scores.scores.insert(worker, pos as u32);
+        for (worker, overlap) in active.drain() {
+            scores.scores.insert(worker, overlap);
         }
     }
 
@@ -516,7 +595,7 @@ impl PositionalIndexer {
         local_hash: LocalBlockHash,
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
-    ) -> Option<FxHashSet<WorkerWithDpRank>> {
+    ) -> Option<FxHashMap<WorkerWithDpRank, TierSet>> {
         let entry = self.index.get(&(position, local_hash))?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
@@ -555,7 +634,7 @@ impl PositionalIndexer {
         &self,
         sequence: &[LocalBlockHash],
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
-        active: &mut FxHashSet<WorkerWithDpRank>,
+        active: &mut FxHashMap<WorkerWithDpRank, TieredOverlap>,
         scores: &mut OverlapScores,
         lo: usize,
         hi: usize,
@@ -564,31 +643,53 @@ impl PositionalIndexer {
         if active.is_empty() {
             return;
         }
+
+        let all_device =
+            self.tier_union.load(Ordering::Relaxed) == StorageTier::Device.bit();
+
         for pos in lo..hi {
             if active.is_empty() {
                 break;
             }
 
             let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
-                Self::drain_active(active, scores, pos);
+                Self::drain_active(active, scores);
                 break;
             };
 
             Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
             let Some(workers) = entry.get(seq_hashes[pos]) else {
-                Self::drain_active(active, scores, pos);
+                Self::drain_active(active, scores);
                 break;
             };
 
+            // Detect and drain workers that dropped out at this position
             if workers.len() < active.len() {
-                active.retain(|w| {
-                    if workers.contains(w) {
-                        true
-                    } else {
-                        scores.scores.insert(*w, pos as u32);
-                        false
+                let mut to_drain = Vec::new();
+                for (w, overlap) in active.iter() {
+                    if !workers.contains_key(w) {
+                        to_drain.push((*w, *overlap));
                     }
-                });
+                }
+                for (w, overlap) in to_drain {
+                    active.remove(&w);
+                    scores.scores.insert(w, overlap);
+                }
+            }
+
+            // Increment overlap for remaining active workers
+            if all_device {
+                for (_, overlap) in active.iter_mut() {
+                    overlap.device += 1;
+                }
+            } else {
+                for (w, overlap) in active.iter_mut() {
+                    if let Some(tier_set) = workers.get(w) {
+                        if let Some(best) = tier_set.best_tier() {
+                            overlap.add(best, 1);
+                        }
+                    }
+                }
             }
 
             if early_exit && !active.is_empty() {
@@ -638,7 +739,24 @@ impl PositionalIndexer {
             return scores;
         };
 
-        let mut active = initial_workers;
+        let all_device =
+            self.tier_union.load(Ordering::Relaxed) == StorageTier::Device.bit();
+
+        // Build initial active map: worker -> TieredOverlap with 1 block at best tier
+        let mut active: FxHashMap<WorkerWithDpRank, TieredOverlap> = FxHashMap::default();
+        if all_device {
+            for (worker, _) in &initial_workers {
+                active.insert(*worker, TieredOverlap { device: 1, ..Default::default() });
+            }
+        } else {
+            for (worker, tier_set) in &initial_workers {
+                let mut overlap = TieredOverlap::default();
+                if let Some(best) = tier_set.best_tier() {
+                    overlap.add(best, 1);
+                }
+                active.insert(*worker, overlap);
+            }
+        }
 
         if active.is_empty() {
             return scores;
@@ -646,8 +764,8 @@ impl PositionalIndexer {
 
         if early_exit {
             // For early exit, just record that these workers matched at least position 0
-            for worker in &active {
-                scores.scores.insert(*worker, 1);
+            for (worker, overlap) in &active {
+                scores.scores.insert(*worker, *overlap);
             }
             // Populate tree_sizes
             for worker in scores.scores.keys() {
@@ -678,6 +796,27 @@ impl PositionalIndexer {
                 .unwrap_or(0);
 
             if num_workers_at_next == active.len() {
+                // All active workers still present at jump destination.
+                // Increment their overlap for the skipped positions using the jump destination's tier info.
+                let jump_blocks = (next_pos - current_pos) as u32;
+                if all_device {
+                    for (_, overlap) in active.iter_mut() {
+                        overlap.device += jump_blocks;
+                    }
+                } else if let Some(entry) =
+                    self.index.get(&(next_pos, local_hashes[next_pos]))
+                {
+                    Self::ensure_seq_hash_computed(&mut seq_hashes, next_pos, local_hashes);
+                    if let Some(workers) = entry.get(seq_hashes[next_pos]) {
+                        for (w, overlap) in active.iter_mut() {
+                            if let Some(tier_set) = workers.get(w) {
+                                if let Some(best) = tier_set.best_tier() {
+                                    overlap.add(best, jump_blocks);
+                                }
+                            }
+                        }
+                    }
+                }
                 current_pos = next_pos;
             } else {
                 // No active workers match at jump destination
@@ -697,9 +836,8 @@ impl PositionalIndexer {
 
         // Record final scores for remaining active workers
         // They matched all positions through the end
-        let final_score = len as u32;
-        for worker in active {
-            scores.scores.insert(worker, final_score);
+        for (worker, overlap) in active {
+            scores.scores.insert(worker, overlap);
         }
 
         for worker in scores.scores.keys() {

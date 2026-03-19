@@ -256,7 +256,7 @@ async fn test_store_and_find(variant: &str) {
         .await
         .unwrap();
     assert_eq!(scores.scores.len(), 1);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 }
 
 #[tokio::test]
@@ -278,7 +278,7 @@ async fn test_partial_match(variant: &str) {
         ])
         .await
         .unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 2);
 }
 
 #[tokio::test]
@@ -322,8 +322,8 @@ async fn test_multiple_workers_shared_prefix(variant: &str) {
     // Query [1] - both workers should match
     let scores = index.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
     assert_eq!(scores.scores.len(), 2);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 1);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(), 1);
 
     // Query [1, 2] - worker 0 matches both, worker 1 matches only first block
     let scores = index
@@ -331,8 +331,8 @@ async fn test_multiple_workers_shared_prefix(variant: &str) {
         .await
         .unwrap();
     assert_eq!(scores.scores.len(), 2);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 2);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(), 1);
 }
 
 #[tokio::test]
@@ -554,12 +554,12 @@ async fn test_parent_hash_chains(variant: &str) {
     let full_seq: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
     let scores = index.find_matches(full_seq).await.unwrap();
     assert_eq!(scores.scores.len(), 1);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 5);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 5);
 
     // Query for just [1, 2, 3] should match 3 blocks
     let prefix_seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
     let scores = index.find_matches(prefix_seq).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 }
 
 #[tokio::test]
@@ -585,9 +585,9 @@ async fn test_multiple_dp_ranks(variant: &str) {
     let scores = index.find_matches(seq).await.unwrap();
 
     assert_eq!(scores.scores.len(), 3);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 1)).unwrap(), 3);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 2)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 1)).unwrap().total(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 2)).unwrap().total(), 3);
 }
 
 #[tokio::test]
@@ -603,7 +603,7 @@ async fn test_partial_block_removal(variant: &str) {
     // Verify all 3 blocks match
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
     let scores = index.find_matches(seq.clone()).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 
     // Remove only the last block (block 3)
     // To do this correctly, we need to compute the seq_hash for block 3 specifically,
@@ -619,12 +619,12 @@ async fn test_partial_block_removal(variant: &str) {
 
     // Query [1, 2, 3] - should only match 2 blocks now (block 3 is removed)
     let scores = index.find_matches(seq).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 2);
 
     // Query [1, 2] - should still match 2 blocks
     let partial_seq: Vec<LocalBlockHash> = (1..=2).map(LocalBlockHash).collect();
     let scores = index.find_matches(partial_seq).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 2);
 }
 
 #[tokio::test]
@@ -648,7 +648,7 @@ async fn test_remove_mid_chain_block(variant: &str) {
     // Verify all 5 blocks match
     let seq: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
     let scores = index.find_matches(seq.clone()).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 5);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 5);
 
     // Remove only block 3 (index 2) — the middle of the chain
     let full_hashes: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
@@ -662,12 +662,12 @@ async fn test_remove_mid_chain_block(variant: &str) {
 
     // Query [1, 2, 3, 4, 5] — only first 2 positions reachable (block 3 removed, orphaning 4 & 5)
     let scores = index.find_matches(seq.clone()).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 2);
 
     // Query [1, 2] — prefix before the gap is still intact
     let prefix_seq: Vec<LocalBlockHash> = (1..=2).map(LocalBlockHash).collect();
     let scores = index.find_matches(prefix_seq).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 2);
 
     // Re-store block 3 as a continuation of [1, 2]
     index
@@ -678,7 +678,7 @@ async fn test_remove_mid_chain_block(variant: &str) {
 
     // Query [1, 2, 3, 4, 5] — block 3 is back but 4 & 5 were orphaned, so score = 3
     let scores = index.find_matches(seq).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 }
 
 #[tokio::test]
@@ -720,7 +720,7 @@ async fn test_remove_nonexistent_blocks(variant: &str) {
     // Original data should still be there
     let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
     let scores = index.find_matches(seq).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 }
 
 #[tokio::test]
@@ -749,7 +749,7 @@ async fn test_clear_then_reuse(variant: &str) {
     // Verify new data is accessible
     let scores = index.find_matches(seq).await.unwrap();
     assert_eq!(scores.scores.len(), 1);
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 }
 
 #[tokio::test]
@@ -770,18 +770,18 @@ async fn test_multiple_sequences_per_worker(variant: &str) {
     // Query first sequence
     let seq1: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
     let scores = index.find_matches(seq1).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 
     // Query second sequence
     let seq2: Vec<LocalBlockHash> = (100..=102).map(LocalBlockHash).collect();
     let scores = index.find_matches(seq2).await.unwrap();
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 3);
 
     // Query a mix that doesn't exist as a sequence - should only match first block
     let mixed: Vec<LocalBlockHash> = vec![LocalBlockHash(1), LocalBlockHash(100)];
     let scores = index.find_matches(mixed).await.unwrap();
     // Only block 1 matches because [1, 100] is not a valid prefix
-    assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
+    assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(), 1);
 }
 
 #[tokio::test]
@@ -876,10 +876,11 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
         "Only base-model worker should match"
     );
     assert_eq!(
-        *base_scores
+        base_scores
             .scores
             .get(&WorkerWithDpRank::new(0, 0))
-            .unwrap(),
+            .unwrap()
+            .total(),
         3
     );
 
@@ -887,10 +888,11 @@ async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
     let lora_scores = index.find_matches(lora_hashes.clone()).await.unwrap();
     assert_eq!(lora_scores.scores.len(), 1, "Only LoRA worker should match");
     assert_eq!(
-        *lora_scores
+        lora_scores
             .scores
             .get(&WorkerWithDpRank::new(1, 0))
-            .unwrap(),
+            .unwrap()
+            .total(),
         3
     );
 }
@@ -962,10 +964,11 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
     let base_scores = index.find_matches(base_local.clone()).await.unwrap();
     assert_eq!(base_scores.scores.len(), 1);
     assert_eq!(
-        *base_scores
+        base_scores
             .scores
             .get(&WorkerWithDpRank::new(0, 0))
-            .unwrap(),
+            .unwrap()
+            .total(),
         3
     );
 
@@ -973,10 +976,11 @@ async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
     let lora_scores = index.find_matches(lora_local.clone()).await.unwrap();
     assert_eq!(lora_scores.scores.len(), 1);
     assert_eq!(
-        *lora_scores
+        lora_scores
             .scores
             .get(&WorkerWithDpRank::new(1, 0))
-            .unwrap(),
+            .unwrap()
+            .total(),
         3
     );
 }
@@ -1062,26 +1066,26 @@ async fn test_long_sequence_single_store(variant: &str) {
     let scores = index.find_matches(full_query).await.unwrap();
     assert_eq!(scores.scores.len(), 1);
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         seq_len as u32
-    );
+        );
 
     // Query prefix (first 64 blocks)
     let prefix_query: Vec<LocalBlockHash> = (1..=64).map(LocalBlockHash).collect();
     let scores = index.find_matches(prefix_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         64
-    );
+        );
 
     // Query with divergence at position 50
     let mut divergent_query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
     divergent_query[49] = LocalBlockHash(99999); // Position 49 (0-indexed) diverges
     let scores = index.find_matches(divergent_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         49
-    );
+        );
 }
 
 #[tokio::test]
@@ -1114,9 +1118,9 @@ async fn test_long_sequence_multiple_continuations(variant: &str) {
     let scores = index.find_matches(full_query).await.unwrap();
     assert_eq!(scores.scores.len(), 1);
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         150
-    );
+        );
 
     // Query crossing continuation boundaries
     let cross_boundary_query: Vec<LocalBlockHash> = (45..=105).map(LocalBlockHash).collect();
@@ -1157,25 +1161,25 @@ async fn test_long_sequence_branching_continuations(variant: &str) {
     let scores = index.find_matches(prefix_query).await.unwrap();
     assert_eq!(scores.scores.len(), 2);
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         30
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         30
-    );
+        );
 
     // Query branch A path - only worker 0 should match fully
     let branch_a_query: Vec<LocalBlockHash> = (1..=60).map(LocalBlockHash).collect();
     let scores = index.find_matches(branch_a_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         60
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         30
-    );
+        );
 }
 
 #[tokio::test]
@@ -1193,9 +1197,9 @@ async fn test_long_sequence_partial_removal(variant: &str) {
     let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(full_query.clone()).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         100
-    );
+        );
 
     // Remove blocks 80-100 (the tail)
     let tail_hashes: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
@@ -1213,9 +1217,9 @@ async fn test_long_sequence_partial_removal(variant: &str) {
     // Query should now only match first 79 blocks
     let scores = index.find_matches(full_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         79
-    );
+        );
 }
 
 #[tokio::test]
@@ -1246,21 +1250,21 @@ async fn test_long_sequence_interleaved_workers(variant: &str) {
     let scores = index.find_matches(query_60).await.unwrap();
     assert_eq!(scores.scores.len(), 4);
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         60
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         60
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap().total(),
         50
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap().total(),
         25
-    );
+        );
 }
 
 #[tokio::test]
@@ -1289,23 +1293,23 @@ async fn test_long_sequence_exact_jump_size_boundaries(variant: &str) {
     let query_32: Vec<LocalBlockHash> = seq_32.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_32).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         32
-    );
+        );
 
     let query_64: Vec<LocalBlockHash> = seq_64.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_64).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         64
-    );
+        );
 
     let query_96: Vec<LocalBlockHash> = seq_96.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_96).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap().total(),
         96
-    );
+        );
 }
 
 #[tokio::test]
@@ -1330,30 +1334,30 @@ async fn test_long_sequence_off_by_one_jump_boundaries(variant: &str) {
     let query_31: Vec<LocalBlockHash> = seq_31.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_31).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         31
-    );
+        );
 
     let query_33: Vec<LocalBlockHash> = seq_33.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_33).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         33
-    );
+        );
 
     let query_63: Vec<LocalBlockHash> = seq_63.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_63).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap().total(),
         63
-    );
+        );
 
     let query_65: Vec<LocalBlockHash> = seq_65.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query_65).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap().total(),
         65
-    );
+        );
 }
 
 #[tokio::test]
@@ -1374,7 +1378,7 @@ async fn test_long_sequence_divergence_at_jump_boundaries(variant: &str) {
 
         let scores = index.find_matches(query).await.unwrap();
         assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
             diverge_pos as u32,
             "Divergence at position {} should match {} blocks",
             diverge_pos,
@@ -1418,17 +1422,17 @@ async fn test_long_sequence_deep_continuation_chain(variant: &str) {
     let full_query: Vec<LocalBlockHash> = (1..=200).map(LocalBlockHash).collect();
     let scores = index.find_matches(full_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         200
-    );
+        );
 
     // Query partial prefix crossing multiple chunk boundaries
     let partial_query: Vec<LocalBlockHash> = (1..=75).map(LocalBlockHash).collect();
     let scores = index.find_matches(partial_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         75
-    );
+        );
 }
 
 #[tokio::test]
@@ -1446,9 +1450,9 @@ async fn test_long_sequence_clear_and_rebuild(variant: &str) {
     let query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(query.clone()).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         100
-    );
+        );
 
     // Clear the worker
     index.apply_event(make_clear_event(0)).await;
@@ -1469,9 +1473,9 @@ async fn test_long_sequence_clear_and_rebuild(variant: &str) {
     let new_query: Vec<LocalBlockHash> = new_sequence.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(new_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         100
-    );
+        );
 
     // Verify old sequence no longer matches
     let scores = index.find_matches(query).await.unwrap();
@@ -1526,17 +1530,17 @@ async fn test_long_sequence_multiple_workers_diverging(variant: &str) {
     let scores = index.find_matches(query).await.unwrap();
 
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         100
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         40
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap().total(),
         40
-    );
+        );
 }
 
 #[tokio::test]
@@ -1565,25 +1569,25 @@ async fn test_long_sequence_staggered_lengths(variant: &str) {
     let scores = index.find_matches(query).await.unwrap();
 
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         10
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap().total(),
         20
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap().total(),
         35
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap().total(),
         64
-    );
+        );
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(4, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(4, 0)).unwrap().total(),
         100
-    );
+        );
 }
 
 #[tokio::test]
@@ -1602,26 +1606,26 @@ async fn test_very_long_sequence(variant: &str) {
     let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
     let scores = index.find_matches(full_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         seq_len as u32
-    );
+        );
 
     // Partial match (first 500)
     let partial_query: Vec<LocalBlockHash> = (1..=500).map(LocalBlockHash).collect();
     let scores = index.find_matches(partial_query).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         500
-    );
+        );
 
     // Divergence in the middle
     let mut mid_diverge: Vec<LocalBlockHash> = (1..=1000).map(LocalBlockHash).collect();
     mid_diverge[499] = LocalBlockHash(99999);
     let scores = index.find_matches(mid_diverge).await.unwrap();
     assert_eq!(
-        *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+        scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap().total(),
         499
-    );
+        );
 }
 
 // ============================================================================

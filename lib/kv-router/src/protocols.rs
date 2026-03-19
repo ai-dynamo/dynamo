@@ -163,6 +163,97 @@ impl StorageTier {
     pub fn is_gpu(self) -> bool {
         matches!(self, Self::Device)
     }
+
+    /// Returns true for tiers that represent local cache (Device, HostPinned, Disk).
+    /// External storage is not considered local cache.
+    pub fn is_local_cache(self) -> bool {
+        matches!(self, Self::Device | Self::HostPinned | Self::Disk)
+    }
+
+    /// Bit position for this tier in a [`TierSet`].
+    pub fn bit(self) -> u8 {
+        match self {
+            Self::Device => 0b001,
+            Self::HostPinned => 0b010,
+            Self::Disk => 0b100,
+            Self::External => 0,
+        }
+    }
+}
+
+/// Compact bitflag representation of which tiers a worker holds a block on.
+/// Bit 0 = Device, Bit 1 = HostPinned, Bit 2 = Disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TierSet(pub u8);
+
+impl TierSet {
+    pub fn insert(&mut self, tier: StorageTier) {
+        self.0 |= tier.bit();
+    }
+
+    pub fn remove(&mut self, tier: StorageTier) {
+        self.0 &= !tier.bit();
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn contains(self, tier: StorageTier) -> bool {
+        self.0 & tier.bit() != 0
+    }
+
+    /// Returns the lowest-latency tier present (Device > HostPinned > Disk).
+    pub fn best_tier(self) -> Option<StorageTier> {
+        if self.contains(StorageTier::Device) {
+            Some(StorageTier::Device)
+        } else if self.contains(StorageTier::HostPinned) {
+            Some(StorageTier::HostPinned)
+        } else if self.contains(StorageTier::Disk) {
+            Some(StorageTier::Disk)
+        } else {
+            None
+        }
+    }
+}
+
+/// Per-tier block counts for a single worker's overlap with a request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TieredOverlap {
+    pub device: u32,
+    pub host_pinned: u32,
+    pub disk: u32,
+}
+
+impl TieredOverlap {
+    /// Create a device-only overlap (backward-compatible with plain u32 scores).
+    pub fn device_only(count: u32) -> Self {
+        Self {
+            device: count,
+            host_pinned: 0,
+            disk: 0,
+        }
+    }
+
+    /// Increment the count for a specific tier.
+    pub fn add(&mut self, tier: StorageTier, count: u32) {
+        match tier {
+            StorageTier::Device => self.device += count,
+            StorageTier::HostPinned => self.host_pinned += count,
+            StorageTier::Disk => self.disk += count,
+            StorageTier::External => {}
+        }
+    }
+
+    /// Total blocks across all tiers.
+    pub fn total(&self) -> u32 {
+        self.device + self.host_pinned + self.disk
+    }
+
+    /// Weighted score: Device counts as 1.0, HostPinned as `host_w`, Disk as `disk_w`.
+    pub fn weighted(&self, host_w: f64, disk_w: f64) -> f64 {
+        self.device as f64 + self.host_pinned as f64 * host_w + self.disk as f64 * disk_w
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -191,6 +282,12 @@ impl Placement {
 
     pub fn is_local_gpu(&self) -> bool {
         matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_gpu()
+    }
+
+    /// Returns true if this placement is a local worker on any cacheable tier
+    /// (Device, HostPinned, or Disk). Excludes External.
+    pub fn is_local_cache(&self) -> bool {
+        matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_local_cache()
     }
 }
 
@@ -638,8 +735,8 @@ impl RouterEvent {
 /// Scores representing the overlap of workers (with their dp_rank).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlapScores {
-    /// Map of worker (with dp_rank) to score.
-    pub scores: FxHashMap<WorkerWithDpRank, u32>,
+    /// Map of worker (with dp_rank) to tiered overlap score.
+    pub scores: FxHashMap<WorkerWithDpRank, TieredOverlap>,
     /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
     /// Map of worker to their tree size (number of blocks in the tree for that worker).
@@ -666,7 +763,7 @@ impl OverlapScores {
         }
     }
 
-    /// Update the scores with a set of workers.
+    /// Update the scores with a set of workers, counting each as one Device-tier block.
     ///
     /// ### Arguments
     ///
@@ -676,8 +773,10 @@ impl OverlapScores {
         I: IntoIterator<Item = &'a WorkerWithDpRank>,
     {
         for worker in workers {
-            let score = self.scores.entry(*worker).or_insert(0);
-            *score += 1;
+            self.scores
+                .entry(*worker)
+                .or_default()
+                .add(StorageTier::Device, 1);
         }
     }
 

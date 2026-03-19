@@ -7,7 +7,9 @@ use rand::Rng;
 
 use super::config::KvRouterConfig;
 use super::types::{KvSchedulerError, SchedulingRequest};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    TieredOverlap, WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+};
 
 /// A trait that users can implement to define custom selection logic.
 ///
@@ -126,6 +128,19 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .and_then(|cfg| cfg.overlap_score_weight)
             .unwrap_or(self.kv_router_config.overlap_score_weight);
 
+        let host_w = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.tier_weight_host_pinned)
+            .unwrap_or(self.kv_router_config.tier_weight_host_pinned);
+        let disk_w = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.tier_weight_disk)
+            .unwrap_or(self.kv_router_config.tier_weight_disk);
+
+        let default_overlap = TieredOverlap::default();
+
         for (worker_id, config) in workers
             .iter()
             .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
@@ -137,7 +152,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
-                let overlap = *overlaps.get(&worker).unwrap_or(&0);
+                let tiered = overlaps.get(&worker).unwrap_or(&default_overlap);
+                let overlap = tiered.weighted(host_w, disk_w).round() as u32;
 
                 let prefill_token = *prefill_tokens.get(&worker).unwrap_or(&isl);
                 let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
@@ -200,11 +216,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             return Ok(WorkerSelectionResult {
                 worker: best_worker,
                 required_blocks: request_blocks as u64,
-                overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+                overlap_blocks: overlaps.get(&best_worker).map(|t| t.total()).unwrap_or(0),
             });
         }
 
-        let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
+        let best_overlap = overlaps.get(&best_worker).map(|t| t.total()).unwrap_or(0);
 
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
@@ -233,7 +249,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         Ok(WorkerSelectionResult {
             worker: best_worker,
             required_blocks: request_blocks as u64,
-            overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+            overlap_blocks: overlaps.get(&best_worker).map(|t| t.total()).unwrap_or(0),
         })
     }
 }

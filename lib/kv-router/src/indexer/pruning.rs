@@ -372,7 +372,7 @@ mod tests {
                 .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_id))
-                .copied()
+                .map(|t| t.total())
                 == Some(1)
         })
         .await;
@@ -493,11 +493,11 @@ mod tests {
                 .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .copied()
+                .map(|t| t.total())
                 == Some(1)
                 && s.scores
                     .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .copied()
+                    .map(|t| t.total())
                     == Some(1)
         })
         .await;
@@ -515,7 +515,7 @@ mod tests {
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
                 && s.scores
                     .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .copied()
+                    .map(|t| t.total())
                     == Some(1)
         })
         .await;
@@ -563,7 +563,7 @@ mod tests {
                 .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_a))
-                .copied()
+                .map(|t| t.total())
                 == Some(1)
         })
         .await;
@@ -581,8 +581,9 @@ mod tests {
         assert_eq!(
             overlap
                 .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_a)),
-            Some(&1)
+                .get(&WorkerWithDpRank::from_worker_id(worker_a))
+                .map(|t| t.total()),
+            Some(1)
         );
     }
 
@@ -636,11 +637,11 @@ mod tests {
                 .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .copied()
+                .map(|t| t.total())
                 == Some(1)
                 && s.scores
                     .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .copied()
+                    .map(|t| t.total())
                     == Some(1)
         })
         .await;
@@ -653,14 +654,16 @@ mod tests {
         assert_eq!(
             scores
                 .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_0)),
-            Some(&1)
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .map(|t| t.total()),
+            Some(1)
         );
         assert_eq!(
             scores
                 .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1)),
-            Some(&1)
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .map(|t| t.total()),
+            Some(1)
         );
     }
 
@@ -812,7 +815,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                scores.scores.get(&worker).copied(),
+                scores.scores.get(&worker).map(|t| t.total()),
                 Some(1),
                 "Block {} should be present before threshold is exceeded",
                 i
@@ -841,7 +844,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                scores.scores.get(&worker).copied().unwrap_or(0) == 0,
+                scores.scores.get(&worker).map(|t| t.total()).unwrap_or(0) == 0,
                 "Block {} should have been pruned but is still present",
                 i
             );
@@ -855,7 +858,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                scores.scores.get(&worker).copied(),
+                scores.scores.get(&worker).map(|t| t.total()),
                 Some(1),
                 "Block {} should have been present but was pruned",
                 i
