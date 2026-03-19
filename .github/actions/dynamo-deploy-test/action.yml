@@ -20,6 +20,14 @@ inputs:
     description: 'HuggingFace token for model access'
     required: false
     default: ''
+  dockerhub_username:
+    description: 'Docker Hub username for image pull secrets. Required for rerun self-bootstrap if private images are used.'
+    required: false
+    default: ''
+  dockerhub_password:
+    description: 'Docker Hub password for image pull secrets. Required for rerun self-bootstrap if private images are used.'
+    required: false
+    default: ''
 
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
@@ -75,6 +83,8 @@ runs:
         registry: ${{ inputs.registry }}
         operator_tag: ${{ inputs.operator_tag }}
         hf_token: ${{ inputs.hf_token }}
+        dockerhub_username: ${{ inputs.dockerhub_username }}
+        dockerhub_password: ${{ inputs.dockerhub_password }}
 
     - name: Setup Kubeconfig
       id: setup-kubeconfig

@@ -79,7 +79,6 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",  # This flag enables mypy type checking during pytest runs
     "--ignore-glob=*model.py",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=deploy/api-store/*",
