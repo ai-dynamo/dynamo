@@ -292,7 +292,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// this is a dummy change to trigger pipeline
 	// Initialize namespace scope mechanism
 	var leaseManager *namespace_scope.LeaseManager
 	var leaseWatcher *namespace_scope.LeaseWatcher

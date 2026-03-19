@@ -314,10 +314,23 @@ jobs:
        needs.changed-files.outputs.deploy == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
-    uses: ./.github/workflows/deploy-operator.yml
-    with:
-      operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
-    secrets: inherit
+    runs-on: prod-default-small-v2
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
     if: |
@@ -326,7 +339,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.vllm-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, vllm-pipeline]
-    uses: ./.github/workflows/deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -343,7 +356,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.sglang-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, sglang-pipeline]
-    uses: ./.github/workflows/deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -360,7 +373,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.trtllm-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, trtllm-pipeline]
-    uses: ./.github/workflows/deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
@@ -373,11 +386,16 @@ jobs:
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    uses: ./.github/workflows/deploy-cleanup.yml
-    with:
-      namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-    secrets: inherit
+    runs-on: prod-default-small-v2
+    steps:
+    - uses: actions/checkout@v4
+    - name: Teardown vCluster
+      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
   # ============================================================================
   # CLEANUP JOBS
