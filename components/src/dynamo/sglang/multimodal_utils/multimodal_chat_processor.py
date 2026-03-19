@@ -37,12 +37,17 @@ def multimodal_request_to_sglang(
     processed = tokenizer(text=conv.get_prompt(), return_tensors="pt")
     input_ids = processed["input_ids"][0].tolist()
 
+    if raw_request.temperature is not None:
+        temperature = raw_request.temperature
+    else:
+        temperature = 0.7
+
     # Build the SGLang request dict
     sglang_request = {
         "model": raw_request.model,
         "token_ids": input_ids,
         "stop_conditions": {"max_tokens": raw_request.max_tokens or None},
-        "sampling_options": {"temperature": raw_request.temperature or 0.7},
+        "sampling_options": {"temperature": temperature},
         "eos_token_ids": [tokenizer.eos_token_id],
         "annotations": [],
         "stream": raw_request.stream if raw_request.stream is not None else False,
