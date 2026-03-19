@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import gc
 import logging
 import os
 import re
@@ -79,6 +80,7 @@ class RequestHandlerConfig:
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    generate_endpoint: Optional[Any] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
@@ -111,9 +113,18 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.generate_endpoint = config.generate_endpoint
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
+        # Sleep/wake state
+        self._sleep_wake_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._memory_released = False
+        self._reject_new_requests = False
 
     def check_error(self, result: dict) -> bool:
         """
@@ -125,6 +136,290 @@ class HandlerBase(BaseGenerativeHandler):
             return (
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
+
+    # ------------------------------------------------------------------
+    # In-flight request tracking (used by sleep/wake)
+    # ------------------------------------------------------------------
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Sleep/wake helpers
+    # ------------------------------------------------------------------
+
+    _DEFAULT_MEMORY_TAGS = ("kv_cache", "weights")
+
+    @staticmethod
+    def _normalize_memory_tags(body: dict) -> list[str]:
+        tags = body.get("tags")
+        if tags is None:
+            return list(HandlerBase._DEFAULT_MEMORY_TAGS)
+        if not isinstance(tags, list):
+            raise ValueError("'tags' must be a list of strings")
+        normalized: list[str] = []
+        for tag in tags:
+            if not isinstance(tag, str):
+                raise ValueError("'tags' must be a list of strings")
+            candidate = tag.strip().lower()
+            if candidate not in {"kv_cache", "weights"}:
+                raise ValueError(f"Unsupported memory tag: {tag!r}")
+            if candidate not in normalized:
+                normalized.append(candidate)
+        if not normalized:
+            raise ValueError("'tags' must include at least one value")
+        return normalized
+
+    @staticmethod
+    def _split_memory_tags(tags: list[str]) -> tuple[list[str], bool]:
+        """Split tags into (collective_rpc_tags, handle_weights)."""
+        collective_tags = [t for t in tags if t == "kv_cache"]
+        handle_weights = "weights" in tags
+        return collective_tags, handle_weights
+
+    @staticmethod
+    def _is_collective_rpc_unsupported(exc: Exception) -> bool:
+        return "does not support collective rpc" in str(exc).lower()
+
+    def _can_use_local_kv_sleep_fallback(self) -> bool:
+        """Return True if this executor is single-rank (local VMM ops are safe)."""
+        try:
+            llm_args = getattr(self.engine.llm, "args", None)
+            world_size = int(
+                getattr(getattr(llm_args, "parallel_config", None), "world_size", 1)
+            )
+        except Exception:
+            return False
+        return world_size == 1
+
+    @staticmethod
+    def _call_local_virtual_memory_method(method: str, tags: list[str]) -> None:
+        from tensorrt_llm._torch.virtual_memory import (
+            materialize_with_tag,
+            release_with_tag,
+        )
+
+        if not tags:
+            return
+        torch.cuda.synchronize()
+        if method == "sleep":
+            for tag in tags:
+                release_with_tag(tag)
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+        elif method in {"wakeup", "wake_up"}:
+            for tag in tags:
+                materialize_with_tag(tag)
+            torch.cuda.synchronize()
+        else:
+            raise ValueError(f"Unsupported virtual memory method: {method!r}")
+
+    async def _call_collective_rpc(self, method: str, tags: list[str]) -> None:
+        rpc = getattr(self.engine.llm, "_collective_rpc", None)
+        if rpc is None:
+            raise RuntimeError(
+                "TensorRT-LLM runtime does not support collective RPC memory operations"
+            )
+        kwargs = {"args": (tags,), "kwargs": {}, "non_block": False}
+        try:
+            rpc(method, **kwargs)
+        except Exception:
+            if method != "wakeup":
+                raise
+            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
+            rpc("wake_up", **kwargs)
+
+    @staticmethod
+    def _get_gms_manager():
+        try:
+            from gpu_memory_service import get_gms_client_memory_manager
+        except ImportError as exc:
+            raise RuntimeError(
+                "gpu-memory-service is not installed; cannot use GMS sleep/wake"
+            ) from exc
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None:
+            raise RuntimeError("GMS weights manager is not initialized")
+        return manager
+
+    # ------------------------------------------------------------------
+    # Sleep / wake public API
+    # ------------------------------------------------------------------
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory: unregister endpoint, drain requests, sleep KV + weights."""
+        body = body or {}
+        try:
+            tags = self._normalize_memory_tags(body)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
+        timeout_raw = body.get("timeout_s", 30.0)
+        try:
+            timeout_s = float(timeout_raw)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "timeout_s must be a number"}
+        if timeout_s <= 0:
+            return {"status": "error", "message": "timeout_s must be > 0"}
+
+        collective_tags, handle_weights = self._split_memory_tags(tags)
+
+        async with self._sleep_wake_lock:
+            if self._memory_released:
+                return {"status": "ok", "message": "Memory already released"}
+
+            await self._set_reject_new_requests(True)
+            endpoint_unregistered = False
+            skipped_tags: list[str] = []
+            try:
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+                    endpoint_unregistered = True
+
+                await self._wait_for_inflight_requests(timeout_s)
+
+                # Release KV cache via TRTLLM's collective RPC (or local VMM fallback)
+                if collective_tags:
+                    try:
+                        await self._call_collective_rpc("sleep", collective_tags)
+                    except Exception as exc:
+                        if not self._is_collective_rpc_unsupported(exc):
+                            raise
+                        if self._can_use_local_kv_sleep_fallback():
+                            logging.info(
+                                "[GMS] collective RPC unsupported; using local kv_cache sleep fallback"
+                            )
+                            self._call_local_virtual_memory_method(
+                                "sleep", collective_tags
+                            )
+                        else:
+                            logging.warning(
+                                "[GMS] Skipping kv_cache sleep (collective RPC unsupported, multi-rank): %s",
+                                exc,
+                            )
+                            skipped_tags.append("kv_cache")
+
+                # Release weights via GMS unmap
+                if handle_weights:
+                    manager = self._get_gms_manager()
+                    manager.unmap_all_vas()
+                    manager.abort()
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+
+                self._memory_released = True
+                response: dict = {
+                    "status": "ok",
+                    "message": f"Memory released for tags: {tags}",
+                }
+                if skipped_tags:
+                    response["skipped_tags"] = skipped_tags
+                return response
+
+            except Exception as exc:
+                logging.error("release_memory_occupation failed: %s", exc)
+                if endpoint_unregistered and self.generate_endpoint is not None:
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                    except Exception:
+                        logging.exception(
+                            "Failed to restore endpoint after release failure"
+                        )
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Restore GPU memory: remap weights, wake KV cache, re-register endpoint."""
+        body = body or {}
+        try:
+            tags = self._normalize_memory_tags(body)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
+        collective_tags, handle_weights = self._split_memory_tags(tags)
+
+        async with self._sleep_wake_lock:
+            if not self._memory_released:
+                return {"status": "ok", "message": "Memory already resumed"}
+
+            skipped_tags: list[str] = []
+            try:
+                # Remap GMS weights first so the model is accessible during KV wake
+                if handle_weights:
+                    manager = self._get_gms_manager()
+                    if manager.is_unmapped:
+                        from gpu_memory_service.integrations.trtllm.model_loader import (
+                            get_gms_lock_mode,
+                        )
+
+                        manager.connect(get_gms_lock_mode())
+                        manager.remap_all_vas()
+
+                # Restore KV cache via TRTLLM's collective RPC (or local VMM fallback)
+                if collective_tags:
+                    try:
+                        await self._call_collective_rpc("wakeup", collective_tags)
+                    except Exception as exc:
+                        if not self._is_collective_rpc_unsupported(exc):
+                            raise
+                        if self._can_use_local_kv_sleep_fallback():
+                            logging.info(
+                                "[GMS] collective RPC unsupported; using local kv_cache wakeup fallback"
+                            )
+                            self._call_local_virtual_memory_method(
+                                "wakeup", collective_tags
+                            )
+                        else:
+                            logging.warning(
+                                "[GMS] Skipping kv_cache wakeup (collective RPC unsupported, multi-rank): %s",
+                                exc,
+                            )
+                            skipped_tags.append("kv_cache")
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+
+                await self._set_reject_new_requests(False)
+                self._memory_released = False
+                response: dict = {
+                    "status": "ok",
+                    "message": f"Memory resumed for tags: {tags}",
+                }
+                if skipped_tags:
+                    response["skipped_tags"] = skipped_tags
+                return response
+
+            except Exception as exc:
+                logging.error("resume_memory_occupation failed: %s", exc)
+                return {"status": "error", "message": str(exc)}
 
     @staticmethod
     def _extract_logprobs(
@@ -642,6 +937,31 @@ class HandlerBase(BaseGenerativeHandler):
             os._exit(1)
 
     async def generate_locally(
+        self,
+        request: dict,
+        context: Context,
+        embeddings: Optional[Union[torch.Tensor, dict]] = None,
+        ep_disaggregated_params: Optional[DisaggregatedParams] = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Track in-flight count, reject during sleep, then delegate to implementation."""
+        started = await self._mark_request_started()
+        if not started:
+            yield {
+                "finish_reason": {
+                    "error": "Worker is temporarily rejecting new requests"
+                },
+                "token_ids": [],
+            }
+            return
+        try:
+            async for chunk in self._generate_locally_impl(
+                request, context, embeddings, ep_disaggregated_params
+            ):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_locally_impl(
         self,
         request: dict,
         context: Context,

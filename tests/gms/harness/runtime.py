@@ -30,6 +30,8 @@ def get_gpu_memory_used(device: int = 0) -> int:
 def send_completion(
     port: int,
     prompt: str = "Hello",
+    *,
+    model: str = FAULT_TOLERANCE_MODEL_NAME,
     max_retries: int = 3,
     retry_delay: float = 1.0,
 ) -> dict:
@@ -39,7 +41,7 @@ def send_completion(
             response = requests.post(
                 f"http://localhost:{port}/v1/completions",
                 json={
-                    "model": FAULT_TOLERANCE_MODEL_NAME,
+                    "model": model,
                     "prompt": prompt,
                     "max_tokens": 20,
                 },
@@ -62,3 +64,24 @@ def send_completion(
                 )
                 time.sleep(retry_delay)
     raise last_error  # type: ignore[misc]
+
+
+def wait_for_memory_drop(
+    baseline_bytes: int,
+    *,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 0.5,
+    device: int = 0,
+) -> int:
+    """Poll until GPU memory drops below *baseline_bytes*, then return current usage.
+
+    Returns the last observed usage (which may still be >= baseline if timeout fired).
+    """
+    deadline = time.monotonic() + timeout_s
+    current = get_gpu_memory_used(device)
+    while time.monotonic() < deadline:
+        if current < baseline_bytes:
+            return current
+        time.sleep(poll_interval_s)
+        current = get_gpu_memory_used(device)
+    return current
