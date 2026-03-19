@@ -15,8 +15,6 @@ pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
 pub use indexer::concurrent_radix_tree;
-#[cfg(feature = "bench")]
-pub use indexer::naive as naive_indexers;
 pub use indexer::positional as nested_map;
 pub use indexer::pruning as approx;
 pub use indexer::radix_tree;
@@ -26,6 +24,9 @@ pub use scheduling::queue;
 pub use scheduling::selector;
 pub use sequences::multi_worker as multi_worker_sequence;
 pub use sequences::single as sequence;
+
+#[cfg(feature = "standalone-indexer")]
+pub mod standalone_indexer;
 
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
@@ -37,11 +38,9 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
-pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
 pub use event_sink::EventSink;
 pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
-#[cfg(feature = "bench")]
-pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
     KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId,
@@ -49,5 +48,6 @@ pub use protocols::{
 };
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
+pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
 pub use selector::{DefaultWorkerSelector, WorkerSelector};

@@ -23,11 +23,11 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-import dynamo.nixl_connect as nixl_connect
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -36,6 +36,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -49,6 +50,43 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+class VllmEngineQuiesceController:
+    def __init__(self, engine_client: Any):
+        self._engine_client = engine_client
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, *args: object) -> bool:
+        if self._is_quiesced:
+            return False
+
+        level = args[0] if args else None
+        await self._engine_client.pause_generation()
+        if level is None:
+            await self._engine_client.sleep()
+        else:
+            await self._engine_client.sleep(level)
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+
+        if tags is None:
+            await self._engine_client.wake_up()
+        else:
+            await self._engine_client.wake_up(tags)
+        await self._engine_client.resume_generation()
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
 
 
 @dataclass(frozen=True)
@@ -309,17 +347,13 @@ class BaseWorkerHandler(ABC):
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[KvEventPublisher] | None = None
+        self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
-        self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
-        self.enable_frontend_decoding = enable_frontend_decoding
-        # NIXL connector for frontend decoding - lazy initialized
-        self._nixl_connector: nixl_connect.Connector | None = None
-        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
@@ -327,11 +361,15 @@ class BaseWorkerHandler(ABC):
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
 
+        self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
-        self._sleep_wake_lock = asyncio.Lock()
-        self._engine_is_sleeping = False
+        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        self._quiesce_lock = asyncio.Lock()
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -355,8 +393,8 @@ class BaseWorkerHandler(ABC):
         """
         body = body or {}
         level = body.get("level", 1)
-        async with self._sleep_wake_lock:
-            if self._engine_is_sleeping:
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
@@ -372,11 +410,11 @@ class BaseWorkerHandler(ABC):
 
                 # Step 2: Abort in-flight requests and wait for them to drain so the
                 # GPU is fully quiesced before unmapping memory.
-                await self.engine_client.pause_generation()
-
-                # Step 3: Now safe to sleep - no in-flight GPU work
-                await self.engine_client.sleep(level)
-                self._engine_is_sleeping = True
+                if not await self._quiesce_controller.quiesce(level):
+                    return {
+                        "status": "ok",
+                        "message": "Engine already sleeping",
+                    }
 
                 return {
                     "status": "ok",
@@ -390,29 +428,27 @@ class BaseWorkerHandler(ABC):
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
-            body: Unused. Wake always restores all sleep-managed memory.
+            body: Optional dict with "tags" to request a partial wake.
 
         Order of operations:
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
-        async with self._sleep_wake_lock:
-            if not self._engine_is_sleeping:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self.engine_client.wake_up()
-
-                # Step 2: Resume generation and re-register.
-                await self.engine_client.resume_generation()
+                await self._quiesce_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-
-                self._engine_is_sleeping = False
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -976,18 +1012,9 @@ class BaseWorkerHandler(ABC):
         mm_map = request["multi_modal_data"]
         vllm_mm_data = {}
 
-        # Lazy-init NIXL connector only when frontend decoding is enabled
-        if self.enable_frontend_decoding:
-            async with self._nixl_connector_lock:
-                if self._nixl_connector is None:
-                    self._nixl_connector = nixl_connect.Connector()
-                    await self._nixl_connector.initialize()
-
         # Process image_url entries
         images = await self.image_loader.load_image_batch(
             mm_map.get(IMAGE_URL_KEY, []),
-            enable_frontend_decoding=self.enable_frontend_decoding,
-            nixl_connector=self._nixl_connector,
         )
 
         if images:
@@ -1105,7 +1132,7 @@ class BaseWorkerHandler(ABC):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int
+        output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from vLLM CompletionOutput for new tokens.
@@ -1113,6 +1140,8 @@ class BaseWorkerHandler(ABC):
         Args:
             output: vLLM CompletionOutput object
             num_output_tokens_so_far: Number of tokens already processed
+            tokenizer: Optional tokenizer for decoding token IDs when
+                       decoded_token is not populated by the engine
 
         Returns:
             Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
@@ -1145,18 +1174,23 @@ class BaseWorkerHandler(ABC):
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
+                token_str = getattr(logprob_info, "decoded_token", None)
+                if not token_str and tokenizer:
+                    try:
+                        token_str = tokenizer.decode([tok_id])
+                    except Exception:
+                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": (
                             logprob_info.rank if hasattr(logprob_info, "rank") else 0
                         ),
                         "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
+                        "token": token_str,
                         "logprob": float(logprob_info.logprob),
+                        "bytes": (
+                            list(token_str.encode("utf-8")) if token_str else None
+                        ),
                     }
                 )
             top_logprobs.append(token_top_logprobs)
@@ -1248,8 +1282,9 @@ class BaseWorkerHandler(ABC):
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 # Extract logprobs for new tokens if available
+                tokenizer = getattr(self.engine_client, "tokenizer", None)
                 log_probs, top_logprobs = self._extract_logprobs(
-                    output, num_output_tokens_so_far
+                    output, num_output_tokens_so_far, tokenizer=tokenizer
                 )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
@@ -1296,7 +1331,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
+        if encode_worker_client is not None:
+            raise NotImplementedError(
+                "'encode_worker_client' is provided which indicates remote "
+                "multimodal encode is configured, this is not currently supported."
+            )
         super().__init__(
             runtime,
             engine,
@@ -1314,14 +1355,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        first_token = True
+        with time_and_log_code_section(
+            f"[DECODE] request: {request_id} generate"
+        ) as decode_timer:
+            if self.use_vllm_tokenizer:
+                # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+                generator = self._generate_text_mode(request, context, request_id)
+            else:
+                # Token-in-token-out mode: internal protocol format
+                generator = self._generate_token_mode(request, context, request_id)
 
-        if self.use_vllm_tokenizer:
-            # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
-            async for chunk in self._generate_text_mode(request, context, request_id):
-                yield chunk
-        else:
-            # Token-in-token-out mode: internal protocol format
-            async for chunk in self._generate_token_mode(request, context, request_id):
+            async for chunk in generator:
+                if first_token:
+                    decode_timer.stop_interval()
+                    first_token = False
                 yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
@@ -1504,7 +1552,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
+        if encode_worker_client is not None:
+            raise NotImplementedError(
+                "'encode_worker_client' is provided which indicates remote "
+                "multimodal encode is configured, this is not currently supported."
+            )
         super().__init__(
             runtime,
             engine,
@@ -1524,8 +1578,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prefill Request ID: {request_id}")
 
         # Token-in-token-out mode: internal protocol format
-        async for chunk in self._generate_token_mode(request, context, request_id):
-            yield chunk
+        with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""

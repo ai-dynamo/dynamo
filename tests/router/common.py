@@ -21,9 +21,10 @@ from tests.router.helper import (
     send_request_with_retry,
     verify_response_timing,
     wait_for_frontend_ready,
+    wait_for_indexer_workers_active,
     wait_for_workers_ready,
 )
-from tests.router.router_process import KVRouterProcess
+from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -46,6 +47,8 @@ def _test_router_basic(
     frontend_timeout: int = 120,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    router_mode: str = "kv",
+    enforce_disagg: bool = False,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
@@ -53,6 +56,9 @@ def _test_router_basic(
 
     This is a shared test implementation for both mocker and vLLM workers.
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
+
+    Supports any router_mode (defaults to "kv" for existing callers).
+    block_size is only sent to the frontend CLI when router_mode is "kv".
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -64,21 +70,27 @@ def _test_router_basic(
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
+        router_mode: Router mode ("kv", "round-robin", "random", "direct"). Defaults to "kv".
+        enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
 
     Raises:
         AssertionError: If requests fail or frontend doesn't become ready
         TimeoutError: If frontend doesn't become ready within timeout
     """
-    with KVRouterProcess(
+    with FrontendRouterProcess(
         request,
         block_size,
         frontend_port,
         engine_workers.namespace,
         store_backend,
+        enforce_disagg=enforce_disagg,
         request_plane=request_plane,
+        router_mode=router_mode,
     ):
-        # Start KV router frontend
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        # Start router frontend
+        logger.info(
+            f"Starting frontend --router-mode {router_mode} on port {frontend_port}"
+        )
 
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -701,6 +713,61 @@ def _test_router_overload_503(
         logger.info("Successfully verified 503 response when all workers are busy")
 
 
+async def _zmq_replay_cycle(
+    phase: int,
+    router,
+    router_name: str,
+    endpoint,
+    indexer_url: str,
+    engine_workers,
+    send_requests_to_router,
+):
+    """Pause indexer listeners → send gap requests → resume → send to trigger replay."""
+    await asyncio.sleep(1)
+    worker_ids = list(engine_workers.worker_id_to_zmq_ports.keys())
+    dp_size = getattr(engine_workers, "dp_size", None) or 1
+
+    logger.info(f"=== ZMQ REPLAY TEST: Phase {phase} ({router_name}) ===")
+    async with aiohttp.ClientSession() as session:
+        for wid in worker_ids:
+            for dp_rank in range(dp_size):
+                async with session.post(
+                    f"{indexer_url}/test/pause_listener",
+                    json={"instance_id": wid, "dp_rank": dp_rank},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"Pause {wid}:{dp_rank} failed: {await resp.text()}"
+
+    logger.info("Sending 10 requests while indexer listeners are paused")
+    successful_gap = await send_requests_to_router(
+        router, 10, f"{router_name} (indexer paused)", endpoint
+    )
+    assert (
+        successful_gap == 10
+    ), f"Expected 10 requests while paused, got {successful_gap}"
+
+    async with aiohttp.ClientSession() as session:
+        for wid in worker_ids:
+            for dp_rank in range(dp_size):
+                async with session.post(
+                    f"{indexer_url}/test/resume_listener",
+                    json={"instance_id": wid, "dp_rank": dp_rank},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
+
+    logger.info("Sending 5 requests after resume (triggers gap detection + replay)")
+    successful_post = await send_requests_to_router(
+        router, 5, f"{router_name} (post-resume)", endpoint
+    )
+    assert (
+        successful_post == 5
+    ), f"Expected 5 requests post-resume, got {successful_post}"
+    await asyncio.sleep(2)
+
+
 def _test_router_indexers_sync(
     engine_workers,
     block_size: int,
@@ -714,6 +781,7 @@ def _test_router_indexers_sync(
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     standalone_indexer_b_url: Optional[str] = None,
+    test_zmq_replay: bool = False,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -854,6 +922,17 @@ def _test_router_indexers_sync(
 
             await asyncio.sleep(5)
 
+        if test_zmq_replay and standalone_indexer_url:
+            await _zmq_replay_cycle(
+                1,
+                kv_router1,
+                "Router 1",
+                endpoint1,
+                standalone_indexer_url,
+                engine_workers,
+                send_requests_to_router,
+            )
+
         # Wait for snapshot to be available before creating second router.
         # In JetStream mode, the background task may purge acknowledged messages
         # from the stream before the snapshot upload completes. Poll the object
@@ -902,6 +981,9 @@ def _test_router_indexers_sync(
         # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
         if standalone_indexer_b_url:
             engine_workers.launch_indexer()
+            await wait_for_indexer_workers_active(
+                standalone_indexer_b_url, engine_workers.worker_id_to_zmq_ports
+            )
             logger.info(
                 f"Launched Indexer B at {standalone_indexer_b_url} "
                 f"(P2P recovery from Indexer A)"
@@ -944,6 +1026,17 @@ def _test_router_indexers_sync(
             assert (
                 successful_recovery == 5
             ), f"Expected 5 successful requests post-recovery, got {successful_recovery}"
+
+        if test_zmq_replay and standalone_indexer_url:
+            await _zmq_replay_cycle(
+                2,
+                kv_router2,
+                "Router 2",
+                endpoint2,
+                standalone_indexer_url,
+                engine_workers,
+                send_requests_to_router,
+            )
 
         # Wait for internal synchronization and ZMQ event propagation
         logger.info("Waiting for final synchronization")

@@ -198,7 +198,7 @@ def metric_payload_default(
     Returns:
         Backend-specific MetricsPayload subclass based on backend parameter
     """
-    common_args = {
+    common_args: dict[str, Any] = {
         "body": {},
         "repeat_count": repeat_count,
         "expected_log": expected_log or [],

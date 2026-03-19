@@ -14,6 +14,9 @@ export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
 export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml"}
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Aggregated + Approximate KV Routing" "$MODEL_PATH" "$HTTP_PORT"
+
 # run frontend with KV router in approximate mode (i.e. no KV events)
 python3 -m dynamo.frontend --router-mode kv --no-kv-events &
 

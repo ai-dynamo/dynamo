@@ -1090,6 +1090,8 @@ impl OpenAIPreprocessor {
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
     ///   or "force_nonempty_content": true.
+    /// For deepseek_r1: disabled when chat_template_args contains "thinking": false
+    ///   or "thinking_mode": "chat".
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -1114,6 +1116,17 @@ impl OpenAIPreprocessor {
                         && force_nonempty == &serde_json::Value::Bool(true)
                     {
                         return true;
+                    }
+                }
+                false
+            }
+            Some("deepseek_r1") => {
+                if let Some(args) = chat_template_args {
+                    if let Some(thinking) = args.get("thinking") {
+                        return thinking == &serde_json::Value::Bool(false);
+                    }
+                    if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
+                        return mode == "chat";
                     }
                 }
                 false
@@ -1500,6 +1513,22 @@ mod tests {
             );
             m
         };
+        let thinking_mode_chat = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("chat".to_string()),
+            );
+            m
+        };
+        let thinking_mode_thinking = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("thinking".to_string()),
+            );
+            m
+        };
         let empty_args = std::collections::HashMap::new();
 
         // (parser, args, expected_disabled, description)
@@ -1528,11 +1557,42 @@ mod tests {
                 false,
                 "kimi_k25 + empty args → enabled",
             ),
+            // deepseek_r1 uses "thinking" bool or "thinking_mode" string
             (
                 Some("deepseek_r1"),
                 Some(&thinking_false),
+                true,
+                "deepseek_r1 + thinking=false → disabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_true),
                 false,
-                "deepseek_r1 → never disabled",
+                "deepseek_r1 + thinking=true → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseek_r1 + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_mode_thinking),
+                false,
+                "deepseek_r1 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                None,
+                false,
+                "deepseek_r1 + no args → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&empty_args),
+                false,
+                "deepseek_r1 + empty args → enabled",
             ),
             (
                 Some("basic"),

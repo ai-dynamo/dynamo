@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -42,6 +42,7 @@ def pytest_configure(config):
         "gpu_2: marks tests to run on 2GPUs",
         "gpu_4: marks tests to run on 4GPUs",
         "gpu_8: marks tests to run on 8GPUs",
+        "max_vram_gib(N): peak VRAM in GiB (with 10% safety). Filter with --max-vram-gib=N",
         "e2e: marks tests as end-to-end tests",
         "integration: marks tests as integration tests",
         "unit: marks tests as unit tests",
@@ -50,6 +51,7 @@ def pytest_configure(config):
         "vllm: marks tests as requiring vllm",
         "trtllm: marks tests as requiring trtllm",
         "sglang: marks tests as requiring sglang",
+        "lmcache: mark tests as requiring lmcache",
         "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
@@ -99,6 +101,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,  # None = use fixture's default behavior
         help="Skip restarting NATS and etcd services before deployment. "
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
+    parser.addoption(
+        "--max-vram-gib",
+        type=float,
+        default=None,
+        help="Skip tests whose @pytest.mark.max_vram_gib(N) exceeds this value (GiB).",
+    )
+    parser.addoption(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Show which tests would run vs skip based on --max-vram-gib, then exit.",
     )
 
 
@@ -242,30 +256,6 @@ def predownload_tokenizers(pytestconfig):
     os.environ.pop("HF_HUB_OFFLINE", None)
 
 
-@pytest.fixture(scope="session")
-def build_kv_indexer():
-    """Pre-build the standalone KV indexer binary once per session.
-
-    Runs `cargo build` so that `cargo run` in tests starts instantly.
-    No-op if the binary is already cached in target/.
-    """
-    _logger.info("Building dynamo-kv-indexer binary (cached after first build)")
-    subprocess.check_call(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "dynamo-kv-router",
-            "--features",
-            "indexer-bin",
-            "--bin",
-            "dynamo-kv-indexer",
-        ],
-        timeout=600,
-    )
-    _logger.info("dynamo-kv-indexer binary ready")
-
-
 @pytest.fixture(autouse=True)
 def logger(request):
     log_dir = resolve_test_output_path(request.node.name)
@@ -282,11 +272,105 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+def _item_has_marker(item, marker_name):
+    """Check if a test item has a marker, including module-level pytestmark."""
+    if item.get_closest_marker(marker_name):
+        return True
+    module = getattr(item, "module", None)
+    if module is not None:
+        marks = getattr(module, "pytestmark", [])
+        if not isinstance(marks, list):
+            marks = [marks]
+        if any(getattr(m, "name", "") == marker_name for m in marks):
+            return True
+    return False
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Auto-skip tests marked with a framework marker when the framework is not installed
+    framework_markers = {
+        "trtllm": "tensorrt_llm",
+        "vllm": "vllm",
+        "sglang": "sglang",
+        "kvbm": "kvbm",
+        "lmcache": "lmcache",
+    }
+    for marker_name, module_name in framework_markers.items():
+        if importlib.util.find_spec(module_name) is None:
+            skip = pytest.mark.skip(reason=f"{module_name} is not installed")
+            for item in items:
+                if _item_has_marker(item, marker_name):
+                    item.add_marker(skip)
+
+    # Skip tests that exceed --max-vram-gib
+    vram_limit = config.getoption("--max-vram-gib", default=None)
+    if vram_limit is not None:
+        skip_vram = pytest.mark.skip(
+            reason=f"requires more than {vram_limit} GiB VRAM (--max-vram-gib={vram_limit})"
+        )
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram_gib")
+            if vram_mark and vram_mark.args and vram_mark.args[0] > vram_limit:
+                item.add_marker(skip_vram)
+
+    # --dry-run: print run/skip breakdown and exit without executing tests
+    if config.getoption("--dry-run", default=False):
+        would_run = []
+        would_skip = []
+        unmarked = []
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram_gib")
+            vram_val = vram_mark.args[0] if vram_mark and vram_mark.args else None
+            name = item.nodeid.split("::", 1)[1] if "::" in item.nodeid else item.nodeid
+
+            skip_reasons = []
+            for marker in item.iter_markers("skip"):
+                reason = marker.kwargs.get("reason", "")
+                if not reason and marker.args:
+                    reason = marker.args[0]
+                skip_reasons.append(reason or "no reason given")
+
+            vram_skipped = (
+                vram_limit is not None
+                and vram_val is not None
+                and vram_val > vram_limit
+            )
+            if vram_skipped:
+                skip_reasons.insert(0, f"{vram_val} GiB > {vram_limit} GiB VRAM limit")
+
+            if skip_reasons:
+                would_skip.append((name, vram_val, skip_reasons))
+            elif vram_val is not None:
+                would_run.append((name, vram_val))
+            else:
+                unmarked.append(name)
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"--max-vram-gib={vram_limit or 'not set'}  |  {len(items)} tests selected"
+        )
+        print(f"{'=' * 60}")
+        if would_run:
+            print(f"\nWould RUN ({len(would_run)}):")
+            for name, gib in would_run:
+                print(f"  {name}  ({gib} GiB)")
+        if would_skip:
+            print(f"\nWould SKIP ({len(would_skip)}):")
+            for name, vram_val, reasons in would_skip:
+                vram_str = f"  ({vram_val} GiB)" if vram_val is not None else ""
+                print(f"  {name}{vram_str}  -- {'; '.join(reasons)}")
+        if unmarked:
+            print(f"\nNo VRAM marker — always run ({len(unmarked)}):")
+            for name in unmarked:
+                print(f"  {name}")
+        print()
+        items.clear()
+        return
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
@@ -830,11 +914,17 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
     frontend_port = allocate_port(DefaultPort.FRONTEND.value)
     system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list]
+    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list, kv_event_port]
     try:
-        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+        yield ServicePorts(
+            frontend_port=frontend_port,
+            system_ports=system_port_list,
+            kv_event_port=kv_event_port,
+        )
     finally:
         deallocate_ports(all_ports)

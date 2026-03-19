@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Compliance Scan'
+description: 'Generate attribution CSVs (dpkg + Python) for a container image and upload as workflow artifacts'
+
+inputs:
+  image:
+    description: 'Full container image URI to scan (must be accessible to the BuildKit worker)'
+    required: true
+  artifact_name:
+    description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda12-amd64)'
+    required: true
+  arch:
+    description: 'Target architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
+  framework:
+    description: 'Framework name for base image resolution (vllm, sglang, trtllm, dynamo)'
+    required: false
+    default: ''
+  target:
+    description: 'Build target for base image resolution (runtime or frontend)'
+    required: false
+    default: 'runtime'
+  cuda_version:
+    description: 'CUDA version for base image resolution (e.g., 12.9, 13.0, 13.1)'
+    required: false
+    default: ''
+  base_image:
+    description: 'Explicit base image for diff (overrides framework/cuda-version auto-resolve)'
+    required: false
+    default: ''
+  retention_days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '90'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Initialize builder
+      uses: ./.github/actions/init-dynamo-builder
+      with:
+        builder_name: compliance-${{ github.run_id }}-${{ github.run_attempt }}
+        flavor: general
+        arch: ${{ inputs.arch }}
+
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      with:
+        python-version: '3.12'
+        pip-install: pyyaml
+
+    - name: Resolve base image
+      id: resolve-base
+      shell: bash
+      run: |
+        BASE_IMAGE=""
+        if [ -n "${{ inputs.base_image }}" ]; then
+          BASE_IMAGE="${{ inputs.base_image }}"
+        elif [ -n "${{ inputs.framework }}" ]; then
+          RESOLVE_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }}"
+          if [ -n "${{ inputs.cuda_version }}" ]; then
+            RESOLVE_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+          fi
+          BASE_IMAGE=$(python3 container/compliance/resolve_base_image.py ${RESOLVE_ARGS})
+        fi
+        echo "base_image=${BASE_IMAGE}" >> $GITHUB_OUTPUT
+
+    - name: Extract target image packages
+      shell: bash
+      run: |
+        mkdir -p /tmp/compliance-target
+        docker buildx build \
+          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --platform linux/${{ inputs.arch }} \
+          --build-arg TARGET_IMAGE="${{ inputs.image }}" \
+          --output "type=local,dest=/tmp/compliance-target" \
+          --pull \
+          --no-cache-filter extractor \
+          --progress=plain \
+          -f container/compliance/Dockerfile.extract \
+          container/compliance/
+
+    - name: Extract base image packages
+      if: steps.resolve-base.outputs.base_image != ''
+      shell: bash
+      run: |
+        mkdir -p /tmp/compliance-base
+        docker buildx build \
+          --builder compliance-${{ github.run_id }}-${{ github.run_attempt }} \
+          --platform linux/${{ inputs.arch }} \
+          --build-arg TARGET_IMAGE="${{ steps.resolve-base.outputs.base_image }}" \
+          --output "type=local,dest=/tmp/compliance-base" \
+          --pull \
+          --no-cache-filter extractor \
+          --progress=plain \
+          -f container/compliance/Dockerfile.extract \
+          container/compliance/
+
+    - name: Generate attribution CSVs
+      shell: bash
+      run: |
+        ARGS=(--target-dir /tmp/compliance-target --output "${{ inputs.artifact_name }}.csv")
+        if [ -n "${{ steps.resolve-base.outputs.base_image }}" ]; then
+          ARGS+=(--base-dir /tmp/compliance-base)
+        fi
+        python3 container/compliance/process_results.py "${ARGS[@]}"
+
+    - name: Upload attribution artifacts
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.artifact_name }}*.csv
+        retention-days: ${{ inputs.retention_days }}
+
+    - name: Cleanup compliance builder
+      if: always()
+      shell: bash
+      run: |
+        docker buildx rm compliance-${{ github.run_id }}-${{ github.run_attempt }} || true

@@ -48,7 +48,7 @@ fi
 
 MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching Disaggregated Router (2P + 2D)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching Disaggregated + KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT"
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router

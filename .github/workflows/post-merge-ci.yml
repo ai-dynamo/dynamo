@@ -20,6 +20,7 @@ jobs:
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
+    name: vllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -44,6 +45,7 @@ jobs:
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
+    name: sglang
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -68,6 +70,7 @@ jobs:
   # TRTLLM PIPELINE
   # ============================================================================
   trtllm-pipeline:
+    name: trtllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -86,6 +89,54 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       single_gpu_test_timeout_minutes: 60
       multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # DEV PIPELINES
+  # ============================================================================
+  vllm-dev-pipeline:
+    name: vllm-dev
+    uses: ./.github/workflows/build-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
+    secrets: inherit
+
+  sglang-dev-pipeline:
+    name: sglang-dev
+    uses: ./.github/workflows/build-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
+    secrets: inherit
+
+  trtllm-dev-pipeline:
+    name: trtllm-dev
+    uses: ./.github/workflows/build-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: true
+      auto_acr_deploy: true
     secrets: inherit
 
   # ============================================================================
@@ -284,6 +335,8 @@ jobs:
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         operator_tag: ${{ steps.operator-tag.outputs.tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   # ============================================================================
   # End-to-end tests for each framework with various deployment profiles
@@ -319,9 +372,11 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
           platform_arch: amd64
 
   deploy-test-sglang:
@@ -352,9 +407,11 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
           platform_arch: amd64
 
   deploy-test-trtllm:
@@ -389,9 +446,11 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
           platform_arch: amd64
 
   deploy-status-check:
@@ -411,7 +470,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -447,7 +506,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
     permissions:
       contents: read
     steps:
@@ -463,7 +522,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"

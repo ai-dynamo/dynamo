@@ -75,8 +75,7 @@ sglang_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2265"),
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -126,8 +125,7 @@ sglang_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2265"),
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -137,9 +135,9 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
+                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],
@@ -169,15 +167,22 @@ sglang_configs = {
             )
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_epd_qwen": SGLangConfig(
-        # E/PD architecture: Encode worker (GPU 0) + Prefill/Decode worker (GPU 1)
+        # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_epd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        delayed_start=0,
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -196,6 +201,40 @@ sglang_configs = {
                 # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "multimodal_disagg_qwen": SGLangConfig(
+        # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
+        name="multimodal_disagg_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_disagg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(360),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),

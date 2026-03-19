@@ -23,6 +23,9 @@ export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D (8 GPUs)" "$MODEL_PATH" "$HTTP_PORT"
+
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &

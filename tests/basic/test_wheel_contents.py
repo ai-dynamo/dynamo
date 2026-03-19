@@ -26,6 +26,7 @@ def test_no_bundled_shared_libraries():
     except PackageNotFoundError:
         pytest.fail("ai-dynamo-runtime is not installed")
 
+    assert installed_files is not None, "ai-dynamo-runtime has no recorded files"
     bundled_libs = [
         str(f) for f in installed_files if ".libs/" in str(f) and ".so" in str(f)
     ]
