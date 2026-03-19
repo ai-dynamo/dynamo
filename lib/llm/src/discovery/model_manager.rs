@@ -597,12 +597,22 @@ impl ModelManager {
         ));
 
         // Build shared cache client from config if configured.
+        // Validation already rejects both being set, but guard here too.
+        if let Some(cfg) = kv_router_config.as_ref()
+            && cfg.shared_cache_url.is_some()
+            && cfg.shared_cache_component.is_some()
+        {
+            anyhow::bail!(
+                "shared_cache_url and shared_cache_component are mutually exclusive; set only one"
+            );
+        }
+
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if let Some(ref url) =
             kv_router_config
                 .as_ref()
                 .and_then(|c| c.shared_cache_url.clone())
         {
-            tracing::info!(url, "Using shared KV cache (HTTP)");
+            tracing::info!("Using shared KV cache (HTTP)");
             Some(Box::new(SharedKvCacheHttpClient::new(url.clone())))
         } else if let Some(ref comp) = kv_router_config
             .as_ref()
