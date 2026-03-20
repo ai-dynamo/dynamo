@@ -128,12 +128,8 @@ type CUDAManifest struct {
 }
 
 func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
-	orderedPIDs := make([]int, len(pids))
-	for i, pid := range pids {
-		orderedPIDs[i] = pid
-	}
 	return CUDAManifest{
-		PIDs:           orderedPIDs,
+		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
 	}
 }
