@@ -19,6 +19,7 @@ package disagg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -110,7 +111,15 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 
 	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
 	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+		if errors.Is(err, dynscorer.ErrDisaggEnforced) {
+			logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: enforce_disagg=true but prefill workers not available")
+			if req.Headers == nil {
+				req.Headers = map[string]string{}
+			}
+			req.Headers[EnforceDisaggFailedHeader] = "true"
+		} else {
+			logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+		}
 		return uniformScores(pods, 0)
 	}
 

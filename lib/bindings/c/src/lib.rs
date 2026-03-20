@@ -457,8 +457,15 @@ impl RouterHandles {
             .await
             .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
-                tracing::error!(error = ?e, "Prefill query failed");
-                QueryRouterResult::ErrQueryFailed
+                if !self.prefill_router.is_activated() && self.prefill_router.enforce_disagg() {
+                    tracing::error!(
+                        "Prefill router not activated and enforce_disagg=true; failing request"
+                    );
+                    QueryRouterResult::ErrDisaggEnforced
+                } else {
+                    tracing::error!(error = ?e, "Prefill query failed");
+                    QueryRouterResult::ErrQueryFailed
+                }
             })
     }
 
@@ -743,8 +750,7 @@ pub unsafe extern "C" fn create_routers(
         // Create PrefillRouter with a pending activation channel.
         // A background task watches discovery for prefill workers and activates
         // the router when one appears. Before activation, requests gracefully
-        // degrade to aggregated mode (or fail if enforce_disagg=true).
-        // This eliminates any fixed-timeout waiting for prefill workers at startup.
+        // fallback to decode-only routing.
         let mut prefill_config = kv_router_config;
         prefill_config.router_track_active_blocks = false;
 
@@ -764,67 +770,7 @@ pub unsafe extern "C" fn create_routers(
         // Polls discovery until a prefill-only worker appears in the same
         // rolling-update namespace, then sends its endpoint through the channel
         // to activate the PrefillRouter.
-        let prefill_drt = drt.clone();
-        let prefill_namespace = actual_namespace.clone();
-        tokio::spawn(async move {
-            let discovery = prefill_drt.discovery();
-            tracing::info!(
-                namespace = prefill_namespace,
-                "Background task: watching for prefill workers to register..."
-            );
-
-            loop {
-                if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
-                    for instance in instances {
-                        if let dynamo_runtime::discovery::DiscoveryInstance::Model {
-                            namespace,
-                            component,
-                            endpoint,
-                            ..
-                        } = &instance
-                        {
-                            if namespace != &prefill_namespace {
-                                continue;
-                            }
-
-                            let card = match instance
-                                .deserialize_model::<dynamo_llm::model_card::ModelDeploymentCard>()
-                            {
-                                Ok(card) => card,
-                                Err(_) => continue,
-                            };
-
-                            if !card.model_type.supports_prefill()
-                                || card.model_type.supports_chat()
-                                || card.model_type.supports_completions()
-                            {
-                                continue;
-                            }
-
-                            tracing::info!(
-                                model_name = card.name(),
-                                namespace = namespace.as_str(),
-                                "Prefill worker discovered, activating PrefillRouter"
-                            );
-
-                            if let Ok(ns) = prefill_drt.namespace(namespace)
-                                && let Ok(comp) = ns.component(component)
-                            {
-                                let ep = comp.endpoint(endpoint);
-                                if prefill_tx.send(ep).is_err() {
-                                    tracing::debug!(
-                                        "PrefillRouter activation channel already closed"
-                                    );
-                                }
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
+        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.clone(), prefill_tx);
 
         Ok((
             prefill_router,
@@ -1371,6 +1317,74 @@ async fn init_preprocessor(
     );
 
     Ok((Some(prep), block_size, model_name, actual_namespace))
+}
+
+/// Spawn a background task that watches discovery for a prefill-only worker
+/// in the given namespace. When found, sends its endpoint through `tx` to
+/// activate the PrefillRouter. Polls every 1 second until a match is found.
+fn spawn_prefill_discovery_watcher(
+    drt: DistributedRuntime,
+    target_namespace: String,
+    tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+) {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::discovery::DiscoveryInstance;
+
+    tokio::spawn(async move {
+        let discovery = drt.discovery();
+        tracing::info!(
+            namespace = target_namespace,
+            "Background task: watching for prefill workers to register..."
+        );
+
+        loop {
+            if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
+                for instance in instances {
+                    if let DiscoveryInstance::Model {
+                        namespace,
+                        component,
+                        endpoint,
+                        ..
+                    } = &instance
+                    {
+                        if namespace != &target_namespace {
+                            continue;
+                        }
+
+                        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                            Ok(card) => card,
+                            Err(_) => continue,
+                        };
+
+                        if !card.model_type.supports_prefill()
+                            || card.model_type.supports_chat()
+                            || card.model_type.supports_completions()
+                        {
+                            continue;
+                        }
+
+                        tracing::info!(
+                            model_name = card.name(),
+                            namespace = namespace.as_str(),
+                            "Prefill worker discovered, activating PrefillRouter"
+                        );
+
+                        if let Ok(ns) = drt.namespace(namespace)
+                            && let Ok(comp) = ns.component(component)
+                        {
+                            let ep = comp.endpoint(endpoint);
+                            if tx.send(ep).is_err() {
+                                tracing::debug!("PrefillRouter activation channel already closed");
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 }
 
 /// Fetch model card via discovery and create preprocessor.
