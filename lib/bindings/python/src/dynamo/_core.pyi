@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Import from specialized modules
@@ -1246,6 +1247,15 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 
+def run_mocker_trace_replay(
+    trace_file: str | os.PathLike[str],
+    extra_engine_args: Optional[str | os.PathLike[str]] = None,
+    num_workers: int = 1,
+    replay_concurrency: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Replay a mocker trace file and return the simulation report."""
+    ...
+
 class Layer:
     """
     A KV cache block layer
@@ -1756,4 +1766,3 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
-
