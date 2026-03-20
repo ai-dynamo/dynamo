@@ -95,6 +95,7 @@ async def worker():
                 output_file=args.output_file,
                 extra_engine_args=extra_engine_args_path,
                 num_workers=args.num_workers,
+                replay_concurrency=args.replay_concurrency,
             )
             return
 

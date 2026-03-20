@@ -645,6 +645,57 @@ pub fn simulate_trace(
     Ok(collector.finish())
 }
 
+pub fn simulate_concurrency(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+) -> anyhow::Result<TraceSimulationReport> {
+    args.validate()?;
+
+    let mut pending = VecDeque::from(requests);
+    let mut state = SchedulerState::default();
+    let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+    let mut hit_rates = RunningMean::new(1000);
+    let collector = TraceCollector::default();
+    let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+    let mut current_time_ms = 0.0;
+
+    while !pending.is_empty() || !state.is_empty() {
+        enqueue_concurrency_arrivals(
+            &mut pending,
+            &mut state,
+            &collector,
+            current_time_ms,
+            max_in_flight,
+        );
+
+        if state.is_empty() {
+            break;
+        }
+
+        let prefill_time = simulate_prefill_step(
+            &mut state,
+            &mut kv_manager,
+            &mut hit_rates,
+            &args,
+            Some(&collector),
+            current_time_ms,
+        );
+        current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+
+        let decode_time = simulate_decode_step(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args,
+            Some(&collector),
+            current_time_ms,
+        );
+        current_time_ms += decode_time.as_secs_f64() * 1000.0;
+    }
+
+    Ok(collector.finish())
+}
 fn enqueue_trace_arrivals(
     pending: &mut VecDeque<DirectRequest>,
     state: &mut SchedulerState,
@@ -672,6 +723,26 @@ fn enqueue_trace_arrivals(
         let output_length = request.max_output_tokens;
         let uuid = state.receive(request);
         collector.on_arrival(uuid, arrival_ms, input_length, output_length);
+    }
+}
+
+fn enqueue_concurrency_arrivals(
+    pending: &mut VecDeque<DirectRequest>,
+    state: &mut SchedulerState,
+    collector: &TraceCollector,
+    current_time_ms: f64,
+    max_in_flight: usize,
+) {
+    while state.requests.len() < max_in_flight {
+        let Some(mut request) = pending.pop_front() else {
+            break;
+        };
+
+        request.arrival_timestamp_ms = Some(current_time_ms);
+        let input_length = request.tokens.len();
+        let output_length = request.max_output_tokens;
+        let uuid = state.receive(request);
+        collector.on_arrival(uuid, current_time_ms, input_length, output_length);
     }
 }
 
@@ -1077,6 +1148,12 @@ mod tests {
         first_decode_end_ms: f64,
     }
 
+    #[derive(Debug)]
+    struct ManualConcurrencyResult {
+        report: TraceSimulationReport,
+        snapshots: HashMap<Uuid, TraceRequestStatsSnapshot>,
+    }
+
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
             .block_size(4)
@@ -1203,6 +1280,68 @@ mod tests {
         }
     }
 
+    fn run_concurrency_manually(
+        args: &MockEngineArgs,
+        requests: Vec<DirectRequest>,
+        max_in_flight: usize,
+    ) -> ManualConcurrencyResult {
+        let mut pending = VecDeque::from(requests);
+        let mut state = SchedulerState::default();
+        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+        let mut hit_rates = RunningMean::new(1000);
+        let collector = TraceCollector::default();
+        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+        let mut current_time_ms = 0.0;
+
+        while !pending.is_empty() || !state.is_empty() {
+            enqueue_concurrency_arrivals(
+                &mut pending,
+                &mut state,
+                &collector,
+                current_time_ms,
+                max_in_flight,
+            );
+
+            if state.is_empty() {
+                break;
+            }
+
+            let prefill_time = simulate_prefill_step(
+                &mut state,
+                &mut kv_manager,
+                &mut hit_rates,
+                args,
+                Some(&collector),
+                current_time_ms,
+            );
+            current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+
+            let decode_time = simulate_decode_step(
+                &mut state,
+                &mut kv_manager,
+                &output_tx,
+                args,
+                Some(&collector),
+                current_time_ms,
+            );
+            current_time_ms += decode_time.as_secs_f64() * 1000.0;
+        }
+
+        let snapshots = [
+            Uuid::from_u128(11),
+            Uuid::from_u128(22),
+            Uuid::from_u128(33),
+        ]
+        .into_iter()
+        .map(|uuid| (uuid, collector.snapshot(uuid).unwrap()))
+        .collect();
+
+        ManualConcurrencyResult {
+            report: collector.finish(),
+            snapshots,
+        }
+    }
+
     fn assert_report_close(left: &TraceSimulationReport, right: &TraceSimulationReport) {
         let epsilon = 1e-9;
         assert_eq!(
@@ -1315,6 +1454,50 @@ mod tests {
             assert_eq!(request_2.reused_input_tokens, 0);
             assert_eq!(manual.report.prefix_cache_reused_ratio, 0.0);
         }
+
+        assert_report_close(&replay_report, &manual.report);
+    }
+
+    #[test]
+    fn test_concurrency_replay_matches_manual_steps() {
+        let args = replay_args(false, false);
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(900.0),
+            },
+            DirectRequest {
+                tokens: vec![1, 2, 3, 4, 5, 9, 10, 11],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(1000.0),
+            },
+            DirectRequest {
+                tokens: vec![12, 13, 14, 15, 16, 17, 18, 19],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+        ];
+        let manual = run_concurrency_manually(&args, requests.clone(), 2);
+        let replay_report = simulate_concurrency(args, requests, 2).unwrap();
+
+        let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
+        let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
+        let request_3 = manual.snapshots.get(&Uuid::from_u128(33)).unwrap();
+
+        assert_eq!(request_1.arrival_time_ms, 0.0);
+        assert_eq!(request_2.arrival_time_ms, 0.0);
+        assert_eq!(request_3.arrival_time_ms, request_1.last_token_ms.unwrap());
+        assert!(request_3.arrival_time_ms < request_2.last_token_ms.unwrap());
+        assert_eq!(manual.report.request_counts.completed_requests, 3);
+        assert_eq!(manual.report.request_counts.total_input_tokens, 24);
+        assert_eq!(manual.report.request_counts.total_output_tokens, 6);
 
         assert_report_close(&replay_report, &manual.report);
     }

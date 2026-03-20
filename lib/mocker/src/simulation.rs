@@ -337,6 +337,40 @@ pub fn simulate_trace_file(
     trace_path: &Path,
     num_workers: usize,
 ) -> Result<TraceSimulationReport> {
+    validate_offline_replay_args(&args, num_workers)?;
+    let requests = load_trace_requests(trace_path, args.block_size, true)?;
+    let started_at = Instant::now();
+    let report = crate::scheduler::vllm::simulate_trace(args, requests)?;
+    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_concurrency_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    let requests = load_trace_requests(trace_path, args.block_size, false)?;
+    let started_at = Instant::now();
+    let report = simulate_concurrency_requests(args, requests, max_in_flight, num_workers)?;
+    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_concurrency_requests(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    validate_offline_concurrency_args(&args, num_workers, max_in_flight)?;
+    if requests.is_empty() {
+        bail!("concurrency replay requires at least one request");
+    }
+
+    crate::scheduler::vllm::simulate_concurrency(args, requests, max_in_flight)
+}
+
+fn validate_offline_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
     if num_workers != 1 {
         bail!(
             "trace replay only supports num_workers=1, got {}",
@@ -362,13 +396,26 @@ pub fn simulate_trace_file(
         );
     }
 
-    let requests = load_trace_requests(trace_path, args.block_size)?;
-    let started_at = Instant::now();
-    let report = crate::scheduler::vllm::simulate_trace(args, requests)?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(())
 }
 
-fn load_trace_requests(trace_path: &Path, trace_block_size: usize) -> Result<Vec<DirectRequest>> {
+fn validate_offline_concurrency_args(
+    args: &MockEngineArgs,
+    num_workers: usize,
+    max_in_flight: usize,
+) -> Result<()> {
+    if max_in_flight == 0 {
+        bail!("concurrency replay requires max_in_flight >= 1");
+    }
+
+    validate_offline_replay_args(args, num_workers)
+}
+
+fn load_trace_requests(
+    trace_path: &Path,
+    trace_block_size: usize,
+    timestamps_required: bool,
+) -> Result<Vec<DirectRequest>> {
     let file = File::open(trace_path)
         .with_context(|| format!("failed to open trace file {}", trace_path.display()))?;
     let reader = BufReader::new(file);
@@ -403,10 +450,14 @@ fn load_trace_requests(trace_path: &Path, trace_block_size: usize) -> Result<Vec
         let hash_ids = raw
             .hash_ids
             .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
-        let arrival_timestamp_ms = raw
-            .timestamp
-            .or(raw.created_time)
-            .ok_or_else(|| anyhow!("trace line {} is missing timestamp", line_idx + 1))?;
+        let arrival_timestamp_ms = if timestamps_required {
+            match raw.timestamp.or(raw.created_time) {
+                Some(timestamp_ms) => Some(timestamp_ms),
+                None => return Err(anyhow!("trace line {} is missing timestamp", line_idx + 1)),
+            }
+        } else {
+            None
+        };
         let tokens = synthesize_tokens_from_hash_ids(&hash_ids, input_length, trace_block_size)
             .with_context(|| {
                 format!(
@@ -420,7 +471,7 @@ fn load_trace_requests(trace_path: &Path, trace_block_size: usize) -> Result<Vec
             max_output_tokens: output_length,
             uuid: Some(Uuid::new_v4()),
             dp_rank: 0,
-            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            arrival_timestamp_ms,
         });
     }
 
@@ -497,17 +548,6 @@ fn percentile(values: &[f64], percentile: f64) -> f64 {
 mod tests {
     use super::*;
 
-    fn test_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(32))
-            .max_num_seqs(Some(8))
-            .speedup_ratio(0.0)
-            .build()
-            .unwrap()
-    }
-
     #[test]
     fn test_replay_itl_uses_per_token_gaps() {
         let collector = TraceCollector::default();
@@ -528,5 +568,4 @@ mod tests {
         assert_eq!(report.latency.itl.distribution.p95_ms, 98.0);
         assert_eq!(report.latency.itl.max_ms, 98.0);
     }
-
 }

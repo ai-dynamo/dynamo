@@ -65,12 +65,14 @@ def run_trace_replay(
     output_file: Path | None,
     extra_engine_args: Path,
     num_workers: int,
+    replay_concurrency: int | None,
 ) -> None:
     resolved_output_file = output_file or default_replay_output_path(trace_file)
     report = run_mocker_trace_replay(
         trace_file=trace_file,
         extra_engine_args=extra_engine_args,
         num_workers=num_workers,
+        replay_concurrency=replay_concurrency,
     )
     write_replay_report(report, resolved_output_file)
     print_replay_summary(report, resolved_output_file)

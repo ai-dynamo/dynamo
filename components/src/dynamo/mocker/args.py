@@ -260,6 +260,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Write replay metrics JSON to this path. Defaults to a replay JSON next to the trace file.",
     )
+    parser.add_argument(
+        "--replay-concurrency",
+        type=int,
+        default=None,
+        help="Run offline replay in closed-loop concurrency mode with this many in-flight requests.",
+    )
 
     # MockEngineArgs parameters (similar to vLLM style)
     parser.add_argument(
@@ -557,6 +563,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     validate_worker_type_args(args)
+
+    if args.replay_concurrency is not None and args.trace_file is None:
+        raise ValueError("--replay-concurrency requires --trace-file")
 
     # Validate num_workers
     if args.num_workers < 1:
