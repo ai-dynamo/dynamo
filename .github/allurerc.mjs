@@ -14,10 +14,29 @@ const byTagOrLabel = (tagValue, labelName, labelValue) => ({ labels }) =>
   labels.find((l) => l.name === labelName && l.value === labelValue) ||
   labels.find((l) => l.name === "tag" && l.value === tagValue);
 
+// Environment matcher: matches on framework tag + platform label
+const envMatcher = (framework, platform) => ({ labels }) => {
+  const hasFramework =
+    labels.find((l) => l.name === "dynamo_framework" && l.value === framework) ||
+    labels.find((l) => l.name === "tag" && l.value === framework);
+  const hasPlatform = platform
+    ? labels.find((l) => l.name === "dynamo_platform" && l.value === platform)
+    : true;
+  return hasFramework && hasPlatform;
+};
+
 export default defineConfig({
   name: "Dynamo Test Health",
   output: "./allure-report",
   historyPath: "./history.jsonl",
+  environments: {
+    "vllm-amd64": { name: "vLLM (amd64)", matcher: envMatcher("vllm", "amd64") },
+    "vllm-arm64": { name: "vLLM (arm64)", matcher: envMatcher("vllm", "arm64") },
+    "sglang-amd64": { name: "SGLang (amd64)", matcher: envMatcher("sglang", "amd64") },
+    "sglang-arm64": { name: "SGLang (arm64)", matcher: envMatcher("sglang", "arm64") },
+    "trtllm-amd64": { name: "TRT-LLM (amd64)", matcher: envMatcher("trtllm", "amd64") },
+    "trtllm-arm64": { name: "TRT-LLM (arm64)", matcher: envMatcher("trtllm", "arm64") },
+  },
   plugins: {
     pr: {
       import: "@allurereport/plugin-awesome",
