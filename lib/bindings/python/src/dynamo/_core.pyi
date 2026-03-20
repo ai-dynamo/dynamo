@@ -1133,7 +1133,7 @@ class KvRouterConfig:
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
             router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 2.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
-                Enables priority scheduling via latency_sensitivity hints.
+                Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
@@ -1756,4 +1756,3 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
-

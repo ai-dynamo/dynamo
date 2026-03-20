@@ -131,7 +131,7 @@ runs:
         kubectl wait --for=condition=ready pod \
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
-          --timeout=300s
+          --timeout=900s
         echo "::endgroup::"
 
     - name: Connect to vCluster
@@ -194,7 +194,7 @@ runs:
       run: |
         echo "::group::Wait for operator rollout inside vCluster"
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          rollout status deployment -n default --watch --timeout=600s
+          rollout status deployment -n default --watch --timeout=900s
         echo "::endgroup::"
 
     - name: Debug deployment failure
