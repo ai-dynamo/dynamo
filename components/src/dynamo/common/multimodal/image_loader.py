@@ -19,7 +19,7 @@ import binascii
 import logging
 import os
 from io import BytesIO
-from typing import Any, Dict, Final, List, Optional
+from typing import Any, Dict, Final, List
 from urllib.parse import urlparse
 
 import httpx
@@ -28,6 +28,7 @@ from PIL import Image
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
+from dynamo.common.utils.runtime import run_async
 
 from .http_client import get_http_client
 
@@ -43,11 +44,35 @@ class ImageLoader:
     CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_CACHE_SIZE", "8"))
 
     def __init__(
-        self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
+        self,
+        cache_size: int = CACHE_SIZE_MAXIMUM,
+        http_timeout: float = 30.0,
+        enable_frontend_decoding: bool = False,
     ):
+        """
+        Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
+        receiving frontend decoding.
+
+        Args:
+            cache_size: Maximum number of images to store in the in-memory LRU cache.
+                Defaults to CACHE_SIZE_MAXIMUM.
+            http_timeout: Timeout in seconds for HTTP requests when fetching remote images.
+                Defaults to 30.0 seconds.
+            enable_frontend_decoding: If True, enables NIXL RDMA for transferring
+                decoded images directly from frontend memory, bypassing standard
+                network transport. Defaults to False.
+        """
         self._http_timeout = http_timeout
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        self._enable_frontend_decoding = enable_frontend_decoding
+        # Lazy-init NIXL connector only when frontend decoding is enabled
+        self._nixl_connector = None
+        if self._enable_frontend_decoding:
+            self._nixl_connector = nixl_connect.Connector()
+            run_async(
+                self._nixl_connector.initialize
+            )  # Synchronously wait for async init
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
@@ -137,8 +162,6 @@ class ImageLoader:
     async def load_image_batch(
         self,
         image_mm_items: List[Dict[str, Any]],
-        enable_frontend_decoding: bool = False,
-        nixl_connector: Optional["nixl_connect.Connector"] = None,
     ) -> List[Any]:
         """
         Load a batch of images from multimodal data items.
@@ -149,8 +172,6 @@ class ImageLoader:
 
         Args:
             image_mm_items: List of multimodal data items for images
-            enable_frontend_decoding: If True, enables NIXL RDMA for decoded images
-            nixl_connector: NIXL connector for frontend decoding (required if enable_frontend_decoding=True)
 
         Returns:
             List of loaded image data
@@ -168,19 +189,12 @@ class ImageLoader:
                 image_futures.append(self.load_image(url))
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if enable_frontend_decoding:
-                    if nixl_connector is None:
-                        logger.error(
-                            "Frontend decoding enabled but nixl_connector not provided. "
-                            "Caller must pass an initialized NIXL connector."
-                        )
-                        raise ValueError(
-                            "nixl_connector required when enable_frontend_decoding=True"
-                        )
-
+                if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
+                    if self._nixl_connector is None:
+                        raise RuntimeError("NIXL connector is not initialized")
                     image_futures.append(
-                        read_decoded_media_via_nixl(nixl_connector, metadata)
+                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
                     )
                 else:
                     logger.error(

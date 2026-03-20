@@ -4,14 +4,12 @@
 import copy
 import logging
 import uuid
-from collections import defaultdict
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
-import dynamo.nixl_connect as connect
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -34,14 +32,14 @@ from ..multimodal_utils import (
     vLLMMultimodalRequest,
 )
 from ..multimodal_utils.model import is_qwen_vl_model
-from ..multimodal_utils.prefill_worker_utils import load_multimodal_embeddings
+from ..multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
 
 
-class MultimodalPDWorkerHandler(BaseWorkerHandler):
+class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
     """Prefill/Decode or Prefill-only worker for multimodal serving"""
 
     def __init__(
@@ -49,8 +47,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         runtime,
         engine_client: AsyncLLM,
         config: Config,
-        encode_worker_client: Client | None = None,
-        decode_worker_client: Client | None = None,
+        encode_worker_client: Optional[Client] = None,
+        decode_worker_client: Optional[Client] = None,
         shutdown_event=None,
         generate_endpoint=None,
     ):
@@ -62,18 +60,40 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             shutdown_event=shutdown_event,
         )
 
         self.config = config
-        self.encode_worker_client = encode_worker_client
         self.decode_worker_client = decode_worker_client
         self.enable_disagg = config.disaggregation_mode == DisaggregationMode.PREFILL
+
+        # Initialize multimodal-specific components
+        logger.info("Multimodal PD Worker startup started.")
+
+        # Embedding loader consist of two main components:
+        # 1) An remote encode worker client and matching embedding receiver,
+        #    which can request remote encode and handle the transfer of embeddings
+        #    from the encode worker to this prefill worker.
+        # 2) A local embedding cache manager, which can store previously fetched embeddings
+        #    and used to determine whether remote encode is necessary for a given mm data.
+        self.encode_worker_client = encode_worker_client  # type: ignore
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_receiver = LocalEmbeddingReceiver()  # type: ignore
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()  # type: ignore
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+            # to be at matching size, need to overwrite nixl connect library
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)  # type: ignore
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
         self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
         if config.multimodal_embedding_cache_capacity_gb > 0:
             capacity_bytes = int(
@@ -82,40 +102,16 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
                 capacity_bytes
             )
-
-        # Initialize multimodal-specific components
-        logger.info("Multimodal PD Worker startup started.")
-
-        if "video" in self.config.model.lower():
-            self.EMBEDDINGS_DTYPE = torch.uint8
-        else:
-            self.EMBEDDINGS_DTYPE = torch.float16
-
-        # Create and initialize a dynamo connector for this worker.
-        # We'll need this to move data between this worker and remote workers efficiently.
-        # Note: This is synchronous initialization, async initialization happens in async_init
-        self._connector: connect.Connector | None = (
-            None  # Will be initialized in async_init
+        self.embedding_loader: MultiModalEmbeddingLoader = MultiModalEmbeddingLoader(
+            encode_worker_client=self.encode_worker_client,  # type: ignore
+            receiver=self.embedding_receiver,
+            embedding_cache_manager=self.embedding_cache_manager,
         )
-        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_receiver = LocalEmbeddingReceiver()
-        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_receiver = NixlWriteEmbeddingReceiver()
-        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
-            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
-            # to be at matching size, need to overwrite nixl connect library
-            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
-        else:
-            raise ValueError(
-                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
-            )
 
         logger.info("Multimodal PD Worker has been initialized")
 
     async def async_init(self, runtime: DistributedRuntime):
         """Async initialization for connector that requires async setup"""
-        # Initialize the connector asynchronously
-        self._connector = connect.Connector()
         logger.info("Multimodal PD Worker async initialization completed.")
 
     def _parse_frontend_request(
@@ -164,17 +160,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         Returns an empty dict when no encode worker is configured or no images
         are present.
         """
-        if not self.encode_worker_client or not image_urls:
-            return defaultdict(list)
 
-        return await load_multimodal_embeddings(
-            self.encode_worker_client,  # type: ignore[arg-type]
+        return await self.embedding_loader.load_multimodal_embeddings(
             image_urls,
             request_id,
-            self.embedding_receiver,
             model=self.config.model,
-            embeddings_dtype=self.EMBEDDINGS_DTYPE,
-            cache=self.embedding_cache_manager,
             context=context,
         )
 
@@ -212,10 +202,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 if not value:
                     del multi_modal_data[key]
                 else:
-                    # [gluo FIXME] should be mindful to default dict, move this evaluation logic to here
-                    # so that we don't accidentally add empty keys to the dict which causes vLLM misbehavior
                     logger.debug(
-                        f"Prepared multimodal data size: {len(multi_modal_data[key])}"
+                        f"Prepared multimodal data key {key}, number of items: {len(multi_modal_data[key])}"
                     )
 
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
@@ -387,12 +375,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ) as decode_timer,
         ):
             num_output_tokens_so_far = 0
-            async for (
-                decode_response
-            ) in await self.decode_worker_client.round_robin(  # type: ignore
+            if self.decode_worker_client is None:
+                raise RuntimeError("Decode worker client is not configured.")
+            async for (decode_response) in await self.decode_worker_client.round_robin(
                 request.model_dump_json(), context=context
             ):
-                output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore
+                output = MyRequestOutput.model_validate_json(decode_response.data())
                 yield self._format_engine_output(output, num_output_tokens_so_far)
                 if output.outputs:
                     if num_output_tokens_so_far == 0:

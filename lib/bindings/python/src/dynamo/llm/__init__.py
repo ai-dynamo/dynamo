@@ -35,6 +35,7 @@ from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
 from dynamo._core import run_input
 from dynamo._core import run_kv_indexer as run_kv_indexer
+from dynamo._core import run_mocker_trace_replay
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError

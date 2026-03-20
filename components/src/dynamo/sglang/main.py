@@ -26,9 +26,10 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_worker,
 )
 from dynamo.sglang.shutdown import install_graceful_shutdown
-from dynamo.sglang.snapshot import handle_checkpoint_mode
+from dynamo.sglang.snapshot import prepare_snapshot_engine
 
 configure_dynamo_logging()
+logger = logging.getLogger(__name__)
 
 
 async def worker():
@@ -41,11 +42,17 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
-    should_exit, snapshot_engine = await handle_checkpoint_mode(config.server_args)
-    if should_exit:
-        return
+    snapshot_controller = await prepare_snapshot_engine(config.server_args)
 
     dynamo_args = config.dynamo_args
+    snapshot_engine = None
+    if snapshot_controller is not None:
+        snapshot_engine = snapshot_controller.engine
+        (
+            dynamo_args.namespace,
+            dynamo_args.discovery_backend,
+        ) = snapshot_controller.reload_restore_identity()
+
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
     runtime, loop = create_runtime(
@@ -58,7 +65,7 @@ async def worker():
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event
     )
-    logging.info(
+    logger.info(
         "Signal handlers set up for graceful shutdown "
         "(discovery unregister + grace period, with chaining)"
     )

@@ -16,6 +16,7 @@
 import argparse
 import asyncio
 import logging
+from typing import Union
 
 from pydantic import BaseModel
 
@@ -39,6 +40,7 @@ class RequestType(BaseModel):
 
 async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
     mode = config.mode
+    planner: Union[DisaggPlanner, PrefillPlanner, DecodePlanner, AggPlanner]
     if mode == "disagg":
         planner = DisaggPlanner(runtime, config)
     elif mode == "prefill":
@@ -63,7 +65,7 @@ async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
         yield "mock endpoint"
 
     generate_endpoint = runtime.endpoint(f"{config.namespace}.Planner.generate")
-    await generate_endpoint.serve_endpoint(generate)  # type: ignore[arg-type]
+    await generate_endpoint.serve_endpoint(generate)
 
 
 def _parse_config() -> PlannerConfig:
