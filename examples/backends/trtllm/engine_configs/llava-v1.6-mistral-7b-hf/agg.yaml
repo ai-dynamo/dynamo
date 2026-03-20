@@ -19,7 +19,6 @@ max_num_tokens: 4096
 max_batch_size: 8
 trust_remote_code: true
 backend: pytorch
-dtype: bfloat16
 enable_chunked_prefill: true
 
 kv_cache_config:
