@@ -303,6 +303,36 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         matched_blocks
     }
 
+    /// Attempts to do non-contiguous lookup. Returns all blocks found from the list of hashes.
+    /// Unlike match_sequence_hashes, this does NOT break if a hash is missing,
+    /// this is useful in offloading to find bulk matches without caring about the order or contiguity of the matches.
+    ///
+    /// Iterates through the provided hashes and takes blocks using `take_with_sequence_hash`.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence_hashes` - A vector of sequence hashes ([`SequenceHash`]) to match.
+    ///
+    /// # Returns
+    ///
+    /// A vector containing the blocks ([`Block<T, M>`]) that were successfully matched and taken.
+    /// The vector may be shorter than `sequence_hashes` if not all hashes were found.
+    #[instrument(level = "debug", skip(self, sequence_hashes), fields(num_hashes = sequence_hashes.len()))]
+    pub fn find_blocks_with_hashes(
+        &mut self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Vec<Block<S, L, M>> {
+        let mut found_blocks = Vec::with_capacity(sequence_hashes.len());
+
+        for hash in sequence_hashes {
+            if let Some(block) = self.take_with_sequence_hash(*hash) {
+                found_blocks.push(block);
+            }
+        }
+
+        found_blocks
+    }
+
     /// Attempts to find and take multiple blocks matching a sequence of `TokenBlock`s.
     ///
     /// Extracts sequence hashes from the [`TokenBlock`]s and calls [`take_with_sequence_hash`].

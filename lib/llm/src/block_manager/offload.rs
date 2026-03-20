@@ -416,16 +416,8 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
 
             // Try to check the offload queue.
-            loop {
-                match offload_rx.try_recv() {
-                    Ok(request) => {
-                        queue.insert(request);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        break;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
+            while let Ok(request) = offload_rx.try_recv() {
+                queue.insert(request);
             }
 
             if queue.is_empty() {
@@ -439,55 +431,84 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 continue;
             }
 
-            // Pop up to max_transfer_batch_size requests and validate each.
-            let mut valid_sources = Vec::new();
-
-            for _ in 0..max_transfer_batch_size() {
-                let Some(request) = queue.pop_first() else {
+            // 1. Collect Batch Candidates
+            let mut candidates = Vec::with_capacity(max_transfer_batch_size());
+            while candidates.len() < max_transfer_batch_size() {
+                if let Some(req) = queue.pop_first() {
+                    candidates.push(req);
+                } else {
                     break;
-                };
-
-                // Try to upgrade the block to a strong reference.
-                let block = match request.block.upgrade() {
-                    Some(block) => Some(ImmutableBlock::new(block)),
-                    // If unable to upgrade, the block may have been moved to the inactive pool.
-                    None => source_pool
-                        .match_sequence_hashes(vec![request.sequence_hash].as_slice())
-                        .await?
-                        .pop(),
-                };
-
-                let Some(block) = block else {
-                    continue;
-                };
-
-                // If the block is already in the target, don't offload it.
-                if let Ok(blocks) = target_pool
-                    .match_sequence_hashes(vec![request.sequence_hash].as_slice())
-                    .await
-                    && !blocks.is_empty()
-                {
-                    continue;
                 }
-
-                if let Some(offload_filter) = offload_filter.as_ref()
-                    && !offload_filter.should_offload(request.sequence_hash)
-                {
-                    continue;
-                }
-
-                valid_sources.push(block);
             }
 
-            if valid_sources.is_empty() {
-                continue;
+            // 2. Bulk Source Resolution
+            // We separate blocks into "immediate upgrade" and "need pool lookup"
+            let mut resolved_requests = Vec::with_capacity(candidates.len());
+            let mut resolved_sources = Vec::with_capacity(candidates.len());
+            let mut lookup_hashes = Vec::new();
+            let mut lookup_indices = Vec::new();
+
+            for (i, req) in candidates.into_iter().enumerate() {
+                if let Some(arc) = req.block.upgrade() {
+                    resolved_requests.push(req);
+                    resolved_sources.push(ImmutableBlock::new(arc));
+                } else {
+                    lookup_hashes.push(req.sequence_hash);
+                    lookup_indices.push(req);
+                }
             }
 
-            // Allocate target blocks in bulk.
-            let target_blocks = match target_pool.allocate_blocks(valid_sources.len()).await {
+            if !lookup_hashes.is_empty() {
+                let found = source_pool.find_blocks_with_hashes(&lookup_hashes).await?;
+                for req in lookup_indices {
+                    if let Some(b) = found.iter().find(|b| b.sequence_hash() == req.sequence_hash) {
+                        resolved_requests.push(req);
+                        resolved_sources.push(b.clone());
+                    }
+                }
+            }
+
+            if resolved_sources.is_empty() { continue; }
+
+            // 3. Bulk Target existence check
+            // One IPC call to check if the target pool already has these blocks
+            let all_hashes: Vec<_> = resolved_requests.iter().map(|r| r.sequence_hash).collect();
+            let existing_in_target = target_pool.find_blocks_with_hashes(&all_hashes).await?;
+
+            if !existing_in_target.is_empty() {
+                let existing_set: BTreeSet<_> = existing_in_target.iter().map(|b| b.sequence_hash()).collect();
+                let mut i = 0;
+                while i < resolved_requests.len() {
+                    if existing_set.contains(&resolved_requests[i].sequence_hash) {
+                        resolved_requests.remove(i);
+                        resolved_sources.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+
+            // 4. Final Filter Check
+            if let Some(ref filter) = offload_filter {
+                let mut i = 0;
+                while i < resolved_requests.len() {
+                    if !filter.should_offload(resolved_requests[i].sequence_hash) {
+                        resolved_requests.remove(i);
+                        resolved_sources.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+
+            if resolved_sources.is_empty() { continue; }
+
+            // 5. Bulk Allocation and Transfer
+            let allocation_result = target_pool.allocate_blocks(resolved_sources.len()).await;
+            let final_targets = match allocation_result {
                 Ok(blocks) => blocks,
                 Err(BlockPoolError::NotEnoughBlocksAvailable(_, available)) if available > 0 => {
-                    valid_sources.truncate(available);
+                    resolved_sources.truncate(available);
                     target_pool.allocate_blocks(available).await?
                 }
                 Err(_) => {
@@ -496,23 +517,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 }
             };
 
-            tracing::debug!(
-                "Offloading batch of {} blocks to target pool.",
-                target_blocks.len()
-            );
-
             if let Some(ref metric) = offload_metric {
-                metric.inc_by(target_blocks.len() as u64);
+                metric.inc_by(final_targets.len() as u64);
             }
 
-            transfer_manager
-                .enqueue_transfer(PendingTransfer::new(
-                    valid_sources,
-                    target_blocks,
-                    None,
-                    target_pool.clone(),
-                ))
-                .await?;
+            transfer_manager.enqueue_transfer(PendingTransfer::new(
+                resolved_sources,
+                final_targets,
+                None,
+                target_pool.clone(),
+            )).await?;
         }
     }
 

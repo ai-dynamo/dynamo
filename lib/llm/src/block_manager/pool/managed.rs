@@ -125,6 +125,7 @@ pub enum PriorityRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     TouchBlocks(TouchBlocksReq),
     Reset(ResetReq),
     ReturnBlock(ReturnBlockReq<S, L, M>),
+    FindBlocksWithHashes(MatchHashesReq<S, L, M>),
 }
 
 pub enum ControlRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
@@ -316,6 +317,19 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         Ok(resp_rx)
     }
 
+    fn _find_blocks_with_hashes(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
+        let (req, resp_rx) = MatchHashesReq::new(sequence_hashes.into());
+
+        self.priority_tx
+            .send(PriorityRequest::FindBlocksWithHashes(req))
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+
+        Ok(resp_rx)
+    }
+
     fn _touch_blocks(
         &self,
         sequence_hashes: &[SequenceHash],
@@ -437,6 +451,15 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
         self._match_sequence_hashes(sequence_hashes)?
+            .await
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    }
+
+    async fn find_blocks_with_hashes(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        self._find_blocks_with_hashes(sequence_hashes)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }

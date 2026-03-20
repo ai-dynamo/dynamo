@@ -79,6 +79,15 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                     tracing::error!("failed to send response to return block");
                 }
             }
+            PriorityRequest::FindBlocksWithHashes(req) => {
+                let (sequence_hashes, resp_tx) = req.dissolve();
+                let immutable_blocks = self
+                    .find_blocks_with_hashes(sequence_hashes, return_rx)
+                    .await;
+                if resp_tx.send(Ok(immutable_blocks)).is_err() {
+                    tracing::error!("failed to send response to find blocks with hashes");
+                }
+            }
         }
     }
 
@@ -295,6 +304,49 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 } else {
                     self.wait_for_returned_block(*sequence_hash, return_rx)
                         .await
+                };
+
+            // this assert allows us to skip the error checking on the active pool registration step
+            assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+
+            let mutable = MutableBlock::new(raw_block, self.return_tx.clone());
+
+            let immutable = self
+                .active
+                .register(mutable)
+                .expect("unable to register block; should never happen");
+
+            immutable_blocks.push(immutable);
+        }
+
+        immutable_blocks
+    }
+
+    pub async fn find_blocks_with_hashes(
+        &mut self,
+        sequence_hashes: Vec<SequenceHash>,
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) -> Vec<ImmutableBlock<S, L, M>> {
+        let mut immutable_blocks = Vec::with_capacity(sequence_hashes.len());
+
+        for sequence_hash in sequence_hashes {
+            // Check the registry.
+            // Note: We use 'continue' here because in a batch find,
+            // we don't want one missing block to stop us from finding the rest.
+            if !self.registry.is_registered(sequence_hash) {
+                continue;
+            }
+
+            if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
+                immutable_blocks.push(immutable);
+                continue;
+            }
+
+            let raw_block =
+                if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
+                    raw_block
+                } else {
+                    self.wait_for_returned_block(sequence_hash, return_rx).await
                 };
 
             // this assert allows us to skip the error checking on the active pool registration step

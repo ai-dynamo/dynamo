@@ -212,6 +212,12 @@ pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>:
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>>;
 
+    /// Find non-contiguous blocks with the specified hashes
+    async fn find_blocks_with_hashes(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>>;
+
     /// Blocking version of [`BlockPool::match_sequence_hashes`].
     fn match_sequence_hashes_blocking(
         &self,
