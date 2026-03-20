@@ -274,15 +274,16 @@ trtllm_configs = {
     #   2. Encode + Aggregated PD workers start for LLaVA
     #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.pt
     #
-    # Uses gpu_1 (all workers share GPU 0 after embeddings generation frees memory).
-    # Marked nightly because the 7B model + embeddings generation is heavier than
-    # the standard 2B multimodal tests.
+    # Uses gpu_2: encode worker on GPU 0, PD worker on GPU 1.
+    # The 7B LLaVA model requires two GPUs because both encode and PD workers
+    # load the full model (~14GB each in bfloat16), exceeding a single L4's 22GB.
+    # Runs in the multi-GPU pre-merge CI (marker: pre_merge and trtllm and gpu_2).
     "raw_embeddings_epd": TRTLLMConfig(
         name="raw_embeddings_epd",
         directory=trtllm_dir,
         script_name="agg_raw_embeddings_llava.sh",
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
@@ -304,6 +305,7 @@ trtllm_configs = {
         ],
         env={
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+            "PD_CUDA_VISIBLE_DEVICES": "1",
         },
     ),
     "completions_only": TRTLLMConfig(

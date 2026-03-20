@@ -29,6 +29,7 @@ export MODEL_REVISION=${MODEL_REVISION:-""}
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/encode.yaml"}
 export PD_ENGINE_ARGS=${PD_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/agg.yaml"}
 export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}
+export PD_CUDA_VISIBLE_DEVICES=${PD_CUDA_VISIBLE_DEVICES:-"0"}
 export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.generate"}
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
@@ -152,9 +153,9 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode encode &
 
-# Aggregated PD worker (GPU 0)
+# Aggregated PD worker
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
+CUDA_VISIBLE_DEVICES=$PD_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PD_ENGINE_ARGS" \
