@@ -350,7 +350,9 @@ async fn anthropic_messages(
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut converter = match anthropic_ctx {
-            Some(ctx) => AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx),
+            Some(ctx) => {
+                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
+            }
             None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
         };
         let start_events = converter.emit_start_events();
@@ -486,9 +488,7 @@ async fn handler_count_tokens(
 // ---------------------------------------------------------------------------
 
 /// Build a lookup of model display_name -> context_length from model cards.
-fn build_model_context_map(
-    state: &service_v2::State,
-) -> std::collections::HashMap<String, u32> {
+fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
     state
         .manager()
         .get_model_cards()
@@ -499,12 +499,26 @@ fn build_model_context_map(
 
 /// Read optional env var overrides for context window and max output tokens.
 fn model_env_overrides() -> (Option<u64>, Option<u64>) {
-    let context_window = std::env::var("DYN_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|v| v.parse().ok());
-    let max_output_tokens = std::env::var("DYN_MAX_OUTPUT_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok());
+    let context_window = match std::env::var("DYN_CONTEXT_WINDOW") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_CONTEXT_WINDOW value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let max_output_tokens = match std::env::var("DYN_MAX_OUTPUT_TOKENS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_MAX_OUTPUT_TOKENS value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
     (context_window, max_output_tokens)
 }
 
@@ -548,10 +562,10 @@ async fn list_models(
                     "created_at": created_at,
                 });
                 if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
-                    obj["context_window"] = serde_json::json!(cw);
+                    obj["max_input_tokens"] = serde_json::json!(cw);
                 }
                 if let Some(mot) = mot_override {
-                    obj["max_output_tokens"] = serde_json::json!(mot);
+                    obj["max_tokens"] = serde_json::json!(mot);
                 }
                 obj
             })
@@ -635,10 +649,10 @@ async fn get_model(
             "created_at": created_at,
         });
         if let Some(cw) = context_window {
-            obj["context_window"] = serde_json::json!(cw);
+            obj["max_input_tokens"] = serde_json::json!(cw);
         }
         if let Some(mot) = mot_override {
-            obj["max_output_tokens"] = serde_json::json!(mot);
+            obj["max_tokens"] = serde_json::json!(mot);
         }
         Ok(Json(obj).into_response())
     } else {
