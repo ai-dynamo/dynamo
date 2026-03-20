@@ -715,9 +715,13 @@ class ManagedDeployment:
             details: List[PodStatusDetail] = []
             for pod in pods.items:
                 pod_name = pod.metadata.name
-                phase = pod.status.phase or "Unknown"
+                pod_status = pod.status
+                phase = pod_status.phase if pod_status else "Unknown"
 
-                if not pod.status.container_statuses:
+                container_statuses = (
+                    pod_status.container_statuses if pod_status else None
+                )
+                if not container_statuses:
                     details.append(
                         PodStatusDetail(
                             pod_name=pod_name,
@@ -728,31 +732,40 @@ class ManagedDeployment:
                     )
                     continue
 
-                for cs in pod.status.container_statuses:
-                    detail = PodStatusDetail(
-                        pod_name=pod_name,
-                        container_name=cs.name,
-                        restart_count=cs.restart_count or 0,
+                for cs in container_statuses:
+                    state: Literal["Waiting", "Terminated", "Running", "Unknown"] = (
+                        "Unknown"
                     )
+                    reason = ""
+                    message = ""
+                    exit_code: Optional[int] = None
 
-                    if cs.state.waiting:
-                        detail.state = "Waiting"
-                        detail.reason = cs.state.waiting.reason or ""
-                        detail.message = cs.state.waiting.message or ""
-                    elif cs.state.terminated:
-                        detail.state = "Terminated"
-                        detail.reason = cs.state.terminated.reason or ""
-                        detail.exit_code = cs.state.terminated.exit_code
-                    elif cs.state.running:
-                        detail.state = "Running"
-                    else:
-                        detail.state = "Unknown"
+                    if cs.state and cs.state.waiting:
+                        state = "Waiting"
+                        reason = cs.state.waiting.reason or ""
+                        message = cs.state.waiting.message or ""
+                    elif cs.state and cs.state.terminated:
+                        state = "Terminated"
+                        reason = cs.state.terminated.reason or ""
+                        exit_code = cs.state.terminated.exit_code
+                    elif cs.state and cs.state.running:
+                        state = "Running"
 
-                    details.append(detail)
+                    details.append(
+                        PodStatusDetail(
+                            pod_name=pod_name,
+                            container_name=cs.name,
+                            state=state,
+                            reason=reason,
+                            message=message,
+                            exit_code=exit_code,
+                            restart_count=cs.restart_count or 0,
+                        )
+                    )
 
             return details
 
-        except Exception as e:
+        except exceptions.ApiException as e:
             self._logger.debug(f"Failed to collect pod status details: {e}")
             return []
 
