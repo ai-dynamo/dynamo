@@ -148,6 +148,9 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		if err != nil {
 			return nil, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
 		}
+		if len(process.NamespacePIDs) != 2 {
+			return nil, fmt.Errorf("CUDA process %d has namespace depth %d, want 2", cudaHostPID, len(process.NamespacePIDs))
+		}
 		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
 	}
 	if len(cudaHostPIDs) > 0 {
