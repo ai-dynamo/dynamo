@@ -73,6 +73,9 @@ python -m dynamo.mocker \
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
 | `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
+| `--trace-file` | None | Run offline trace replay from a Mooncake-style JSONL trace file |
+| `--output-file` | `<trace stem>.replay.json` | Write replay metrics JSON to this path |
+| `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 | Tokens per KV cache block |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
@@ -118,6 +121,20 @@ python -m dynamo.mocker \
 | `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured KV cache allocation and eviction traces |
 
 > **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
+
+## Offline Trace Replay
+
+The mocker also supports an offline replay mode for Mooncake-style traces:
+
+```bash
+python -m dynamo.mocker \
+    --trace-file /path/to/mooncake_trace.jsonl \
+    --model-path Qwen/Qwen3-0.6B
+```
+
+This mode writes a replay report JSON and prints a `Replay Summary` table without launching a runtime or router.
+
+For full usage, constraints, and benchmarking guidance, see [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md).
 
 ## Performance Modeling Setup
 

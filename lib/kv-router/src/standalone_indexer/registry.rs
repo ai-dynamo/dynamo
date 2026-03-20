@@ -359,11 +359,16 @@ impl WorkerRegistry {
     #[cfg(feature = "metrics")]
     pub fn refresh_metrics(&self) {
         let models = self.indexers.len();
-        let mut workers = self.workers.len();
-        #[cfg(feature = "indexer-runtime")]
-        {
-            workers += self.discovered_workers.len();
-        }
+        let workers = self.workers.len() + {
+            #[cfg(feature = "indexer-runtime")]
+            {
+                self.discovered_workers.len()
+            }
+            #[cfg(not(feature = "indexer-runtime"))]
+            {
+                0
+            }
+        };
 
         let mut listener_counts = [0_i64; 4];
         for entry in self.workers.iter() {
