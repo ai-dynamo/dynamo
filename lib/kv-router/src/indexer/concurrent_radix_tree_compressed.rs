@@ -509,76 +509,88 @@ impl ConcurrentRadixTreeCompressed {
 
         let parent = match op.parent_hash {
             Some(parent_hash) => {
-                let node = {
-                    let wl = lookup.get_mut(&worker).unwrap();
-                    match Self::resolve_lookup(wl, parent_hash) {
-                        Some(n) => n,
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                parent_hash = ?op.parent_hash,
-                                num_blocks = op.blocks.len(),
-                                "Failed to find parent block; skipping store operation"
-                            );
-                            return Err(KvCacheEventError::ParentBlockNotFound);
+                // Retry loop: re-resolve if a concurrent split moves parent_hash
+                // into a descendant between resolve_lookup and the write lock below.
+                let node = loop {
+                    let node = {
+                        let wl = lookup.get_mut(&worker).unwrap();
+                        match Self::resolve_lookup(wl, parent_hash) {
+                            Some(n) => n,
+                            None => {
+                                tracing::warn!(
+                                    worker_id = worker.worker_id.to_string(),
+                                    dp_rank = worker.dp_rank,
+                                    id,
+                                    parent_hash = ?op.parent_hash,
+                                    num_blocks = op.blocks.len(),
+                                    "Failed to find parent block; skipping store operation"
+                                );
+                                return Err(KvCacheEventError::ParentBlockNotFound);
+                            }
+                        }
+                    };
+
+                    // Verify the worker still covers parent_hash. A prior removal may
+                    // have reduced the worker's cutoff past this position, leaving a
+                    // stale entry in the lookup map.
+                    {
+                        let guard = node.read();
+                        if let Some(&pos_u16) = guard.edge_index.get(&parent_hash) {
+                            let pos = pos_u16 as usize;
+                            let is_full = guard.full_edge_workers.contains(&worker);
+                            let cutoff = if is_full {
+                                guard.edge.len()
+                            } else {
+                                guard
+                                    .worker_cutoffs
+                                    .get(&worker)
+                                    .copied()
+                                    .map(|k| k as usize)
+                                    .unwrap_or(0)
+                            };
+                            if pos >= cutoff {
+                                tracing::warn!(
+                                    worker_id = worker.worker_id.to_string(),
+                                    dp_rank = worker.dp_rank,
+                                    id,
+                                    parent_hash = ?parent_hash,
+                                    pos,
+                                    cutoff,
+                                    "Stale parent: worker no longer covers parent_hash; rejecting store"
+                                );
+                                drop(guard);
+                                let wl = lookup.get_mut(&worker).unwrap();
+                                wl.remove(&parent_hash);
+                                return Err(KvCacheEventError::ParentBlockNotFound);
+                            }
                         }
                     }
-                };
 
-                // Verify the worker still covers parent_hash. A prior removal may
-                // have reduced the worker's cutoff past this position, leaving a
-                // stale entry in the lookup map.
-                {
-                    let guard = node.read();
-                    if let Some(&pos_u16) = guard.edge_index.get(&parent_hash) {
-                        let pos = pos_u16 as usize;
-                        let is_full = guard.full_edge_workers.contains(&worker);
-                        let cutoff = if is_full {
-                            guard.edge.len()
-                        } else {
+                    // If parent_hash is not the tail of the node's edge, split so it becomes tail.
+                    // We check edge_index inside the write lock: if parent_hash is absent, a
+                    // concurrent split moved it to a descendant — retry resolve from the top.
+                    let split_data = {
+                        let mut guard = node.write();
+                        if !guard.edge_index.contains_key(&parent_hash) {
+                            // Concurrent split moved parent_hash; retry resolve.
+                            continue;
+                        }
+                        if !guard.edge.is_empty() && guard.edge.last().unwrap().1 != parent_hash {
                             guard
-                                .worker_cutoffs
-                                .get(&worker)
-                                .copied()
-                                .map(|k| k as usize)
-                                .unwrap_or(0)
-                        };
-                        if pos >= cutoff {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                parent_hash = ?parent_hash,
-                                pos,
-                                cutoff,
-                                "Stale parent: worker no longer covers parent_hash; rejecting store"
-                            );
-                            drop(guard);
-                            let wl = lookup.get_mut(&worker).unwrap();
-                            wl.remove(&parent_hash);
-                            return Err(KvCacheEventError::ParentBlockNotFound);
+                                .edge
+                                .iter()
+                                .position(|&(_, h)| h == parent_hash)
+                                .map(|pos| Self::split_node(&mut guard, pos + 1))
+                        } else {
+                            None
                         }
+                    };
+                    if let Some(split) = split_data {
+                        Self::apply_split_lookup(lookup, split);
                     }
-                }
 
-                // If parent_hash is not the tail of the node's edge, split so it becomes tail.
-                let split_data = {
-                    let mut guard = node.write();
-                    if !guard.edge.is_empty() && guard.edge.last().unwrap().1 != parent_hash {
-                        guard
-                            .edge
-                            .iter()
-                            .position(|&(_, h)| h == parent_hash)
-                            .map(|pos| Self::split_node(&mut guard, pos + 1))
-                    } else {
-                        None
-                    }
+                    break node;
                 };
-                if let Some(split) = split_data {
-                    Self::apply_split_lookup(lookup, split);
-                }
 
                 node
             }
