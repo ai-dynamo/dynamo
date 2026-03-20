@@ -175,16 +175,31 @@ const (
 )
 
 // GPUSKUType is the AIC hardware system identifier for a supported GPU.
-// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 type GPUSKUType string
 
 const (
+	// --- Blackwell ---
 	GPUSKUTypeGB200SXM GPUSKUType = "gb200_sxm"
+	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	// --- Hopper ---
 	GPUSKUTypeH200SXM  GPUSKUType = "h200_sxm"
 	GPUSKUTypeH100SXM  GPUSKUType = "h100_sxm"
-	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	GPUSKUTypeH100PCIe GPUSKUType = "h100_pcie"
+	// --- Ampere ---
 	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
-	GPUSKUTypeL40S     GPUSKUType = "l40s"
+	GPUSKUTypeA100PCIe GPUSKUType = "a100_pcie"
+	// --- Ada ---
+	GPUSKUTypeL40S GPUSKUType = "l40s"
+	GPUSKUTypeL40  GPUSKUType = "l40"
+	GPUSKUTypeL4   GPUSKUType = "l4"
+	// --- Older NVIDIA ---
+	GPUSKUTypeV100SXM  GPUSKUType = "v100_sxm"
+	GPUSKUTypeV100PCIe GPUSKUType = "v100_pcie"
+	GPUSKUTypeT4       GPUSKUType = "t4"
+	// --- AMD ---
+	GPUSKUTypeMI200 GPUSKUType = "mi200"
+	GPUSKUTypeMI300 GPUSKUType = "mi300"
 )
 
 // BackendType specifies the inference backend.
@@ -324,7 +339,7 @@ type HardwareSpec struct {
 	// GPUSKU is the AIC hardware system identifier for the GPU.
 	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
@@ -338,6 +353,13 @@ type HardwareSpec struct {
 	// NumGPUsPerNode is the number of GPUs per node.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+	// Interconnect describes the GPU interconnect type within a node.
+	// Examples: "pcie", "nvlink", "infiniband".
+	// +optional
+	Interconnect string `json:"interconnect,omitempty"`
+	// RDMA indicates whether RDMA is available on the cluster.
+	// +optional
+	RDMA *bool `json:"rdma,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
