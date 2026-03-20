@@ -273,6 +273,41 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_duplicate_store_does_not_inflate_tree_size() {
+        let index = make_indexer("concurrent");
+        let sequence = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
+        let worker = WorkerWithDpRank::new(0, 0);
+        let event = make_store_event(0, &[1, 2, 3]);
+
+        index.apply_event(event.clone()).await;
+        flush_and_settle(index.as_ref()).await;
+
+        let initial_snapshot = snapshot_tree(index.as_ref()).await;
+        let initial_scores = index.find_matches(sequence.clone()).await.unwrap();
+        assert_eq!(
+            initial_scores.tree_sizes.get(&worker),
+            Some(&3),
+            "initial store should count all three blocks"
+        );
+
+        index.apply_event(event).await;
+        flush_and_settle(index.as_ref()).await;
+
+        let duplicate_snapshot = snapshot_tree(index.as_ref()).await;
+        let duplicate_scores = index.find_matches(sequence).await.unwrap();
+
+        assert_eq!(
+            initial_snapshot, duplicate_snapshot,
+            "replaying the same store event should not change the tree structure"
+        );
+        assert_eq!(
+            duplicate_scores.tree_sizes.get(&worker),
+            Some(&3),
+            "replaying the same store event should not increase the per-worker tree size"
+        );
+    }
+
+    #[tokio::test]
     #[apply(indexer_template)]
     async fn test_partial_match(variant: &str) {
         let index = make_indexer(variant);
