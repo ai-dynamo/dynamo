@@ -60,6 +60,13 @@ echo "         Image : ${TEST_IMAGE_URL}"
 echo "         Output: ${EMBEDDINGS_FILE}"
 echo "         Phase 1 GPU: CUDA_VISIBLE_DEVICES=0"
 
+# The test framework sets HF_HUB_OFFLINE=1 after predownloading models at the
+# default (main) revision.  Phase 1 needs a *specific* pinned revision, so we
+# temporarily disable offline mode for the download.  Phase 2 uses the resolved
+# local path and does not need HF hub access.
+_SAVED_HF_OFFLINE="${HF_HUB_OFFLINE:-}"
+unset HF_HUB_OFFLINE
+
 CUDA_VISIBLE_DEVICES=0 python3 - <<'PYEOF'
 import torch, io, os, urllib.request
 from PIL import Image
@@ -133,6 +140,11 @@ del model, processor, vision_out, features, embeddings, pixel_values
 torch.cuda.empty_cache()
 print("GPU memory released. Phase 1 complete ✓")
 PYEOF
+
+# Restore offline mode (if it was set by the test framework)
+if [ -n "$_SAVED_HF_OFFLINE" ]; then
+    export HF_HUB_OFFLINE="$_SAVED_HF_OFFLINE"
+fi
 
 if [ ! -f "$EMBEDDINGS_FILE" ]; then
     echo "ERROR: Embeddings file not produced at ${EMBEDDINGS_FILE}"
