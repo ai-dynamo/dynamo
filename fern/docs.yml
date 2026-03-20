@@ -95,6 +95,8 @@ redirects:
     destination: "/dynamo/dev/user-guides/agents/:slug*"
   - source: "/dynamo/dev/user-guides/agentic-workloads"
     destination: "/dynamo/dev/user-guides/agents"
+  - source: "/dynamo/latest/planner/planner_intro.html"
+    destination: "/dynamo/components/planner"
 
 # GitHub repository link in navbar
 navbar-links:

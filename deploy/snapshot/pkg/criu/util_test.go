@@ -53,7 +53,7 @@ func TestApplyCommonSettings(t *testing.T) {
 		settings := &types.CRIUSettings{
 			LogLevel:          4,
 			ShellJob:          true,
-			TcpClose:          true,
+			TcpEstablished:    true,
 			FileLocks:         true,
 			ExtUnixSk:         true,
 			LinkRemap:         true,
@@ -70,8 +70,11 @@ func TestApplyCommonSettings(t *testing.T) {
 		if !opts.GetShellJob() {
 			t.Error("ShellJob should be true")
 		}
-		if !opts.GetTcpClose() {
-			t.Error("TcpClose should be true")
+		if !opts.GetTcpEstablished() {
+			t.Error("TcpEstablished should be true")
+		}
+		if opts.GetTcpClose() {
+			t.Error("TcpClose should be false")
 		}
 		if !opts.GetFileLocks() {
 			t.Error("FileLocks should be true")
@@ -95,6 +98,17 @@ func TestApplyCommonSettings(t *testing.T) {
 		settings := &types.CRIUSettings{ManageCgroupsMode: "invalid"}
 		if err := applyCommonSettings(opts, settings); err == nil {
 			t.Error("expected error for invalid ManageCgroupsMode")
+		}
+	})
+
+	t.Run("conflicting tcp settings return error", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{
+			TcpClose:       true,
+			TcpEstablished: true,
+		}
+		if err := applyCommonSettings(opts, settings); err == nil {
+			t.Error("expected error for conflicting tcp settings")
 		}
 	})
 }
