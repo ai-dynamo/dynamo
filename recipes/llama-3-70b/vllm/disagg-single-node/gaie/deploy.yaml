@@ -83,6 +83,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -134,6 +138,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
