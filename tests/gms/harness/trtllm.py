@@ -49,6 +49,7 @@ def _build_env(system_port: int) -> dict[str, str]:
         venv_lib = os.path.join(venv, "lib")
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{venv_lib}:{existing}" if existing else venv_lib
+    env.pop("HF_HUB_OFFLINE", None)
     return env
 
 

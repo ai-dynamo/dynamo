@@ -33,7 +33,8 @@ def patch_empty_cache() -> None:
 
     def safe_empty_cache() -> None:
         mapping_count = sum(
-            len(manager.mappings) for manager in get_gms_client_memory_managers()
+            sum(1 for m in manager.mappings.values() if m.handle != 0)
+            for manager in get_gms_client_memory_managers()
         )
         if mapping_count > 0:
             logger.debug(
