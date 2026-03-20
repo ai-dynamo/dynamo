@@ -509,6 +509,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		CheckpointLocation:    checkpointLocation,
 		CheckpointStorageType: checkpointStorageType,
 		NSRestorePath:         w.config.Restore.NSRestorePath,
+		DebugPauseCUDARestore: w.config.Restore.Debug.PauseCUDARestore,
+		DebugResumeMode:       w.config.Restore.ResumeMode(),
+		DebugContinueFile:     w.config.Restore.ContinuePath(),
 		PodName:               pod.Name,
 		PodNamespace:          pod.Namespace,
 		ContainerName:         containerName,
@@ -521,6 +524,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		if pidErr != nil {
 			releaseOnExit = false
 			return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
+		}
+		if w.config.Restore.Debug.PreserveFailedPod {
+			log.Info("Preserving failed restore pod for debugging", "placeholder_pid", placeholderHostPID)
+			return nil
 		}
 		if killErr := common.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore failed"); killErr != nil {
 			releaseOnExit = false

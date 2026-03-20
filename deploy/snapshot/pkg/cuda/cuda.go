@@ -4,7 +4,9 @@ package cuda
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -18,6 +20,7 @@ import (
 const nvidiaGPUResource = "nvidia.com/gpu"
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
+var procRootPath = "/proc"
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
 // All nvidia.com/gpu device entries are accumulated in case the kubelet splits them
@@ -163,9 +166,18 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
+func RestoreAndUnlockProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	deviceMap string,
+	debugPause bool,
+	debugResumeMode string,
+	debugContinueFile string,
+	log logr.Logger,
+) error {
+	for index, pid := range cudaPIDs {
+		logRestoreTarget(log, pid, index, len(cudaPIDs))
+		if err := restoreProcess(ctx, pid, deviceMap, debugPause, debugResumeMode, debugContinueFile, log); err != nil {
 			return fmt.Errorf("cuda restore failed for PID %d: %w", pid, err)
 		}
 	}
@@ -199,7 +211,7 @@ func recoverCheckpointed(ctx context.Context, checkpointed, locked []int, log lo
 		checkpointedSet[pid] = struct{}{}
 	}
 	for _, pid := range checkpointed {
-		if err := restoreProcess(ctx, pid, "", log); err != nil {
+		if err := restoreProcess(ctx, pid, "", false, "", "", log); err != nil {
 			log.Error(err, "Failed to restore CUDA process during cleanup", "pid", pid)
 			continue
 		}
@@ -215,4 +227,31 @@ func recoverCheckpointed(ctx context.Context, checkpointed, locked []int, log lo
 			log.Error(err, "Failed to unlock CUDA process during cleanup", "pid", pid)
 		}
 	}
+}
+
+func logRestoreTarget(log logr.Logger, pid, index, total int) {
+	entry := log.WithValues("pid", pid, "restore_index", index, "restore_total", total)
+	if comm := readProcessComm(pid); comm != "" {
+		entry = entry.WithValues("comm", comm)
+	}
+	if cmdline := readProcessCmdline(pid); cmdline != "" {
+		entry = entry.WithValues("cmdline", cmdline)
+	}
+	entry.Info("Restoring CUDA state for process")
+}
+
+func readProcessComm(pid int) string {
+	data, err := os.ReadFile(filepath.Join(procRootPath, strconv.Itoa(pid), "comm"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func readProcessCmdline(pid int) string {
+	data, err := os.ReadFile(filepath.Join(procRootPath, strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 }

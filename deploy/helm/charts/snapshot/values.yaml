@@ -141,6 +141,11 @@ config:
     nsRestorePath: /usr/local/bin/nsrestore
     # Maximum seconds to wait for a restored pod to become Ready (0 = no timeout)
     restoreReadyTimeoutSeconds: 0
+    debug:
+      pauseCudaRestore: false
+      resumeMode: file
+      continueFile: /tmp/cuda-restore-continue
+      preserveFailedPod: false
 
   criu:
     # Path to the criu binary

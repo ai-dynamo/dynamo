@@ -19,6 +19,9 @@ func main() {
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
+	debugPauseCUDARestore := flag.Bool("debug-pause-cuda-restore", false, "Pause each cuda-checkpoint restore child with SIGSTOP until continued")
+	debugResumeMode := flag.String("debug-resume-mode", "", "Resume mode for paused cuda-checkpoint restore children: file or signal")
+	debugContinueFile := flag.String("debug-continue-file", "", "File path whose creation resumes a paused cuda-checkpoint restore child")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -26,9 +29,12 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
+		CheckpointPath:        *checkpointPath,
+		CUDADeviceMap:         *cudaDeviceMap,
+		CgroupRoot:            *cgroupRoot,
+		DebugPauseCUDARestore: *debugPauseCUDARestore,
+		DebugResumeMode:       *debugResumeMode,
+		DebugContinueFile:     *debugContinueFile,
 	}
 
 	restoredPID, err := executor.RestoreInNamespace(context.Background(), opts, log)

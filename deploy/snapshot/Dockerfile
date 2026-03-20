@@ -134,6 +134,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tar \
     ca-certificates \
     util-linux \
+    gdb \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy CRIU from builder

@@ -17,9 +17,12 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
+	CheckpointPath        string
+	CUDADeviceMap         string
+	CgroupRoot            string
+	DebugPauseCUDARestore bool
+	DebugResumeMode       string
+	DebugContinueFile     string
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -88,7 +91,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// CUDA restore — use the CUDA-only namespace PID list captured in the manifest
 	if !m.CUDA.IsEmpty() {
-		if err := cuda.RestoreAndUnlockProcessTree(ctx, m.CUDA.PIDs, opts.CUDADeviceMap, log); err != nil {
+		if err := cuda.RestoreAndUnlockProcessTree(
+			ctx,
+			m.CUDA.PIDs,
+			opts.CUDADeviceMap,
+			opts.DebugPauseCUDARestore,
+			opts.DebugResumeMode,
+			opts.DebugContinueFile,
+			log,
+		); err != nil {
 			return 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
 	}

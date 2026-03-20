@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containerd/containerd"
@@ -28,6 +30,9 @@ type RestoreRequest struct {
 	CheckpointLocation    string
 	CheckpointStorageType string
 	NSRestorePath         string
+	DebugPauseCUDARestore bool
+	DebugResumeMode       string
+	DebugContinueFile     string
 	PodName               string
 	PodNamespace          string
 	ContainerName         string
@@ -159,11 +164,23 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
 	}
+	if req.DebugPauseCUDARestore {
+		args = append(args, "--debug-pause-cuda-restore")
+	}
+	if req.DebugContinueFile != "" {
+		args = append(args, "--debug-continue-file", req.DebugContinueFile)
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
+
+	stopSignalBridge := func() {}
+	if req.DebugPauseCUDARestore && req.DebugResumeMode == types.RestoreResumeModeSignal {
+		stopSignalBridge = bridgeSIGCONTToContinueFile(ctx, log, snap.TargetRoot, req.DebugContinueFile)
+	}
+	defer stopSignalBridge()
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -184,4 +201,46 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return result.RestoredPID, nil
+}
+
+func bridgeSIGCONTToContinueFile(ctx context.Context, log logr.Logger, targetRoot, continueFile string) func() {
+	if continueFile == "" {
+		continueFile = "/tmp/cuda-restore-continue"
+	}
+	hostPath := filepath.Join(targetRoot, strings.TrimPrefix(continueFile, string(os.PathSeparator)))
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGCONT)
+	log.Info(
+		"SIGCONT resume bridge armed for paused cuda-checkpoint restores",
+		"signal", "SIGCONT",
+		"send_signal_to_pid", 1,
+		"continue_file", continueFile,
+		"continue_file_host_path", hostPath,
+	)
+
+	done := make(chan struct{})
+	stopCh := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			case <-signalCh:
+				if err := os.WriteFile(hostPath, []byte{}, 0o644); err != nil {
+					log.Error(err, "Failed to write continue file after SIGCONT", "continue_file", continueFile, "continue_file_host_path", hostPath)
+					continue
+				}
+				log.Info("Wrote continue file after SIGCONT", "continue_file", continueFile, "continue_file_host_path", hostPath)
+			}
+		}
+	}()
+
+	return func() {
+		signal.Stop(signalCh)
+		close(stopCh)
+		<-done
+	}
 }

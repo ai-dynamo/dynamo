@@ -16,6 +16,11 @@ data:
     restore:
       nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
       restoreReadyTimeoutSeconds: {{ .Values.config.restore.restoreReadyTimeoutSeconds }}
+      debug:
+        pauseCudaRestore: {{ .Values.config.restore.debug.pauseCudaRestore }}
+        resumeMode: {{ .Values.config.restore.debug.resumeMode | quote }}
+        continueFile: {{ .Values.config.restore.debug.continueFile | quote }}
+        preserveFailedPod: {{ .Values.config.restore.debug.preserveFailedPod }}
 
     criu:
       binaryPath: {{ .Values.config.criu.binaryPath | quote }}

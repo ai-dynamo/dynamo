@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -38,9 +39,22 @@ func (c *AgentConfig) Validate() error {
 
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
-	NSRestorePath              string `yaml:"nsRestorePath"`
-	RestoreReadyTimeoutSeconds int    `yaml:"restoreReadyTimeoutSeconds"`
+	NSRestorePath              string           `yaml:"nsRestorePath"`
+	RestoreReadyTimeoutSeconds int              `yaml:"restoreReadyTimeoutSeconds"`
+	Debug                      RestoreDebugSpec `yaml:"debug"`
 }
+
+type RestoreDebugSpec struct {
+	PauseCUDARestore  bool   `yaml:"pauseCudaRestore"`
+	ResumeMode        string `yaml:"resumeMode"`
+	ContinueFile      string `yaml:"continueFile"`
+	PreserveFailedPod bool   `yaml:"preserveFailedPod"`
+}
+
+const (
+	RestoreResumeModeFile   = "file"
+	RestoreResumeModeSignal = "signal"
+)
 
 func (c *RestoreSpec) RestoreReadyTimeout() time.Duration {
 	if c.RestoreReadyTimeoutSeconds <= 0 {
@@ -49,9 +63,29 @@ func (c *RestoreSpec) RestoreReadyTimeout() time.Duration {
 	return time.Duration(c.RestoreReadyTimeoutSeconds) * time.Second
 }
 
+func (c *RestoreSpec) ContinuePath() string {
+	if c.Debug.ContinueFile != "" {
+		return c.Debug.ContinueFile
+	}
+	return "/tmp/cuda-restore-continue"
+}
+
+func (c *RestoreSpec) ResumeMode() string {
+	mode := strings.ToLower(strings.TrimSpace(c.Debug.ResumeMode))
+	if mode == "" {
+		return RestoreResumeModeFile
+	}
+	return mode
+}
+
 func (c *RestoreSpec) Validate() error {
 	if c.NSRestorePath == "" {
 		return &ConfigError{Field: "nsRestorePath", Message: "nsRestorePath is required"}
+	}
+	switch c.ResumeMode() {
+	case RestoreResumeModeFile, RestoreResumeModeSignal:
+	default:
+		return &ConfigError{Field: "restore.debug.resumeMode", Message: "resumeMode must be one of: file, signal"}
 	}
 	return nil
 }
