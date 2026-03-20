@@ -21,6 +21,14 @@ trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true
 
+# LLaVA's text_config (MistralConfig) does not inherit torch_dtype from the
+# top-level LlavaNextConfig.  Without this, TRT-LLM creates Mistral-7B layers
+# in float32 (~28 GB), exceeding L4's 22 GB.  Propagate the checkpoint dtype
+# so that layers are created in float16 (~14 GB).
+model_kwargs:
+  text_config:
+    torch_dtype: float16
+
 kv_cache_config:
   free_gpu_memory_fraction: 0.10
   enable_block_reuse: false
