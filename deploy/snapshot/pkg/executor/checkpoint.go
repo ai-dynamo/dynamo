@@ -144,11 +144,11 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	cudaHostPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
 	cudaNamespacePIDs := make([]int, 0, len(cudaHostPIDs))
 	for _, cudaHostPID := range cudaHostPIDs {
-		cudaNamespacePID, err := common.NamespacePID(cudaHostPID)
+		process, err := common.ReadProcessDetails(common.HostProcPath, cudaHostPID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve namespace PID for CUDA process %d: %w", cudaHostPID, err)
+			return nil, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
 		}
-		cudaNamespacePIDs = append(cudaNamespacePIDs, cudaNamespacePID)
+		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
 	}
 	if len(cudaHostPIDs) > 0 {
 		log.Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)

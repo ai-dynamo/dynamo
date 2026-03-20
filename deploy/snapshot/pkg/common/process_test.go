@@ -69,64 +69,6 @@ func TestParseProcExitCode(t *testing.T) {
 	}
 }
 
-func TestParseNSPIDs(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  string
-		hostPID int
-		want    []int
-		wantErr bool
-	}{
-		{
-			name:    "happy path",
-			status:  "Name:\tpython3\nNSpid:\t2402711 1018\n",
-			hostPID: 2402711,
-			want:    []int{2402711, 1018},
-		},
-		{
-			name:    "missing nspid line",
-			status:  "Name:\tpython3\nState:\tS (sleeping)\n",
-			hostPID: 2402711,
-			wantErr: true,
-		},
-		{
-			name:    "non integer nspid",
-			status:  "Name:\tpython3\nNSpid:\t2402711 abc\n",
-			hostPID: 2402711,
-			wantErr: true,
-		},
-		{
-			name:    "host pid mismatch",
-			status:  "Name:\tpython3\nNSpid:\t2402712 1018\n",
-			hostPID: 2402711,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseNSPIDs(tc.status, tc.hostPID)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("parseNSPIDs(%q, %d) unexpectedly succeeded with %v", tc.status, tc.hostPID, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseNSPIDs(%q, %d): %v", tc.status, tc.hostPID, err)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("parseNSPIDs(%q, %d) len = %d, want %d", tc.status, tc.hostPID, len(got), len(tc.want))
-			}
-			for i := range tc.want {
-				if got[i] != tc.want[i] {
-					t.Fatalf("parseNSPIDs(%q, %d)[%d] = %d, want %d", tc.status, tc.hostPID, i, got[i], tc.want[i])
-				}
-			}
-		})
-	}
-}
-
 func TestReadProcessDetails(t *testing.T) {
 	procRoot := t.TempDir()
 	pid := 1018

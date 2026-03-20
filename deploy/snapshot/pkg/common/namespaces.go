@@ -3,7 +3,6 @@ package common
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -21,57 +20,6 @@ func GetNetNSInode(pid int) (uint64, error) {
 		return 0, fmt.Errorf("failed to stat %s: %w", nsPath, err)
 	}
 	return stat.Ino, nil
-}
-
-// NamespacePIDs returns the nested NSpid chain from outermost to innermost for a host PID.
-func NamespacePIDs(hostPID int) ([]int, error) {
-	if hostPID <= 0 {
-		return nil, fmt.Errorf("invalid host PID %d", hostPID)
-	}
-
-	data, err := os.ReadFile(fmt.Sprintf("%s/%d/status", HostProcPath, hostPID))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read status for pid %d: %w", hostPID, err)
-	}
-
-	return parseNSPIDs(string(data), hostPID)
-}
-
-func parseNSPIDs(status string, hostPID int) ([]int, error) {
-	for _, line := range strings.Split(status, "\n") {
-		if !strings.HasPrefix(line, "NSpid:") {
-			continue
-		}
-
-		fields := strings.Fields(strings.TrimPrefix(line, "NSpid:"))
-		if len(fields) == 0 {
-			break
-		}
-
-		nspids := make([]int, 0, len(fields))
-		for _, field := range fields {
-			value, err := strconv.Atoi(field)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse NSpid %q for pid %d: %w", field, hostPID, err)
-			}
-			nspids = append(nspids, value)
-		}
-		if nspids[0] != hostPID {
-			return nil, fmt.Errorf("pid %d has mismatched NSpid host PID %d", hostPID, nspids[0])
-		}
-		return nspids, nil
-	}
-
-	return nil, fmt.Errorf("pid %d is missing NSpid data", hostPID)
-}
-
-// NamespacePID returns the innermost namespace PID for a host-visible PID.
-func NamespacePID(hostPID int) (int, error) {
-	nspids, err := NamespacePIDs(hostPID)
-	if err != nil {
-		return 0, err
-	}
-	return nspids[len(nspids)-1], nil
 }
 
 // SendSignalViaPIDNamespace sends a signal to a namespace-relative PID by entering the
