@@ -356,6 +356,7 @@ fn simulate_prefill_step(
         .map_or(usize::MAX, |t| t.saturating_sub(state.decode.len()));
 
     'prefill: while token_budget > 0 {
+        // Drain prefill first, then pull from waiting one at a time.
         if state.prefill.is_empty() {
             let Some(admitted_uuid) = state.admit_one(args) else {
                 break;
@@ -379,6 +380,7 @@ fn simulate_prefill_step(
         let allocated_tokens = seq.num_allocated_tokens();
         let remaining = prefill_cost.new_tokens;
 
+        // Token budget check.
         let tokens_left = sequence_len - allocated_tokens;
         if !args.enable_chunked_prefill && tokens_left > token_budget {
             break;
@@ -386,6 +388,9 @@ fn simulate_prefill_step(
         let chunk = tokens_left.min(token_budget);
         let cumulative = allocated_tokens + chunk;
 
+        // Allocate blocks. process() returns the number of blocks committed.
+        // On partial success, preempt a decode request and retry; the next
+        // loop iteration re-prepares from the updated num_allocated_tokens.
         let Some(Request::Active(seq)) = state.requests.get_mut(&uuid) else {
             panic!("Request does not exist.");
         };
@@ -395,9 +400,11 @@ fn simulate_prefill_step(
                 _ => unreachable!(),
             };
             let allocated = kv_manager.process(&signal);
+            // Commit the blocks that were actually allocated.
             let committed_tokens = if allocated == expected {
                 cumulative
             } else {
+                // Partial success: compute token boundary from block count.
                 let prev_blocks = allocated_tokens
                     .div_ceil(seq.block_size())
                     .min(seq.unique_blocks().len());
@@ -412,12 +419,13 @@ fn simulate_prefill_step(
                 for signal in state.preempt(args.preemption_mode) {
                     kv_manager.process(&signal);
                 }
-                continue 'prefill;
+                continue 'prefill; // Retry with freed capacity.
             }
         } else {
             seq.commit_allocation(cumulative);
         }
 
+        // Accumulate prefill compute time only for the new tokens in this chunk.
         let new_tokens_in_chunk = chunk.min(remaining);
         if args.worker_type != WorkerType::Decode && new_tokens_in_chunk > 0 {
             total_time += Duration::from_secs_f64(
@@ -426,6 +434,7 @@ fn simulate_prefill_step(
             );
         }
 
+        // Hit rate: fraction of tokens that were already cached.
         let hit_rate = if sequence_len > 0 {
             1.0 - (remaining as f32 / sequence_len as f32)
         } else {
@@ -436,9 +445,11 @@ fn simulate_prefill_step(
         token_budget -= chunk;
 
         if cumulative >= sequence_len {
+            // Fully prefilled: promote to decode queue.
             state.prefill.pop_front();
             state.decode.push_back(uuid);
         } else {
+            // Partially prefilled: resume next iteration with updated allocation state.
             break;
         }
     }
@@ -477,6 +488,7 @@ fn simulate_decode_step(
     let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
     let decode_end_ms = decode_start_ms + total_time.as_secs_f64() * 1000.0;
 
+    // Process decoding.
     let uuids: Vec<Uuid> = state.decode.iter().copied().collect();
     for uuid in uuids {
         let mut allocated = false;
@@ -517,6 +529,7 @@ fn simulate_decode_step(
             collector.on_token(uuid, decode_end_ms);
         }
 
+        // Check completion and send notification.
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
 
         let send_failed = output_tx.as_ref().is_some_and(|tx| {
