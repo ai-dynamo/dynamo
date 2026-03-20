@@ -13,7 +13,6 @@ import signal
 import socket
 import tempfile
 from pathlib import Path
-from typing import Any
 
 import uvloop
 
