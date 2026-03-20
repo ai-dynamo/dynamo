@@ -428,6 +428,24 @@ jobs:
             echo "No allure results found. Skipping report generation."
           fi
 
+      - name: Inject workflow label into allure results
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          # The conftest.py hook doesn't fire for all tests, so inject
+          # dynamo_workflow label into all result files to ensure the PR
+          # tile in the unified dashboard captures every test.
+          python3 -c "
+          import json, glob
+          for f in glob.glob('allure-results/*-result.json'):
+              with open(f, 'r') as fh:
+                  data = json.load(fh)
+              labels = data.setdefault('labels', [])
+              if not any(l.get('name') == 'dynamo_workflow' for l in labels):
+                  labels.append({'name': 'dynamo_workflow', 'value': 'PR'})
+              with open(f, 'w') as fh:
+                  json.dump(data, fh)
+          "
+
       - name: Install Allure 2 CLI
         if: steps.check-results.outputs.has_results == 'true'
         run: |
