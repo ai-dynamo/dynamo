@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
@@ -30,43 +31,45 @@ class TestAsyncEncoderCacheBasicOperations:
     def test_sync_get_returns_cached_tensor(self, cache):
         """Test sync get returns tensor after it's cached."""
         tensor = torch.randn(10, 10)
-        cache._cache.set("key1", tensor)
+        cache._cache.set("key1", CachedEmbedding(tensor))
 
         result = cache.get("key1")
-        assert torch.equal(result, tensor)
+        assert result is not None
+        assert torch.equal(result.tensor, tensor)
 
     @pytest.mark.asyncio
     async def test_get_or_compute_caches_result(self, cache):
         """Test get_or_compute caches the computed result."""
         tensor = torch.randn(10, 10)
+        embedding = CachedEmbedding(tensor)
 
         async def compute():
-            return tensor
+            return embedding
 
         result = await cache.get_or_compute("key1", compute)
-        assert torch.equal(result, tensor)
+        assert torch.equal(result.tensor, tensor)
 
         # Should be in cache now
         cached = cache.get("key1")
         assert cached is not None
-        assert torch.equal(cached, tensor)
+        assert torch.equal(cached.tensor, tensor)
 
     @pytest.mark.asyncio
     async def test_get_or_compute_returns_cached(self, cache):
         """Test get_or_compute returns cached value without computing."""
         tensor = torch.randn(10, 10)
-        cache._cache.set("key1", tensor)
+        cache._cache.set("key1", CachedEmbedding(tensor))
 
         compute_called = False
 
         async def compute():
             nonlocal compute_called
             compute_called = True
-            return torch.randn(10, 10)
+            return CachedEmbedding(torch.randn(10, 10))
 
         result = await cache.get_or_compute("key1", compute)
 
-        assert torch.equal(result, tensor)
+        assert torch.equal(result.tensor, tensor)
         assert not compute_called
 
 
@@ -84,6 +87,7 @@ class TestAsyncEncoderCacheRequestCoalescing:
         """Test that concurrent requests for same key only compute once."""
         compute_count = 0
         tensor = torch.randn(10, 10)
+        embedding = CachedEmbedding(tensor)
         compute_started = asyncio.Event()
         compute_proceed = asyncio.Event()
 
@@ -92,7 +96,7 @@ class TestAsyncEncoderCacheRequestCoalescing:
             compute_count += 1
             compute_started.set()  # Signal that compute has started
             await compute_proceed.wait()  # Wait for permission to proceed
-            return tensor
+            return embedding
 
         # Start concurrent requests as tasks
         task1 = asyncio.create_task(cache.get_or_compute("key1", compute))
@@ -109,7 +113,7 @@ class TestAsyncEncoderCacheRequestCoalescing:
 
         # All should get the same tensor
         for result in results:
-            assert torch.equal(result, tensor)
+            assert torch.equal(result.tensor, tensor)
 
         # But compute should only be called once
         assert compute_count == 1
@@ -122,7 +126,7 @@ class TestAsyncEncoderCacheRequestCoalescing:
         async def compute():
             nonlocal compute_count
             compute_count += 1
-            return torch.randn(10, 10)
+            return CachedEmbedding(torch.randn(10, 10))
 
         await asyncio.gather(
             cache.get_or_compute("key1", compute),
@@ -197,12 +201,13 @@ class TestAsyncEncoderCacheExceptionHandling:
 
         # Should be able to retry
         tensor = torch.randn(10, 10)
+        embedding = CachedEmbedding(tensor)
 
         async def working_compute():
-            return tensor
+            return embedding
 
         result = await cache.get_or_compute("key1", working_compute)
-        assert torch.equal(result, tensor)
+        assert torch.equal(result.tensor, tensor)
 
 
 class TestAsyncEncoderCacheStats:
@@ -226,7 +231,7 @@ class TestAsyncEncoderCacheStats:
         tensor = torch.randn(10, 10)
 
         async def compute():
-            return tensor
+            return CachedEmbedding(tensor)
 
         await cache.get_or_compute("key1", compute)
 

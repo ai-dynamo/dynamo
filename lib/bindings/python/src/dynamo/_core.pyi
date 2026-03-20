@@ -2,17 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from typing import (
-    Any,
-    AsyncGenerator,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-)
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
@@ -31,14 +21,14 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-class JsonLike:
-    """
-    Any PyObject which can be serialized to JSON
-    """
-
+def run_kv_indexer(args: List[str]) -> None:
+    """Run the KV indexer with the given arguments."""
     ...
 
-RequestHandler = Callable[[JsonLike], AsyncGenerator[JsonLike, None]]
+# Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
+JsonLike = Any
+
+RequestHandler = Callable[..., AsyncIterator[JsonLike]]
 
 class DistributedRuntime:
     """
@@ -209,19 +199,35 @@ class Client:
         """
         ...
 
-    async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+    async def random(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick a random instance of the endpoint and issue the request
         """
         ...
 
-    async def round_robin(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+    async def round_robin(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick the next instance of the endpoint in a round-robin fashion
         """
         ...
 
-    async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
+    async def direct(
+            self,
+            request: JsonLike,
+            instance_id: int,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
         """
@@ -457,8 +463,6 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
-    data_parallel_size: int
-    data_parallel_start_rank: int
     bootstrap_host: str | None
     bootstrap_port: int | None
 
@@ -1129,7 +1133,7 @@ class KvRouterConfig:
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
             router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 2.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
-                Enables priority scheduling via latency_sensitivity hints.
+                Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
@@ -1752,4 +1756,3 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
-

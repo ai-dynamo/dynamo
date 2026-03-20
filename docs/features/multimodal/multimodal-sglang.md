@@ -403,6 +403,39 @@ export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 
 Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
 
+## Profiling
+
+Dynamo's SGLang multimodal workers include NVTX markers for `nsys` profiling. They are disabled by default (zero overhead) and enabled by setting `DYN_NVTX=1`.
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
+  bash launch/multimodal_epd.sh ...
+```
+
+| ENV Variable | Default | Description |
+|---|---|---|
+| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling |
+
+Key NVTX ranges emitted:
+
+| Range | Worker | Description |
+|-------|--------|-------------|
+| `mm:enc:generate` | Encode | Full encode request lifetime |
+| `mm:enc:vision_encode` | Encode | Vision encode call (`MMEncoder._encode`) |
+| `mm:enc:embedding_transfer` | Encode | Embedding handoff to downstream worker |
+| `mm:nixl:begin_read` | PD (agg) / Prefill | Begin NIXL read operation for embeddings |
+| `mm:nixl:wait_completion` | PD (agg) / Prefill | Wait for NIXL embedding transfer completion |
+| `mm:pd:generate` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Full worker-side request lifetime |
+| `mm:pd:generate_agg` | PD (agg) | Aggregated generation path |
+| `mm:pd:load_multimodal` | PD (agg) | Build multimodal items from transferred embeddings |
+| `mm:pd:generate_disagg` | Decode worker (disagg entrypoint) | Disaggregated generation path |
+| `mm:prefill:bootstrap` | Prefill (disagg) | Bootstrap coordination path before returning `{bootstrap_host, bootstrap_port, bootstrap_room}` |
+| `mm:prefill:load_multimodal` | Prefill (disagg) | Build multimodal items from transferred embeddings in the prefill worker |
+| `mm:prefill:engine_async_generate` | Prefill (disagg) | SGLang prefill engine invocation (`engine.async_generate`) |
+| `mm:pd:ttft` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Worker-entry TTFT: from request arrival at this worker to first output token (excludes client->frontend->worker network transit) |
+| `mm:dec:first_token` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Decode-stage first-token range (starts when decode stream is launched; not worker-entry TTFT) |
+
 ## Known Limitations
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported

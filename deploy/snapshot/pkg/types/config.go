@@ -4,7 +4,6 @@ package types
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -13,7 +12,6 @@ import (
 type AgentConfig struct {
 	NodeName            string          `yaml:"-"`
 	RestrictedNamespace string          `yaml:"-"`
-	BasePath            string          `yaml:"basePath"`
 	Overlay             OverlaySettings `yaml:"overlay"`
 	Restore             RestoreSpec     `yaml:"restore"`
 	CRIU                CRIUSettings    `yaml:"criu"`
@@ -29,8 +27,11 @@ func (c *AgentConfig) LoadEnvOverrides() {
 }
 
 func (c *AgentConfig) Validate() error {
-	if strings.TrimSpace(c.BasePath) == "" {
-		return &ConfigError{Field: "basePath", Message: "basePath is required"}
+	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
+		return &ConfigError{
+			Field:   "criu",
+			Message: "tcpClose and tcpEstablished cannot both be true",
+		}
 	}
 	return c.Restore.Validate()
 }
@@ -65,6 +66,7 @@ type CRIUSettings struct {
 	LeaveRunning      bool   `yaml:"leaveRunning"`
 	ShellJob          bool   `yaml:"shellJob"`
 	TcpClose          bool   `yaml:"tcpClose"`
+	TcpEstablished    bool   `yaml:"tcpEstablished"`
 	FileLocks         bool   `yaml:"fileLocks"`
 	OrphanPtsMaster   bool   `yaml:"orphanPtsMaster"`
 	ExtUnixSk         bool   `yaml:"extUnixSk"`
@@ -83,9 +85,7 @@ type CRIUSettings struct {
 
 // OverlaySettings is the static config for rootfs exclusions.
 type OverlaySettings struct {
-	SystemDirs           []string `yaml:"systemDirs"`
-	CacheDirs            []string `yaml:"cacheDirs"`
-	AdditionalExclusions []string `yaml:"additionalExclusions"`
+	Exclusions []string `yaml:"exclusions"`
 }
 
 // ConfigError represents a configuration validation error.

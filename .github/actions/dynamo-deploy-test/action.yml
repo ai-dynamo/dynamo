@@ -10,14 +10,22 @@ inputs:
     description: 'Kubernetes namespace for deployment'
     required: true
   registry:
-    description: 'Container registry hostname. Required for rerun self-bootstrap.'
+    description: 'Container registry hostname'
     required: true
   operator_tag:
-    description: 'Operator image tag (default: main-operator). Required for rerun self-bootstrap.'
+    description: 'Operator image tag (default: main-operator)'
     required: false
     default: 'main-operator'
   hf_token:
     description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+  dockerhub_username:
+    description: 'Docker Hub username for image pull secrets. Required for rerun self-bootstrap if private images are used.'
+    required: false
+    default: ''
+  dockerhub_password:
+    description: 'Docker Hub password for image pull secrets. Required for rerun self-bootstrap if private images are used.'
     required: false
     default: ''
 
@@ -38,49 +46,11 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Check if namespace exists
-      id: ns-check
-      shell: bash
-      env:
-        KUBECONFIG_B64: ${{ inputs.kubeconfig_base64 }}
-        NAMESPACE: ${{ inputs.namespace }}
-        FRAMEWORK: ${{ inputs.framework }}
-        PROFILE: ${{ inputs.profile }}
-      run: |
-        echo "::group::Check if namespace exists"
-        echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_check
-        chmod 600 ${{ github.workspace }}/.kubeconfig_check
-        if KUBECONFIG=${{ github.workspace }}/.kubeconfig_check kubectl get namespace $NAMESPACE --ignore-not-found | grep -q $NAMESPACE; then
-          echo "exists=true" >> $GITHUB_OUTPUT
-          echo "ns=${NAMESPACE}" >> $GITHUB_OUTPUT
-          echo "Namespace $NAMESPACE exists, will reuse it"
-        else
-          echo "exists=false" >> $GITHUB_OUTPUT
-          # Use check_run_id (unique per job+retry) to keep namespace under k8s 63-char label limit
-          SELF_NS="${NAMESPACE}-${{ job.check_run_id }}"
-          SELF_NS="${SELF_NS:0:36}"
-          SELF_NS="${SELF_NS%-}"
-          echo "ns=${SELF_NS}" >> $GITHUB_OUTPUT
-          echo "Namespace $NAMESPACE not found, will self-bootstrap as ${SELF_NS}"
-        fi
-        rm -f ${{ github.workspace }}/.kubeconfig_check
-        echo "::endgroup::"
-
-    - name: Setup namespace (self-bootstrap on rerun)
-      if: steps.ns-check.outputs.exists != 'true'
-      uses: ./.github/actions/setup-deploy-namespace
-      with:
-        kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
-        namespace: ${{ steps.ns-check.outputs.ns }}
-        registry: ${{ inputs.registry }}
-        operator_tag: ${{ inputs.operator_tag }}
-        hf_token: ${{ inputs.hf_token }}
-
     - name: Setup Kubeconfig
       id: setup-kubeconfig
       shell: bash
       env:
-        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        NAMESPACE: ${{ inputs.namespace }}
       run: |
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
@@ -107,7 +77,7 @@ runs:
       shell: bash
       env:
         KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        NAMESPACE: ${{ inputs.namespace }}
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
@@ -127,7 +97,7 @@ runs:
       if: always()
       shell: bash
       env:
-        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        NAMESPACE: ${{ inputs.namespace }}
         GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
         echo "::group::Cleanup Deployment"
@@ -152,13 +122,6 @@ runs:
           echo "DGD ${GRAPH_NAME} already cleaned up by test"
         fi
         echo "::endgroup::"
-
-    - name: Teardown namespace (self-cleanup on rerun)
-      if: always() && steps.ns-check.outputs.exists != 'true'
-      uses: ./.github/actions/teardown-deploy-namespace
-      with:
-        kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
-        namespace: ${{ steps.ns-check.outputs.ns }}
 
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
