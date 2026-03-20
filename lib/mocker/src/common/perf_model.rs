@@ -227,8 +227,8 @@ impl PerfModel {
                 decode_interp.interp(query_x, query_y).unwrap_or(0.0)
             }
         };
-        // Ensure non-negative timing
-        let result = time.max(0.0);
+        // Token-emitting decode steps should not collapse onto the same timestamp.
+        let result = time.max(1.0);
         tracing::trace!(
             "Decode time prediction: active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );

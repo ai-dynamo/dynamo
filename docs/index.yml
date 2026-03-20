@@ -101,6 +101,8 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - page: Mocker Offline Trace Replay
+        path: benchmarks/mocker-trace-replay.md
       - section: Testing
         contents:
           - page: Mocker

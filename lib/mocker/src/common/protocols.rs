@@ -53,6 +53,7 @@ pub struct DirectRequest {
     pub max_output_tokens: usize,
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
+    pub arrival_timestamp_ms: Option<f64>,
 }
 
 /// Represents the cost of prefilling content in the cache
