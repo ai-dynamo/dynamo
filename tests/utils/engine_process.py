@@ -16,6 +16,7 @@ from tests.utils.payloads import BasePayload, check_health_generate, check_model
 
 logger = logging.getLogger(__name__)
 
+
 FRONTEND_PORT = (
     DefaultPort.FRONTEND.value
 )  # Do NOT use this in tests! Use allocate_port() instead.
@@ -169,6 +170,27 @@ class EngineProcess(ManagedProcess):
         if extra_env:
             env.update(extra_env)
 
+        health_urls = [
+            (
+                f"http://localhost:{config.frontend_port}/v1/models",
+                check_models_api,
+            ),
+            (
+                f"http://localhost:{config.frontend_port}/health",
+                check_health_generate,
+            ),
+        ]
+
+        # For disagg deployments (delayed_start > 0), also health-check each
+        # worker's system port so we wait for ALL workers to be ready, not just
+        # the first one to register with the frontend.
+        delayed = config.delayed_start
+        if delayed > 0:
+            for key, val in sorted(env.items()):
+                if key.startswith("DYN_SYSTEM_PORT") and val.isdigit():
+                    health_urls.append((f"http://localhost:{val}/health", None))
+            delayed = 0
+
         return cls(
             command=command,
             env=env,
@@ -176,17 +198,8 @@ class EngineProcess(ManagedProcess):
             display_output=True,
             working_dir=config.directory,
             health_check_ports=[],
-            health_check_urls=[
-                (
-                    f"http://localhost:{config.frontend_port}/v1/models",
-                    check_models_api,
-                ),
-                (
-                    f"http://localhost:{config.frontend_port}/health",
-                    check_health_generate,
-                ),
-            ],
-            delayed_start=config.delayed_start,
+            health_check_urls=health_urls,
+            delayed_start=delayed,
             # Must stay False: command[0] is "bash", so True would kill every
             # bash process system-wide.  Stale cleanup relies on stragglers list
             # and process-group termination in __exit__ instead.
