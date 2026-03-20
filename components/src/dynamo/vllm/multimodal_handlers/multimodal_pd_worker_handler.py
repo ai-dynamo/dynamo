@@ -68,6 +68,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
             shutdown_event=shutdown_event,
         )
 
+        self.config = config
         self.decode_worker_client = decode_worker_client
         self.enable_disagg = config.disaggregation_mode == DisaggregationMode.PREFILL
 
