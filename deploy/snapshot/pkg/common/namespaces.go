@@ -29,7 +29,7 @@ func NamespacePIDs(hostPID int) ([]int, error) {
 		return nil, fmt.Errorf("invalid host PID %d", hostPID)
 	}
 
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", hostPID))
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/status", HostProcPath, hostPID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read status for pid %d: %w", hostPID, err)
 	}
@@ -55,6 +55,9 @@ func parseNSPIDs(status string, hostPID int) ([]int, error) {
 				return nil, fmt.Errorf("failed to parse NSpid %q for pid %d: %w", field, hostPID, err)
 			}
 			nspids = append(nspids, value)
+		}
+		if nspids[0] != hostPID {
+			return nil, fmt.Errorf("pid %d has mismatched NSpid host PID %d", hostPID, nspids[0])
 		}
 		return nspids, nil
 	}
