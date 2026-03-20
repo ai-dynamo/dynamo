@@ -740,39 +740,91 @@ pub unsafe extern "C" fn create_routers(
             }
         }
 
-        let prefill_router =
-            match find_prefill_endpoint(&drt, &actual_namespace, enforce_disagg).await {
-                Some(prefill_endpoint) => {
-                    tracing::info!("Prefill worker found, running in disaggregated mode");
-                    let mut prefill_config = kv_router_config;
-                    prefill_config.router_track_active_blocks = false;
+        // Create PrefillRouter with a pending activation channel.
+        // A background task watches discovery for prefill workers and activates
+        // the router when one appears. Before activation, requests gracefully
+        // degrade to aggregated mode (or fail if enforce_disagg=true).
+        // This eliminates any fixed-timeout waiting for prefill workers at startup.
+        let mut prefill_config = kv_router_config;
+        prefill_config.router_track_active_blocks = false;
 
-                    // Create immediately-resolved channel to activate router
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = tx.send(prefill_endpoint);
+        let (prefill_tx, prefill_rx) = tokio::sync::oneshot::channel();
+        let prefill_router = PrefillRouter::new(
+            prefill_rx,
+            model_manager.clone(),
+            RouterMode::KV,
+            block_size,
+            Some(prefill_config),
+            enforce_disagg,
+            model_name.clone(),
+            actual_namespace.clone(),
+        );
 
-                    PrefillRouter::new(
-                        rx,
-                        model_manager.clone(),
-                        RouterMode::KV,
-                        block_size,
-                        Some(prefill_config),
-                        enforce_disagg,
-                        model_name.clone(),
-                        actual_namespace.clone(),
-                    )
+        // Spawn background discovery watcher for prefill workers.
+        // Polls discovery until a prefill-only worker appears in the same
+        // rolling-update namespace, then sends its endpoint through the channel
+        // to activate the PrefillRouter.
+        let prefill_drt = drt.clone();
+        let prefill_namespace = actual_namespace.clone();
+        tokio::spawn(async move {
+            let discovery = prefill_drt.discovery();
+            tracing::info!(
+                namespace = prefill_namespace,
+                "Background task: watching for prefill workers to register..."
+            );
+
+            loop {
+                if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
+                    for instance in instances {
+                        if let dynamo_runtime::discovery::DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            ..
+                        } = &instance
+                        {
+                            if namespace != &prefill_namespace {
+                                continue;
+                            }
+
+                            let card = match instance
+                                .deserialize_model::<dynamo_llm::model_card::ModelDeploymentCard>()
+                            {
+                                Ok(card) => card,
+                                Err(_) => continue,
+                            };
+
+                            if !card.model_type.supports_prefill()
+                                || card.model_type.supports_chat()
+                                || card.model_type.supports_completions()
+                            {
+                                continue;
+                            }
+
+                            tracing::info!(
+                                model_name = card.name(),
+                                namespace = namespace.as_str(),
+                                "Prefill worker discovered, activating PrefillRouter"
+                            );
+
+                            if let Ok(ns) = prefill_drt.namespace(namespace)
+                                && let Ok(comp) = ns.component(component)
+                            {
+                                let ep = comp.endpoint(endpoint);
+                                if prefill_tx.send(ep).is_err() {
+                                    tracing::debug!(
+                                        "PrefillRouter activation channel already closed"
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                    }
                 }
-                None if enforce_disagg => {
-                    tracing::error!(
-                        "Prefill workers required but none found (enforce_disagg is enabled)"
-                    );
-                    return Err(QueryRouterResult::ErrDisaggEnforced);
-                }
-                None => {
-                    tracing::info!("No prefill workers found, running in aggregated mode");
-                    PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
-                }
-            };
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
 
         Ok((
             prefill_router,
@@ -1400,105 +1452,4 @@ async fn fetch_preprocessor_from_discovery(
         model_name,
         actual_namespace,
     ))
-}
-
-/// Find a prefill endpoint, waiting for prefill workers to register.
-///
-/// Waits indefinitely (controlled by K8s StartupProbe) for a prefill worker
-/// to appear in the target namespace. This prevents the race condition where
-/// the EPP starts before prefill workers have registered, which would create
-/// a permanently disabled PrefillRouter.
-///
-/// Returns None only if `enforce_disagg` is false and no prefill workers
-/// appear within 5 minutes, allowing aggregated-mode fallback.
-/// Returns immediately as soon as a prefill worker registers.
-async fn find_prefill_endpoint(
-    drt: &DistributedRuntime,
-    target_namespace: &str,
-    enforce_disagg: bool,
-) -> Option<dynamo_runtime::component::Endpoint> {
-    use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_runtime::discovery::DiscoveryInstance;
-
-    let discovery = drt.discovery();
-
-    // enforce_disagg=true:  wait indefinitely (K8s StartupProbe is the timeout)
-    // enforce_disagg=false: wait up to 5 minutes, exit early as soon as a prefill worker appears
-    let deadline = if enforce_disagg {
-        None
-    } else {
-        Some(tokio::time::Instant::now() + Duration::from_secs(300))
-    };
-
-    let mut logged_waiting = false;
-
-    loop {
-        if let Some(dl) = deadline
-            && tokio::time::Instant::now() >= dl
-        {
-            tracing::info!(
-                "No prefill workers found after 5 minutes, proceeding in aggregated mode"
-            );
-            return None;
-        }
-
-        let instances = match discovery.list(DiscoveryQuery::AllModels).await {
-            Ok(instances) => instances,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to list instances for prefill discovery");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
-
-        for instance in instances {
-            if let DiscoveryInstance::Model {
-                namespace,
-                component,
-                endpoint,
-                ..
-            } = &instance
-            {
-                if namespace != target_namespace {
-                    continue;
-                }
-
-                let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-                    Ok(card) => card,
-                    Err(_) => continue,
-                };
-
-                if !card.model_type.supports_prefill()
-                    || card.model_type.supports_chat()
-                    || card.model_type.supports_completions()
-                {
-                    continue;
-                }
-
-                tracing::info!(
-                    model_name = card.name(),
-                    "Prefill worker found in discovered instances"
-                );
-
-                if let Ok(ns) = drt.namespace(namespace)
-                    && let Ok(comp) = ns.component(component)
-                {
-                    return Some(comp.endpoint(endpoint));
-                }
-            }
-        }
-
-        if !logged_waiting {
-            if enforce_disagg {
-                tracing::info!(
-                    "Waiting for prefill workers to register \
-                     (no timeout - controlled by K8s StartupProbe)..."
-                );
-            } else {
-                tracing::info!("Waiting up to 5 minutes for prefill workers to register...");
-            }
-            logged_waiting = true;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
 }
