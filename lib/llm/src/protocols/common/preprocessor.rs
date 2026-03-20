@@ -66,6 +66,11 @@ pub struct RoutingHints {
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+
+    /// Session control for subagent KV isolation and sticky routing.
+    /// Contains session_id (for affinity) and optional action (open/close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

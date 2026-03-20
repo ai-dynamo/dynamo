@@ -1138,8 +1138,8 @@ class KvRouterConfig:
                 Set to None to disable queueing (all requests go directly to the scheduler).
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
-            router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
-                cache_control service mesh endpoint (default: False).
+            router_enable_cache_control: Enable agent-aware cache control: session lifecycle RPCs
+                (open/close), sticky session routing, and retention_seconds injection (default: False).
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.

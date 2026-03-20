@@ -248,7 +248,9 @@ impl OpenAIPreprocessor {
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        let preprocessed = builder.build()?;
+
+        Ok((preprocessed, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -313,6 +315,7 @@ impl OpenAIPreprocessor {
                 lora_name,
                 cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
+                session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() || cache_control_ttl.is_some() {

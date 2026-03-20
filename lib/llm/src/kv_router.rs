@@ -32,7 +32,15 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use validator::Validate;
 
-pub mod cache_control;
+// Re-export from dynamo-kv-router crate
+pub use dynamo_kv_router::approx;
+pub use dynamo_kv_router::indexer;
+pub use dynamo_kv_router::protocols;
+pub use dynamo_kv_router::scheduling;
+pub use dynamo_kv_router::selector;
+
+pub mod agent_controller;
+pub mod sticky_sessions;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -46,7 +54,8 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
-pub use cache_control::{CacheControlClient, spawn_pin_prefix};
+pub use agent_controller::AgentController;
+pub use sticky_sessions::StickySessionRouter;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 

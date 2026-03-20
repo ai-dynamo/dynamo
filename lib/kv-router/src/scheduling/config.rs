@@ -120,10 +120,10 @@ pub struct KvRouterConfig {
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
-    /// Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint.
-    /// When true, the router creates a cache_control client and honors nvext.cache_control on
-    /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
-    /// When false (default), cache_control is ignored and no cache_control client is created.
+    /// Enable agent-aware cache control features.
+    /// When true, the router creates a session_control client for session lifecycle RPCs,
+    /// manages sticky session affinity, and injects retention_seconds for priority-based
+    /// KV eviction with time decay. When false (default), these features are disabled.
     pub router_enable_cache_control: bool,
 
     /// Skip blocking for workers at init time (default: false).

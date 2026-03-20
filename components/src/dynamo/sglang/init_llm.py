@@ -119,6 +119,12 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    # Serve session_control as a discoverable endpoint so the router's
+    # AgentController can find it via component.endpoint("session_control").
+    session_control_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
+    )
+
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -126,6 +132,9 @@ async def init_decode(
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            session_control_endpoint.serve_endpoint(
+                handler.session_control,
             ),
             register_model_with_readiness_gate(
                 engine,

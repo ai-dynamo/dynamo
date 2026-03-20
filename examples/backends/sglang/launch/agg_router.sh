@@ -61,7 +61,7 @@ print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-FRONTEND_ARGS=(--router-mode kv)
+FRONTEND_ARGS=(--router-mode kv --enable-cache-control)
 if [ "$APPROX_MODE" = true ]; then
     FRONTEND_ARGS+=(--no-kv-events)
 fi
@@ -85,6 +85,9 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
+  --skip-tokenizer-init \
+  --radix-eviction-policy priority \
+  --enable-streaming-session \
   "${KV_EVENTS_ARGS_1[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
@@ -97,6 +100,9 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
+  --skip-tokenizer-init \
+  --radix-eviction-policy priority \
+  --enable-streaming-session \
   "${KV_EVENTS_ARGS_2[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &

@@ -14,14 +14,14 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
-use tokio::sync::OnceCell;
 use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        CacheControlClient, KvRouter,
-        cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
+        KvRouter,
+        agent_controller::{AgentController, SessionCloseAction},
         metrics::RouterRequestMetrics,
+        sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -33,8 +33,10 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    /// Lazily initialized on first PIN request. `None` when cache_control is disabled.
-    cache_control_cell: Option<OnceCell<CacheControlClient>>,
+    /// Sticky session routing (always available when session_id is set).
+    sticky_sessions: Option<Arc<StickySessionRouter>>,
+    /// Session lifecycle RPCs (open/close). Requires --enable-event-plane.
+    agent_controller: Option<Arc<AgentController>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -65,8 +67,8 @@ struct RequestGuard {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
-    // PIN state: set when cache_control TTL is present and a cc_client exists
-    pin_state: Option<PinState>,
+    /// Deferred session close action (fires after generation completes)
+    deferred_close: Option<SessionCloseAction>,
 }
 
 impl RequestGuard {
@@ -143,14 +145,9 @@ impl RequestGuard {
         }
         self.freed = true;
 
-        if let Some(ref pin) = self.pin_state {
-            spawn_pin_prefix(
-                Some(&pin.cc_client),
-                &pin.token_ids,
-                pin.instance_id,
-                &self.context_id,
-                pin.ttl_seconds,
-            );
+        // Take to prevent double-fire from Drop
+        if let Some(close) = self.deferred_close.take() {
+            close.execute(&self.context_id);
         }
     }
 
@@ -173,6 +170,12 @@ impl RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
+
+        // Fire deferred close if finish() didn't run (e.g., stream dropped early).
+        if let Some(close) = self.deferred_close.take() {
+            close.execute(&self.context_id);
+        }
+
         if !self.freed {
             let chooser = self.chooser.clone();
             let context_id = self.context_id.clone();
@@ -199,16 +202,30 @@ impl KvPushRouter {
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        let cache_control_cell = if chooser.kv_router_config().router_enable_cache_control {
-            tracing::info!("Cache control enabled for PIN operations (lazy init)");
-            Some(OnceCell::new())
+        let enable_event_plane = chooser.kv_router_config().router_enable_cache_control;
+
+        // Sticky sessions are always available -- no event plane needed.
+        // Created alongside the agent controller since session lifecycle RPCs
+        // (open/close) also manage affinity bindings.
+        let sticky_sessions = if enable_event_plane {
+            Some(Arc::new(StickySessionRouter::new(InMemoryAffinityStore::new())))
         } else {
             None
         };
+
+        // Agent controller manages session lifecycle RPCs (open/close).
+        let agent_controller = if enable_event_plane {
+            let component = chooser.client().endpoint.component().clone();
+            Some(Arc::new(AgentController::new(component)))
+        } else {
+            None
+        };
+
         KvPushRouter {
             inner,
             chooser,
-            cache_control_cell,
+            sticky_sessions,
+            agent_controller,
         }
     }
 
@@ -352,13 +369,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+
+        // Resolve session affinity: if the request has a session_id, inject the
+        // pinned worker_id into backend_instance_id before worker selection.
+        if let Some(ref sticky) = self.sticky_sessions {
+            if request.routing.as_ref().and_then(|r| r.backend_instance_id).is_none() {
+                if let Some(worker_id) = sticky.resolve(&request) {
+                    request.routing_mut().backend_instance_id = Some(worker_id);
+                }
+            }
+        }
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
@@ -455,25 +482,32 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
-        // Extract pin state: lazily init cache_control client on first PIN request
-        let pin_state: Option<PinState> = async {
-            let ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl)?;
-            let cell = self.cache_control_cell.as_ref()?;
-            let component = self.chooser.client().endpoint.component().clone();
-            let client = cell
-                .get_or_try_init(|| create_cache_control_client(&component))
-                .await
-                .inspect_err(|e| tracing::warn!("Failed to create cache_control client: {e}"))
-                .ok()?
-                .clone();
-            Some(PinState {
-                token_ids: request.token_ids.clone(),
-                cc_client: client,
-                instance_id,
-                ttl_seconds: ttl,
-            })
+        // Session lifecycle RPCs via agent controller.
+        // Fails fast if session_control.open is requested but the client can't be created.
+        let deferred_close = match self.agent_controller.as_ref() {
+            Some(ctrl) => {
+                ctrl.on_routed(
+                    &request,
+                    instance_id,
+                    &context_id,
+                    self.sticky_sessions.as_deref(),
+                )
+                .await?
+            }
+            None => None,
+        };
+
+        // Inject retention_seconds from cache_control TTL into extra_args.
+        // This replaces the old pin_prefix RPC -- the backend uses retention_seconds
+        // for priority-based KV cache eviction with time decay.
+        if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
+            let extra = request
+                .extra_args
+                .get_or_insert_with(|| json!({}));
+            if let serde_json::Value::Object(map) = extra {
+                map.insert("retention_seconds".to_string(), json!(ttl));
+            }
         }
-        .await;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -516,7 +550,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
-                pin_state,
+                deferred_close,
             };
 
             loop {

@@ -253,9 +253,9 @@ class KvRouterArgGroup(ArgGroup):
             default=False,
             dest="router_enable_cache_control",
             help=(
-                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
-                "a cache_control service mesh client and fires pin_prefix after generation for "
-                "requests with nvext.cache_control."
+                "KV Router: Enable agent-aware cache control. Activates session lifecycle "
+                "RPCs (open/close for subagent KV isolation), sticky session routing, and "
+                "retention_seconds injection for priority-based KV eviction with time decay."
             ),
         )
         add_argument(

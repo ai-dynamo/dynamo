@@ -5,7 +5,6 @@ import asyncio
 import inspect
 import logging
 import random
-import socket
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import (
@@ -20,7 +19,7 @@ from typing import (
 )
 
 import sglang as sgl
-from sglang.srt.utils import get_local_ip_auto
+from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
@@ -199,11 +198,15 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             self._engine_supports_priority = (
                 "priority" in inspect.signature(engine.async_generate).parameters
             )
+            self._engine_supports_retention = (
+                "retention_seconds" in inspect.signature(engine.async_generate).parameters
+            )
         else:
             # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
+            self._engine_supports_retention = False
         self._quiesce_controller = (
             SGLangEngineQuiesceController(engine) if engine is not None else None
         )
@@ -217,6 +220,11 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             ):
                 normalized = -normalized
             return {"priority": normalized}
+        return {}
+
+    def _retention_kwargs(self, retention_seconds: Any) -> Dict[str, Any]:
+        if retention_seconds is not None and self._engine_supports_retention:
+            return {"retention_seconds": retention_seconds}
         return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
@@ -394,43 +402,74 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
-    async def pin_prefix(self, body: dict) -> dict:
-        """Pin a prefix by token_ids to resist eviction.
+    async def open_session(self, body: dict) -> dict:
+        """Open a streaming session for subagent KV isolation.
 
         Args:
-            body: Dict with "token_ids" list of token IDs and optional
-                  "ttl_seconds" (default 300).
+            body: Dict with "session_id", optional "timeout" (default 120),
+                  and optional "capacity_of_str_len" (default 65536).
         """
-        token_ids = body.get("token_ids", [])
-        ttl_seconds = body.get("ttl_seconds", 300)
-        if not token_ids:
-            return {"status": "error", "message": "token_ids required"}
+        from sglang.srt.managers.io_struct import OpenSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        timeout = body.get("timeout", 120)
+        capacity = body.get("capacity_of_str_len", 65536)
         try:
-            result = await self.engine.tokenizer_manager.pin_prefix(
-                token_ids, ttl_seconds
+            obj = OpenSessionReqInput(
+                capacity_of_str_len=capacity,
+                session_id=session_id,
+                streaming=True,
+                timeout=float(timeout),
             )
-            return {
-                "status": "ok" if result.success else "error",
-                "nodes_pinned": result.nodes_pinned,
-                "message": result.message,
-            }
+            result = await self.engine.tokenizer_manager.open_session(obj, None)
+            if result is None:
+                return {
+                    "status": "ok",
+                    "session_id": session_id,
+                    "message": "Session already exists",
+                }
+            return {"status": "ok", "session_id": result}
         except Exception as e:
-            logging.error(f"Failed to pin prefix: {e}")
+            logging.error(f"Failed to open session {session_id}: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def cache_control(self, request, context=None):
-        """Service mesh endpoint for cache control operations.
+    async def close_session(self, body: dict) -> dict:
+        """Close a streaming session and release its KV resources.
 
         Args:
-            request: Dict with "action" key and action-specific parameters.
+            body: Dict with "session_id".
+        """
+        from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        try:
+            obj = CloseSessionReqInput(session_id=session_id)
+            await self.engine.tokenizer_manager.close_session(obj, None)
+            return {"status": "ok", "session_id": session_id}
+        except Exception as e:
+            logging.error(f"Failed to close session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def session_control(self, request, context=None):
+        """Service mesh endpoint for session lifecycle operations.
+
+        Args:
+            request: Dict with "action" key ("open_session" or "close_session")
+                     and action-specific parameters.
             context: Optional Dynamo context (unused but required by protocol).
 
         Yields:
             Single dict with operation result.
         """
         action = request.get("action")
-        if action == "pin_prefix":
-            result = await self.pin_prefix(request)
+        if action == "open_session":
+            result = await self.open_session(request)
+        elif action == "close_session":
+            result = await self.close_session(request)
         else:
             result = {"status": "error", "message": f"Unknown action: {action}"}
         yield result
@@ -449,7 +488,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
-        runtime.register_engine_route("pin_prefix", self.pin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
@@ -465,6 +503,9 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
         )
+        # session_control is served as a discoverable service endpoint
+        # (not an engine route) so the router can find it via
+        # component.endpoint("session_control"). See init_llm.py.
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -516,39 +557,16 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-            except socket.gaierror:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
+            net_addr = NetworkAddress.parse(
+                inner_tm.server_args.dist_init_addr.strip()
+            )
+            bootstrap_host = net_addr.host
         else:
             bootstrap_host = get_local_ip_auto()
 
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
+        # Wrap IPv6 with brackets
+        na = NetworkAddress(bootstrap_host, 0)
+        if na.is_ipv6:
             bootstrap_host = f"[{bootstrap_host}]"
 
         return bootstrap_host, bootstrap_port
