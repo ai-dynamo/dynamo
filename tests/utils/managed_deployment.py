@@ -861,9 +861,10 @@ class ManagedDeployment:
 
         pod_names: list[str] = []
 
-        for service_name in service_names:
+        for original_name in service_names:
             label_selector = (
-                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
             )
             assert self._core_api is not None, "Kubernetes API not initialized"
             pods: client.V1PodList = await self._core_api.list_namespaced_pod(
@@ -895,11 +896,11 @@ class ManagedDeployment:
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
 
-        for service_name in service_names:
-            # List pods for this service using the selector label
-            # nvidia.com/selector: deployment-name-service
+        for original_name in service_names:
+            # List pods using stable labels that are not affected by worker hash suffixes.
             label_selector = (
-                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
             )
 
             pods: list[Pod] = []
@@ -909,7 +910,7 @@ class ManagedDeployment:
             ):
                 pods.append(pod)  # type: ignore[arg-type]
 
-            result[service_name] = pods
+            result[original_name] = pods
 
         return result
 
