@@ -3,6 +3,7 @@ package cuda
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -49,21 +50,38 @@ func getState(ctx context.Context, pid int) (string, error) {
 	return state, nil
 }
 
+func readProcessCmdline(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+}
+
 func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, cudaCheckpointBinary, args...)
+	cmdline := readProcessCmdline(pid)
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	duration := time.Since(start)
 	out := strings.TrimSpace(string(output))
 	if err != nil {
+		log.Error(err, "cuda-checkpoint command failed",
+			"pid", pid,
+			"cmdline", cmdline,
+			"action", action,
+			"duration", duration,
+			"output", out,
+		)
 		return fmt.Errorf("cuda-checkpoint %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
 	}
 	log.Info("cuda-checkpoint command succeeded",
 		"pid", pid,
+		"cmdline", cmdline,
 		"action", action,
 		"duration", duration,
 		"output", out,

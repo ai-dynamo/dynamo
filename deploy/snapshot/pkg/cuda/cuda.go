@@ -143,13 +143,13 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := lock(ctx, pid, log); err != nil {
-			return fmt.Errorf("cuda lock failed for PID %d: %w", pid, err)
+			return err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
 		if err := checkpoint(ctx, pid, log); err != nil {
-			return fmt.Errorf("cuda checkpoint failed for PID %d: %w", pid, err)
+			return err
 		}
 	}
 
@@ -160,7 +160,7 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			return fmt.Errorf("cuda restore failed for PID %d: %w", pid, err)
+			return err
 		}
 	}
 	for _, pid := range cudaPIDs {
@@ -170,7 +170,7 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap 
 				log.Info("cuda-checkpoint unlock returned error but process is already running", "pid", pid)
 				continue
 			}
-			return fmt.Errorf("failed to unlock CUDA process %d: %w", pid, err)
+			return err
 		}
 	}
 	return nil
