@@ -1,1 +1,1 @@
-{"id":"27bdee212985d4e4c0b6a6eee89d0f56","fullName":"tests.planner.unit.test_sla_planner_scaling.TestInitializeGpuCounts#test_kubernetes_mode_prefill_only","name":"test_kubernetes_mode_prefill_only","status":"passed","testResultsByEnv":{"default":"435bcc72d5d1fcfa46cd5d8514ebaf42"}}
+{"id":"27bdee212985d4e4c0b6a6eee89d0f56","fullName":"tests.planner.unit.test_sla_planner_scaling.TestInitializeGpuCounts#test_kubernetes_mode_prefill_only","name":"test_kubernetes_mode_prefill_only","status":"passed","testResultsByEnv":{"default":"198dac4d27b5885d23c781010ca0cdf7"}}

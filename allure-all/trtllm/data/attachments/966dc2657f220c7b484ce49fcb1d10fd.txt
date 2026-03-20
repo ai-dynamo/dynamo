@@ -1,0 +1,2 @@
+INFO     dynamo.vllm.args:args.py:327 Using env-var DYN_VLLM_KV_EVENT_PORT=20080 to create kv_events_config
+INFO     dynamo.vllm.args:args.py:254 Using kv_events_config for publishing vLLM kv events over zmq: KVEventsConfig(enable_kv_cache_events=True, publisher='zmq', endpoint='tcp://*:20080', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='') (use_kv_events=True)

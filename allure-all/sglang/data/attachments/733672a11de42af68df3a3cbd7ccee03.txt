@@ -1,0 +1,120 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4259 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4259
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4259
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2433 --advertise-client-urls http://0.0.0.0:2433 --listen-peer-urls http://0.0.0.0:2434 --initial-advertise-peer-urls http://localhost:2434 --initial-cluster default=http://localhost:2434 --data-dir /tmp/etcd_qea7b5xu in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2433
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2433
+INFO     test_sglang_deployment[multimodal_disagg_qwen-2]:common.py:42 Starting multimodal_disagg_qwen test_deployment
+INFO     test_sglang_deployment[multimodal_disagg_qwen-2]:common.py:48 Using model: Qwen/Qwen3-VL-2B-Instruct
+INFO     test_sglang_deployment[multimodal_disagg_qwen-2]:common.py:49 Script: multimodal_disagg.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/sglang/launch/multimodal_disagg.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8065/v1/models
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8065/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8065/v1/models (attempt=18, elapsed=33.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1774039557,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8065/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8065/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.encoder.generate",
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.processor.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1482982856453224723,
+      "transport": {
+        "tcp": "10.1.71.82:35857/14949d0cfee37913/generate"
+      }
+    },
+    {
+      "component": "encoder",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1482982856453224717,
+      "transport": {
+        "tcp": "10.1.71.82:38593/14949d0cfee3790d/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1482982856453224721,
+      "transport": {
+        "tcp": "10.1.71.82:34009/14949d0cfee37911/generate"
+      }
+    },
+    {
+      "component": "processor",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1482982856453224713,
+      "transport": {
+        "tcp": "10.1.71.82:36509/14949d0cfee37909/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[multimodal_disagg_qwen-2]:common.py:115 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8065/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=6.17s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['image']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+The image contains a text that appears to be a long string of the same word "this" repeated, followed by a semicolon, then the word "image" in lowercase. The text is very long and repetitive. The imag...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 4600
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 4602 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 4602 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 4601 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 4601 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 4587
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 4588 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 4588 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 4575
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4576 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4576 sed

@@ -1,0 +1,1 @@
+WARNING  dynamo.planner.utils.prometheus:prometheus.py:139 No prometheus metric data available for dynamo_component_router_inter_token_latency_seconds, use 0 instead

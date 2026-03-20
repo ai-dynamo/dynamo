@@ -1,1 +1,1 @@
-{"id":"4bba217561310e90bdcd5b8f6c325bef","fullName":"tests.planner.unit.test_sla_planner_scaling.TestInitializeGpuCounts#test_virtual_mode_uses_cli_args","name":"test_virtual_mode_uses_cli_args","status":"passed","testResultsByEnv":{"default":"83935fc5d9b06041587edad47bde53a1"}}
+{"id":"4bba217561310e90bdcd5b8f6c325bef","fullName":"tests.planner.unit.test_sla_planner_scaling.TestInitializeGpuCounts#test_virtual_mode_uses_cli_args","name":"test_virtual_mode_uses_cli_args","status":"passed","testResultsByEnv":{"default":"90a1ef57a0c3c2c8afee85b7601cb944"}}

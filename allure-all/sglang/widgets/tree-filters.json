@@ -1,1 +1,1 @@
-{"tags":["asyncio","deploy","e2e","fault_tolerance","gpu_1","gpu_2","k8s","nightly","post_merge","pre_merge","router","sglang"],"categories":[]}
+{"tags":["asyncio","e2e","fault_tolerance","gpu_0","gpu_1","gpu_2","integration","nightly","parallel","planner","post_merge","pre_merge","router","sglang","trtllm","unit","vllm"],"categories":[]}

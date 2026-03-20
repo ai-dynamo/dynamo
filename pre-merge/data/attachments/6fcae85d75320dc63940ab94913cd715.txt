@@ -1,0 +1,42 @@
+[2m2026-03-20T20:37:42.136351Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4310 in /workspace
+[2m2026-03-20T20:37:42.138475Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4310
+[2m2026-03-20T20:37:42.339380Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4310
+[2m2026-03-20T20:37:42.339515Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-20T20:37:42.342278Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-20T20:37:42.343839Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2455 --advertise-client-urls http://0.0.0.0:2455 --listen-peer-urls http://0.0.0.0:2456 --initial-advertise-peer-urls http://localhost:2456 --initial-cluster default=http://localhost:2456 --data-dir /tmp/etcd_7ny485ie in /workspace
+[2m2026-03-20T20:37:42.345427Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2455
+[2m2026-03-20T20:37:42.646802Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2455
+[2m2026-03-20T20:37:42.652622Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8098 --migration-limit 0 --dyn-chat-processor vllm --discovery-backend etcd --request-plane tcp --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3 in /workspace
+[2m2026-03-20T20:37:42.654628Z[0m [32m INFO[0m [2mtest_vllm_prepost_integration.start_services[0m[2m:[0m Frontend started on port 8098
+[2m2026-03-20T20:37:42.654894Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m tests.frontend.vllm_prepost_worker in /workspace
+[2m2026-03-20T20:37:42.656081Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8098/v1/models
+[2m2026-03-20T20:38:00.687836Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8098/v1/models (attempt=19, elapsed=18.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1774039080,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-20T20:38:00.687930Z[0m [32m INFO[0m [2mtest_vllm_prepost_integration.start_services[0m[2m:[0m vLLM pre/post test worker registered model Qwen/Qwen3-0.6B
+[2m2026-03-20T20:38:00.757976Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 287
+[2m2026-03-20T20:38:00.859410Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 289 name: tee
+[2m2026-03-20T20:38:00.859563Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 289 tee
+[2m2026-03-20T20:38:00.860051Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 288 name: sed
+[2m2026-03-20T20:38:00.860144Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 288 sed
+[2m2026-03-20T20:38:00.860572Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 284
+[2m2026-03-20T20:38:07.067759Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 286 name: tee
+[2m2026-03-20T20:38:07.067953Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 286 tee
+[2m2026-03-20T20:38:07.068429Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 285 name: sed
+[2m2026-03-20T20:38:07.068526Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 285 sed
+[2m2026-03-20T20:38:07.071344Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 271
+[2m2026-03-20T20:38:07.172219Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 272 name: sed
+[2m2026-03-20T20:38:07.172321Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 272 sed
+[2m2026-03-20T20:38:07.173082Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 259
+[2m2026-03-20T20:38:07.273898Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 260 name: sed
+[2m2026-03-20T20:38:07.274141Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 260 sed
