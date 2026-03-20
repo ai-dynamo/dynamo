@@ -320,39 +320,20 @@ async def test_gaie_deployment(
             headers = {"Host": route_hostname}
             logger.info(f"Using Host header: {route_hostname}")
 
-            test_url = f"{gateway_url}{endpoint}"
-            model_ready = False
-            for attempt in range(30):
-                try:
-                    r = requests.post(
-                        test_url,
-                        json={
-                            "model": GAIE_MODEL_NAME,
-                            "messages": [{"role": "user", "content": "test"}],
-                            "max_tokens": 1,
-                            "stream": False,
-                        },
-                        headers=headers,
-                        timeout=60,
-                    )
-                    if r.status_code == 200:
-                        logger.info(
-                            f"Model '{GAIE_MODEL_NAME}' is available and responding"
-                        )
-                        time.sleep(5)
-                        model_ready = True
-                        break
-                except Exception as e:
-                    logger.warning(
-                        f"Model availability check failed (attempt {attempt + 1}): {e}"
-                    )
-                time.sleep(10 if attempt < 5 else 5)
-
+            model_ready = wait_for_model_availability(
+                url=gateway_url,
+                endpoint=endpoint,
+                model=GAIE_MODEL_NAME,
+                logger=logger,
+                max_attempts=30,
+                headers=headers,
+            )
             assert model_ready, (
                 f"Model '{GAIE_MODEL_NAME}' did not become available "
                 f"within the timeout period"
             )
 
+            url = f"{gateway_url}{endpoint}"
             payload = {
                 "model": GAIE_MODEL_NAME,
                 "messages": [{"role": "user", "content": TEST_PROMPT}],
@@ -360,9 +341,9 @@ async def test_gaie_deployment(
                 "temperature": DEFAULT_TEMPERATURE,
                 "stream": False,
             }
-            logger.info(f"Sending inference request to {test_url}")
+            logger.info(f"Sending inference request to {url}")
             response = requests.post(
-                test_url,
+                url,
                 json=payload,
                 headers=headers,
                 timeout=DEFAULT_REQUEST_TIMEOUT,
