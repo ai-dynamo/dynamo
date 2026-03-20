@@ -67,6 +67,8 @@ navigation:
             path: ../pages-dev/kubernetes/autoscaling.md
           - page: Rolling Update
             path: ../pages-dev/kubernetes/rolling-update.md
+          - page: Developing with Tilt
+            path: ../pages-dev/kubernetes/tilt-dev-setup.md
           - page: Inference Gateway (GAIE)
             path: ../pages-dev/kubernetes/inference-gateway.md
           - page: Snapshot
