@@ -480,11 +480,9 @@ spec:
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].reason
           name: Reason
-          priority: 1
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].message
           name: Message
-          priority: 1
           type: string
         - jsonPath: .status.dgdName
           name: DGD
