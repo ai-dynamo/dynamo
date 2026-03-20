@@ -21,7 +21,7 @@ use crate::{
     kv_router::{
         KvRouter, router_endpoint_id,
         scheduler::DefaultWorkerSelector,
-        shared_cache::{SharedKvCacheHttpClient, SharedKvCacheRequestPlaneClient},
+        shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
@@ -596,35 +596,24 @@ impl ModelManager {
             worker_type,
         ));
 
-        // Build shared cache client from config if configured.
-        // Validation already rejects both being set, but guard here too.
-        if let Some(cfg) = kv_router_config.as_ref()
-            && cfg.shared_cache_url.is_some()
-            && cfg.shared_cache_component.is_some()
-        {
-            anyhow::bail!(
-                "shared_cache_url and shared_cache_component are mutually exclusive; set only one"
-            );
-        }
-
-        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if let Some(ref url) =
-            kv_router_config
-                .as_ref()
-                .and_then(|c| c.shared_cache_url.clone())
-        {
-            tracing::info!("Using shared KV cache (HTTP)");
-            Some(Box::new(SharedKvCacheHttpClient::new(url.clone())))
-        } else if let Some(ref comp) = kv_router_config
+        // Build shared cache client based on shared_cache_type.
+        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
             .as_ref()
-            .and_then(|c| c.shared_cache_component.clone())
+            .map(|c| c.shared_cache_type)
+            .unwrap_or_default()
         {
-            tracing::info!(shared_cache_component = %comp, "Using shared KV cache (request plane)");
-            let component = endpoint.component();
-            Some(Box::new(
-                SharedKvCacheRequestPlaneClient::new(component, comp).await?,
-            ))
-        } else {
-            None
+            dynamo_kv_router::SharedCacheType::None => None,
+            dynamo_kv_router::SharedCacheType::Hicache => {
+                let component = endpoint.component();
+                let worker_component_name = &endpoint.id().component;
+                tracing::info!(
+                    worker_component = worker_component_name,
+                    "Using HiCache shared KV cache"
+                );
+                Some(Box::new(
+                    HicacheSharedKvCache::new(component, worker_component_name).await?,
+                ))
+            }
         };
 
         let chooser = KvRouter::new(
@@ -1196,14 +1185,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_kv_chooser_for_accepts_shared_cache_url_config() {
+    async fn test_kv_chooser_for_shared_cache_type_none() {
         let mm = ModelManager::new();
-        let endpoint = make_test_endpoint("shared-cache-url").await;
+        let endpoint = make_test_endpoint("shared-cache-none").await;
         let config = KvRouterConfig {
             overlap_score_weight: 0.0,
             skip_initial_worker_wait: true,
             use_kv_events: false,
-            shared_cache_url: Some("http://127.0.0.1:8091/check_blocks".to_string()),
+            shared_cache_type: dynamo_kv_router::SharedCacheType::None,
             ..Default::default()
         };
 
@@ -1213,36 +1202,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            chooser.kv_router_config().shared_cache_url.as_deref(),
-            Some("http://127.0.0.1:8091/check_blocks")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_kv_chooser_for_accepts_shared_cache_component_config() {
-        let mm = ModelManager::new();
-        let endpoint = make_test_endpoint("shared-cache-component").await;
-        let _shared_cache_component = endpoint
-            .component()
-            .namespace()
-            .component("shared-cache")
-            .unwrap();
-        let config = KvRouterConfig {
-            overlap_score_weight: 0.0,
-            skip_initial_worker_wait: true,
-            use_kv_events: false,
-            shared_cache_component: Some("shared-cache".to_string()),
-            ..Default::default()
-        };
-
-        let chooser = mm
-            .kv_chooser_for(&endpoint, 2, Some(config), "decode", None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            chooser.kv_router_config().shared_cache_component.as_deref(),
-            Some("shared-cache")
+            chooser.kv_router_config().shared_cache_type,
+            dynamo_kv_router::SharedCacheType::None
         );
     }
 }

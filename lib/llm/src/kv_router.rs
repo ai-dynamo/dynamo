@@ -433,7 +433,7 @@ impl KvRouter {
                 .find_matches(block_hashes.clone())
                 .instrument(tracing::info_span!("kv_router.find_matches"));
             let shared_fut = shared_cache
-                .check_blocks(&block_hashes)
+                .check_blocks(tokens, self.block_size)
                 .instrument(tracing::info_span!("kv_router.shared_cache_check"));
 
             let (indexer_result, shared_result) = tokio::join!(indexer_fut, shared_fut);
@@ -709,7 +709,8 @@ mod tests {
     impl SharedKvCache for FakeSharedCache {
         async fn check_blocks(
             &self,
-            _block_hashes: &[LocalBlockHash],
+            _tokens: &[u32],
+            _block_size: u32,
         ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
             if self.should_error {
                 Err(KvRouterError::IndexerOffline)

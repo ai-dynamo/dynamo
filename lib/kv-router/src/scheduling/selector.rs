@@ -170,7 +170,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
                 worker_logits.insert(worker, logit);
 
-                if shared_beyond > 0 {
+                if request.shared_cache_hits.is_some() {
                     tracing::debug!(
                         "Formula for worker_id={} dp_rank={:?} with {overlap} device blocks, \
                          {shared_beyond} shared blocks beyond device (reduction={shared_cache_reduction:.1}, \

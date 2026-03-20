@@ -119,6 +119,19 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    # Serve hicache query endpoint alongside generate (for shared cache routing).
+    hicache_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.hicache_query"
+    )
+
+    async def hicache_query_handler(request, context):
+        token_ids = request.get("token_ids", [])
+        result = await engine.tokenizer_manager.hicache_exists_by_tokens(token_ids)
+        yield {
+            "exists": result.exists if result.success else [],
+            "page_size": result.page_size,
+        }
+
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -126,6 +139,10 @@ async def init_decode(
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            hicache_endpoint.serve_endpoint(
+                hicache_query_handler,
+                graceful_shutdown=True,
             ),
             register_model_with_readiness_gate(
                 engine,
@@ -196,6 +213,19 @@ async def init_prefill(
 
     ready_event = asyncio.Event()
 
+    # Serve hicache query endpoint alongside generate (for shared cache routing).
+    hicache_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.hicache_query"
+    )
+
+    async def hicache_query_handler(request, context):
+        token_ids = request.get("token_ids", [])
+        result = await engine.tokenizer_manager.hicache_exists_by_tokens(token_ids)
+        yield {
+            "exists": result.exists if result.success else [],
+            "page_size": result.page_size,
+        }
+
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -203,6 +233,10 @@ async def init_prefill(
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            hicache_endpoint.serve_endpoint(
+                hicache_query_handler,
+                graceful_shutdown=True,
             ),
             register_model_with_readiness_gate(
                 engine,

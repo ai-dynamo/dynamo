@@ -41,7 +41,7 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
-pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
+pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy, SharedCacheType};
 pub use event_sink::EventSink;
 pub use indexer::{MaybeError, SharedKvCache, SyncIndexer, ThreadPoolIndexer};
 pub use nested_map::PositionalIndexer;

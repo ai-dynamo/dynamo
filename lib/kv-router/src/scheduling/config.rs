@@ -11,6 +11,40 @@ use validator::{Validate, ValidationError};
 
 use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
+/// Type of external shared KV cache to query during routing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedCacheType {
+    /// No shared cache (default).
+    #[default]
+    None,
+    /// HiCache L3 shared cache — queries sglang workers via the request plane.
+    Hicache,
+}
+
+impl fmt::Display for SharedCacheType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Hicache => f.write_str("hicache"),
+        }
+    }
+}
+
+impl FromStr for SharedCacheType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "hicache" => Ok(Self::Hicache),
+            _ => Err(format!(
+                "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -154,15 +188,9 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: f64,
 
-    /// Component name of the shared KV cache pool (Dynamo request plane transport).
-    /// Mutually exclusive with `shared_cache_url`.
-    #[serde(default)]
-    pub shared_cache_component: Option<String>,
-
-    /// HTTP URL of the shared KV cache pool.
-    /// Mutually exclusive with `shared_cache_component`.
-    #[serde(default)]
-    pub shared_cache_url: Option<String>,
+    /// Type of external shared KV cache to query during routing.
+    /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
+    pub shared_cache_type: SharedCacheType,
 }
 
 impl Default for KvRouterConfig {
@@ -188,8 +216,7 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
             shared_cache_multiplier: 0.5,
-            shared_cache_component: None,
-            shared_cache_url: None,
+            shared_cache_type: SharedCacheType::default(),
         }
     }
 }
@@ -209,11 +236,6 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     if config.router_track_output_blocks && !config.router_track_active_blocks {
         return Err(ValidationError::new(
             "router_track_output_blocks requires router_track_active_blocks=true",
-        ));
-    }
-    if config.shared_cache_component.is_some() && config.shared_cache_url.is_some() {
-        return Err(ValidationError::new(
-            "shared_cache_component and shared_cache_url are mutually exclusive",
         ));
     }
     Ok(())
@@ -271,17 +293,6 @@ impl KvRouterConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_kv_router_config_rejects_mutually_exclusive_shared_cache_transports() {
-        let config = KvRouterConfig {
-            shared_cache_component: Some("shared-cache".to_string()),
-            shared_cache_url: Some("http://localhost:8091/check_blocks".to_string()),
-            ..Default::default()
-        };
-
-        assert!(config.validate().is_err());
-    }
 
     #[test]
     fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
