@@ -74,6 +74,7 @@ pub(crate) mod test_utils {
                 max_output_tokens,
                 uuid: None,
                 dp_rank: 0,
+                arrival_timestamp_ms: None,
             });
         }
 

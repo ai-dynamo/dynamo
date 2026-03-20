@@ -30,6 +30,7 @@ from dynamo.llm import (
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
+from .replay import run_trace_replay
 from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
@@ -72,6 +73,33 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
+    profile_data_result = None
+
+    # Offline replay does not need planner profile conversion or runtime setup.
+    if args.trace_file is not None:
+        if args.extra_engine_args:
+            extra_engine_args_path = args.extra_engine_args
+            logger.info(f"Using provided MockEngineArgs from {extra_engine_args_path}")
+        else:
+            extra_engine_args_path = create_temp_engine_args_file(args)
+            logger.info("Created MockEngineArgs from CLI arguments")
+
+        try:
+            run_trace_replay(
+                trace_file=args.trace_file,
+                output_file=args.output_file,
+                extra_engine_args=extra_engine_args_path,
+                num_workers=args.num_workers,
+                replay_concurrency=args.replay_concurrency,
+            )
+            return
+        finally:
+            if not args.extra_engine_args and extra_engine_args_path.exists():
+                try:
+                    extra_engine_args_path.unlink()
+                    logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file: {e}")
 
     # Resolve planner-profile-data: convert profile results dir to NPZ if needed
     profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
@@ -87,25 +115,25 @@ async def worker():
         extra_engine_args_path = create_temp_engine_args_file(args)
         logger.info("Created MockEngineArgs from CLI arguments")
 
-    # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
-    if args.num_workers > 1 and args.model_path:
-        await prefetch_model(args.model_path)
-
-    # Auto-compute kv_bytes_per_token from model config if not explicitly set
-    if args.kv_bytes_per_token is None and args.model_path:
-        args.kv_bytes_per_token = compute_kv_bytes_per_token(
-            args.model_path, args.kv_cache_dtype
-        )
-
-    # Inject kv_bytes_per_token into engine args JSON (computed after model prefetch)
-    if args.kv_bytes_per_token is not None and not args.extra_engine_args:
-        with open(extra_engine_args_path) as f:
-            engine_args = json.load(f)
-        engine_args["kv_bytes_per_token"] = args.kv_bytes_per_token
-        with open(extra_engine_args_path, "w") as f:
-            json.dump(engine_args, f, indent=2)
-
     try:
+        # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
+        if args.num_workers > 1 and args.model_path:
+            await prefetch_model(args.model_path)
+
+        # Auto-compute kv_bytes_per_token from model config if not explicitly set
+        if args.kv_bytes_per_token is None and args.model_path:
+            args.kv_bytes_per_token = compute_kv_bytes_per_token(
+                args.model_path, args.kv_cache_dtype
+            )
+
+        # Inject kv_bytes_per_token into engine args JSON (computed after model prefetch)
+        if args.kv_bytes_per_token is not None and not args.extra_engine_args:
+            with open(extra_engine_args_path) as f:
+                engine_args = json.load(f)
+            engine_args["kv_bytes_per_token"] = args.kv_bytes_per_token
+            with open(extra_engine_args_path, "w") as f:
+                json.dump(engine_args, f, indent=2)
+
         logger.info(
             f"Launching {args.num_workers} mocker worker(s) with isolated DistributedRuntime instances"
         )
@@ -118,8 +146,8 @@ async def worker():
                 logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary file: {e}")
-
-        del profile_data_result  # Triggers tmpdir cleanup via __del__
+        if profile_data_result is not None:
+            del profile_data_result  # Triggers tmpdir cleanup via __del__
 
 
 def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:

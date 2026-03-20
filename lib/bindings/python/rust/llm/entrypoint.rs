@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
+use pythonize::pythonize;
 
 use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
@@ -465,6 +466,50 @@ pub fn run_input<'p>(
         .map_err(to_pyerr)?;
         Ok(())
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None))]
+pub fn run_mocker_trace_replay(
+    py: Python<'_>,
+    trace_file: PathBuf,
+    extra_engine_args: Option<PathBuf>,
+    num_workers: usize,
+    replay_concurrency: Option<isize>,
+) -> PyResult<PyObject> {
+    let report = py.allow_threads(move || {
+        let args = if let Some(extra_args_path) = extra_engine_args {
+            MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load mocker args from {:?}: {}",
+                    extra_args_path,
+                    e
+                )
+            })?
+        } else {
+            MockEngineArgs::default()
+        };
+
+        let replay_concurrency = replay_concurrency
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("replay_concurrency must be at least 1"))?;
+
+        if let Some(max_in_flight) = replay_concurrency {
+            dynamo_mocker::simulation::simulate_concurrency_file(
+                args,
+                &trace_file,
+                max_in_flight,
+                num_workers,
+            )
+        } else {
+            dynamo_mocker::simulation::simulate_trace_file(args, &trace_file, num_workers)
+        }
+    });
+    let report = report.map_err(to_pyerr)?;
+    pythonize(py, &report)
+        .map_err(to_pyerr)
+        .map(|obj| obj.unbind())
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Import from specialized modules
@@ -1244,6 +1245,15 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
 
 async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
     """Start an engine, connect it to an input, and run until stopped."""
+    ...
+
+def run_mocker_trace_replay(
+    trace_file: str | os.PathLike[str],
+    extra_engine_args: Optional[str | os.PathLike[str]] = None,
+    num_workers: int = 1,
+    replay_concurrency: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Replay a mocker trace file and return the simulation report."""
     ...
 
 class Layer:
