@@ -70,8 +70,8 @@ use derive_getters::Getters;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CudaContextProivder, DeviceStorage, DiskStorage, PinnedStorage, RegistationHandle,
-    RegisterableStorage, Remote, Storage, StorageError, StorageType, SystemStorage,
+    DeviceStorage, DiskStorage, PinnedStorage, RegistationHandle, RegisterableStorage, Remote,
+    Storage, StorageError, StorageType, SystemStorage,
 };
 
 /// NIXL remote descriptor
@@ -369,7 +369,8 @@ impl NixlDescriptor for DeviceStorage {
     }
 
     fn device_id(&self) -> u64 {
-        CudaContextProivder::cuda_context(self).cu_device() as u64
+        use super::StorageBackendOps;
+        self.ctx.device_id() as u64
     }
 }
 

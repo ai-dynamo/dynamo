@@ -28,9 +28,9 @@ type CudaMemcpyFnPtr = unsafe fn(
 
 fn cuda_memcpy_fn_ptr(strategy: &TransferStrategy) -> Result<CudaMemcpyFnPtr, TransferError> {
     match strategy {
-        TransferStrategy::CudaAsyncH2D => Ok(cuda_memcpy_h2d),
-        TransferStrategy::CudaAsyncD2H => Ok(cuda_memcpy_d2h),
-        TransferStrategy::CudaAsyncD2D => Ok(cuda_memcpy_d2d),
+        TransferStrategy::AsyncH2D | TransferStrategy::BlockingH2D => Ok(cuda_memcpy_h2d),
+        TransferStrategy::AsyncD2H | TransferStrategy::BlockingD2H => Ok(cuda_memcpy_d2h),
+        TransferStrategy::AsyncD2D => Ok(cuda_memcpy_d2d),
         _ => Err(TransferError::ExecutionError(
             "Unsupported copy strategy for CUDA memcpy async".into(),
         )),
@@ -215,12 +215,23 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    let pool = ctx.cuda_mem_pool().ok_or_else(|| {
-        TransferError::ExecutionError(
-            "TransferContext was not instantiated with a CudaPool; please report this error"
-                .to_string(),
-        )
-    })?;
+    let pool = match ctx.device_mem_pool() {
+        Some(device_mem_pool) => match device_mem_pool.as_ref() {
+            crate::block_manager::block::transfer::context::DeviceMemPool::Cuda(pool) => pool,
+            _ => {
+                return Err(TransferError::ExecutionError(
+                    "TransferContext was not instantiated with a CUDA device pool; please report this error"
+                        .to_string(),
+                ));
+            }
+        },
+        None => {
+            return Err(TransferError::ExecutionError(
+                "TransferContext was not instantiated with a CUDA device pool; please report this error"
+                    .to_string(),
+            ));
+        }
+    };
 
     // Allocate DEVICE memory from pool (stream-ordered)
     let src_buffer = pool.alloc_async(size, stream).map_err(|e| {
@@ -314,7 +325,7 @@ where
     {
         let expected_strategy =
             expected_strategy::<Source::StorageType, Destination::StorageType>();
-        assert_eq!(strategy, expected_strategy);
+            assert_eq!(strategy, expected_strategy);
     }
 
     if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
@@ -364,7 +375,7 @@ where
     {
         let expected_strategy =
             expected_strategy::<Source::StorageType, Destination::StorageType>();
-        assert_eq!(strategy, expected_strategy);
+            assert_eq!(strategy, expected_strategy);
     }
 
     for layer_idx in layer_range {
@@ -399,19 +410,19 @@ fn expected_strategy<Source: Storage, Dest: Storage>() -> TransferStrategy {
             if src == std::any::TypeId::of::<PinnedStorage>()
                 && dst == std::any::TypeId::of::<DeviceStorage>() =>
         {
-            TransferStrategy::CudaAsyncH2D
+            TransferStrategy::AsyncH2D
         }
         (src, dst)
             if src == std::any::TypeId::of::<DeviceStorage>()
                 && dst == std::any::TypeId::of::<PinnedStorage>() =>
         {
-            TransferStrategy::CudaAsyncD2H
+            TransferStrategy::AsyncD2H
         }
         (src, dst)
             if src == std::any::TypeId::of::<DeviceStorage>()
                 && dst == std::any::TypeId::of::<DeviceStorage>() =>
         {
-            TransferStrategy::CudaAsyncD2D
+            TransferStrategy::AsyncD2D
         }
         _ => TransferStrategy::Invalid,
     }
@@ -657,7 +668,7 @@ mod tests {
         let device_allocator = DeviceAllocator::default();
         let pinned_allocator = PinnedAllocator::default();
 
-        let ctx = device_allocator.ctx().clone();
+        let ctx = device_allocator.ctx().as_ref().cuda_context();
 
         // Create CUDA stream
         let stream = ctx.new_stream().unwrap();
@@ -744,7 +755,7 @@ mod tests {
         fn test_h2d_fc_host_to_ls_device() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = device_allocator.ctx().as_ref().cuda_context();
             let stream = ctx.new_stream().unwrap();
 
             let config = create_test_config();
@@ -861,7 +872,7 @@ mod tests {
         fn test_d2h_ls_device_to_fc_host() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = device_allocator.ctx().as_ref().cuda_context();
             let stream = ctx.new_stream().unwrap();
 
             let config = create_test_config();
@@ -991,7 +1002,7 @@ mod tests {
         fn test_bidirectional_layout_transfers() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = device_allocator.ctx().as_ref().cuda_context();
             let stream = ctx.new_stream().unwrap();
 
             let config = create_test_config();
@@ -1100,7 +1111,7 @@ mod tests {
         fn test_layout_transfer_alignment_performance() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = device_allocator.ctx().as_ref().cuda_context();
             let stream = ctx.new_stream().unwrap();
 
             // Test different alignments

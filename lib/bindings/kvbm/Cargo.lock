@@ -683,15 +683,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bs58"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
-dependencies = [
- "tinyvec",
-]
-
-[[package]]
 name = "bs62"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1599,24 +1590,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-kv-router"
-version = "0.9.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dynamo-runtime",
- "dynamo-tokens",
- "prometheus",
- "rand 0.9.2",
- "serde",
- "thiserror 2.0.17",
- "tokio",
- "tokio-util",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
 name = "dynamo-llm"
 version = "0.9.0"
 dependencies = [
@@ -1646,16 +1619,12 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
- "dynamo-kv-router",
  "dynamo-memory",
- "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
- "dynamo-tokens",
  "either",
  "erased-serde",
  "etcd-client",
- "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",
@@ -1666,6 +1635,7 @@ dependencies = [
  "image",
  "itertools 0.14.0",
  "json-five",
+ "level-zero",
  "minijinja",
  "minijinja-contrib",
  "modelexpress-client",
@@ -1729,28 +1699,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "tracing",
-]
-
-[[package]]
-name = "dynamo-mocker"
-version = "0.9.0"
-dependencies = [
- "anyhow",
- "dashmap 6.1.0",
- "derive-getters",
- "derive_builder",
- "dynamo-kv-router",
- "dynamo-tokens",
- "ndarray",
- "ndarray-interp",
- "ndarray-npy",
- "rand 0.9.2",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1841,20 +1789,6 @@ dependencies = [
  "validator",
  "xxhash-rust",
  "zmq",
-]
-
-[[package]]
-name = "dynamo-tokens"
-version = "0.9.0"
-dependencies = [
- "bs58",
- "bytemuck",
- "dashmap 6.1.0",
- "derive-getters",
- "serde",
- "thiserror 2.0.17",
- "uuid",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -3636,6 +3570,22 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "level-zero"
+version = "0.2.0"
+dependencies = [
+ "level-zero-sys",
+ "libc",
+ "libloading",
+]
+
+[[package]]
+name = "level-zero-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libc"
