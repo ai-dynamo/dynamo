@@ -49,6 +49,7 @@ runs:
         echo "Verifying vCluster connectivity..."
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster get ns
 
-        KUBECONFIG_B64=::add-mask::$(base64 -w 0 < ${{ github.workspace }}/.kubeconfig-vcluster)
-        echo "kubeconfig_base64=::add-mask::${KUBECONFIG_B64}" >> $GITHUB_OUTPUT
+        KUBECONFIG_B64=$(base64 -w 0 < ${{ github.workspace }}/.kubeconfig-vcluster)
+        echo "::add-mask::$KUBECONFIG_B64"
+        echo "kubeconfig_base64=${KUBECONFIG_B64}" >> $GITHUB_OUTPUT
         echo "::endgroup::"
