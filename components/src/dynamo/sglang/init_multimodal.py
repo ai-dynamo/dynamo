@@ -102,7 +102,6 @@ async def init_multimodal_encode_worker(
     ).client()
 
     handler = MultimodalEncodeWorkerHandler(config, pd_worker_client, shutdown_event)
-    await handler.async_init(runtime)
 
     await pd_worker_client.wait_for_instances()
 
@@ -159,8 +158,6 @@ async def init_multimodal_worker(
     else:
         handler = MultimodalWorkerHandler(engine, config, None, shutdown_event)
 
-    await handler.async_init()
-
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
     else:
@@ -202,8 +199,6 @@ async def init_multimodal_prefill_worker(
     handler = MultimodalPrefillWorkerHandler(engine, config, shutdown_event)
 
     shutdown_endpoints[:] = [generate_endpoint]
-
-    await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
