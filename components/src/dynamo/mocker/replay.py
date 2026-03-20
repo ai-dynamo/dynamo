@@ -12,42 +12,122 @@ def default_replay_output_path(trace_file: Path) -> Path:
     return trace_file.with_name(f"{trace_file.stem}.replay.json")
 
 
-def format_latency_summary(report: dict[str, Any], label: str, key_prefix: str) -> str:
-    return (
-        f"{label}: mean={report[f'mean_{key_prefix}_ms']:.3f} ms, "
-        f"median={report[f'median_{key_prefix}_ms']:.3f} ms, "
-        f"p95={report[f'p95_{key_prefix}_ms']:.3f} ms, "
-        f"p99={report[f'p99_{key_prefix}_ms']:.3f} ms"
+def format_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(cell))
+
+    def format_row(row: list[str]) -> str:
+        return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row))
+
+    separator = "-+-".join("-" * width for width in widths)
+    return "\n".join(
+        [format_row(headers), separator, *(format_row(row) for row in rows)]
     )
 
 
+def format_ms(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3f}"
+
+
+def format_number(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3f}"
+
+
 def print_replay_summary(report: dict[str, Any], output_file: Path) -> None:
+    scalar_rows = [
+        ["Request count", str(report["num_requests"])],
+        ["Completed requests", str(report["completed_requests"])],
+        ["Virtual duration (ms)", f"{report['duration_ms']:.3f}"],
+        ["Wall time (ms)", f"{report['wall_time_ms']:.3f}"],
+        ["Input tokens", str(report["total_input_tokens"])],
+        ["Output tokens", str(report["total_output_tokens"])],
+        ["Request throughput (req/s)", f"{report['request_throughput_rps']:.3f}"],
+        ["Input throughput (tok/s)", f"{report['input_throughput_tok_s']:.3f}"],
+        ["Output throughput (tok/s)", f"{report['output_throughput_tok_s']:.3f}"],
+        ["Total throughput (tok/s)", f"{report['total_throughput_tok_s']:.3f}"],
+        ["Prefix cache reused ratio", f"{report['prefix_cache_reused_ratio']:.6f}"],
+    ]
+    latency_rows = [
+        [
+            "TTFT",
+            format_ms(report["mean_ttft_ms"]),
+            format_ms(report["min_ttft_ms"]),
+            format_ms(report["max_ttft_ms"]),
+            format_ms(report["p99_ttft_ms"]),
+            format_ms(report["p90_ttft_ms"]),
+            format_ms(report["median_ttft_ms"]),
+            format_ms(report["p75_ttft_ms"]),
+            format_ms(report["std_ttft_ms"]),
+        ],
+        [
+            "TTST",
+            format_ms(report["mean_ttst_ms"]),
+            format_ms(report["min_ttst_ms"]),
+            format_ms(report["max_ttst_ms"]),
+            format_ms(report["p99_ttst_ms"]),
+            format_ms(report["p90_ttst_ms"]),
+            format_ms(report["median_ttst_ms"]),
+            format_ms(report["p75_ttst_ms"]),
+            format_ms(report["std_ttst_ms"]),
+        ],
+        [
+            "TPOT",
+            format_ms(report["mean_tpot_ms"]),
+            format_ms(report["min_tpot_ms"]),
+            format_ms(report["max_tpot_ms"]),
+            format_ms(report["p99_tpot_ms"]),
+            format_ms(report["p90_tpot_ms"]),
+            format_ms(report["median_tpot_ms"]),
+            format_ms(report["p75_tpot_ms"]),
+            format_ms(report["std_tpot_ms"]),
+        ],
+        [
+            "ITL",
+            format_ms(report["mean_itl_ms"]),
+            format_ms(report["min_itl_ms"]),
+            format_ms(report["max_itl_ms"]),
+            format_ms(report["p99_itl_ms"]),
+            format_ms(report["p90_itl_ms"]),
+            format_ms(report["median_itl_ms"]),
+            format_ms(report["p75_itl_ms"]),
+            format_ms(report["std_itl_ms"]),
+        ],
+        [
+            "E2E latency",
+            format_ms(report["mean_e2e_latency_ms"]),
+            format_ms(report["min_e2e_latency_ms"]),
+            format_ms(report["max_e2e_latency_ms"]),
+            format_ms(report["p99_e2e_latency_ms"]),
+            format_ms(report["p90_e2e_latency_ms"]),
+            format_ms(report["median_e2e_latency_ms"]),
+            format_ms(report["p75_e2e_latency_ms"]),
+            format_ms(report["std_e2e_latency_ms"]),
+        ],
+        [
+            "Output TPS/User",
+            format_number(report["mean_output_token_throughput_per_user"]),
+            format_number(report["min_output_token_throughput_per_user"]),
+            format_number(report["max_output_token_throughput_per_user"]),
+            format_number(report["p99_output_token_throughput_per_user"]),
+            format_number(report["p90_output_token_throughput_per_user"]),
+            format_number(report["median_output_token_throughput_per_user"]),
+            format_number(report["p75_output_token_throughput_per_user"]),
+            format_number(report["std_output_token_throughput_per_user"]),
+        ],
+    ]
     lines = [
         "Replay Summary",
-        f"Completed requests: {report['completed_requests']}/{report['num_requests']}",
-        (
-            f"Virtual duration: {report['duration_ms']:.3f} ms | "
-            f"Wall time: {report['wall_time_ms']:.3f} ms"
-        ),
-        (
-            f"Tokens: input={report['total_input_tokens']} "
-            f"output={report['total_output_tokens']}"
-        ),
-        (
-            "Throughput: "
-            f"requests={report['request_throughput_rps']:.3f} req/s, "
-            f"input={report['input_throughput_tok_s']:.3f} tok/s, "
-            f"output={report['output_throughput_tok_s']:.3f} tok/s, "
-            f"total={report['total_throughput_tok_s']:.3f} tok/s"
-        ),
-        f"Queue latency: mean={report['mean_queue_ms']:.3f} ms",
-        format_latency_summary(report, "TTFT", "ttft"),
-        format_latency_summary(report, "TPOT", "tpot"),
-        format_latency_summary(report, "ITL", "itl"),
-        format_latency_summary(report, "E2E latency", "e2e_latency"),
-        (
-            f"Prefix cache reused ratio: {report['prefix_cache_reused_ratio']:.6f} | "
-            f"Max ITL: {report['max_itl_ms']:.3f} ms"
+        format_table(["Metric", "Value"], scalar_rows),
+        "",
+        format_table(
+            ["Metric", "avg", "min", "max", "p99", "p90", "p50", "p75", "std"],
+            latency_rows,
         ),
         f"JSON report: {output_file}",
     ]

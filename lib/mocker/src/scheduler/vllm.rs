@@ -307,7 +307,7 @@ async fn simulate_prefill(
     args: &MockEngineArgs,
 ) -> Duration {
     let start_time = Instant::now();
-    let total_time = simulate_prefill_step(state, kv_manager, hit_rates, args, None, 0.0);
+    let total_time = simulate_prefill_step(state, kv_manager, hit_rates, args, None, 0.0, false);
 
     if args.speedup_ratio > 0.0 && total_time > Duration::ZERO {
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
@@ -328,7 +328,7 @@ async fn simulate_decode(
     args: &MockEngineArgs,
 ) -> Duration {
     let start_time = Instant::now();
-    let total_time = simulate_decode_step(state, kv_manager, output_tx, args, None, 0.0);
+    let total_time = simulate_decode_step(state, kv_manager, output_tx, args, None, 0.0, false);
 
     let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
     if effective_ratio > 0.0 && total_time > Duration::ZERO {
@@ -348,6 +348,7 @@ fn simulate_prefill_step(
     args: &MockEngineArgs,
     collector: Option<&TraceCollector>,
     current_time_ms: f64,
+    apply_speedup: bool,
 ) -> Duration {
     let mut total_time = Duration::ZERO;
 
@@ -454,7 +455,11 @@ fn simulate_prefill_step(
         }
     }
 
-    total_time
+    if !apply_speedup || args.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
+        return total_time;
+    }
+
+    Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio)
 }
 
 fn simulate_decode_step(
@@ -464,6 +469,7 @@ fn simulate_decode_step(
     args: &MockEngineArgs,
     collector: Option<&TraceCollector>,
     current_time_ms: f64,
+    apply_speedup: bool,
 ) -> Duration {
     if state.decode.is_empty() {
         return Duration::ZERO;
@@ -489,7 +495,13 @@ fn simulate_decode_step(
     let decoding_time = args
         .perf_model
         .predict_decode_time(active_kv_tokens, context_length);
-    let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
+    let unscaled_time = Duration::from_secs_f64(decoding_time / 1000.0);
+    let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
+    let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
+        Duration::from_secs_f64(unscaled_time.as_secs_f64() / effective_ratio)
+    } else {
+        unscaled_time
+    };
     let decode_end_ms = decode_start_ms + total_time.as_secs_f64() * 1000.0;
 
     // Process decoding.
@@ -627,6 +639,7 @@ pub fn simulate_trace(
             &args,
             Some(&collector),
             current_time_ms,
+            true,
         );
         current_time_ms += prefill_time.as_secs_f64() * 1000.0;
         enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
@@ -638,6 +651,7 @@ pub fn simulate_trace(
             &args,
             Some(&collector),
             current_time_ms,
+            true,
         );
         current_time_ms += decode_time.as_secs_f64() * 1000.0;
     }
@@ -680,6 +694,7 @@ pub fn simulate_concurrency(
             &args,
             Some(&collector),
             current_time_ms,
+            true,
         );
         current_time_ms += prefill_time.as_secs_f64() * 1000.0;
 
@@ -690,6 +705,7 @@ pub fn simulate_concurrency(
             &args,
             Some(&collector),
             current_time_ms,
+            true,
         );
         current_time_ms += decode_time.as_secs_f64() * 1000.0;
     }
@@ -1245,6 +1261,7 @@ mod tests {
                 args,
                 Some(&collector),
                 current_time_ms,
+                true,
             );
             current_time_ms += prefill_time.as_secs_f64() * 1000.0;
             enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
@@ -1256,6 +1273,7 @@ mod tests {
                 args,
                 Some(&collector),
                 current_time_ms,
+                true,
             );
             if first_decode_end_ms == 0.0 && decode_time > Duration::ZERO {
                 first_decode_end_ms = current_time_ms + decode_time.as_secs_f64() * 1000.0;
@@ -1313,6 +1331,7 @@ mod tests {
                 args,
                 Some(&collector),
                 current_time_ms,
+                true,
             );
             current_time_ms += prefill_time.as_secs_f64() * 1000.0;
 
@@ -1323,6 +1342,7 @@ mod tests {
                 args,
                 Some(&collector),
                 current_time_ms,
+                true,
             );
             current_time_ms += decode_time.as_secs_f64() * 1000.0;
         }
@@ -1384,22 +1404,56 @@ mod tests {
         assert!(
             (left.prefix_cache_reused_ratio - right.prefix_cache_reused_ratio).abs() <= epsilon
         );
-        assert!((left.latency.mean_queue_ms - right.latency.mean_queue_ms).abs() <= epsilon);
         assert!((left.latency.ttft.mean_ms - right.latency.ttft.mean_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.min_ms - right.latency.ttft.min_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.max_ms - right.latency.ttft.max_ms).abs() <= epsilon);
         assert!((left.latency.ttft.median_ms - right.latency.ttft.median_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p75_ms - right.latency.ttft.p75_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p90_ms - right.latency.ttft.p90_ms).abs() <= epsilon);
         assert!((left.latency.ttft.p95_ms - right.latency.ttft.p95_ms).abs() <= epsilon);
         assert!((left.latency.ttft.p99_ms - right.latency.ttft.p99_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.std_ms - right.latency.ttft.std_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.mean_ms - right.latency.ttst.mean_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.min_ms - right.latency.ttst.min_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.max_ms - right.latency.ttst.max_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.median_ms - right.latency.ttst.median_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p75_ms - right.latency.ttst.p75_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p90_ms - right.latency.ttst.p90_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p95_ms - right.latency.ttst.p95_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p99_ms - right.latency.ttst.p99_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.std_ms - right.latency.ttst.std_ms).abs() <= epsilon);
         assert!((left.latency.tpot.mean_ms - right.latency.tpot.mean_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.min_ms - right.latency.tpot.min_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.max_ms - right.latency.tpot.max_ms).abs() <= epsilon);
         assert!((left.latency.tpot.median_ms - right.latency.tpot.median_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p75_ms - right.latency.tpot.p75_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p90_ms - right.latency.tpot.p90_ms).abs() <= epsilon);
         assert!((left.latency.tpot.p95_ms - right.latency.tpot.p95_ms).abs() <= epsilon);
         assert!((left.latency.tpot.p99_ms - right.latency.tpot.p99_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.std_ms - right.latency.tpot.std_ms).abs() <= epsilon);
         assert!(
             (left.latency.itl.distribution.mean_ms - right.latency.itl.distribution.mean_ms).abs()
                 <= epsilon
         );
         assert!(
+            (left.latency.itl.distribution.min_ms - right.latency.itl.distribution.min_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.max_ms - right.latency.itl.distribution.max_ms).abs()
+                <= epsilon
+        );
+        assert!(
             (left.latency.itl.distribution.median_ms - right.latency.itl.distribution.median_ms)
                 .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p75_ms - right.latency.itl.distribution.p75_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p90_ms - right.latency.itl.distribution.p90_ms).abs()
                 <= epsilon
         );
         assert!(
@@ -1410,11 +1464,74 @@ mod tests {
             (left.latency.itl.distribution.p99_ms - right.latency.itl.distribution.p99_ms).abs()
                 <= epsilon
         );
+        assert!(
+            (left.latency.itl.distribution.std_ms - right.latency.itl.distribution.std_ms).abs()
+                <= epsilon
+        );
         assert!((left.latency.itl.max_ms - right.latency.itl.max_ms).abs() <= epsilon);
         assert!((left.latency.e2e.mean_ms - right.latency.e2e.mean_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.min_ms - right.latency.e2e.min_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.max_ms - right.latency.e2e.max_ms).abs() <= epsilon);
         assert!((left.latency.e2e.median_ms - right.latency.e2e.median_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p75_ms - right.latency.e2e.p75_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p90_ms - right.latency.e2e.p90_ms).abs() <= epsilon);
         assert!((left.latency.e2e.p95_ms - right.latency.e2e.p95_ms).abs() <= epsilon);
         assert!((left.latency.e2e.p99_ms - right.latency.e2e.p99_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.std_ms - right.latency.e2e.std_ms).abs() <= epsilon);
+        assert!(
+            (left.latency.output_token_throughput_per_user.mean_ms
+                - right.latency.output_token_throughput_per_user.mean_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.min_ms
+                - right.latency.output_token_throughput_per_user.min_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.max_ms
+                - right.latency.output_token_throughput_per_user.max_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.median_ms
+                - right.latency.output_token_throughput_per_user.median_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p75_ms
+                - right.latency.output_token_throughput_per_user.p75_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p90_ms
+                - right.latency.output_token_throughput_per_user.p90_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p95_ms
+                - right.latency.output_token_throughput_per_user.p95_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p99_ms
+                - right.latency.output_token_throughput_per_user.p99_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.std_ms
+                - right.latency.output_token_throughput_per_user.std_ms)
+                .abs()
+                <= epsilon
+        );
     }
 
     #[rstest]
@@ -1444,7 +1561,6 @@ mod tests {
         );
         assert!(request_2.first_admit_ms.unwrap() >= request_2.arrival_time_ms);
         assert!(request_3.first_admit_ms.unwrap() >= request_3.arrival_time_ms);
-        assert!(manual.report.latency.ttft.mean_ms >= manual.report.latency.mean_queue_ms);
         assert!(manual.report.latency.e2e.mean_ms >= manual.report.latency.ttft.mean_ms);
 
         if enable_prefix_caching {
