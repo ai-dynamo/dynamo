@@ -1,1 +1,1 @@
-{"id":"7044fc8ba4496001ac2d17f0c103cb35","fullName":"tests.planner.unit.test_prometheus#test_frontend_metric_with_partial_data","name":"test_frontend_metric_with_partial_data","status":"passed","testResultsByEnv":{"default":"ed5eac1c9adb4d39d30e37e6e38499d6"}}
+{"id":"7044fc8ba4496001ac2d17f0c103cb35","fullName":"tests.planner.unit.test_prometheus#test_frontend_metric_with_partial_data","name":"test_frontend_metric_with_partial_data","status":"passed","testResultsByEnv":{"vllm-amd64":"bd971c7ed1bbba3c6abbc7ee9520fb1d","vllm-arm64":"1b9ff0d182394ff12338156285df9b20"}}

@@ -1,0 +1,10 @@
+[2m2026-03-20T22:17:04.937028Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 2 models needed for collected tests
+Models: {'Qwen/Qwen3-VL-2B-Instruct', 'Qwen/Qwen3-0.6B'}
+[2m2026-03-20T22:17:04.937138Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-03-20T22:17:04.937189Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [00:00<00:03,  3.24it/s]Fetching 12 files:  58%|█████▊    | 7/12 [00:08<00:05,  1.18s/it]Fetching 12 files: 100%|██████████| 12/12 [00:08<00:00,  1.50it/s]
+[2m2026-03-20T22:17:13.110594Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-03-20T22:17:13.110681Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  7.29it/s]Fetching 10 files:  70%|███████   | 7/10 [00:05<00:02,  1.20it/s]Fetching 10 files: 100%|██████████| 10/10 [00:05<00:00,  1.77it/s]
+[2m2026-03-20T22:17:18.876086Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-03-20T22:17:18.876439Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

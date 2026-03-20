@@ -1,0 +1,86 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4282 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4282
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4282
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2469 --advertise-client-urls http://0.0.0.0:2469 --listen-peer-urls http://0.0.0.0:2470 --initial-advertise-peer-urls http://localhost:2470 --initial-cluster default=http://localhost:2470 --data-dir /tmp/etcd_5t_9g495 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2469
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2469
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8031 --migration-limit 0 in /workspace
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:322 Frontend started successfully
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode decode --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9147/health
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9147/health (status code 503) (attempt=21, elapsed=20.0s)
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:174 Decode worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9147/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 12,
+    "nanos": 41635811
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:331 Decode Worker PID: 1973
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode prefill --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9282/health
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:174 Prefill worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9282/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 195387300
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:340 Prefill Worker PID: 2617
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:346 Testing chat completion stream request cancellation during decode phase...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:219 Sending chat completion request (stream=True) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:347 Starting to poll for 'New Request ID: ' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:375 Found pattern 'New Request ID: ' at iteration 1
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:377 Content after pattern: 'aee1bbaa-4571-487a-915f-f00aae885bed'
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:347 Starting to poll for 'New Request ID: aee1bbaa-4571-487a-915f-f00aae885bed' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:375 Found pattern 'New Request ID: aee1bbaa-4571-487a-915f-f00aae885bed' at iteration 0
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:288 Received streaming response 1: data: {"id":"chatcmpl-aee1bbaa-4571-487a-915f-f00aae885bed","choices":[{"index":0,"delta":{"content"
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:292 Successfully read 1 responses
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:347 Starting to poll for 'New SGLang Request ID: ' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:375 Found pattern 'New SGLang Request ID: ' at iteration 0
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:377 Content after pattern: 'd83132d377ee4cc79286914597bea892'
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:131 Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:136 Failed to shutdown socket: [Errno 9] Bad file descriptor
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:131 Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:136 Failed to shutdown socket: [Errno 9] Bad file descriptor
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:381 Cancelled request ID: aee1bbaa-4571-487a-915f-f00aae885bed
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:347 Starting to poll for 'Aborted Request ID: aee1bbaa-4571-487a-915f-f00aae885bed' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:375 Found pattern 'Aborted Request ID: aee1bbaa-4571-487a-915f-f00aae885bed' at iteration 1
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:347 Starting to poll for 'issued control message Kill to sender' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:375 Found pattern 'issued control message Kill to sender' at iteration 0
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:396 Chat completion stream cancellation in decode phase detected successfully
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 2617
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 2619 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 2619 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 2618 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 2618 sed
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 1973
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 1975 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1975 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 1974 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1974 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 1970
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 1972 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1972 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 1971 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1971 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 1953
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1954 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1954 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 1941
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1942 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1942 sed

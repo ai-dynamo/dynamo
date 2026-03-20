@@ -1,1 +1,1 @@
-{"id":"8ce8153599915a9a4bea582b7a3ea0b3","fullName":"tests.kvbm_integration.test_kvbm#test_gpu_cache_eviction","name":"test_gpu_cache_eviction[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"default":"a8094f1578df0611189efa362a0fe95f"}}
+{"id":"8ce8153599915a9a4bea582b7a3ea0b3","fullName":"tests.kvbm_integration.test_kvbm#test_gpu_cache_eviction","name":"test_gpu_cache_eviction[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"default":"558345d9c85136ef1c5ddda8f45ddd67"}}

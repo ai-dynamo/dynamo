@@ -1,1 +1,1 @@
-{"id":"5b49fea04b52c2f6c2f0838eaf5ae4aa","fullName":"tests.planner.unit.test_prometheus#test_get_average_metric_none_result","name":"test_get_average_metric_none_result","status":"passed","testResultsByEnv":{"default":"b0d690e216b9b5c9b6902702d4e6f1d4"}}
+{"id":"5b49fea04b52c2f6c2f0838eaf5ae4aa","fullName":"tests.planner.unit.test_prometheus#test_get_average_metric_none_result","name":"test_get_average_metric_none_result","status":"passed","testResultsByEnv":{"vllm-arm64":"e887212203b4f9a45ef0ea0c4bc913c7","vllm-amd64":"768b6efbfb5fdd9382ee65455e632f0d"}}

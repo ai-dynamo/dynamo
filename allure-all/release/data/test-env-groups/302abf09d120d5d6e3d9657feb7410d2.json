@@ -1,1 +1,1 @@
-{"id":"302abf09d120d5d6e3d9657feb7410d2","fullName":"tests.planner.unit.test_sla_planner_scaling#test_disagg_scale_up","name":"test_disagg_scale_up","status":"passed","testResultsByEnv":{"default":"d889c0495c1030a33ce62bfbe2e0e3a1"}}
+{"id":"302abf09d120d5d6e3d9657feb7410d2","fullName":"tests.planner.unit.test_sla_planner_scaling#test_disagg_scale_up","name":"test_disagg_scale_up","status":"passed","testResultsByEnv":{"vllm-amd64":"f34170c8c431715b58f45e6728a9fc4a","vllm-arm64":"a8b1424b44d98ae9569228cfb6882e7f"}}

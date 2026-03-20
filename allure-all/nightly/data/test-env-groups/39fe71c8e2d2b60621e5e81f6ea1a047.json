@@ -1,1 +1,1 @@
-{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[agg-router]","status":"passed","testResultsByEnv":{"default":"40788202d17e688f075b317dc4fa3d00"}}
+{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[aggregated]","status":"passed","testResultsByEnv":{"vllm-amd64":"4c5f52db56d71f68097ac75a1a8c3849","default":"4f9cd977163f088dd9e7a0ac3ac69ae3"}}

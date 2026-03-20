@@ -1,1 +1,1 @@
-["default"]
+["default","vllm-amd64","vllm-arm64","sglang-amd64","sglang-arm64","trtllm-amd64","trtllm-arm64"]

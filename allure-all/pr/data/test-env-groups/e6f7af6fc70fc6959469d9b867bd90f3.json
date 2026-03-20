@@ -1,1 +1,1 @@
-{"id":"e6f7af6fc70fc6959469d9b867bd90f3","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_ulysses_degree","name":"test_omni_config_invalid_ulysses_degree[-1]","status":"passed","testResultsByEnv":{"default":"625ba8e8676df4631636f73c397a1141"}}
+{"id":"e6f7af6fc70fc6959469d9b867bd90f3","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_ulysses_degree","name":"test_omni_config_invalid_ulysses_degree[0]","status":"passed","testResultsByEnv":{"default":"2d96c2370821c627f9f96f506cdb7648"}}

@@ -1,1 +1,1 @@
-{"id":"3e8c85a793d0f2446f1b327f5833f0dc","fullName":"tests.kvbm_integration.test_kvbm#test_onboarding_determinism","name":"test_onboarding_determinism[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"default":"ef7c1381b87f6514778eb6c19e54a5da"}}
+{"id":"3e8c85a793d0f2446f1b327f5833f0dc","fullName":"tests.kvbm_integration.test_kvbm#test_onboarding_determinism","name":"test_onboarding_determinism[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"vllm-amd64":"49ecdb0a7da06d68626f0fe58b16584d"}}

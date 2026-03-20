@@ -1,0 +1,1 @@
+{"uuid": "8f487bc0-28b8-4f44-9e8b-5b8ad3c98d79", "children": ["ec418331-e663-4b7a-8f8c-b7f1c3560e70"], "befores": [{"name": "monkeypatch", "status": "passed", "start": 1774044938525, "stop": 1774044938525}], "afters": [{"name": "monkeypatch::0", "status": "passed", "start": 1774044938530, "stop": 1774044938530}], "start": 1774044938525, "stop": 1774044938530}

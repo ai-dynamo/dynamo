@@ -1,1 +1,1 @@
-{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[disaggregated_same_gpu-2]","status":"passed","testResultsByEnv":{"default":"fbe57c4f40d4bf79fe610e2dd9f8d2f5"}}
+{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[disaggregated-2]","status":"passed","testResultsByEnv":{"default":"0a9f1c4f5da30bc48654d00cbeda62d4"}}

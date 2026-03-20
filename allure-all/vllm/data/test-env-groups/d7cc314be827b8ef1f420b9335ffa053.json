@@ -1,1 +1,1 @@
-{"id":"d7cc314be827b8ef1f420b9335ffa053","fullName":"tests.router.test_router_e2e_with_vllm#test_vllm_kv_router_basic","name":"test_vllm_kv_router_basic[tcp]","status":"passed","testResultsByEnv":{"default":"0148125bf97c2615d1c7ecd207b1a383"}}
+{"id":"d7cc314be827b8ef1f420b9335ffa053","fullName":"tests.router.test_router_e2e_with_vllm#test_vllm_kv_router_basic","name":"test_vllm_kv_router_basic[tcp]","status":"passed","testResultsByEnv":{"vllm-amd64":"eb04774650300fb8eee6e87edeedc7e9"}}
