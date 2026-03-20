@@ -609,8 +609,22 @@ impl ConcurrentRadixTreeCompressed {
     ) {
         let mut current_parent = parent.clone();
         let mut remaining = blocks;
+        // Track the last ExternalSequenceBlockHash we matched to re-validate
+        // `current_parent` at the top of each iteration. A concurrent thread
+        // may have split `current_parent` since we last held its lock,
+        // shortening its edge and moving our last-matched hash into a
+        // newly-created suffix child. `resolve_lookup` detects this and
+        // returns the correct node so we attach the next child in the right place.
+        let mut last_ext_hash: Option<ExternalSequenceBlockHash> = None;
 
         while !remaining.is_empty() {
+            // Re-resolve current_parent in case another thread split it.
+            if let Some(hash) = last_ext_hash {
+                let wl = lookup.get_mut(&worker).unwrap();
+                if let Some(resolved) = Self::resolve_lookup(wl, hash) {
+                    current_parent = resolved;
+                }
+            }
             let first_local = remaining[0].tokens_hash;
 
             let child = {
@@ -745,6 +759,7 @@ impl ConcurrentRadixTreeCompressed {
                     wl.insert(b.block_hash, child.clone());
                 }
 
+                last_ext_hash = Some(remaining[edge_len - 1].block_hash);
                 remaining = &remaining[edge_len..];
                 current_parent = child;
             }
