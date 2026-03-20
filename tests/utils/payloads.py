@@ -176,12 +176,12 @@ class VideoGenerationPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert result.get("object") == "video", (
-            f"Expected video response object, got {result.get('object')!r}"
-        )
-        assert result.get("status") == "completed", (
-            f"Expected completed video response, got {result.get('status')!r}"
-        )
+        assert (
+            result.get("object") == "video"
+        ), f"Expected video response object, got {result.get('object')!r}"
+        assert (
+            result.get("status") == "completed"
+        ), f"Expected completed video response, got {result.get('status')!r}"
 
         data = result.get("data")
         assert isinstance(data, list) and data, "Video response data is missing"
@@ -192,9 +192,9 @@ class VideoGenerationPayload(BasePayload):
             return b64_json
 
         url = first_video.get("url")
-        assert isinstance(url, str) and url, (
-            "Video response must include b64_json or url"
-        )
+        assert (
+            isinstance(url, str) and url
+        ), "Video response must include b64_json or url"
         return url
 
     def validate(self, response: Any, content: str) -> None:
@@ -217,9 +217,9 @@ class VideoGenerationPayload(BasePayload):
             return
 
         url = first_video.get("url")
-        assert isinstance(url, str) and url, (
-            "Video response must include a non-empty url"
-        )
+        assert (
+            isinstance(url, str) and url
+        ), "Video response must include a non-empty url"
 
 
 @dataclass

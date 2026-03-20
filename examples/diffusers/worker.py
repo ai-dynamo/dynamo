@@ -9,12 +9,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from dynamo.fastvideo.main import main
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 components_src = REPO_ROOT / "components/src"
 if components_src.exists():
     sys.path.insert(0, str(components_src))
-
-from dynamo.fastvideo.main import main
 
 if __name__ == "__main__":
     main()

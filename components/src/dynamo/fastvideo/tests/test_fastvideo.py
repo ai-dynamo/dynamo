@@ -10,10 +10,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dynamo.llm import ModelInput, ModelType
-
 from dynamo.fastvideo.args import parse_fastvideo_args
 from dynamo.fastvideo.backend import FastVideoHandler, register_fastvideo_model
+from dynamo.llm import ModelInput, ModelType
 
 pytestmark = [
     pytest.mark.unit,
