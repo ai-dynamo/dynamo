@@ -167,9 +167,15 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 > ```
 >
 > **Option 2: LeaderWorkerSet (LWS) + Volcano**
+> - LWS >= v0.7.0 is required for native gang scheduling support.
 > - If using LWS for multinode deployments, you must also install Volcano (required dependency):
->   - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+>   - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation) (>= v0.7.0)
 >   - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
+> - When installing LWS with Volcano for gang scheduling, set the gang scheduling value:
+>   ```bash
+>   helm install lws ... --set gangScheduling=volcano
+>   ```
+>   See the [LWS gang scheduling documentation](https://github.com/kubernetes-sigs/lws/tree/main/docs/examples/gang-scheduling) for details.
 > - These must be installed manually before deploying multinode workloads with LWS.
 >
 > See the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for details on orchestrator selection.
