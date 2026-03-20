@@ -25,7 +25,7 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"llava-hf/llava-v1.6-mistral-7b-hf"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"llava-hf/llava-v1.6-mistral-7b-hf"}
-export MODEL_REVISION=${MODEL_REVISION:-""}
+export MODEL_REVISION=${MODEL_REVISION:-"52320fb52229"}
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/encode.yaml"}
 export PD_ENGINE_ARGS=${PD_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/agg.yaml"}
 export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}
@@ -122,6 +122,12 @@ print(f"Embeddings: shape={embeddings.shape}, dtype={embeddings.dtype}")
 torch.save(embeddings.cpu(), output)
 print(f"Saved embeddings → {output}")
 
+# ── Write resolved model path so Phase 2 uses the exact same revision ──
+model_path_file = os.environ.get("_MODEL_PATH_FILE", "/tmp/_resolved_model_path.txt")
+with open(model_path_file, "w") as f:
+    f.write(model_path)
+print(f"Resolved model path written to {model_path_file}")
+
 # ── Free GPU memory ──
 del model, processor, vision_out, features, embeddings, pixel_values
 torch.cuda.empty_cache()
@@ -133,6 +139,16 @@ if [ ! -f "$EMBEDDINGS_FILE" ]; then
     exit 1
 fi
 echo "Embeddings generated at ${EMBEDDINGS_FILE}"
+
+# Override MODEL_PATH with the resolved local cache path so Phase 2 workers
+# load the exact same revision (HF hub caches are revision-specific).
+_MODEL_PATH_FILE="/tmp/_resolved_model_path.txt"
+if [ -f "$_MODEL_PATH_FILE" ]; then
+    RESOLVED_PATH=$(cat "$_MODEL_PATH_FILE")
+    echo "Using resolved model path for Phase 2: ${RESOLVED_PATH}"
+    export MODEL_PATH="$RESOLVED_PATH"
+    rm -f "$_MODEL_PATH_FILE"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 2: Start Encode + Aggregated PD workers
