@@ -36,6 +36,14 @@
 //!   sequentially.  This models the real TLB / memory-controller
 //!   pressure of a scatter-gather KV cache transfer.
 //!
+//! # Host memory kinds
+//!
+//! - **pinned** — USM host memory (`zeMemAllocHost`). Page-locked,
+//!   DMA-friendly. This is what the real KV cache offload path uses.
+//! - **system** — Regular heap memory (`Vec<u8>`). Not pinned.
+//!   The L0 driver pins on-the-fly or stages through an internal
+//!   bounce buffer, so H2D/D2H bandwidth is typically lower.
+//!
 //! # Limitations
 //!
 //! - The vectorized backend panics with DEVICE_LOST on H2D/D2H for
@@ -49,6 +57,19 @@
 //! # Usage
 //!
 //! ```sh
+//! # Run ALL safe configurations (skips vectorized H2D/D2H which causes DEVICE_LOST):
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction d2d --backend vectorized,memcpy \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null && \
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction h2d,d2h --backend memcpy \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//!
+//! # Run ALL configurations including vectorized H2D/D2H (may DEVICE_LOST):
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction h2d,d2h,d2d --backend vectorized,memcpy \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//!
 //! # Run all D2D configurations (both backends, both patterns):
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2d 2>/dev/null
@@ -60,6 +81,10 @@
 //! # H2D/D2H (memcpy only — vectorized causes DEVICE_LOST on discrete GPUs):
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction h2d,d2h --backend memcpy
+//!
+//! # Compare pinned vs system host memory for H2D:
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction h2d --backend memcpy --host-mem pinned,system
 //!
 //! # Quick smoke test on device 2:
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
@@ -120,6 +145,10 @@ struct Cli {
     /// Comma-separated patterns: fc_to_fc, lw_to_fc.
     #[arg(long, default_value = "fc_to_fc,lw_to_fc", value_delimiter = ',')]
     pattern: Vec<String>,
+
+    /// Comma-separated host memory kinds: pinned, system.
+    #[arg(long, default_value = "pinned", value_delimiter = ',')]
+    host_mem: Vec<String>,
 
     /// Number of warmup iterations.
     #[arg(long, default_value = "10")]
@@ -231,11 +260,43 @@ impl Backend {
 }
 
 // ---------------------------------------------------------------------------
+// Host memory kind
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+enum HostMemKind {
+    Pinned,
+    System,
+}
+
+impl HostMemKind {
+    fn label(&self) -> &'static str {
+        match self {
+            HostMemKind::Pinned => "pinned",
+            HostMemKind::System => "system",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pinned" | "pin" => Some(HostMemKind::Pinned),
+            "system" | "sys" | "heap" => Some(HostMemKind::System),
+            _ => None,
+        }
+    }
+
+    fn all_labels() -> &'static str {
+        "pinned (or pin), system (or sys/heap)"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Memory pair: holds src + dst buffers for a given direction
 // ---------------------------------------------------------------------------
 
 enum SideBuffers {
     Host(Vec<ZeHostSlice<u8>>),
+    System(Vec<Vec<u8>>),
     Device(Vec<ZeSlice<u8>>),
 }
 
@@ -243,6 +304,7 @@ impl SideBuffers {
     fn ptr(&self, idx: usize) -> *mut c_void {
         match self {
             SideBuffers::Host(bufs) => bufs[idx].as_ptr() as *mut c_void,
+            SideBuffers::System(bufs) => bufs[idx].as_ptr() as *mut c_void,
             SideBuffers::Device(bufs) => bufs[idx].as_ptr() as *mut c_void,
         }
     }
@@ -267,6 +329,14 @@ fn allocate_side_host(dev: &Arc<ZeDevice>, count: usize, size: usize) -> SideBuf
     )
 }
 
+fn allocate_side_system(count: usize, size: usize) -> SideBuffers {
+    SideBuffers::System(
+        (0..count)
+            .map(|_| vec![0xABu8; size])
+            .collect(),
+    )
+}
+
 fn allocate_side_device(dev: &Arc<ZeDevice>, count: usize, size: usize) -> SideBuffers {
     let queue = dev.new_queue().expect("queue for alloc");
     SideBuffers::Device(
@@ -276,9 +346,22 @@ fn allocate_side_device(dev: &Arc<ZeDevice>, count: usize, size: usize) -> SideB
     )
 }
 
+fn allocate_host_side(
+    dev: &Arc<ZeDevice>,
+    host_mem: HostMemKind,
+    count: usize,
+    size: usize,
+) -> SideBuffers {
+    match host_mem {
+        HostMemKind::Pinned => allocate_side_host(dev, count, size),
+        HostMemKind::System => allocate_side_system(count, size),
+    }
+}
+
 fn allocate_memory(
     dev: &Arc<ZeDevice>,
     direction: Direction,
+    host_mem: HostMemKind,
     src_count: usize,
     src_size: usize,
     dst_count: usize,
@@ -291,12 +374,12 @@ fn allocate_memory(
     };
     MemoryPair {
         src: if src_host {
-            allocate_side_host(dev, src_count, src_size)
+            allocate_host_side(dev, host_mem, src_count, src_size)
         } else {
             allocate_side_device(dev, src_count, src_size)
         },
         dst: if dst_host {
-            allocate_side_host(dev, dst_count, dst_size)
+            allocate_host_side(dev, host_mem, dst_count, dst_size)
         } else {
             allocate_side_device(dev, dst_count, dst_size)
         },
@@ -448,6 +531,7 @@ fn run_benchmark(
     direction: Direction,
     pattern: Pattern,
     backend: Backend,
+    host_mem: HostMemKind,
     tokens_per_block: usize,
     num_blocks: usize,
     warmup_iters: usize,
@@ -475,7 +559,7 @@ fn run_benchmark(
             (NUM_LAYERS, layer_buf_size, 1, full_block_size * num_blocks)
         }
     };
-    let mem = allocate_memory(dev, direction, src_count, src_size, dst_count, dst_size);
+    let mem = allocate_memory(dev, direction, host_mem, src_count, src_size, dst_count, dst_size);
 
     let (src_addrs, dst_addrs) = match pattern {
         Pattern::FcToFc => build_fc_pairs(&mem, num_blocks),
@@ -588,6 +672,16 @@ fn parse_backends(raw: &[String]) -> Vec<Backend> {
         .collect()
 }
 
+fn parse_host_mem_kinds(raw: &[String]) -> Vec<HostMemKind> {
+    raw.iter()
+        .map(|s| {
+            HostMemKind::from_str(s).unwrap_or_else(|| {
+                panic!("unknown host-mem '{}', expected: {}", s, HostMemKind::all_labels())
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -625,13 +719,14 @@ fn main() {
     let directions = parse_directions(&cli.direction);
     let patterns = parse_patterns(&cli.pattern);
     let backends = parse_backends(&cli.backend);
+    let host_mem_kinds = parse_host_mem_kinds(&cli.host_mem);
     let tpb_options = &cli.tokens_per_block;
     let num_blocks_options = &cli.num_blocks;
     let warmup_iters = cli.warmup;
     let timed_iters = cli.iters;
 
     let total_tests =
-        tpb_options.len() * num_blocks_options.len() * directions.len() * patterns.len() * backends.len();
+        tpb_options.len() * num_blocks_options.len() * directions.len() * patterns.len() * backends.len() * host_mem_kinds.len();
 
     // Initialize Level Zero device.
     let dev = ZeDevice::new(cli.device).expect("Failed to create ZeDevice");
@@ -676,12 +771,16 @@ fn main() {
         "  backends: [{}]",
         backends.iter().map(|b| b.label()).collect::<Vec<_>>().join(", ")
     );
+    eprintln!(
+        "  host_mem: [{}]",
+        host_mem_kinds.iter().map(|h| h.label()).collect::<Vec<_>>().join(", ")
+    );
     eprintln!("  Total tests: {total_tests}");
     eprintln!();
 
     // CSV header.
     println!(
-        "tokens_per_block,num_blocks,pattern,direction,backend,total_bytes,inner_bytes,copy_size,num_copies,median_ms,bandwidth_gbps"
+        "tokens_per_block,num_blocks,pattern,direction,backend,host_mem,total_bytes,inner_bytes,copy_size,num_copies,median_ms,bandwidth_gbps"
     );
 
     let mut test_num = 0;
@@ -706,36 +805,53 @@ fn main() {
                     };
 
                     for &backend in &backends {
-                        test_num += 1;
+                        for &host_mem in &host_mem_kinds {
+                            // D2D doesn't involve host memory; skip extra host_mem variants.
+                            if matches!(direction, Direction::D2D)
+                                && !matches!(host_mem, HostMemKind::Pinned)
+                            {
+                                continue;
+                            }
 
-                        eprint!(
-                            "  [{test_num}/{total_tests}] tpb={tpb} N={num_blocks:>3} {:<8} {:<6} {:<12} ... ",
-                            pattern.label(),
-                            direction.label(),
-                            backend.label(),
-                        );
+                            test_num += 1;
 
-                        let (median_ms, bw) = run_benchmark(
-                            &dev,
-                            &cmd_copy,
-                            &cmd_compute,
-                            &kernel,
-                            direction,
-                            pattern,
-                            backend,
-                            tpb,
-                            num_blocks,
-                            warmup_iters,
-                            timed_iters,
-                        );
+                            let host_label = if matches!(direction, Direction::D2D) {
+                                "-"
+                            } else {
+                                host_mem.label()
+                            };
 
-                        println!(
-                            "{tpb},{num_blocks},{},{},{},{total_bytes},{inner},{copy_size},{num_copies},{median_ms:.4},{bw:.2}",
-                            pattern.label(),
-                            direction.label(),
-                            backend.label(),
-                        );
-                        eprintln!("{bw:.2} GB/s ({median_ms:.4} ms)");
+                            eprint!(
+                                "  [{test_num}/{total_tests}] tpb={tpb} N={num_blocks:>3} {:<8} {:<6} {:<12} host={:<7} ... ",
+                                pattern.label(),
+                                direction.label(),
+                                backend.label(),
+                                host_label,
+                            );
+
+                            let (median_ms, bw) = run_benchmark(
+                                &dev,
+                                &cmd_copy,
+                                &cmd_compute,
+                                &kernel,
+                                direction,
+                                pattern,
+                                backend,
+                                host_mem,
+                                tpb,
+                                num_blocks,
+                                warmup_iters,
+                                timed_iters,
+                            );
+
+                            println!(
+                                "{tpb},{num_blocks},{},{},{},{host_label},{total_bytes},{inner},{copy_size},{num_copies},{median_ms:.4},{bw:.2}",
+                                pattern.label(),
+                                direction.label(),
+                                backend.label(),
+                            );
+                            eprintln!("{bw:.2} GB/s ({median_ms:.4} ms)");
+                        }
                     }
                 }
             }
