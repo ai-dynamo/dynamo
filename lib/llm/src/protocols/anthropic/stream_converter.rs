@@ -83,7 +83,11 @@ impl AnthropicStreamConverter {
     /// Create a converter seeded with the original Anthropic request context.
     /// This allows the response stream to carry forward metadata that was lost
     /// during the Anthropic-to-OpenAI request conversion.
-    pub fn with_context(model: String, estimated_input_tokens: u32, context: AnthropicContext) -> Self {
+    pub fn with_context(
+        model: String,
+        estimated_input_tokens: u32,
+        context: AnthropicContext,
+    ) -> Self {
         let mut converter = Self::new(model, estimated_input_tokens);
         converter.api_context = Some(context);
         converter
