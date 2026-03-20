@@ -233,12 +233,12 @@ fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
             Some(serde_json::Value::Array(segments)) => {
                 let mut result = String::new();
                 for seg in segments {
-                    if let Some(s) = seg.as_str() {
-                        if !s.is_empty() {
-                            result.push_str("<think>");
-                            result.push_str(s);
-                            result.push_str("</think>");
-                        }
+                    if let Some(s) = seg.as_str()
+                        && !s.is_empty()
+                    {
+                        result.push_str("<think>");
+                        result.push_str(s);
+                        result.push_str("</think>");
                     }
                 }
                 if result.is_empty() {
