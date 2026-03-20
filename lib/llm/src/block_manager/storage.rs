@@ -101,7 +101,10 @@ use cudarc::driver::CudaContext;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use self::ze::ZeContext;
+use crate::block_manager::numa_allocator;
+
+use self::hpu::SynapseContext;
+use self::ze::{ZeContext, free_host_ze, malloc_host_prefer_writecombined_ze};
 
 /// Result type for storage operations
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
@@ -499,12 +502,14 @@ pub trait StorageBackendOps {
 pub enum DeviceBackend {
     Cuda,
     Ze,
+    Hpu,
 }
 
 #[derive(Clone)]
 pub enum DeviceContext {
     Cuda(Arc<CudaContext>),
     Ze(Arc<ZeContext>),
+    Synapse(Arc<SynapseContext>),
 }
 
 /// Trait for types that can provide a device context.
@@ -585,6 +590,7 @@ impl DeviceContextProvider for PinnedStorage {
         match &self.ctx {
             DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
             DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
+            DeviceContext::Synapse(ctx) => Arc::new(DeviceContext::Synapse(ctx.clone())),
         }
     }
 }
@@ -643,6 +649,9 @@ impl PinnedAllocator {
             DeviceBackend::Ze => Ok(Self {
                 ctx: DeviceContext::Ze(Ze::device_or_create(device_id)?),
             }),
+            DeviceBackend::Hpu => Ok(Self {
+                ctx: DeviceContext::Synapse(Synapse::device_or_create(device_id)?),
+            }),
         }
     }
 
@@ -650,6 +659,7 @@ impl PinnedAllocator {
         match &self.ctx {
             DeviceContext::Cuda(_) => DeviceBackend::Cuda,
             DeviceContext::Ze(_) => DeviceBackend::Ze,
+            DeviceContext::Synapse(_) => DeviceBackend::Hpu,
         }
     }
 
@@ -670,6 +680,7 @@ impl std::fmt::Debug for DeviceContext {
         match self {
             Self::Cuda(_) => write!(f, "DeviceContext::Cuda"),
             Self::Ze(_) => write!(f, "DeviceContext::Ze"),
+            Self::Synapse(_) => write!(f, "DeviceContext::Synapse"),
         }
     }
 }
@@ -679,6 +690,7 @@ impl StorageBackendOps for DeviceContext {
         match self {
             Self::Cuda(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
             Self::Ze(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
+            Self::Synapse(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
         }
     }
 
@@ -686,6 +698,7 @@ impl StorageBackendOps for DeviceContext {
         match self {
             Self::Cuda(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
             Self::Ze(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
+            Self::Synapse(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
         }
     }
 
@@ -696,6 +709,7 @@ impl StorageBackendOps for DeviceContext {
         match self {
             Self::Cuda(ctx) => StorageBackendOps::alloc_device(ctx, size),
             Self::Ze(ctx) => StorageBackendOps::alloc_device(ctx, size),
+            Self::Synapse(ctx) => StorageBackendOps::alloc_device(ctx, size),
         }
     }
 
@@ -703,6 +717,7 @@ impl StorageBackendOps for DeviceContext {
         match self {
             Self::Cuda(ctx) => StorageBackendOps::free_device(ctx, ptr),
             Self::Ze(ctx) => StorageBackendOps::free_device(ctx, ptr),
+            Self::Synapse(ctx) => StorageBackendOps::free_device(ctx, ptr),
         }
     }
 
@@ -710,6 +725,7 @@ impl StorageBackendOps for DeviceContext {
         match self {
             Self::Cuda(ctx) => StorageBackendOps::device_id(ctx),
             Self::Ze(ctx) => StorageBackendOps::device_id(ctx),
+            Self::Synapse(ctx) => StorageBackendOps::device_id(ctx),
         }
     }
 }
@@ -762,6 +778,7 @@ impl DeviceStorage {
         match ctx {
             DeviceContext::Cuda(ctx) => Self::new_from_torch_cuda(ctx, tensor),
             DeviceContext::Ze(ctx) => Self::new_from_torch_ze(ctx, tensor),
+            DeviceContext::Synapse(ctx) => Self::new_from_torch_synapse(ctx, tensor),
         }
     }
 
@@ -769,6 +786,7 @@ impl DeviceStorage {
         match &self.ctx {
             DeviceContext::Cuda(_) => DeviceBackend::Cuda,
             DeviceContext::Ze(_) => DeviceBackend::Ze,
+            DeviceContext::Synapse(_) => DeviceBackend::Hpu,
         }
     }
 
@@ -776,6 +794,7 @@ impl DeviceStorage {
         match &self.ctx {
             DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
             DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
+            DeviceContext::Synapse(ctx) => Arc::new(DeviceContext::Synapse(ctx.clone())),
         }
     }
     pub fn device_storage_type(&self) -> &DeviceStorageType {
@@ -861,6 +880,7 @@ impl DeviceAllocator {
         let ctx = match backend {
             DeviceBackend::Cuda => DeviceContext::Cuda(cuda::Cuda::device_or_create(device_id)?),
             DeviceBackend::Ze => DeviceContext::Ze(Ze::device_or_create(device_id)?),
+            DeviceBackend::Hpu => DeviceContext::Synapse(Synapse::device_or_create(device_id)?),
         };
         Ok(Self { ctx })
     }
@@ -869,6 +889,7 @@ impl DeviceAllocator {
         match &self.ctx {
             DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
             DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
+            DeviceContext::Synapse(ctx) => Arc::new(DeviceContext::Synapse(ctx.clone())),
         }
     }
 }
