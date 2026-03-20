@@ -3,7 +3,7 @@
 
 """Shared KV router configuration ArgGroup.
 
-Defines the 17 KvRouterConfig parameters once so that both
+Defines the 20 KvRouterConfig parameters once so that both
 ``dynamo.frontend`` and ``dynamo.router`` can reuse them without duplication.
 Field names on ``KvRouterConfigBase`` match the ``KvRouterConfig`` Python
 constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
@@ -36,11 +36,14 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_enable_cache_control",
     "router_queue_policy",
     "remote_indexer_component",
+    "shared_cache_multiplier",
+    "shared_cache_url",
+    "shared_cache_component",
 )
 
 
 class KvRouterConfigBase(ConfigBase):
-    """Mixin carrying the 17 KvRouterConfig fields."""
+    """Mixin carrying the 20 KvRouterConfig fields."""
 
     overlap_score_weight: float
     router_temperature: float
@@ -60,6 +63,9 @@ class KvRouterConfigBase(ConfigBase):
     router_enable_cache_control: bool
     router_queue_policy: str
     remote_indexer_component: Optional[str]
+    shared_cache_multiplier: float
+    shared_cache_url: Optional[str]
+    shared_cache_component: Optional[str]
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -67,7 +73,7 @@ class KvRouterConfigBase(ConfigBase):
 
 
 class KvRouterArgGroup(ArgGroup):
-    """CLI arguments for the 17 KvRouterConfig parameters."""
+    """CLI arguments for the 20 KvRouterConfig parameters."""
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
@@ -280,6 +286,42 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Component name of a standalone KV indexer to use for overlap scoring. "
                 "When set, the router queries the standalone indexer via the request plane instead "
                 "of maintaining a local radix tree (e.g. 'kv-indexer')."
+            ),
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-multiplier",
+            env_var="DYN_SHARED_CACHE_MULTIPLIER",
+            default=0.5,
+            help=(
+                "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
+                "Blocks in the shared cache are less valuable than device-local blocks. "
+                "E.g. 0.5 means each shared hit counts as half a device-local hit. "
+                "Default 0.5."
+            ),
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-url",
+            env_var="DYN_SHARED_CACHE_URL",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: HTTP URL of a shared KV cache pool "
+                "(e.g. 'http://localhost:8091/check_blocks'). "
+                "Mutually exclusive with --shared-cache-component."
+            ),
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-component",
+            env_var="DYN_SHARED_CACHE_COMPONENT",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Component name of a shared KV cache pool "
+                "for request-plane transport. Mutually exclusive with --shared-cache-url."
             ),
             arg_type=str,
         )

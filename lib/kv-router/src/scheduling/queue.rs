@@ -377,6 +377,7 @@ mod tests {
             priority_jump: 0.0,
             expected_output_tokens: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -696,6 +697,7 @@ mod tests {
             priority_jump: 0.0,
             expected_output_tokens: None,
             allowed_worker_ids: Some(allowed),
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;

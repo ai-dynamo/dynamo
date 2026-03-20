@@ -54,6 +54,11 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub assume_kv_reuse: Option<bool>,
+
+    /// Per-request override of `shared_cache_multiplier`.
+    #[builder(default)]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub shared_cache_multiplier: Option<f64>,
 }
 
 /// KV Router configuration parameters
@@ -141,6 +146,23 @@ pub struct KvRouterConfig {
     /// The standalone indexer handles its own event subscription and discovery.
     #[serde(default)]
     pub remote_indexer_component: Option<String>,
+
+    /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
+    /// Blocks available in the shared cache are less valuable than device-local blocks
+    /// because they need to be fetched. A value of 0.5 means each shared cache hit
+    /// counts as half a device-local hit. Default: 0.5.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub shared_cache_multiplier: f64,
+
+    /// Component name of the shared KV cache pool (Dynamo request plane transport).
+    /// Mutually exclusive with `shared_cache_url`.
+    #[serde(default)]
+    pub shared_cache_component: Option<String>,
+
+    /// HTTP URL of the shared KV cache pool.
+    /// Mutually exclusive with `shared_cache_component`.
+    #[serde(default)]
+    pub shared_cache_url: Option<String>,
 }
 
 impl Default for KvRouterConfig {
@@ -165,6 +187,9 @@ impl Default for KvRouterConfig {
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
+            shared_cache_multiplier: 0.5,
+            shared_cache_component: None,
+            shared_cache_url: None,
         }
     }
 }
@@ -184,6 +209,11 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     if config.router_track_output_blocks && !config.router_track_active_blocks {
         return Err(ValidationError::new(
             "router_track_output_blocks requires router_track_active_blocks=true",
+        ));
+    }
+    if config.shared_cache_component.is_some() && config.shared_cache_url.is_some() {
+        return Err(ValidationError::new(
+            "shared_cache_component and shared_cache_url are mutually exclusive",
         ));
     }
     Ok(())
@@ -235,5 +265,60 @@ impl KvRouterConfig {
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_weight > 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kv_router_config_rejects_mutually_exclusive_shared_cache_transports() {
+        let config = KvRouterConfig {
+            shared_cache_component: Some("shared-cache".to_string()),
+            shared_cache_url: Some("http://localhost:8091/check_blocks".to_string()),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
+        let too_small = KvRouterConfig {
+            shared_cache_multiplier: -0.1,
+            ..Default::default()
+        };
+        let too_large = KvRouterConfig {
+            shared_cache_multiplier: 1.1,
+            ..Default::default()
+        };
+
+        assert!(too_small.validate().is_err());
+        assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_router_config_override_rejects_out_of_range_shared_cache_multiplier() {
+        let too_small = RouterConfigOverride {
+            overlap_score_weight: None,
+            router_temperature: None,
+            assume_kv_reuse: None,
+            shared_cache_multiplier: Some(-0.1),
+        };
+        let too_large = RouterConfigOverride {
+            overlap_score_weight: None,
+            router_temperature: None,
+            assume_kv_reuse: None,
+            shared_cache_multiplier: Some(1.1),
+        };
+
+        assert!(too_small.validate().is_err());
+        assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_default_shared_cache_multiplier_is_half() {
+        assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.5);
     }
 }

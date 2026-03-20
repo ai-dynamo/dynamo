@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    ConcurrentRadixTree, ThreadPoolIndexer,
+    ConcurrentRadixTree, SharedKvCache, ThreadPoolIndexer,
     approx::PruneConfig,
     config::{KvRouterConfig, RouterConfigOverride},
     indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
@@ -43,6 +43,7 @@ pub mod recorder;
 pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;
+pub mod shared_cache;
 pub mod subscriber;
 pub mod worker_query;
 
@@ -304,6 +305,9 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
+    /// Optional external shared KV cache pool. When present, `find_best_match`
+    /// queries it in parallel with the indexer and factors shared hits into scoring.
+    shared_cache: Option<Box<dyn SharedKvCache>>,
 }
 
 impl KvRouter {
@@ -317,6 +321,7 @@ impl KvRouter {
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
         model_name: Option<String>,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -367,6 +372,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            shared_cache,
         })
     }
 
@@ -419,11 +425,36 @@ impl KvRouter {
         });
         let hash_elapsed = start.elapsed();
 
-        let overlap_scores = self
-            .indexer
-            .find_matches(block_hashes)
-            .instrument(tracing::info_span!("kv_router.find_matches"))
-            .await?;
+        // Query indexer and shared cache in parallel when shared cache is configured.
+        let (overlap_scores, shared_cache_hits) = if let Some(ref shared_cache) = self.shared_cache
+        {
+            let indexer_fut = self
+                .indexer
+                .find_matches(block_hashes.clone())
+                .instrument(tracing::info_span!("kv_router.find_matches"));
+            let shared_fut = shared_cache
+                .check_blocks(&block_hashes)
+                .instrument(tracing::info_span!("kv_router.shared_cache_check"));
+
+            let (indexer_result, shared_result) = tokio::join!(indexer_fut, shared_fut);
+            let overlaps = indexer_result?;
+            // Shared cache failure is non-fatal: log warning and fall back to empty hits.
+            let hits = match shared_result {
+                Ok(hits) => Some(hits),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Shared cache query failed, ignoring");
+                    None
+                }
+            };
+            (overlaps, hits)
+        } else {
+            let overlaps = self
+                .indexer
+                .find_matches(block_hashes)
+                .instrument(tracing::info_span!("kv_router.find_matches"))
+                .await?;
+            (overlaps, None)
+        };
         let find_matches_elapsed = start.elapsed();
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
@@ -450,6 +481,7 @@ impl KvRouter {
                 priority_jump,
                 expected_output_tokens,
                 allowed_worker_ids,
+                shared_cache_hits,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
@@ -653,5 +685,180 @@ impl Drop for KvRouter {
     fn drop(&mut self) {
         tracing::info!("Dropping KvRouter - cancelling background tasks");
         self.cancellation_token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use tokio::sync::watch;
+
+    use crate::kv_router::scheduler::KvSchedulerError;
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    struct FakeSharedCache {
+        hits: Option<dynamo_kv_router::protocols::SharedCacheHits>,
+        should_error: bool,
+    }
+
+    #[async_trait]
+    impl SharedKvCache for FakeSharedCache {
+        async fn check_blocks(
+            &self,
+            _block_hashes: &[LocalBlockHash],
+        ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
+            if self.should_error {
+                Err(KvRouterError::IndexerOffline)
+            } else {
+                Ok(self.hits.clone().unwrap_or_default())
+            }
+        }
+    }
+
+    struct InspectingSelector {
+        expected_hits: Option<u32>,
+        selected_worker: WorkerWithDpRank,
+    }
+
+    impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> for InspectingSelector {
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+            request: &dynamo_kv_router::scheduling::SchedulingRequest,
+            block_size: u32,
+        ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
+            let observed_hits = request
+                .shared_cache_hits
+                .as_ref()
+                .map(|hits| hits.total_hits);
+            assert_eq!(observed_hits, self.expected_hits);
+
+            Ok(dynamo_kv_router::protocols::WorkerSelectionResult {
+                worker: self.selected_worker,
+                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
+                overlap_blocks: 0,
+            })
+        }
+    }
+
+    async fn make_test_component(name: &str) -> dynamo_runtime::component::Component {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let namespace = drt.namespace(format!("test-ns-{name}")).unwrap();
+        namespace
+            .component(format!("test-component-{name}"))
+            .unwrap()
+    }
+
+    async fn make_test_router(
+        selector: Box<WorkerSelector>,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+    ) -> KvRouter {
+        let component = make_test_component("shared-cache-router").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+
+        let mut workers = HashMap::new();
+        workers.insert(0, ModelRuntimeConfig::default());
+        workers.insert(1, ModelRuntimeConfig::default());
+        let (_tx, rx) = watch::channel(workers);
+
+        let config = KvRouterConfig {
+            overlap_score_weight: 0.0,
+            router_temperature: 0.0,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            shared_cache_multiplier: 0.5,
+            ..Default::default()
+        };
+
+        KvRouter::new(
+            endpoint,
+            client,
+            rx,
+            2,
+            Some(selector),
+            Some(config),
+            "decode",
+            None,
+            shared_cache,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_passes_shared_cache_hits_to_scheduler() {
+        let router = make_test_router(
+            Box::new(InspectingSelector {
+                expected_hits: Some(2),
+                selected_worker: WorkerWithDpRank::from_worker_id(1),
+            }),
+            Some(Box::new(FakeSharedCache {
+                #[allow(clippy::single_range_in_vec_init)]
+                hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
+                    vec![0..2],
+                )),
+                should_error: false,
+            })),
+        )
+        .await;
+
+        let (worker, overlap) = router
+            .find_best_match(
+                None,
+                &[11, 12, 21, 22],
+                None,
+                None,
+                false,
+                None,
+                0.0,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(worker, WorkerWithDpRank::from_worker_id(1));
+        assert_eq!(overlap, 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_ignores_shared_cache_errors() {
+        let router = make_test_router(
+            Box::new(InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            }),
+            Some(Box::new(FakeSharedCache {
+                hits: None,
+                should_error: true,
+            })),
+        )
+        .await;
+
+        let (worker, overlap) = router
+            .find_best_match(
+                None,
+                &[11, 12, 21, 22],
+                None,
+                None,
+                false,
+                None,
+                0.0,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(worker, WorkerWithDpRank::from_worker_id(0));
+        assert_eq!(overlap, 0);
     }
 }
