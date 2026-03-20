@@ -14,6 +14,60 @@ import (
 // HostProcPath is the mount point for the host's /proc in DaemonSet pods.
 const HostProcPath = "/host/proc"
 
+// ProcessDetails holds pid views and cmdline for a process as observed via a proc root.
+type ProcessDetails struct {
+	HostPID      int
+	NamespacePID int
+	Cmdline      string
+}
+
+// ReadProcessDetails returns the best-effort pid views and cmdline for a process.
+func ReadProcessDetails(procRoot string, pid int) ProcessDetails {
+	details := ProcessDetails{
+		HostPID:      pid,
+		NamespacePID: pid,
+	}
+	if pid <= 0 {
+		return details
+	}
+
+	if data, err := os.ReadFile(fmt.Sprintf("%s/%d/status", procRoot, pid)); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "NSpid:") {
+				continue
+			}
+			fields := strings.Fields(strings.TrimPrefix(line, "NSpid:"))
+			if len(fields) == 0 {
+				break
+			}
+
+			nspids := make([]int, 0, len(fields))
+			parseFailed := false
+			for _, field := range fields {
+				value, err := strconv.Atoi(field)
+				if err != nil {
+					parseFailed = true
+					break
+				}
+				nspids = append(nspids, value)
+			}
+			if parseFailed || len(nspids) == 0 {
+				break
+			}
+
+			details.HostPID = nspids[0]
+			details.NamespacePID = nspids[len(nspids)-1]
+			break
+		}
+	}
+
+	if data, err := os.ReadFile(fmt.Sprintf("%s/%d/cmdline", procRoot, pid)); err == nil {
+		details.Cmdline = strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+	}
+
+	return details
+}
+
 // ProcessTreePIDs walks the process tree rooted at rootPID and returns all PIDs.
 // Used by nsrestore for in-namespace CUDA PID discovery.
 func ProcessTreePIDs(rootPID int) []int {

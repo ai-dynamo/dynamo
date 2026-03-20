@@ -1,6 +1,10 @@
 package common
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseProcExitCode(t *testing.T) {
 	tests := []struct {
@@ -119,5 +123,31 @@ func TestParseNSPIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReadProcessDetails(t *testing.T) {
+	procRoot := t.TempDir()
+	pid := 1018
+	procDir := filepath.Join(procRoot, "1018")
+	if err := os.MkdirAll(procDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", procDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(procDir, "status"), []byte("Name:\tpython3\nNSpid:\t2402711 1018\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(status): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(procDir, "cmdline"), []byte("python3\x00-m\x00dynamo.vllm\x00"), 0644); err != nil {
+		t.Fatalf("WriteFile(cmdline): %v", err)
+	}
+
+	details := ReadProcessDetails(procRoot, pid)
+	if details.HostPID != 2402711 {
+		t.Fatalf("HostPID = %d, want 2402711", details.HostPID)
+	}
+	if details.NamespacePID != 1018 {
+		t.Fatalf("NamespacePID = %d, want 1018", details.NamespacePID)
+	}
+	if details.Cmdline != "python3 -m dynamo.vllm" {
+		t.Fatalf("Cmdline = %q, want %q", details.Cmdline, "python3 -m dynamo.vllm")
 	}
 }
