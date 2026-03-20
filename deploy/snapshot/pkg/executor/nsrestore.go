@@ -86,14 +86,9 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		return 0, err
 	}
 
-	// CUDA restore — discover PIDs in the restored process tree, then restore+unlock
+	// CUDA restore — use the CUDA-only namespace PID list captured in the manifest
 	if !m.CUDA.IsEmpty() {
-		candidates := common.ProcessTreePIDs(int(restoredPID))
-		cudaPIDs := cuda.FilterProcesses(ctx, candidates, log)
-		if len(cudaPIDs) == 0 {
-			return 0, fmt.Errorf("checkpoint has %d CUDA PIDs but none found in restored process tree", len(m.CUDA.PIDs))
-		}
-		if err := cuda.RestoreAndUnlockProcessTree(ctx, cudaPIDs, opts.CUDADeviceMap, log); err != nil {
+		if err := cuda.RestoreAndUnlockProcessTree(ctx, m.CUDA.PIDs, opts.CUDADeviceMap, log); err != nil {
 			return 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
 	}

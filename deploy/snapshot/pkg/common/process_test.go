@@ -1,8 +1,6 @@
 package common
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestParseProcExitCode(t *testing.T) {
 	tests := []struct {
@@ -63,5 +61,15 @@ func TestParseProcExitCode(t *testing.T) {
 				t.Errorf("exit code = %d, want %d", int(ws), tc.wantCode)
 			}
 		})
+	}
+}
+
+func TestParseNSPIDs(t *testing.T) {
+	got, err := parseNSPIDs("Name:\tpython3\nNSpid:\t2402711 1018\n", 2402711)
+	if err != nil {
+		t.Fatalf("parseNSPIDs: %v", err)
+	}
+	if len(got) != 2 || got[0] != 2402711 || got[1] != 1018 {
+		t.Fatalf("parseNSPIDs = %v, want [2402711 1018]", got)
 	}
 }
