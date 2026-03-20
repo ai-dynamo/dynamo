@@ -85,12 +85,14 @@ def pytest_runtest_setup(item):
         if value:
             allure.dynamic.parameter(name, value)
 
-    # Labels used by allurerc.mjs plugin filters for the unified dashboard
+    # Labels used by allurerc.mjs plugin filters for the unified dashboard.
+    # Use "dynamo_" prefix to avoid collision with allure-pytest's built-in
+    # "framework" label (which is always set to "pytest").
     env_labels = {
-        "workflow": os.environ.get("DYNAMO_TEST_WORKFLOW"),
-        "framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
-        "platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
-        "testType": os.environ.get("DYNAMO_TEST_TYPE"),
+        "dynamo_workflow": os.environ.get("DYNAMO_TEST_WORKFLOW"),
+        "dynamo_framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "dynamo_platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "dynamo_testType": os.environ.get("DYNAMO_TEST_TYPE"),
     }
     for name, value in env_labels.items():
         if value:

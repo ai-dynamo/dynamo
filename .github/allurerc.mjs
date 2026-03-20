@@ -3,8 +3,16 @@
 
 import { defineConfig } from "allure";
 
+// Labels use "dynamo_" prefix to avoid collision with allure-pytest's
+// built-in "framework" label (always set to "pytest").
 const byLabel = (name, value) => ({ labels }) =>
   labels.find((l) => l.name === name && l.value === value);
+
+// Also match on pytest marker tags (e.g. @pytest.mark.vllm adds tag "vllm")
+// as a fallback for tests where conftest.py hook doesn't fire.
+const byTagOrLabel = (tagValue, labelName, labelValue) => ({ labels }) =>
+  labels.find((l) => l.name === labelName && l.value === labelValue) ||
+  labels.find((l) => l.name === "tag" && l.value === tagValue);
 
 export default defineConfig({
   name: "Dynamo Test Health",
@@ -16,7 +24,7 @@ export default defineConfig({
       options: {
         reportName: "PR",
         singleFile: false,
-        filter: byLabel("workflow", "PR"),
+        filter: byLabel("dynamo_workflow", "PR"),
         publish: true,
       },
     },
@@ -25,7 +33,7 @@ export default defineConfig({
       options: {
         reportName: "Post-Merge",
         singleFile: false,
-        filter: byLabel("workflow", "Post-Merge CI Pipeline"),
+        filter: byLabel("dynamo_workflow", "Post-Merge CI Pipeline"),
         publish: true,
       },
     },
@@ -34,7 +42,7 @@ export default defineConfig({
       options: {
         reportName: "Nightly",
         singleFile: false,
-        filter: byLabel("workflow", "Nightly CI Pipeline"),
+        filter: byLabel("dynamo_workflow", "Nightly CI Pipeline"),
         publish: true,
       },
     },
@@ -43,7 +51,7 @@ export default defineConfig({
       options: {
         reportName: "Release",
         singleFile: false,
-        filter: byLabel("workflow", "Release Pipeline"),
+        filter: byLabel("dynamo_workflow", "Release Pipeline"),
         publish: true,
       },
     },
@@ -52,7 +60,7 @@ export default defineConfig({
       options: {
         reportName: "vLLM",
         singleFile: false,
-        filter: byLabel("framework", "vllm"),
+        filter: byTagOrLabel("vllm", "dynamo_framework", "vllm"),
         publish: true,
       },
     },
@@ -61,7 +69,7 @@ export default defineConfig({
       options: {
         reportName: "SGLang",
         singleFile: false,
-        filter: byLabel("framework", "sglang"),
+        filter: byTagOrLabel("sglang", "dynamo_framework", "sglang"),
         publish: true,
       },
     },
@@ -70,7 +78,7 @@ export default defineConfig({
       options: {
         reportName: "TRT-LLM",
         singleFile: false,
-        filter: byLabel("framework", "trtllm"),
+        filter: byTagOrLabel("trtllm", "dynamo_framework", "trtllm"),
         publish: true,
       },
     },
