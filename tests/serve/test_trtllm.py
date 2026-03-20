@@ -265,6 +265,47 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
+    # LLaVA raw-embeddings E/PD test
+    # Validates the raw-embeddings code path where pre-computed vision embeddings
+    # (.pt tensor file) are sent via file:// URL instead of a raw image URL.
+    #
+    # Flow:
+    #   1. Launch script generates embeddings using standalone HF vision encoder
+    #   2. Encode + Aggregated PD workers start for LLaVA
+    #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.pt
+    #
+    # Uses gpu_1 (all workers share GPU 0 after embeddings generation frees memory).
+    # Marked nightly because the 7B model + embeddings generation is heavier than
+    # the standard 2B multimodal tests.
+    "raw_embeddings_epd": TRTLLMConfig(
+        name="raw_embeddings_epd",
+        directory=trtllm_dir,
+        script_name="agg_raw_embeddings_llava.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+            pytest.mark.timeout(
+                900
+            ),  # Embeddings generation (~60s) + model load (~120s) + inference
+        ],
+        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=600,
+        # Embeddings generation + worker startup takes longer than normal
+        delayed_start=180,
+        request_payloads=[
+            multimodal_payload_default(
+                image_url="file:///tmp/llava_embeddings.pt",
+                text="Describe what this image shows.",
+                expected_response=["bench", "person", "image", "picture"],
+            )
+        ],
+        env={
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
