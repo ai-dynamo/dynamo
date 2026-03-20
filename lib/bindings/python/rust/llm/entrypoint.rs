@@ -469,11 +469,12 @@ pub fn run_input<'p>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1))]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
     trace_file: PathBuf,
     extra_engine_args: Option<PathBuf>,
+    num_workers: usize,
 ) -> PyResult<PyObject> {
     let report = py.allow_threads(move || {
         let args = if let Some(extra_args_path) = extra_engine_args {
@@ -488,7 +489,7 @@ pub fn run_mocker_trace_replay(
             MockEngineArgs::default()
         };
 
-        dynamo_mocker::simulation::simulate_trace_file(args, &trace_file)
+        dynamo_mocker::simulation::simulate_trace_file(args, &trace_file, num_workers)
     });
     let report = report.map_err(to_pyerr)?;
     pythonize(py, &report)

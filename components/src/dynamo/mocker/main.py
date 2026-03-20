@@ -94,6 +94,7 @@ async def worker():
                 trace_file=args.trace_file,
                 output_file=args.output_file,
                 extra_engine_args=extra_engine_args_path,
+                num_workers=args.num_workers,
             )
             return
 

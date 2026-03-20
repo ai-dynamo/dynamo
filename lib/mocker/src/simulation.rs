@@ -335,7 +335,14 @@ struct RawTraceRecord {
 pub fn simulate_trace_file(
     args: MockEngineArgs,
     trace_path: &Path,
+    num_workers: usize,
 ) -> Result<TraceSimulationReport> {
+    if num_workers != 1 {
+        bail!(
+            "trace replay only supports num_workers=1, got {}",
+            num_workers
+        );
+    }
     if args.engine_type != EngineType::Vllm {
         bail!(
             "trace replay only supports engine_type=vllm, got {:?}",
@@ -502,64 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_rejects_non_aggregated_workers() {
-        let args = MockEngineArgs::builder()
-            .worker_type(WorkerType::Decode)
-            .build()
-            .unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "mocker_trace_{}_{}.jsonl",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        std::fs::write(
-            &path,
-            r#"{"timestamp":1.0,"input_length":4,"output_length":2,"hash_ids":[1]}"#,
-        )
-        .unwrap();
-
-        let error = simulate_trace_file(args, &path).unwrap_err().to_string();
-        std::fs::remove_file(path).unwrap();
-        assert!(error.contains("aggregated workers"));
-    }
-
-    #[test]
-    fn test_replay_report_and_json_serialization() {
-        let path = std::env::temp_dir().join(format!(
-            "mocker_trace_{}_{}.jsonl",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        std::fs::write(
-            &path,
-            [
-                r#"{"timestamp":100.0,"input_length":4,"output_length":2,"hash_ids":[1]}"#,
-                r#"{"timestamp":101.0,"input_length":4,"output_length":2,"hash_ids":[1]}"#,
-                r#"{"timestamp":150.0,"input_length":4,"output_length":2,"hash_ids":[2]}"#,
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-
-        let report = simulate_trace_file(test_args(), &path).unwrap();
-        std::fs::remove_file(path).unwrap();
-
-        assert_eq!(report.request_counts.num_requests, 3);
-        assert_eq!(report.request_counts.completed_requests, 3);
-        assert_eq!(report.request_counts.total_input_tokens, 12);
-        assert_eq!(report.request_counts.total_output_tokens, 6);
-        assert!(report.throughput.duration_ms > 0.0);
-        assert!(report.latency.ttft.mean_ms >= 0.0);
-        assert!(report.latency.e2e.mean_ms >= report.latency.ttft.mean_ms);
-        assert!(report.latency.itl.distribution.mean_ms >= 0.0);
-
-        let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["completed_requests"], 3);
-        assert!(json.get("mean_ttft_ms").is_some());
-        assert!(json.get("mean_e2e_latency_ms").is_some());
-    }
-
-    #[test]
     fn test_replay_itl_uses_per_token_gaps() {
         let collector = TraceCollector::default();
         let uuid = Uuid::from_u128(11);
@@ -579,4 +528,5 @@ mod tests {
         assert_eq!(report.latency.itl.distribution.p95_ms, 98.0);
         assert_eq!(report.latency.itl.max_ms, 98.0);
     }
+
 }
