@@ -1,1 +1,1 @@
-{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[disaggregated]","status":"passed","testResultsByEnv":{"default":"3b482b429d328217272f9e0e390944a3"}}
+{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[aggregated]","status":"passed","testResultsByEnv":{"default":"6c7f31246c85159d3e618e5624820e8f"}}

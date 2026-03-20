@@ -1,1 +1,1 @@
-{"id":"9c7ad54d0d73ccebc0b94d5477074cf9","fullName":"tests.serve.test_sglang#test_sglang_deployment","name":"test_sglang_deployment[kv_events-2]","status":"passed","testResultsByEnv":{"default":"70108577155669487f0be0b060f09ac4"}}
+{"id":"9c7ad54d0d73ccebc0b94d5477074cf9","fullName":"tests.serve.test_sglang#test_sglang_deployment","name":"test_sglang_deployment[disaggregated_same_gpu-2]","status":"passed","testResultsByEnv":{"default":"c86a169965a05c120748fb73b1a1f0d4"}}

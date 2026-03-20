@@ -1,1 +1,1 @@
-{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[trtllm-agg]","status":"passed","testResultsByEnv":{"default":"493911e8feee07cfdcc15b1e59e4f84f"}}
+{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[sglang-agg_router]","status":"passed","testResultsByEnv":{"default":"119c66ff07c19c722ee9b78e1f3d4e56"}}

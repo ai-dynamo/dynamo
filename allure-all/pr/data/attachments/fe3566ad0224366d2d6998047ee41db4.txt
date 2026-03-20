@@ -1,3 +1,0 @@
-INFO     dynamo.vllm.omni.omni_handler:omni_handler.py:365 Video diffusion request: prompt='a drone...', size=832x480, frames=32, fps=16
-INFO     dynamo.vllm.omni.omni_handler:omni_handler.py:340 I2V: attached image (64x64) to multi_modal_data
-INFO     dynamo.vllm.omni.omni_handler:omni_handler.py:365 Video diffusion request: prompt='a drone...', size=832x480, frames=32, fps=16

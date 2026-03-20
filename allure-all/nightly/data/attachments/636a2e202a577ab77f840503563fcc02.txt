@@ -1,0 +1,219 @@
+[2m2026-03-20T17:15:52.367203Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4242 in /workspace
+[2m2026-03-20T17:15:52.368262Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4242
+[2m2026-03-20T17:15:52.468915Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4242
+[2m2026-03-20T17:15:52.469199Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-20T17:15:52.471140Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-20T17:15:52.471845Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2426 --advertise-client-urls http://0.0.0.0:2426 --listen-peer-urls http://0.0.0.0:2427 --initial-advertise-peer-urls http://localhost:2427 --initial-cluster default=http://localhost:2427 --data-dir /tmp/etcd_pf7ie9st in /workspace
+[2m2026-03-20T17:15:52.472717Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2426
+[2m2026-03-20T17:15:52.573365Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2426
+[2m2026-03-20T17:15:52.577467Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated test_deployment
+[2m2026-03-20T17:15:52.577554Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-03-20T17:15:52.577607Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-03-20T17:15:52.577818Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/sglang/launch/agg.sh in /workspace/examples/backends/sglang
+[2m2026-03-20T17:15:52.579000Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8047/v1/models
+[2m2026-03-20T17:16:14.600351Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8047/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-03-20T17:16:26.611844Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8047/v1/models (attempt=18, elapsed=33.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1774026985,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-20T17:16:26.611995Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8047/health
+[2m2026-03-20T17:16:27.614176Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8047/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 3156070114803001865,
+      "transport": {
+        "tcp": "10.1.68.131:42467/2bcc9d0c3f0f2a09/generate"
+      }
+    }
+  ]
+}
+[2m2026-03-20T17:16:27.614463Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-03-20T17:16:27.614697Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:16:31.003552Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=3.39s
+[2m2026-03-20T17:16:31.003943Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 5/6 expected keywords: ['AI', 'knock', 'joke', 'think', 'intelligence']
+[2m2026-03-20T17:16:31.004024Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-20T17:16:31.004148Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:16:36.836429Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=5.83s
+[2m2026-03-20T17:16:36.836798Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:16:36.836893Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-20T17:16:36.837007Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:16:42.628802Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=5.79s
+[2m2026-03-20T17:16:42.629216Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:16:42.629297Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-20T17:16:42.629372Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: CompletionPayload
+[2m2026-03-20T17:16:42.629551Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:16:48.419485Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=5.79s
+[2m2026-03-20T17:16:48.419883Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:16:48.419951Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[2m2026-03-20T17:16:48.420043Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:16:54.214160Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=5.79s
+[2m2026-03-20T17:16:54.214598Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:16:54.214676Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[2m2026-03-20T17:16:54.214788Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:17:00.011410Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=5.80s
+[2m2026-03-20T17:17:00.011788Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:17:00.011856Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[2m2026-03-20T17:17:00.011929Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ResponsesPayload
+[2m2026-03-20T17:17:00.012083Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/responses" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": "Tell me a knock knock joke about AI.",
+  "max_output_tokens": 200,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:17:01.148437Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=1.14s
+[2m2026-03-20T17:17:01.148978Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:17:01.149056Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-20T17:17:01.149116Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ResponsesStreamPayload
+[2m2026-03-20T17:17:01.149266Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/responses" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": "Tell me a knock knock joke about AI.",
+  "stream": true,
+  "max_output_tokens": 200,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-03-20T17:17:01.151241Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.00s
+[2m2026-03-20T17:17:02.284806Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-03-20T17:17:02.284943Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-03-20T17:17:02.285023Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: SGLangMetricsPayload
+[2m2026-03-20T17:17:02.285168Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl "http://localhost:8108/metrics"
+[2m2026-03-20T17:17:02.296487Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.01s
+[2m2026-03-20T17:17:02.297068Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found 10 unique dynamo_component_* metrics (minimum required: 7)
+[2m2026-03-20T17:17:02.297287Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_requests_total with count: 8
+[2m2026-03-20T17:17:02.297509Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_uptime_seconds = 61.35575218s
+[2m2026-03-20T17:17:02.297703Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_total_blocks = 0.0
+[2m2026-03-20T17:17:02.297893Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_gpu_cache_usage_percent = 0.0
+[2m2026-03-20T17:17:02.298082Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_model_load_time_seconds = 23.54s
+[2m2026-03-20T17:17:02.298333Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found 54 unique sglang:* metrics (minimum required: 20)
+[2m2026-03-20T17:17:02.298530Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: sglang metrics include dynamo_namespace label (found 77 metrics)
+[2m2026-03-20T17:17:02.298736Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: sglang metrics include dynamo_component label (found 77 metrics)
+[2m2026-03-20T17:17:02.298946Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: sglang metrics include dynamo_endpoint label (found 77 metrics)
+[2m2026-03-20T17:17:02.299127Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: sglang metrics include model label (found 77 metrics)
+[2m2026-03-20T17:17:02.299309Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: sglang metrics include model_name label (found 77 metrics)
+[2m2026-03-20T17:17:02.299368Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+# HELP dynamo_component_inflight_requests Number of requests currently being processed by work handler
+# TYPE dynamo_component_inflight_requests gauge
+dynamo_component_inflight_requests{dynamo_compone...
+[2m2026-03-20T17:17:02.302715Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3259
+[2m2026-03-20T17:17:10.419395Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3261 name: tee
+[2m2026-03-20T17:17:10.419552Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3261 tee
+[2m2026-03-20T17:17:10.421892Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3260 name: sed
+[2m2026-03-20T17:17:10.421987Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3260 sed
+[2m2026-03-20T17:17:10.427814Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3246
+[2m2026-03-20T17:17:10.530415Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3247 name: sed
+[2m2026-03-20T17:17:10.530530Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3247 sed
+[2m2026-03-20T17:17:10.533207Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3234
+[2m2026-03-20T17:17:10.636097Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3235 name: sed
+[2m2026-03-20T17:17:10.636209Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3235 sed
