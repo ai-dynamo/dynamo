@@ -285,7 +285,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
             pytest.mark.timeout(
                 900
             ),  # Embeddings generation (~60s) + model load (~120s) + inference
