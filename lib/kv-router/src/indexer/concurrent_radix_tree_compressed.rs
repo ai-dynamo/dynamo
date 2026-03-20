@@ -609,26 +609,34 @@ impl ConcurrentRadixTreeCompressed {
     ) {
         let mut current_parent = parent.clone();
         let mut remaining = blocks;
-        // Track the last ExternalSequenceBlockHash we matched to re-validate
-        // `current_parent` at the top of each iteration. A concurrent thread
-        // may have split `current_parent` since we last held its lock,
-        // shortening its edge and moving our last-matched hash into a
-        // newly-created suffix child. `resolve_lookup` detects this and
-        // returns the correct node so we attach the next child in the right place.
+        // Track the last ExternalSequenceBlockHash we matched to detect if
+        // `current_parent` was split by a concurrent thread between iterations.
+        // A split shortens `current_parent`'s edge and moves our last-matched
+        // hash into a new suffix child. We detect this cheaply inside the write
+        // lock we already take on `current_parent`, so no extra lock is needed
+        // in the common case.
         let mut last_ext_hash: Option<ExternalSequenceBlockHash> = None;
 
         while !remaining.is_empty() {
-            // Re-resolve current_parent in case another thread split it.
-            if let Some(hash) = last_ext_hash {
-                let wl = lookup.get_mut(&worker).unwrap();
-                if let Some(resolved) = Self::resolve_lookup(wl, hash) {
-                    current_parent = resolved;
-                }
-            }
             let first_local = remaining[0].tokens_hash;
 
             let child = {
                 let mut parent_guard = current_parent.write();
+
+                // Detect concurrent split: if last_ext_hash is no longer in
+                // this node's edge_index, another thread shortened this edge.
+                // Drop the lock, re-resolve to the correct suffix node, retry.
+                if let Some(hash) = last_ext_hash {
+                    if !parent_guard.edge_index.contains_key(&hash) {
+                        drop(parent_guard);
+                        let wl = lookup.get_mut(&worker).unwrap();
+                        if let Some(resolved) = Self::resolve_lookup(wl, hash) {
+                            current_parent = resolved;
+                        }
+                        continue;
+                    }
+                }
+
                 match parent_guard.children.get(&first_local).cloned() {
                     Some(existing) => existing,
                     None => {
