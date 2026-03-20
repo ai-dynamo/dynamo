@@ -8,7 +8,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 import kr8s
 import requests
@@ -453,6 +453,31 @@ class PodProcess:
 
 
 @dataclass
+class PodStatusDetail:
+    """Container-level status snapshot for a single container in a pod."""
+
+    pod_name: str
+    container_name: str
+    state: Literal["Waiting", "Terminated", "Running", "Unknown"]
+    reason: str = ""
+    message: str = ""
+    exit_code: Optional[int] = None
+    restart_count: int = 0
+
+    def format(self) -> str:
+        parts = [f"{self.pod_name}/{self.container_name}: {self.state}"]
+        if self.reason:
+            parts[0] += f": {self.reason}"
+        if self.message:
+            parts[0] += f" ({self.message})"
+        if self.exit_code is not None:
+            parts[0] += f" (exit_code={self.exit_code})"
+        if self.restart_count > 0:
+            parts[0] += f" [restarts={self.restart_count}]"
+        return parts[0]
+
+
+@dataclass
 class ManagedDeployment:
     log_dir: str
     deployment_spec: DeploymentSpec
@@ -660,7 +685,76 @@ class ManagedDeployment:
                     f"Unexpected exception while checking deployment status: {e}"
                 )
             await asyncio.sleep(sleep)
-        raise TimeoutError("Deployment failed to become ready within timeout")
+
+        # Collect pod diagnostics before raising
+        pod_details = await self._get_pod_status_details()
+        elapsed = time.time() - start_time
+        msg = (
+            f"Deployment {self._deployment_name} failed to reach "
+            f"Ready={desired_ready_condition_val}, state={desired_state_val} "
+            f"within {elapsed:.0f}s (timeout={timeout}s)"
+        )
+        if pod_details:
+            detail_lines = "\n".join(f"  {d.format()}" for d in pod_details)
+            msg += f"\n\nPod status at timeout:\n{detail_lines}"
+        raise TimeoutError(msg)
+
+    async def _get_pod_status_details(self) -> List[PodStatusDetail]:
+        """Collect container-level status for all pods owned by this deployment.
+
+        Returns a list of PodStatusDetail objects. Returns empty list on any
+        API failure so callers never need to guard against exceptions.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+
+            details: List[PodStatusDetail] = []
+            for pod in pods.items:
+                pod_name = pod.metadata.name
+                phase = pod.status.phase or "Unknown"
+
+                if not pod.status.container_statuses:
+                    details.append(
+                        PodStatusDetail(
+                            pod_name=pod_name,
+                            container_name="*",
+                            state="Unknown",
+                            reason=f"{phase} (no container status)",
+                        )
+                    )
+                    continue
+
+                for cs in pod.status.container_statuses:
+                    detail = PodStatusDetail(
+                        pod_name=pod_name,
+                        container_name=cs.name,
+                        restart_count=cs.restart_count or 0,
+                    )
+
+                    if cs.state.waiting:
+                        detail.state = "Waiting"
+                        detail.reason = cs.state.waiting.reason or ""
+                        detail.message = cs.state.waiting.message or ""
+                    elif cs.state.terminated:
+                        detail.state = "Terminated"
+                        detail.reason = cs.state.terminated.reason or ""
+                        detail.exit_code = cs.state.terminated.exit_code
+                    elif cs.state.running:
+                        detail.state = "Running"
+                    else:
+                        detail.state = "Unknown"
+
+                    details.append(detail)
+
+            return details
+
+        except Exception as e:
+            self._logger.debug(f"Failed to collect pod status details: {e}")
+            return []
 
     async def _restart_nats(self):
         NATS_STS_NAME = "dynamo-platform-nats"

@@ -121,6 +121,7 @@ runs:
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
+        DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
       run: |
         mkdir -p test-results
         pytest tests/deploy/test_deploy.py \
@@ -176,4 +177,13 @@ runs:
       with:
         name: test-results-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Pod Logs
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      if: always()
+      with:
+        name: pod-logs-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: ${{ github.workspace }}/test-output/
+        if-no-files-found: warn
         retention-days: 7
