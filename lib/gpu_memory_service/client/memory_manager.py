@@ -123,6 +123,33 @@ class LocalMapping:
         )
 
 
+@dataclass(frozen=True)
+class AllocationRecord:
+    """Allocation metadata that supports both attribute and mapping access."""
+
+    allocation_id: str
+    size: int
+    aligned_size: int
+    tag: str
+    layout_slot: int
+
+    @classmethod
+    def from_response(cls, response: GetAllocationResponse) -> "AllocationRecord":
+        return cls(
+            allocation_id=response.allocation_id,
+            size=int(response.size),
+            aligned_size=int(response.aligned_size),
+            tag=str(response.tag),
+            layout_slot=int(response.layout_slot),
+        )
+
+    def __getitem__(self, key: str) -> object:
+        return getattr(self, key)
+
+    def get(self, key: str, default: object = None) -> object:
+        return getattr(self, key, default)
+
+
 class GMSClientMemoryManager:
     """Unified memory manager for GPU Memory Service.
 
@@ -173,6 +200,10 @@ class GMSClientMemoryManager:
     @property
     def total_bytes(self) -> int:
         return sum(m.aligned_size for m in self._mappings.values())
+
+    @property
+    def committed(self) -> bool:
+        return self._client is not None and self._client.committed
 
     # ==================== Tier 1: Connection ====================
 
@@ -255,6 +286,16 @@ class GMSClientMemoryManager:
             )
         return True
 
+    def clear_all_handles(self) -> int:
+        """Clear server allocations for a fresh RW session.
+
+        The server already clears the committed layout on RW connect, so this
+        is a local compatibility hook for callers that want an explicit reset
+        before repopulating allocations.
+        """
+        self._require_rw()
+        return 0
+
     def commit(self) -> bool:
         """Synchronize, unmap writer mappings, then commit.
 
@@ -284,8 +325,17 @@ class GMSClientMemoryManager:
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()
 
-    def list_handles(self, tag: Optional[str] = None) -> List[GetAllocationResponse]:
-        return self._client_rpc.list_allocations(tag)
+    def list_handles(self, tag: Optional[str] = None) -> List[AllocationRecord]:
+        return [
+            AllocationRecord.from_response(info)
+            for info in self._client_rpc.list_allocations(tag)
+        ]
+
+    def get_allocation_id(self, va: int) -> str:
+        mapping = self._mappings.get(va)
+        if mapping is None:
+            raise KeyError(f"Unknown VA 0x{va:x}")
+        return mapping.allocation_id
 
     # ==================== Tier 1: Metadata ====================
 

@@ -7,10 +7,12 @@ This module provides the client-side components for interacting with the
 GPU Memory Service:
 
 - GMSClientMemoryManager: Manages local VA mappings of remote GPU memory
+- GMSStorageClient: Save and restore GMS state to disk
 
 For PyTorch integration (MemPool, tensor utilities), see gpu_memory_service.client.torch.
 """
 
+from gpu_memory_service.client.gms_storage_client import GMSStorageClient, SaveManifest
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -19,4 +21,6 @@ from gpu_memory_service.client.memory_manager import (
 __all__ = [
     "GMSClientMemoryManager",
     "StaleMemoryLayoutError",
+    "GMSStorageClient",
+    "SaveManifest",
 ]
