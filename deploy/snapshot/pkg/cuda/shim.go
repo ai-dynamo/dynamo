@@ -57,7 +57,15 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, cudaCheckpointBinary, args...)
-	details := common.ReadProcessDetails("/proc", pid)
+	details := common.ProcessDetails{
+		ObservedPID:   pid,
+		OutermostPID:  pid,
+		InnermostPID:  pid,
+		NamespacePIDs: []int{pid},
+	}
+	if process, err := common.ReadProcessDetails("/proc", pid); err == nil {
+		details = process
+	}
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	duration := time.Since(start)
@@ -65,8 +73,8 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	if err != nil {
 		log.Error(err, "cuda-checkpoint command failed",
 			"pid", pid,
-			"host_pid", details.HostPID,
-			"namespace_pid", details.NamespacePID,
+			"outermost_pid", details.OutermostPID,
+			"innermost_pid", details.InnermostPID,
 			"cmdline", details.Cmdline,
 			"action", action,
 			"duration", duration,
@@ -76,8 +84,8 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	}
 	log.Info("cuda-checkpoint command succeeded",
 		"pid", pid,
-		"host_pid", details.HostPID,
-		"namespace_pid", details.NamespacePID,
+		"outermost_pid", details.OutermostPID,
+		"innermost_pid", details.InnermostPID,
 		"cmdline", details.Cmdline,
 		"action", action,
 		"duration", duration,

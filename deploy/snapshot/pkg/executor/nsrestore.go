@@ -85,10 +85,40 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if err != nil {
 		return 0, err
 	}
+	processes, err := common.ReadProcessTable("/proc")
+	if err != nil {
+		return 0, fmt.Errorf("failed to read restored process table: %w", err)
+	}
+	log.Info("Restored process table snapshot",
+		"proc_root", "/proc",
+		"criu_callback_pid", restoredPID,
+		"process_count", len(processes),
+		"manifest_cuda_pids", m.CUDA.PIDs,
+	)
+	for _, process := range processes {
+		log.Info("Restored process entry",
+			"observed_pid", process.ObservedPID,
+			"parent_pid", process.ParentPID,
+			"outermost_pid", process.OutermostPID,
+			"innermost_pid", process.InnermostPID,
+			"namespace_pids", process.NamespacePIDs,
+			"cmdline", process.Cmdline,
+		)
+	}
 
-	// CUDA restore — use the CUDA-only namespace PID list captured in the manifest
+	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
+	// current visible restored PIDs before invoking cuda-checkpoint.
 	if !m.CUDA.IsEmpty() {
-		if err := cuda.RestoreAndUnlockProcessTree(ctx, m.CUDA.PIDs, opts.CUDADeviceMap, log); err != nil {
+		restorePIDs, err := common.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
+		if err != nil {
+			return 0, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
+		}
+		log.Info("Resolved manifest CUDA PIDs to current restore PIDs",
+			"manifest_cuda_pids", m.CUDA.PIDs,
+			"restored_cuda_pids", restorePIDs,
+			"criu_callback_pid", restoredPID,
+		)
+		if err := cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log); err != nil {
 			return 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
 	}
