@@ -24,12 +24,19 @@ from tests.router.helper import (
     wait_for_indexer_workers_active,
     wait_for_workers_ready,
 )
-from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.router.router_process import (
+    DirectRouterProcess,
+    FrontendRouterProcess,
+    KVRouterProcess,
+)
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
 
 logger = logging.getLogger(__name__)
+
+NUM_REQUESTS = 100
+BLOCK_SIZE = 16
 
 
 ########################################################
@@ -2012,3 +2019,155 @@ def _test_busy_threshold_endpoint(
                 logger.info("All busy_threshold endpoint tests passed!")
 
         asyncio.run(test_busy_threshold_api())
+
+
+def _test_disagg_direct_mode(
+    prefill_workers,
+    decode_workers,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    request_plane: str = "nats",
+):
+    """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
+
+    In Direct mode, the router does not select workers itself.
+    Worker IDs must be provided via x-worker-instance-id and x-prefill-instance-id
+    HTTP headers. The test verifies:
+      1. Requests with explicit worker ID headers succeed and return a valid response.
+      2. Requests without headers fail (Direct mode rejects unaddressed requests).
+
+    Args:
+        prefill_workers: Prefill mocker workers (already started).
+        decode_workers: Decode mocker workers (already started).
+        request: Pytest request fixture.
+        frontend_port: Port for the Direct-mode frontend HTTP server.
+        test_payload: Base test payload for /v1/chat/completions.
+        request_plane: Transport for request plane ("nats" or "tcp").
+    """
+    with DirectRouterProcess(
+        request,
+        frontend_port,
+        decode_workers.namespace,
+        enforce_disagg=True,
+        request_plane=request_plane,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        logger.info("Waiting for models to appear in Direct-mode frontend...")
+
+        async def wait_for_models():
+            models_url = f"{frontend_url}/v1/models"
+            for _ in range(120):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(models_url) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                models = data.get("data", [])
+                                if models:
+                                    logger.info(
+                                        f"Models registered: {[m.get('id') for m in models]}"
+                                    )
+                                    return
+                except Exception as e:
+                    logger.debug(f"Error checking models endpoint: {e}")
+                await asyncio.sleep(1)
+            raise TimeoutError("Timeout waiting for models in Direct-mode frontend")
+
+        asyncio.run(wait_for_models())
+
+        # Phase 2: Discover worker IDs via the runtime
+        runtime = get_runtime(request_plane=request_plane)
+        prefill_endpoint = runtime.endpoint(
+            f"{decode_workers.namespace}.prefill.generate"
+        )
+        decode_endpoint = runtime.endpoint(
+            f"{decode_workers.namespace}.backend.generate"
+        )
+
+        async def discover_workers():
+            prefill_client = await prefill_endpoint.client()
+            decode_client = await decode_endpoint.client()
+
+            for _ in range(60):
+                p_ids = prefill_client.instance_ids()
+                d_ids = decode_client.instance_ids()
+                if p_ids and d_ids:
+                    return p_ids, d_ids
+                await asyncio.sleep(0.5)
+            raise TimeoutError(
+                f"Timeout discovering workers: prefill={p_ids}, decode={d_ids}"
+            )
+
+        prefill_ids, decode_ids = asyncio.run(discover_workers())
+        logger.info(f"Discovered prefill workers: {prefill_ids}")
+        logger.info(f"Discovered decode workers: {decode_ids}")
+
+        target_prefill = prefill_ids[0]
+        target_decode = decode_ids[0]
+
+        async def run_direct_mode_tests():
+            # Test 1: Request WITH correct headers should succeed.
+            # In direct mode the router is a passthrough — it does not have a
+            # KvRouter and does not record worker IDs on the RequestTracker, so
+            # the response's nvext will not contain worker_id info.  We only
+            # verify that the request is routed successfully (HTTP 200) and
+            # produces a valid chat completion response.
+            payload = {
+                **test_payload,
+                "stream": False,
+            }
+            headers = {
+                "x-worker-instance-id": str(target_decode),
+                "x-prefill-instance-id": str(target_prefill),
+            }
+
+            async with aiohttp.ClientSession() as session:
+                # Retry a few times to allow the pipeline to warm up
+                for attempt in range(10):
+                    async with session.post(
+                        chat_url, json=payload, headers=headers
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            logger.info(
+                                f"Direct-mode response (attempt {attempt + 1}): "
+                                f"status=200, model={data.get('model')}"
+                            )
+                            assert (
+                                "choices" in data
+                            ), "Expected 'choices' in response data"
+                            assert (
+                                len(data["choices"]) > 0
+                            ), "Expected at least one choice in response"
+                            break
+                        else:
+                            logger.info(
+                                f"Direct-mode attempt {attempt + 1} returned "
+                                f"status {response.status}, retrying..."
+                            )
+                            await asyncio.sleep(2)
+                else:
+                    raise AssertionError(
+                        "Direct-mode request with headers never returned 200"
+                    )
+
+                # Test 2: Request WITHOUT headers should fail (Direct mode
+                # rejects requests that have no worker ID)
+                logger.info(
+                    "Sending request without headers (should fail in Direct mode)..."
+                )
+                no_header_payload = {**test_payload, "stream": False}
+                async with session.post(chat_url, json=no_header_payload) as response:
+                    assert response.status != 200, (
+                        f"Expected non-200 status without routing headers in Direct mode, "
+                        f"got {response.status}. Direct mode must reject unaddressed requests."
+                    )
+                    logger.info(
+                        f"Correctly rejected headerless request: status={response.status}"
+                    )
+
+        asyncio.run(run_direct_mode_tests())
+        logger.info("Direct-mode disagg E2E test passed")

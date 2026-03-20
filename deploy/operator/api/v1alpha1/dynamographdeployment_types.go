@@ -56,6 +56,14 @@ const (
 
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
+	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+	// Service-level annotations take precedence over these values.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+	// Service-level labels take precedence over these values.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
@@ -144,7 +152,7 @@ type ServiceCheckpointStatus struct {
 	// IdentityHash is the computed hash of the checkpoint identity
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint is ready for use
+	// Ready indicates if the checkpoint was visible to the worker at startup
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }

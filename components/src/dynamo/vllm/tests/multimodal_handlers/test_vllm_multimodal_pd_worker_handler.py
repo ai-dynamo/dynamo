@@ -182,7 +182,7 @@ class TestLoadMultimodalData:
 
         fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})  # type: ignore
         with patch.object(
-            mod,
+            handler.embedding_loader,
             "load_multimodal_embeddings",
             new_callable=AsyncMock,
             return_value=fake_mm_data,
@@ -193,31 +193,13 @@ class TestLoadMultimodalData:
         assert result is fake_mm_data
 
     @pytest.mark.asyncio
-    async def test_passes_cache_to_load_multimodal_embeddings(self):
-        """With cache enabled -> passes cache manager kwarg."""
-        mock_client = MagicMock()
-        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
-        handler = _make_handler(config=config, encode_worker_client=mock_client)
-
-        with patch.object(
-            mod,
-            "load_multimodal_embeddings",
-            new_callable=AsyncMock,
-            return_value=defaultdict(list),
-        ) as mock_load:
-            await handler._load_multimodal_data(["http://img.png"], "req-1")
-
-        mock_load.assert_awaited_once()
-        assert mock_load.call_args.kwargs["cache"] is handler.embedding_cache_manager
-
-    @pytest.mark.asyncio
-    async def test_passes_model_and_dtype(self):
-        """Model name and embeddings dtype are forwarded."""
+    async def test_passes_model(self):
+        """Model name is forwarded."""
         mock_client = MagicMock()
         handler = _make_handler(encode_worker_client=mock_client)
 
         with patch.object(
-            mod,
+            handler.embedding_loader,
             "load_multimodal_embeddings",
             new_callable=AsyncMock,
             return_value=defaultdict(list),
@@ -225,9 +207,6 @@ class TestLoadMultimodalData:
             await handler._load_multimodal_data(["http://img.png"], "req-1")
 
         assert mock_load.call_args.kwargs["model"] == handler.config.model
-        assert (
-            mock_load.call_args.kwargs["embeddings_dtype"] == handler.EMBEDDINGS_DTYPE
-        )
 
 
 class TestGenerateAgg:

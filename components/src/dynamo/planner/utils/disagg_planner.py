@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import time
-from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.utils.decode_planner import DecodePlanner
@@ -24,9 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class DisaggPlanner:
-    def __init__(
-        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
-    ) -> None:
+    def __init__(self, runtime: DistributedRuntime, config: PlannerConfig) -> None:
         self.config = config
         self.shared_state = PlannerSharedState()
         prometheus_metrics = PlannerPrometheusMetrics()
@@ -89,13 +86,12 @@ class DisaggPlanner:
             logger.info(f"Detected model name from deployment: {model_name}")
             model_name = model_name.lower()
         else:
-            model_name = getattr(self.config, "model_name", None)
-            if not model_name:
+            if not self.config.model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
                     "Please set model_name in the config."
                 )
-            model_name = model_name.lower()
+            model_name = self.config.model_name.lower()
         self.prefill_planner.model_name = model_name
         self.decode_planner.model_name = model_name
 

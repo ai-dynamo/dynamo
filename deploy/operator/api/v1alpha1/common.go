@@ -71,6 +71,7 @@ type Autoscaling struct {
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
 type SharedMemorySpec struct {
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
@@ -192,8 +193,8 @@ type ServiceCheckpointConfig struct {
 	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
 
-	// CheckpointRef references an existing Checkpoint CR to use
-	// If specified, Identity is ignored and this checkpoint is used directly
+	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
+	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
