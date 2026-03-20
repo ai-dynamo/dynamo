@@ -174,6 +174,11 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+
+    /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
 }
 
 /// Hints from the agent/caller about request characteristics.

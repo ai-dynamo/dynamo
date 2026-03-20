@@ -705,6 +705,7 @@ mod tests {
                 max_output_tokens: max_output,
                 uuid: None,
                 dp_rank: 0,
+                arrival_timestamp_ms: None,
             });
         }
 
@@ -753,6 +754,7 @@ mod tests {
                 max_output_tokens: 5,
                 uuid: None,
                 dp_rank: 0,
+                arrival_timestamp_ms: None,
             });
         }
 
