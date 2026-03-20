@@ -73,6 +73,33 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
+    profile_data_result = None
+
+    # Offline replay does not need planner profile conversion or runtime setup.
+    if args.trace_file is not None:
+        if args.extra_engine_args:
+            extra_engine_args_path = args.extra_engine_args
+            logger.info(f"Using provided MockEngineArgs from {extra_engine_args_path}")
+        else:
+            extra_engine_args_path = create_temp_engine_args_file(args)
+            logger.info("Created MockEngineArgs from CLI arguments")
+
+        try:
+            run_trace_replay(
+                trace_file=args.trace_file,
+                output_file=args.output_file,
+                extra_engine_args=extra_engine_args_path,
+                num_workers=args.num_workers,
+                replay_concurrency=args.replay_concurrency,
+            )
+            return
+        finally:
+            if not args.extra_engine_args and extra_engine_args_path.exists():
+                try:
+                    extra_engine_args_path.unlink()
+                    logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file: {e}")
 
     # Resolve planner-profile-data: convert profile results dir to NPZ if needed
     profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
@@ -89,16 +116,6 @@ async def worker():
         logger.info("Created MockEngineArgs from CLI arguments")
 
     try:
-        if args.trace_file is not None:
-            run_trace_replay(
-                trace_file=args.trace_file,
-                output_file=args.output_file,
-                extra_engine_args=extra_engine_args_path,
-                num_workers=args.num_workers,
-                replay_concurrency=args.replay_concurrency,
-            )
-            return
-
         # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
         if args.num_workers > 1 and args.model_path:
             await prefetch_model(args.model_path)
@@ -129,8 +146,8 @@ async def worker():
                 logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary file: {e}")
-
-        del profile_data_result  # Triggers tmpdir cleanup via __del__
+        if profile_data_result is not None:
+            del profile_data_result  # Triggers tmpdir cleanup via __del__
 
 
 def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
