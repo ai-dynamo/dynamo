@@ -9,49 +9,129 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TraceSimulationReport {
+    pub request_counts: TraceRequestCounts,
+    pub throughput: TraceThroughputStats,
+    pub prefix_cache_reused_ratio: f64,
+    pub latency: TraceLatencyStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceRequestCounts {
     pub num_requests: usize,
     pub completed_requests: usize,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceThroughputStats {
     pub duration_ms: f64,
     pub wall_time_ms: f64,
     pub request_throughput_rps: f64,
     pub input_throughput_tok_s: f64,
     pub output_throughput_tok_s: f64,
     pub total_throughput_tok_s: f64,
-    pub prefix_cache_reused_ratio: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceDistributionStats {
+    pub mean_ms: f64,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceLatencyStats {
     pub mean_queue_ms: f64,
-    pub mean_ttft_ms: f64,
-    pub median_ttft_ms: f64,
-    pub p95_ttft_ms: f64,
-    pub p99_ttft_ms: f64,
-    pub mean_tpot_ms: f64,
-    pub median_tpot_ms: f64,
-    pub p95_tpot_ms: f64,
-    pub p99_tpot_ms: f64,
-    pub mean_itl_ms: f64,
-    pub median_itl_ms: f64,
-    pub p95_itl_ms: f64,
-    pub p99_itl_ms: f64,
-    pub max_itl_ms: f64,
-    pub mean_e2e_latency_ms: f64,
-    pub median_e2e_latency_ms: f64,
-    pub p95_e2e_latency_ms: f64,
-    pub p99_e2e_latency_ms: f64,
+    pub ttft: TraceDistributionStats,
+    pub tpot: TraceDistributionStats,
+    pub itl: TraceInterTokenLatencyStats,
+    pub e2e: TraceDistributionStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceInterTokenLatencyStats {
+    pub distribution: TraceDistributionStats,
+    pub max_ms: f64,
 }
 
 impl TraceSimulationReport {
     pub fn with_wall_time_ms(mut self, wall_time_ms: f64) -> Self {
-        self.wall_time_ms = wall_time_ms;
+        self.throughput.wall_time_ms = wall_time_ms;
         self
     }
+}
+
+impl Serialize for TraceSimulationReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(29))?;
+        map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
+        map.serialize_entry(
+            "completed_requests",
+            &self.request_counts.completed_requests,
+        )?;
+        map.serialize_entry(
+            "total_input_tokens",
+            &self.request_counts.total_input_tokens,
+        )?;
+        map.serialize_entry(
+            "total_output_tokens",
+            &self.request_counts.total_output_tokens,
+        )?;
+        map.serialize_entry("duration_ms", &self.throughput.duration_ms)?;
+        map.serialize_entry("wall_time_ms", &self.throughput.wall_time_ms)?;
+        map.serialize_entry(
+            "request_throughput_rps",
+            &self.throughput.request_throughput_rps,
+        )?;
+        map.serialize_entry(
+            "input_throughput_tok_s",
+            &self.throughput.input_throughput_tok_s,
+        )?;
+        map.serialize_entry(
+            "output_throughput_tok_s",
+            &self.throughput.output_throughput_tok_s,
+        )?;
+        map.serialize_entry(
+            "total_throughput_tok_s",
+            &self.throughput.total_throughput_tok_s,
+        )?;
+        map.serialize_entry("prefix_cache_reused_ratio", &self.prefix_cache_reused_ratio)?;
+        map.serialize_entry("mean_queue_ms", &self.latency.mean_queue_ms)?;
+        serialize_distribution(&mut map, "ttft", &self.latency.ttft)?;
+        serialize_distribution(&mut map, "tpot", &self.latency.tpot)?;
+        serialize_distribution(&mut map, "itl", &self.latency.itl.distribution)?;
+        map.serialize_entry("max_itl_ms", &self.latency.itl.max_ms)?;
+        serialize_distribution(&mut map, "e2e_latency", &self.latency.e2e)?;
+        map.end()
+    }
+}
+
+fn serialize_distribution<S>(
+    map: &mut S,
+    prefix: &str,
+    stats: &TraceDistributionStats,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    map.serialize_entry(&format!("mean_{prefix}_ms"), &stats.mean_ms)?;
+    map.serialize_entry(&format!("median_{prefix}_ms"), &stats.median_ms)?;
+    map.serialize_entry(&format!("p95_{prefix}_ms"), &stats.p95_ms)?;
+    map.serialize_entry(&format!("p99_{prefix}_ms"), &stats.p99_ms)?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -163,39 +243,36 @@ impl TraceCollector {
 
         let duration_s = (duration_ms / 1000.0).max(1e-9);
         TraceSimulationReport {
-            num_requests: requests.len(),
-            completed_requests,
-            total_input_tokens,
-            total_output_tokens,
-            duration_ms,
-            wall_time_ms: 0.0,
-            request_throughput_rps: completed_requests as f64 / duration_s,
-            input_throughput_tok_s: total_input_tokens as f64 / duration_s,
-            output_throughput_tok_s: total_output_tokens as f64 / duration_s,
-            total_throughput_tok_s: (total_input_tokens + total_output_tokens) as f64 / duration_s,
+            request_counts: TraceRequestCounts {
+                num_requests: requests.len(),
+                completed_requests,
+                total_input_tokens,
+                total_output_tokens,
+            },
+            throughput: TraceThroughputStats {
+                duration_ms,
+                wall_time_ms: 0.0,
+                request_throughput_rps: completed_requests as f64 / duration_s,
+                input_throughput_tok_s: total_input_tokens as f64 / duration_s,
+                output_throughput_tok_s: total_output_tokens as f64 / duration_s,
+                total_throughput_tok_s: (total_input_tokens + total_output_tokens) as f64
+                    / duration_s,
+            },
             prefix_cache_reused_ratio: if total_input_tokens == 0 {
                 0.0
             } else {
                 total_reused_tokens as f64 / total_input_tokens as f64
             },
-            mean_queue_ms: mean(&queue_latencies),
-            mean_ttft_ms: mean(&ttfts),
-            median_ttft_ms: percentile(&ttfts, 50.0),
-            p95_ttft_ms: percentile(&ttfts, 95.0),
-            p99_ttft_ms: percentile(&ttfts, 99.0),
-            mean_tpot_ms: mean(&tpots),
-            median_tpot_ms: percentile(&tpots, 50.0),
-            p95_tpot_ms: percentile(&tpots, 95.0),
-            p99_tpot_ms: percentile(&tpots, 99.0),
-            mean_itl_ms: mean(&itls),
-            median_itl_ms: percentile(&itls, 50.0),
-            p95_itl_ms: percentile(&itls, 95.0),
-            p99_itl_ms: percentile(&itls, 99.0),
-            max_itl_ms: max_value(&itls),
-            mean_e2e_latency_ms: mean(&e2e_latencies),
-            median_e2e_latency_ms: percentile(&e2e_latencies, 50.0),
-            p95_e2e_latency_ms: percentile(&e2e_latencies, 95.0),
-            p99_e2e_latency_ms: percentile(&e2e_latencies, 99.0),
+            latency: TraceLatencyStats {
+                mean_queue_ms: mean(&queue_latencies),
+                ttft: build_distribution_stats(&ttfts),
+                tpot: build_distribution_stats(&tpots),
+                itl: TraceInterTokenLatencyStats {
+                    distribution: build_distribution_stats(&itls),
+                    max_ms: max_value(&itls),
+                },
+                e2e: build_distribution_stats(&e2e_latencies),
+            },
         }
     }
 
@@ -365,6 +442,15 @@ fn max_value(values: &[f64]) -> f64 {
     values.iter().copied().reduce(f64::max).unwrap_or(0.0)
 }
 
+fn build_distribution_stats(values: &[f64]) -> TraceDistributionStats {
+    TraceDistributionStats {
+        mean_ms: mean(values),
+        median_ms: percentile(values, 50.0),
+        p95_ms: percentile(values, 95.0),
+        p99_ms: percentile(values, 99.0),
+    }
+}
+
 fn percentile(values: &[f64], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -434,14 +520,14 @@ mod tests {
         let report = simulate_trace_file(test_args(), &path).unwrap();
         std::fs::remove_file(path).unwrap();
 
-        assert_eq!(report.num_requests, 3);
-        assert_eq!(report.completed_requests, 3);
-        assert_eq!(report.total_input_tokens, 12);
-        assert_eq!(report.total_output_tokens, 6);
-        assert!(report.duration_ms > 0.0);
-        assert!(report.mean_ttft_ms >= 0.0);
-        assert!(report.mean_e2e_latency_ms >= report.mean_ttft_ms);
-        assert!(report.mean_itl_ms >= 0.0);
+        assert_eq!(report.request_counts.num_requests, 3);
+        assert_eq!(report.request_counts.completed_requests, 3);
+        assert_eq!(report.request_counts.total_input_tokens, 12);
+        assert_eq!(report.request_counts.total_output_tokens, 6);
+        assert!(report.throughput.duration_ms > 0.0);
+        assert!(report.latency.ttft.mean_ms >= 0.0);
+        assert!(report.latency.e2e.mean_ms >= report.latency.ttft.mean_ms);
+        assert!(report.latency.itl.distribution.mean_ms >= 0.0);
 
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["completed_requests"], 3);

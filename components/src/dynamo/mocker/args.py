@@ -11,12 +11,6 @@ from pathlib import Path
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
-from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
-from .utils.planner_profiler_perf_data_converter import (
-    convert_profile_results_to_npz,
-    is_mocker_format_npz,
-    is_profile_results_dir,
-)
 
 DYN_NAMESPACE = get_worker_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
@@ -62,6 +56,12 @@ def resolve_planner_profile_data(
     Raises:
         FileNotFoundError: If path doesn't contain valid profile data in any supported format.
     """
+    from .utils.planner_profiler_perf_data_converter import (
+        convert_profile_results_to_npz,
+        is_mocker_format_npz,
+        is_profile_results_dir,
+    )
+
     if planner_profile_data is None:
         return ProfileDataResult(npz_path=None, tmpdir=None)
 
@@ -207,25 +207,6 @@ def validate_worker_type_args(args: argparse.Namespace) -> None:
     # Sync booleans from disaggregation_mode
     args.is_prefill_worker = args.disaggregation_mode == "prefill"
     args.is_decode_worker = args.disaggregation_mode == "decode"
-
-
-def validate_trace_replay_args(args: argparse.Namespace) -> None:
-    if args.trace_file is None:
-        return
-
-    if args.disaggregation_mode != "agg":
-        raise ValueError(
-            "--trace-file only supports aggregated replay; use --disaggregation-mode=agg"
-        )
-
-    if args.num_workers != 1:
-        raise ValueError("--trace-file only supports --num-workers=1")
-
-    if args.engine_type == "sglang":
-        raise ValueError("--trace-file only supports --engine-type=vllm")
-
-    if args.dp_size not in (None, 1):
-        raise ValueError("--trace-file only supports --data-parallel-size=1")
 
 
 def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
@@ -512,7 +493,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--kv-transfer-bandwidth",
         type=float,
-        default=DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS,
+        default=_default_kv_transfer_bandwidth_gbps(),
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
         "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
@@ -618,7 +599,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         else:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
-
-    validate_trace_replay_args(args)
-
     return args
+
+
+def _default_kv_transfer_bandwidth_gbps() -> float:
+    from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
+
+    return DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS

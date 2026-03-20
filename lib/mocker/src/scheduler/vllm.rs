@@ -1182,36 +1182,77 @@ mod tests {
 
     fn assert_report_close(left: &TraceSimulationReport, right: &TraceSimulationReport) {
         let epsilon = 1e-9;
-        assert_eq!(left.num_requests, right.num_requests);
-        assert_eq!(left.completed_requests, right.completed_requests);
-        assert_eq!(left.total_input_tokens, right.total_input_tokens);
-        assert_eq!(left.total_output_tokens, right.total_output_tokens);
-        assert!((left.duration_ms - right.duration_ms).abs() <= epsilon);
-        assert!((left.request_throughput_rps - right.request_throughput_rps).abs() <= epsilon);
-        assert!((left.input_throughput_tok_s - right.input_throughput_tok_s).abs() <= epsilon);
-        assert!((left.output_throughput_tok_s - right.output_throughput_tok_s).abs() <= epsilon);
-        assert!((left.total_throughput_tok_s - right.total_throughput_tok_s).abs() <= epsilon);
+        assert_eq!(
+            left.request_counts.num_requests,
+            right.request_counts.num_requests
+        );
+        assert_eq!(
+            left.request_counts.completed_requests,
+            right.request_counts.completed_requests
+        );
+        assert_eq!(
+            left.request_counts.total_input_tokens,
+            right.request_counts.total_input_tokens
+        );
+        assert_eq!(
+            left.request_counts.total_output_tokens,
+            right.request_counts.total_output_tokens
+        );
+        assert!((left.throughput.duration_ms - right.throughput.duration_ms).abs() <= epsilon);
+        assert!(
+            (left.throughput.request_throughput_rps - right.throughput.request_throughput_rps)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.throughput.input_throughput_tok_s - right.throughput.input_throughput_tok_s)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.throughput.output_throughput_tok_s - right.throughput.output_throughput_tok_s)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.throughput.total_throughput_tok_s - right.throughput.total_throughput_tok_s)
+                .abs()
+                <= epsilon
+        );
         assert!(
             (left.prefix_cache_reused_ratio - right.prefix_cache_reused_ratio).abs() <= epsilon
         );
-        assert!((left.mean_queue_ms - right.mean_queue_ms).abs() <= epsilon);
-        assert!((left.mean_ttft_ms - right.mean_ttft_ms).abs() <= epsilon);
-        assert!((left.median_ttft_ms - right.median_ttft_ms).abs() <= epsilon);
-        assert!((left.p95_ttft_ms - right.p95_ttft_ms).abs() <= epsilon);
-        assert!((left.p99_ttft_ms - right.p99_ttft_ms).abs() <= epsilon);
-        assert!((left.mean_tpot_ms - right.mean_tpot_ms).abs() <= epsilon);
-        assert!((left.median_tpot_ms - right.median_tpot_ms).abs() <= epsilon);
-        assert!((left.p95_tpot_ms - right.p95_tpot_ms).abs() <= epsilon);
-        assert!((left.p99_tpot_ms - right.p99_tpot_ms).abs() <= epsilon);
-        assert!((left.mean_itl_ms - right.mean_itl_ms).abs() <= epsilon);
-        assert!((left.median_itl_ms - right.median_itl_ms).abs() <= epsilon);
-        assert!((left.p95_itl_ms - right.p95_itl_ms).abs() <= epsilon);
-        assert!((left.p99_itl_ms - right.p99_itl_ms).abs() <= epsilon);
-        assert!((left.max_itl_ms - right.max_itl_ms).abs() <= epsilon);
-        assert!((left.mean_e2e_latency_ms - right.mean_e2e_latency_ms).abs() <= epsilon);
-        assert!((left.median_e2e_latency_ms - right.median_e2e_latency_ms).abs() <= epsilon);
-        assert!((left.p95_e2e_latency_ms - right.p95_e2e_latency_ms).abs() <= epsilon);
-        assert!((left.p99_e2e_latency_ms - right.p99_e2e_latency_ms).abs() <= epsilon);
+        assert!((left.latency.mean_queue_ms - right.latency.mean_queue_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.mean_ms - right.latency.ttft.mean_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.median_ms - right.latency.ttft.median_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p95_ms - right.latency.ttft.p95_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p99_ms - right.latency.ttft.p99_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.mean_ms - right.latency.tpot.mean_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.median_ms - right.latency.tpot.median_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p95_ms - right.latency.tpot.p95_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p99_ms - right.latency.tpot.p99_ms).abs() <= epsilon);
+        assert!(
+            (left.latency.itl.distribution.mean_ms - right.latency.itl.distribution.mean_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.median_ms - right.latency.itl.distribution.median_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p95_ms - right.latency.itl.distribution.p95_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p99_ms - right.latency.itl.distribution.p99_ms).abs()
+                <= epsilon
+        );
+        assert!((left.latency.itl.max_ms - right.latency.itl.max_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.mean_ms - right.latency.e2e.mean_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.median_ms - right.latency.e2e.median_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p95_ms - right.latency.e2e.p95_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p99_ms - right.latency.e2e.p99_ms).abs() <= epsilon);
     }
 
     #[rstest]
@@ -1241,8 +1282,8 @@ mod tests {
         );
         assert!(request_2.first_admit_ms.unwrap() >= request_2.arrival_time_ms);
         assert!(request_3.first_admit_ms.unwrap() >= request_3.arrival_time_ms);
-        assert!(manual.report.mean_ttft_ms >= manual.report.mean_queue_ms);
-        assert!(manual.report.mean_e2e_latency_ms >= manual.report.mean_ttft_ms);
+        assert!(manual.report.latency.ttft.mean_ms >= manual.report.latency.mean_queue_ms);
+        assert!(manual.report.latency.e2e.mean_ms >= manual.report.latency.ttft.mean_ms);
 
         if enable_prefix_caching {
             assert!(request_2.reused_input_tokens > 0);

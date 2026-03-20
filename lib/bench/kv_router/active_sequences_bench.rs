@@ -176,6 +176,7 @@ async fn generate_sequence_events(
                     max_output_tokens: worker_trace[i].output_length as usize,
                     uuid: Some(worker_trace[i].uuid),
                     dp_rank: 0,
+                    arrival_timestamp_ms: None,
                 });
                 i += 1;
 
@@ -187,6 +188,7 @@ async fn generate_sequence_events(
                         max_output_tokens: worker_trace[i].output_length as usize,
                         uuid: Some(worker_trace[i].uuid),
                         dp_rank: 0,
+                        arrival_timestamp_ms: None,
                     });
                     i += 1;
                 }
