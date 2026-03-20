@@ -203,6 +203,68 @@ fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
     }
 }
 
+/// Inject `reasoning_content` back into the `content` field as `<think>` blocks.
+///
+/// Chat templates only reference `{{ message.content }}` — they don't know about
+/// `reasoning_content`. Without this injection, the model's prior chain-of-thought
+/// is silently dropped across turns.
+///
+/// Uses `<think>`/`</think>` delimiters — the same tags that reasoning models emit
+/// and that the reasoning parser strips on output. Reasoning is prepended to content
+/// to match the original generation order (`<think>...</think> response`).
+///
+/// Segments are concatenated rather than interleaved with tool_calls because Jinja
+/// templates render `tool_calls` separately from `content`. The model still sees
+/// all reasoning text before the template-rendered tool call block.
+fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let reasoning = match msg.get("reasoning_content") {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                format!("<think>{}</think>", s)
+            }
+            Some(serde_json::Value::Array(segments)) => {
+                let mut result = String::new();
+                for seg in segments {
+                    if let Some(s) = seg.as_str() {
+                        if !s.is_empty() {
+                            result.push_str("<think>");
+                            result.push_str(s);
+                            result.push_str("</think>");
+                        }
+                    }
+                }
+                if result.is_empty() {
+                    continue;
+                }
+                result
+            }
+            _ => continue,
+        };
+
+        let existing_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let new_content = if existing_content.is_empty() {
+            reasoning
+        } else {
+            format!("{}{}", reasoning, existing_content)
+        };
+        msg["content"] = serde_json::Value::String(new_content);
+
+        // Remove so the template doesn't see both the injected <think> in content
+        // and the original reasoning_content field.
+        if let Some(obj) = msg.as_object_mut() {
+            obj.remove("reasoning_content");
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
@@ -377,6 +439,18 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         .unwrap();
 
         normalize_tool_arguments_in_messages(&mut messages_for_template);
+
+        // Inject reasoning_content as <think> blocks into content so the template
+        // sees the model's prior chain-of-thought. Only when enable_thinking is set
+        // to avoid injecting <think> tokens for non-reasoning models.
+        if req
+            .chat_template_args()
+            .and_then(|args| args.get("enable_thinking"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            inject_reasoning_content_into_messages(&mut messages_for_template);
+        }
 
         let ctx = context! {
             messages => messages_for_template,
@@ -1311,5 +1385,132 @@ NORMAL_MODE
             "With exclude_tools=false and tool_choice=none, tools should NOT be stripped. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_segments_with_tool_calls() {
+        // Assistant message with reasoning_content segments and tool_calls
+        let mut messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "What is sqrt(144) and sqrt(256)?"
+            },
+            {
+                "role": "assistant",
+                "content": "Let me calculate those.",
+                "reasoning_content": ["I need to compute sqrt(144)", "Now sqrt(256)", ""],
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(144)\"}"
+                        }
+                    },
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(256)\"}"
+                        }
+                    }
+                ]
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let assistant = &messages[1];
+
+        // reasoning_content should be removed
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "reasoning_content should be removed after injection"
+        );
+
+        // content should have <think> blocks prepended (empty segment skipped)
+        let content = assistant["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("<think>I need to compute sqrt(144)</think>"),
+            "content should start with first reasoning segment, got: {}",
+            content
+        );
+        assert!(
+            content.contains("<think>Now sqrt(256)</think>"),
+            "content should contain second reasoning segment"
+        );
+        // Empty third segment should NOT produce <think></think>
+        assert!(
+            !content.contains("<think></think>"),
+            "empty segments should be skipped"
+        );
+        // Original content should be preserved at the end
+        assert!(
+            content.ends_with("Let me calculate those."),
+            "original content should be at the end, got: {}",
+            content
+        );
+
+        // tool_calls should be untouched
+        assert!(assistant.get("tool_calls").is_some());
+        assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_text_variant() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "reasoning_content": "Let me think about this carefully."
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let assistant = &messages[0];
+        assert!(assistant.get("reasoning_content").is_none());
+        let content = assistant["content"].as_str().unwrap();
+        assert_eq!(
+            content,
+            "<think>Let me think about this carefully.</think>The answer is 42."
+        );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_null_content() {
+        // reasoning_content present but content is null
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": "Thinking...",
+                "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let content = messages[0]["content"].as_str().unwrap();
+        assert_eq!(content, "<think>Thinking...</think>");
+        assert!(messages[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_skips_non_assistant() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "hello",
+                "reasoning_content": "should not be touched"
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        // User message should be untouched
+        assert!(messages[0].get("reasoning_content").is_some());
     }
 }
