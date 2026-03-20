@@ -58,6 +58,8 @@ if TYPE_CHECKING:
 
 configure_dynamo_logging()
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class RequestHandlerConfig:
@@ -314,14 +316,14 @@ class HandlerBase(BaseGenerativeHandler):
                         if not self._is_collective_rpc_unsupported(exc):
                             raise
                         if self._can_use_local_kv_sleep_fallback():
-                            logging.info(
+                            logger.info(
                                 "[GMS] collective RPC unsupported; using local kv_cache sleep fallback"
                             )
                             self._call_local_virtual_memory_method(
                                 "sleep", collective_tags
                             )
                         else:
-                            logging.warning(
+                            logger.warning(
                                 "[GMS] Skipping kv_cache sleep (collective RPC unsupported, multi-rank): %s",
                                 exc,
                             )
@@ -345,12 +347,12 @@ class HandlerBase(BaseGenerativeHandler):
                 return response
 
             except Exception as exc:
-                logging.error("release_memory_occupation failed: %s", exc)
+                logger.error("release_memory_occupation failed: %s", exc)
                 if endpoint_unregistered and self.generate_endpoint is not None:
                     try:
                         await self.generate_endpoint.register_endpoint_instance()
                     except Exception:
-                        logging.exception(
+                        logger.exception(
                             "Failed to restore endpoint after release failure"
                         )
                 await self._set_reject_new_requests(False)
@@ -391,14 +393,14 @@ class HandlerBase(BaseGenerativeHandler):
                         if not self._is_collective_rpc_unsupported(exc):
                             raise
                         if self._can_use_local_kv_sleep_fallback():
-                            logging.info(
+                            logger.info(
                                 "[GMS] collective RPC unsupported; using local kv_cache wakeup fallback"
                             )
                             self._call_local_virtual_memory_method(
                                 "wakeup", collective_tags
                             )
                         else:
-                            logging.warning(
+                            logger.warning(
                                 "[GMS] Skipping kv_cache wakeup (collective RPC unsupported, multi-rank): %s",
                                 exc,
                             )
@@ -418,7 +420,7 @@ class HandlerBase(BaseGenerativeHandler):
                 return response
 
             except Exception as exc:
-                logging.error("resume_memory_occupation failed: %s", exc)
+                logger.error("resume_memory_occupation failed: %s", exc)
                 return {"status": "error", "message": str(exc)}
 
     @staticmethod
