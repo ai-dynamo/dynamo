@@ -441,19 +441,10 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         normalize_tool_arguments_in_messages(&mut messages_for_template);
 
         // Inject reasoning_content as <think> blocks into content so the template
-        // sees the model's prior chain-of-thought. Skip only when the request
-        // explicitly disables thinking (enable_thinking=false), since injecting
-        // <think> tags into a prompt where the template has thinking off could
-        // confuse the model. When enable_thinking is absent (the common case for
-        // /v1/chat/completions), we default to injecting.
-        let thinking_disabled = req
-            .chat_template_args()
-            .and_then(|args| args.get("enable_thinking"))
-            .and_then(|v| v.as_bool())
-            == Some(false);
-        if !thinking_disabled {
-            inject_reasoning_content_into_messages(&mut messages_for_template);
-        }
+        // sees the model's prior chain-of-thought. enable_thinking controls output
+        // (whether the model generates new reasoning), not input — prior reasoning
+        // should always be visible regardless of the current turn's thinking mode.
+        inject_reasoning_content_into_messages(&mut messages_for_template);
 
         let ctx = context! {
             messages => messages_for_template,
@@ -1515,5 +1506,64 @@ NORMAL_MODE
 
         // User message should be untouched
         assert!(messages[0].get("reasoning_content").is_some());
+    }
+
+    #[test]
+    fn test_reasoning_content_survives_into_rendered_prompt() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        // Minimal chat template that renders message content verbatim
+        let template = r#"{%- for message in messages %}{{ message.role }}: {{ message.content }}
+{%- endfor %}
+{%- if add_generation_prompt %}assistant:{%- endif %}"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        // Multi-turn conversation: assistant's prior turn has reasoning_content
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is sqrt(144)?"
+                },
+                {
+                    "role": "assistant",
+                    "content": "The answer is 12.",
+                    "reasoning_content": "I need to compute the square root of 144."
+                },
+                {
+                    "role": "user",
+                    "content": "Are you sure?"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // The rendered prompt MUST contain the reasoning from the prior turn
+        assert!(
+            rendered.contains("<think>I need to compute the square root of 144.</think>"),
+            "reasoning_content must appear as <think> block in rendered prompt, got: {}",
+            rendered
+        );
+        // The original content must also be present
+        assert!(
+            rendered.contains("The answer is 12."),
+            "original content must be preserved in rendered prompt"
+        );
+        // reasoning_content should NOT appear as a raw field (it was removed)
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "reasoning_content field should not leak into rendered prompt"
+        );
     }
 }
