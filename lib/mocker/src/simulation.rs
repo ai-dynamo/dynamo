@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -194,7 +193,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
 
 #[derive(Debug, Default)]
 pub(crate) struct TraceCollector {
-    requests: Mutex<HashMap<Uuid, TraceRequestStats>>,
+    requests: HashMap<Uuid, TraceRequestStats>,
 }
 
 impl TraceRequestStats {
@@ -233,13 +232,13 @@ impl TraceRequestStats {
 
 impl TraceCollector {
     pub(crate) fn on_arrival(
-        &self,
+        &mut self,
         uuid: Uuid,
         arrival_time_ms: f64,
         input_length: usize,
         output_length: usize,
     ) {
-        self.requests.lock().unwrap().insert(
+        self.requests.insert(
             uuid,
             TraceRequestStats {
                 arrival_time_ms,
@@ -252,21 +251,21 @@ impl TraceCollector {
         );
     }
 
-    pub(crate) fn on_admit(&self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
-        if let Some(stats) = self.requests.lock().unwrap().get_mut(&uuid) {
+    pub(crate) fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
             stats.first_admit_ms.get_or_insert(admit_time_ms);
             stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
         }
     }
 
-    pub(crate) fn on_token(&self, uuid: Uuid, token_time_ms: f64) {
-        if let Some(stats) = self.requests.lock().unwrap().get_mut(&uuid) {
+    pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
             stats.token_times_ms.push(token_time_ms);
         }
     }
 
     pub(crate) fn finish(self) -> TraceSimulationReport {
-        let requests = self.requests.into_inner().unwrap();
+        let requests = self.requests;
         let mut ttfts = Vec::new();
         let mut ttsts = Vec::new();
         let mut tpots = Vec::new();
@@ -357,8 +356,6 @@ impl TraceCollector {
     #[cfg(test)]
     pub(crate) fn snapshot(&self, uuid: Uuid) -> Option<TraceRequestStatsSnapshot> {
         self.requests
-            .lock()
-            .unwrap()
             .get(&uuid)
             .map(|stats| TraceRequestStatsSnapshot {
                 arrival_time_ms: stats.arrival_time_ms,
@@ -630,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_replay_itl_uses_per_token_gaps() {
-        let collector = TraceCollector::default();
+        let mut collector = TraceCollector::default();
         let uuid = Uuid::from_u128(11);
 
         collector.on_arrival(uuid, 0.0, 4, 4);

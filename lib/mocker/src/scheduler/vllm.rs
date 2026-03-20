@@ -346,7 +346,7 @@ fn simulate_prefill_step(
     kv_manager: &mut KvManager,
     hit_rates: &mut RunningMean<f32>,
     args: &MockEngineArgs,
-    collector: Option<&TraceCollector>,
+    mut collector: Option<&mut TraceCollector>,
     current_time_ms: f64,
     apply_speedup: bool,
 ) -> Duration {
@@ -362,7 +362,7 @@ fn simulate_prefill_step(
             let Some(admitted_uuid) = state.admit_one(args) else {
                 break;
             };
-            if let Some(collector) = collector {
+            if let Some(collector) = collector.as_deref_mut() {
                 let Some(Request::Active(seq)) = state.requests.get(&admitted_uuid) else {
                     panic!("Request does not exist.");
                 };
@@ -467,7 +467,7 @@ fn simulate_decode_step(
     kv_manager: &mut KvManager,
     output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
     args: &MockEngineArgs,
-    collector: Option<&TraceCollector>,
+    mut collector: Option<&mut TraceCollector>,
     current_time_ms: f64,
     apply_speedup: bool,
 ) -> Duration {
@@ -543,7 +543,7 @@ fn simulate_decode_step(
             continue;
         };
         emitted_any = true;
-        if let Some(collector) = collector {
+        if let Some(collector) = collector.as_deref_mut() {
             collector.on_token(uuid, decode_end_ms);
         }
 
@@ -613,12 +613,12 @@ pub fn simulate_trace(
     let mut state = SchedulerState::default();
     let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
     let mut hit_rates = RunningMean::new(1000);
-    let collector = TraceCollector::default();
+    let mut collector = TraceCollector::default();
     let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
     let mut current_time_ms = 0.0;
 
     while !pending.is_empty() || !state.is_empty() {
-        enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
+        enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
 
         if state.is_empty() {
             let Some(next_arrival_ms) = pending
@@ -628,7 +628,7 @@ pub fn simulate_trace(
                 break;
             };
             current_time_ms = next_arrival_ms;
-            enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
+            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
             continue;
         }
 
@@ -637,19 +637,19 @@ pub fn simulate_trace(
             &mut kv_manager,
             &mut hit_rates,
             &args,
-            Some(&collector),
+            Some(&mut collector),
             current_time_ms,
             true,
         );
         current_time_ms += prefill_time.as_secs_f64() * 1000.0;
-        enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
+        enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
 
         let decode_time = simulate_decode_step(
             &mut state,
             &mut kv_manager,
             &output_tx,
             &args,
-            Some(&collector),
+            Some(&mut collector),
             current_time_ms,
             true,
         );
@@ -670,7 +670,7 @@ pub fn simulate_concurrency(
     let mut state = SchedulerState::default();
     let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
     let mut hit_rates = RunningMean::new(1000);
-    let collector = TraceCollector::default();
+    let mut collector = TraceCollector::default();
     let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
     let mut current_time_ms = 0.0;
 
@@ -678,7 +678,7 @@ pub fn simulate_concurrency(
         enqueue_concurrency_arrivals(
             &mut pending,
             &mut state,
-            &collector,
+            &mut collector,
             current_time_ms,
             max_in_flight,
         );
@@ -692,7 +692,7 @@ pub fn simulate_concurrency(
             &mut kv_manager,
             &mut hit_rates,
             &args,
-            Some(&collector),
+            Some(&mut collector),
             current_time_ms,
             true,
         );
@@ -703,7 +703,7 @@ pub fn simulate_concurrency(
             &mut kv_manager,
             &output_tx,
             &args,
-            Some(&collector),
+            Some(&mut collector),
             current_time_ms,
             true,
         );
@@ -715,7 +715,7 @@ pub fn simulate_concurrency(
 fn enqueue_trace_arrivals(
     pending: &mut VecDeque<DirectRequest>,
     state: &mut SchedulerState,
-    collector: &TraceCollector,
+    collector: &mut TraceCollector,
     current_time_ms: f64,
 ) {
     loop {
@@ -745,7 +745,7 @@ fn enqueue_trace_arrivals(
 fn enqueue_concurrency_arrivals(
     pending: &mut VecDeque<DirectRequest>,
     state: &mut SchedulerState,
-    collector: &TraceCollector,
+    collector: &mut TraceCollector,
     current_time_ms: f64,
     max_in_flight: usize,
 ) {
@@ -1235,14 +1235,14 @@ mod tests {
         let mut state = SchedulerState::default();
         let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
         let mut hit_rates = RunningMean::new(1000);
-        let collector = TraceCollector::default();
+        let mut collector = TraceCollector::default();
         let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
         let mut current_time_ms = 0.0;
         let mut idle_jump_ms = 0.0;
         let mut first_decode_end_ms = 0.0;
 
         while !pending.is_empty() || !state.is_empty() {
-            enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
+            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
 
             if state.is_empty() {
                 let next_arrival_ms = pending.front().unwrap().arrival_timestamp_ms.unwrap();
@@ -1250,7 +1250,7 @@ mod tests {
                 if idle_jump_ms == 0.0 && current_time_ms > 0.0 {
                     idle_jump_ms = current_time_ms;
                 }
-                enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
+                enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
                 continue;
             }
 
@@ -1259,19 +1259,19 @@ mod tests {
                 &mut kv_manager,
                 &mut hit_rates,
                 args,
-                Some(&collector),
+                Some(&mut collector),
                 current_time_ms,
                 true,
             );
             current_time_ms += prefill_time.as_secs_f64() * 1000.0;
-            enqueue_trace_arrivals(&mut pending, &mut state, &collector, current_time_ms);
+            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
 
             let decode_time = simulate_decode_step(
                 &mut state,
                 &mut kv_manager,
                 &output_tx,
                 args,
-                Some(&collector),
+                Some(&mut collector),
                 current_time_ms,
                 true,
             );
@@ -1307,7 +1307,7 @@ mod tests {
         let mut state = SchedulerState::default();
         let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
         let mut hit_rates = RunningMean::new(1000);
-        let collector = TraceCollector::default();
+        let mut collector = TraceCollector::default();
         let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
         let mut current_time_ms = 0.0;
 
@@ -1315,7 +1315,7 @@ mod tests {
             enqueue_concurrency_arrivals(
                 &mut pending,
                 &mut state,
-                &collector,
+                &mut collector,
                 current_time_ms,
                 max_in_flight,
             );
@@ -1329,7 +1329,7 @@ mod tests {
                 &mut kv_manager,
                 &mut hit_rates,
                 args,
-                Some(&collector),
+                Some(&mut collector),
                 current_time_ms,
                 true,
             );
@@ -1340,7 +1340,7 @@ mod tests {
                 &mut kv_manager,
                 &output_tx,
                 args,
-                Some(&collector),
+                Some(&mut collector),
                 current_time_ms,
                 true,
             );
