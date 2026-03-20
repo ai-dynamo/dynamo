@@ -8,6 +8,7 @@
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   fastvideo -> FastVideo file coverage (no dedicated CI pipeline yet)
 #   frontend -> frontend EPP image build, dynamo build-test
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -147,6 +148,12 @@ trtllm:
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
+
+fastvideo:
+  - '!**/*.md'
+  - '!**/*.rst'
+  - 'components/src/dynamo/fastvideo/**'
+  - 'examples/diffusers/**'
 
 frontend:
   - '!**/*.md'
