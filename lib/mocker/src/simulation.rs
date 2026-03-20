@@ -391,7 +391,11 @@ pub fn simulate_trace_file(
     validate_offline_replay_args(&args, num_workers)?;
     let requests = load_trace_requests(trace_path, args.block_size, true)?;
     let started_at = Instant::now();
-    let report = crate::scheduler::vllm::simulate_trace(args, requests)?;
+    let report = if num_workers == 1 {
+        crate::scheduler::vllm::simulate_trace(args, requests)?
+    } else {
+        crate::scheduler::offline::simulate_trace_multi(args, requests, num_workers)?
+    };
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -418,15 +422,21 @@ pub fn simulate_concurrency_requests(
         bail!("concurrency replay requires at least one request");
     }
 
-    crate::scheduler::vllm::simulate_concurrency(args, requests, max_in_flight)
+    if num_workers == 1 {
+        crate::scheduler::vllm::simulate_concurrency(args, requests, max_in_flight)
+    } else {
+        crate::scheduler::offline::simulate_concurrency_multi(
+            args,
+            requests,
+            max_in_flight,
+            num_workers,
+        )
+    }
 }
 
 fn validate_offline_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
-    if num_workers != 1 {
-        bail!(
-            "trace replay only supports num_workers=1, got {}",
-            num_workers
-        );
+    if num_workers == 0 {
+        bail!("trace replay requires num_workers >= 1");
     }
     if args.engine_type != EngineType::Vllm {
         bail!(

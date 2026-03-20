@@ -56,25 +56,25 @@ pub struct MockerMetrics {
 }
 
 /// Enum representing either a direct request or an active sequence
-pub enum Request {
+pub(crate) enum Request {
     Direct(DirectRequest),
     Active(ActiveSequence),
 }
 
 #[derive(Default)]
-struct SchedulerState {
-    waiting: VecDeque<Uuid>,
-    prefill: VecDeque<Uuid>,
-    decode: VecDeque<Uuid>,
-    requests: HashMap<Uuid, Request>,
+pub(crate) struct SchedulerState {
+    pub(crate) waiting: VecDeque<Uuid>,
+    pub(crate) prefill: VecDeque<Uuid>,
+    pub(crate) decode: VecDeque<Uuid>,
+    pub(crate) requests: HashMap<Uuid, Request>,
 }
 
 impl SchedulerState {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.requests.is_empty()
     }
 
-    fn receive(&mut self, request: DirectRequest) -> Uuid {
+    pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         self.requests.insert(uuid, Request::Direct(request));
         self.waiting.push_back(uuid);
@@ -84,7 +84,7 @@ impl SchedulerState {
     /// Try to admit one request from waiting → prefill.
     /// Converts DirectRequest → ActiveSequence if needed. PrefillCost is computed
     /// later in simulate_prefill when the request reaches the front of the queue.
-    fn admit_one(&mut self, args: &MockEngineArgs) -> Option<Uuid> {
+    pub(crate) fn admit_one(&mut self, args: &MockEngineArgs) -> Option<Uuid> {
         let &uuid = self.waiting.front()?;
         let num_active = self.prefill.len() + self.decode.len();
         if args.max_num_seqs.is_some_and(|limit| num_active >= limit) {
@@ -114,7 +114,7 @@ impl SchedulerState {
         Some(uuid)
     }
 
-    fn run(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
+    pub(crate) fn run(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
         if !self.decode.contains(&uuid) {
             return None;
         }
@@ -125,7 +125,7 @@ impl SchedulerState {
     }
 
     /// Remove a UUID and its associated Request from collections.
-    fn complete(&mut self, uuid: &Uuid) {
+    pub(crate) fn complete(&mut self, uuid: &Uuid) {
         tracing::trace!("Request {uuid} will complete");
         self.decode.retain(|u| u != uuid);
         self.requests.remove(uuid);
@@ -135,7 +135,7 @@ impl SchedulerState {
     /// and adding it back to the front of the waiting queue.
     /// In LIFO mode, evicts the newest request (matches vLLM v1).
     /// In FIFO mode, evicts the oldest request.
-    fn preempt(&mut self, mode: PreemptionMode) -> Vec<MoveBlock> {
+    pub(crate) fn preempt(&mut self, mode: PreemptionMode) -> Vec<MoveBlock> {
         let uuid = match mode {
             PreemptionMode::Lifo => self.decode.pop_back(),
             PreemptionMode::Fifo => self.decode.pop_front(),
@@ -341,7 +341,7 @@ async fn simulate_decode(
     total_time
 }
 
-fn simulate_prefill_step(
+pub(crate) fn simulate_prefill_step(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     hit_rates: &mut RunningMean<f32>,
@@ -462,7 +462,7 @@ fn simulate_prefill_step(
     Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio)
 }
 
-fn simulate_decode_step(
+pub(crate) fn simulate_decode_step(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,

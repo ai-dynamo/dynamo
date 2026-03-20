@@ -3,6 +3,7 @@
 
 //! Engine-specific scheduling implementations.
 
+pub(crate) mod offline;
 pub mod sglang;
 pub mod vllm;
 
