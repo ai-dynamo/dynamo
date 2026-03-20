@@ -50,7 +50,7 @@ inputs:
     required: false
     default: ''
   extra_pytest_args:
-    description: 'Additional pytest arguments (e.g., markers, custom options)'
+    description: 'Additional pytest arguments (e.g., --frontend-image=...)'
     required: false
     default: ''
 
@@ -106,12 +106,6 @@ runs:
         fi
         if [ -n "${IMAGE}" ]; then
           PYTEST_ARGS+=" --image=${IMAGE}"
-        fi
-
-        # When no explicit marker is provided via extra_pytest_args,
-        # exclude marker-gated tests (e.g. gaie) that require extra options
-        if ! echo "${EXTRA_PYTEST_ARGS}" | grep -q -- '-m '; then
-          PYTEST_ARGS+=" --deselect=tests/deploy/test_deploy.py::test_gaie_deployment"
         fi
 
         if [ -z "${TEST_NAME}" ]; then

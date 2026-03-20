@@ -62,7 +62,8 @@ def pytest_configure(config):
         "k8s: marks tests as requiring Kubernetes",
         "fault_tolerance: marks tests as fault tolerance tests",
         "deploy: marks tests as deployment tests",
-        "gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
+        "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
+        "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
         "timeout: test timeout in seconds (pytest-timeout plugin)",
     ]
     for marker in markers:

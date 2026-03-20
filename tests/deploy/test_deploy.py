@@ -110,6 +110,7 @@ def validate_chat_response(
     return data
 
 
+@pytest.mark.framework_only
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
@@ -226,13 +227,14 @@ async def test_deployment(
 
 
 # GAIE (Gateway API Inference Extension) deployment test
-@pytest.mark.gaie
+@pytest.mark.framework_with_gaie
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.timeout(900)
 async def test_gaie_deployment(
+    image: str,
     namespace: str,
     skip_service_restart: bool,
     request,
@@ -244,7 +246,7 @@ async def test_gaie_deployment(
     the full Gateway path.
     """
     frontend_image = request.config.getoption("--frontend-image")
-    worker_image = request.config.getoption("--image")
+    worker_image = image
 
     assert frontend_image, "--frontend-image is required for GAIE deploy test"
     assert worker_image, "--image is required for GAIE deploy test"
