@@ -209,6 +209,25 @@ def validate_worker_type_args(args: argparse.Namespace) -> None:
     args.is_decode_worker = args.disaggregation_mode == "decode"
 
 
+def validate_trace_replay_args(args: argparse.Namespace) -> None:
+    if args.trace_file is None:
+        return
+
+    if args.disaggregation_mode != "agg":
+        raise ValueError(
+            "--trace-file only supports aggregated replay; use --disaggregation-mode=agg"
+        )
+
+    if args.num_workers != 1:
+        raise ValueError("--trace-file only supports --num-workers=1")
+
+    if args.engine_type == "sglang":
+        raise ValueError("--trace-file only supports --engine-type=vllm")
+
+    if args.dp_size not in (None, 1):
+        raise ValueError("--trace-file only supports --data-parallel-size=1")
+
+
 def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     """Parse comma-separated bootstrap ports string into list of integers."""
     if not ports_str:
@@ -216,7 +235,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:
@@ -247,6 +266,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Model name for API responses (default: derived from model-path)",
+    )
+    parser.add_argument(
+        "--trace-file",
+        type=Path,
+        default=None,
+        help="Run offline trace replay from a Mooncake-style JSONL trace file.",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help="Write replay metrics JSON to this path. Defaults to a replay JSON next to the trace file.",
     )
 
     # MockEngineArgs parameters (similar to vLLM style)
@@ -543,7 +574,7 @@ def parse_args() -> argparse.Namespace:
         help="Determines how events are published [nats|zmq]",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     validate_worker_type_args(args)
 
     # Validate num_workers
@@ -587,5 +618,7 @@ def parse_args() -> argparse.Namespace:
         else:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
+
+    validate_trace_replay_args(args)
 
     return args
