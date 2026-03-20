@@ -292,7 +292,7 @@ class SglangStreamingPostProcessor:
             missing_args = any(
                 idx not in self._tool_call_args for idx in self._tool_call_names
             )
-            if missing_args:
+            if missing_args and self.tool_call_parser is not None:
                 buffer = getattr(self.tool_call_parser.detector, "_buffer", "")
                 if buffer:
                     _, final_calls = self.tool_call_parser.parse_non_stream(buffer)

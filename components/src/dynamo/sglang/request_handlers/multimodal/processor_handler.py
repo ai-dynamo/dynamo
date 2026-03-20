@@ -6,7 +6,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, Optional
 
 from transformers import AutoTokenizer
 
@@ -20,6 +20,7 @@ from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
     MultiModalRequest,
+    PreprocessedRequest,
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -27,7 +28,7 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 logger = logging.getLogger(__name__)
 
 
-class MultimodalProcessorHandler(BaseWorkerHandler):
+class MultimodalProcessorHandler(BaseWorkerHandler[MultiModalRequest, Dict[str, Any]]):
     """
     Handler for multimodal processor component that processes multimodal requests
     and forwards them to the encode worker.
@@ -56,7 +57,9 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def generate(self, raw_request: MultiModalRequest, context: Context):
+    async def generate(
+        self, raw_request: MultiModalRequest, context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Process multimodal request and forward to encode worker.
 
@@ -119,7 +122,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
         )
 
         worker_request = SglangMultimodalRequest(
-            request=sglang_request,
+            request=PreprocessedRequest(**sglang_request),
             multimodal_inputs=multimodal_groups,
         )
 

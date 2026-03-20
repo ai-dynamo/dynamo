@@ -38,7 +38,7 @@ except ImportError as e:
     DEVICE = "cpu"
 
 
-class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
+class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
     Handler for multimodal encode worker component that processes images/videos
     and forwards them to the downstream worker.
@@ -84,12 +84,19 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
             # These are likely the individual special tokens for Qwen2.5-VL
             image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+            assert isinstance(
+                image_pad_id, int
+            ), f"Expected int token id, got {type(image_pad_id)}"
 
             # Use the image_pad token as the main image token
-            self.image_token_id = image_pad_id
+            self.image_token_id: int = image_pad_id
         else:
             # Fallback for other models
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
+            token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
+            assert isinstance(
+                token_id, int
+            ), f"Expected int token id, got {type(token_id)}"
+            self.image_token_id = token_id
 
         self.min_workers = 1
 
@@ -230,10 +237,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 zip(multimodal_groups, image_grid_thw_list)
             ):
                 mm_group.image_grid_thw = image_grid_thw
-                mm_group.multimodal_input.image_url = None
+                if mm_group.multimodal_input is not None:
+                    mm_group.multimodal_input.image_url = None
 
             # Store shared tensor transfer metadata at request level.
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.embeddings_shape = tuple(precomputed_embeddings.shape)  # type: ignore[assignment]
             request.transfer_payload = None
 
             search_start = 0
