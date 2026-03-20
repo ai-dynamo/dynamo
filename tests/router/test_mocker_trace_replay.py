@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,7 @@ def test_mocker_trace_file_replay(tmp_path):
 
     result = subprocess.run(
         [
-            str(repo_root / ".venv/bin/python"),
+            sys.executable,
             "-m",
             "dynamo.mocker",
             "--trace-file",
