@@ -52,20 +52,6 @@ print_launch_banner --multimodal "Launching LLaVA Raw Embeddings E/PD" "$MODEL_P
     "Embeddings: ${EMBEDDINGS_FILE}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Debug: GPU topology and memory before anything starts
-# ══════════════════════════════════════════════════════════════════════════════
-echo ""
-echo "=== GPU Debug Info ==="
-echo "ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES}"
-echo "PD_CUDA_VISIBLE_DEVICES=${PD_CUDA_VISIBLE_DEVICES}"
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
-echo ""
-echo "--- nvidia-smi (all GPUs) ---"
-nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv,noheader,nounits || echo "nvidia-smi failed"
-echo "=============================="
-echo ""
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Phase 1: Generate embeddings using standalone HF vision encoder
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -78,7 +64,7 @@ CUDA_VISIBLE_DEVICES=0 python3 - <<'PYEOF'
 import torch, io, os, urllib.request
 from PIL import Image
 from huggingface_hub import snapshot_download
-from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor, AutoConfig
+from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
 
 model_id   = os.environ["MODEL_PATH"]
 revision   = os.environ.get("MODEL_REVISION", "") or None
@@ -91,24 +77,12 @@ print(f"Resolving model {model_id} (revision={revision}) …")
 model_path = snapshot_download(model_id, revision=revision)
 print(f"Model path: {model_path}")
 
-# ── Debug: inspect config dtype fields ──
-cfg = AutoConfig.from_pretrained(model_path)
-print(f"[DEBUG] config.torch_dtype       = {cfg.torch_dtype}")
-print(f"[DEBUG] text_config.torch_dtype   = {getattr(cfg.text_config, 'torch_dtype', '<MISSING>')}")
-print(f"[DEBUG] vision_config.torch_dtype = {getattr(cfg.vision_config, 'torch_dtype', '<MISSING>')}")
-
-print(f"[DEBUG] GPU mem before model load: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated, "
-      f"{torch.cuda.memory_reserved()/1e9:.2f} GB reserved")
-
 # ── Load model (vision tower + projector) ──
 print("Loading LlavaNext model …")
 model = LlavaNextForConditionalGeneration.from_pretrained(
     model_path, torch_dtype=torch.float16, device_map="cuda:0",
 )
 processor = LlavaNextProcessor.from_pretrained(model_path)
-
-print(f"[DEBUG] GPU mem after model load: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated, "
-      f"{torch.cuda.memory_reserved()/1e9:.2f} GB reserved")
 
 # ── Download and process image ──
 print(f"Downloading test image from {image_url} …")
@@ -160,11 +134,6 @@ if [ ! -f "$EMBEDDINGS_FILE" ]; then
 fi
 echo "Embeddings generated at ${EMBEDDINGS_FILE}"
 
-echo ""
-echo "--- GPU memory after Phase 1 (should be fully released) ---"
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader,nounits || echo "nvidia-smi failed"
-echo ""
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 2: Start Encode + Aggregated PD workers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -206,19 +175,6 @@ CUDA_VISIBLE_DEVICES=$PD_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   "${EXTRA_PD_ARGS[@]}" &
 PD_PID=$!
 echo "[Phase 2] PD worker PID=${PD_PID}"
-
-# Background GPU monitor: prints memory every 30s so we can trace what's eating VRAM
-(
-  for i in $(seq 1 20); do
-    sleep 30
-    echo ""
-    echo "--- [GPU Monitor t=${i}×30s] $(date -u +%H:%M:%S) ---"
-    nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader,nounits 2>/dev/null || true
-    nvidia-smi pmon -c 1 2>/dev/null | head -5 || true
-    echo "---"
-  done
-) &
-GPU_MON_PID=$!
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
