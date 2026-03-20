@@ -48,9 +48,11 @@ const (
 	// DynPrefillScorer to DynDecodeScorer so it can set the x-prefill-instance-id header.
 	PrefillWorkerIDStateKey = plugins.StateKey("disagg-prefill-worker-id")
 
-	// EnforceDisaggFailedHeader is set on the request by DynPrefillScorer when
-	// enforce_disagg=true and prefill workers are not available. ProcessResults
-	// checks this header to fail the request at the EPP level.
+	// EnforceDisaggFailedHeader is an internal header set by DynPrefillScorer
+	// when enforce_disagg=true and prefill workers are not available.
+	// Read by DisaggProfileHandler.ProcessResults to fail the request at the
+	// EPP level. Cleaned up by DynDecodeScorer.PreRequest before the request
+	// is forwarded to the worker.
 	EnforceDisaggFailedHeader = "x-dynamo-enforce-disagg-failed"
 )
 

@@ -178,6 +178,7 @@ func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.C
 
 	// Fail the request if enforce_disagg=true and prefill workers are not available.
 	if req.Headers != nil && req.Headers[EnforceDisaggFailedHeader] == "true" {
+		delete(req.Headers, EnforceDisaggFailedHeader)
 		return nil, errors.New(
 			"disaggregated mode enforced (DYN_ENFORCE_DISAGG=true) but prefill workers " +
 				"are not available; request rejected. Either wait for prefill workers " +

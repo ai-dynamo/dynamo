@@ -198,6 +198,9 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LLMRequest, _ *schedtypes.SchedulingResult) {
 	logger := log.FromContext(ctx)
 
+	// Clean up internal header so it is never forwarded to the worker.
+	delete(request.Headers, EnforceDisaggFailedHeader)
+
 	if request == nil || request.RequestId == "" {
 		logger.V(logutil.DEBUG).Info("DynDecodeScorer PreRequest: no request ID, skipping")
 		return
