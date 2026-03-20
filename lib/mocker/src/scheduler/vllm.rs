@@ -465,23 +465,27 @@ fn simulate_decode_step(
     collector: Option<&TraceCollector>,
     current_time_ms: f64,
 ) -> Duration {
+    if state.decode.is_empty() {
+        return Duration::ZERO;
+    }
+
     let decode_start_ms = current_time_ms;
 
-    let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
-    let total_length: usize = state
+    let decode_lengths = state
         .decode
         .iter()
-        .map(|uuid| {
-            if let Request::Active(seq) = state.requests.get(uuid).unwrap() {
-                seq.len()
-            } else {
-                0
-            }
+        .filter_map(|uuid| match state.requests.get(uuid).unwrap() {
+            Request::Active(seq) => Some(seq.len()),
+            Request::Direct(_) => None,
         })
-        .sum();
-    let count = state.decode.len();
+        .collect::<Vec<_>>();
+    if decode_lengths.is_empty() {
+        return Duration::ZERO;
+    }
 
-    let context_length = if count > 0 { total_length / count } else { 0 };
+    let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
+    let total_length: usize = decode_lengths.iter().sum();
+    let context_length = total_length / decode_lengths.len();
     let decoding_time = args
         .perf_model
         .predict_decode_time(active_kv_tokens, context_length);
@@ -490,6 +494,7 @@ fn simulate_decode_step(
 
     // Process decoding.
     let uuids: Vec<Uuid> = state.decode.iter().copied().collect();
+    let mut emitted_any = false;
     for uuid in uuids {
         let mut allocated = false;
         loop {
@@ -525,6 +530,7 @@ fn simulate_decode_step(
         let Some(sequence) = state.run(uuid) else {
             continue;
         };
+        emitted_any = true;
         if let Some(collector) = collector {
             collector.on_token(uuid, decode_end_ms);
         }
@@ -549,6 +555,10 @@ fn simulate_decode_step(
         if send_failed || is_complete {
             state.complete(&uuid);
         }
+    }
+
+    if !emitted_any {
+        return Duration::ZERO;
     }
 
     total_time

@@ -138,8 +138,7 @@ where
 struct TraceRequestStats {
     arrival_time_ms: f64,
     first_admit_ms: Option<f64>,
-    first_token_ms: Option<f64>,
-    last_token_ms: Option<f64>,
+    token_times_ms: Vec<f64>,
     input_length: usize,
     output_length: usize,
     reused_input_tokens: usize,
@@ -162,6 +161,33 @@ pub(crate) struct TraceCollector {
     requests: Mutex<HashMap<Uuid, TraceRequestStats>>,
 }
 
+impl TraceRequestStats {
+    fn first_token_ms(&self) -> Option<f64> {
+        self.token_times_ms.first().copied()
+    }
+
+    fn last_token_ms(&self) -> Option<f64> {
+        self.token_times_ms.last().copied()
+    }
+
+    fn mean_tpot_ms(&self) -> Option<f64> {
+        let num_gaps = self.token_times_ms.len().saturating_sub(1);
+        if num_gaps == 0 {
+            return None;
+        }
+
+        let first_token_ms = self.first_token_ms()?;
+        let last_token_ms = self.last_token_ms()?;
+        Some((last_token_ms - first_token_ms).max(0.0) / num_gaps as f64)
+    }
+
+    fn itls_ms(&self) -> impl Iterator<Item = f64> + '_ {
+        self.token_times_ms
+            .windows(2)
+            .map(|window| (window[1] - window[0]).max(0.0))
+    }
+}
+
 impl TraceCollector {
     pub(crate) fn on_arrival(
         &self,
@@ -175,8 +201,7 @@ impl TraceCollector {
             TraceRequestStats {
                 arrival_time_ms,
                 first_admit_ms: None,
-                first_token_ms: None,
-                last_token_ms: None,
+                token_times_ms: Vec::with_capacity(output_length),
                 input_length,
                 output_length,
                 reused_input_tokens: 0,
@@ -193,8 +218,7 @@ impl TraceCollector {
 
     pub(crate) fn on_token(&self, uuid: Uuid, token_time_ms: f64) {
         if let Some(stats) = self.requests.lock().unwrap().get_mut(&uuid) {
-            stats.first_token_ms.get_or_insert(token_time_ms);
-            stats.last_token_ms = Some(token_time_ms);
+            stats.token_times_ms.push(token_time_ms);
         }
     }
 
@@ -212,11 +236,13 @@ impl TraceCollector {
         let mut total_reused_tokens = 0usize;
 
         for stats in requests.values() {
-            let (Some(first_admit_ms), Some(first_token_ms), Some(last_token_ms)) = (
-                stats.first_admit_ms,
-                stats.first_token_ms,
-                stats.last_token_ms,
-            ) else {
+            let Some(first_admit_ms) = stats.first_admit_ms else {
+                continue;
+            };
+            let Some(first_token_ms) = stats.first_token_ms() else {
+                continue;
+            };
+            let Some(last_token_ms) = stats.last_token_ms() else {
                 continue;
             };
 
@@ -233,11 +259,9 @@ impl TraceCollector {
             ttfts.push(ttft_ms);
             e2e_latencies.push(e2e_ms);
 
-            if stats.output_length > 1 {
-                let per_token_ms =
-                    ((last_token_ms - first_token_ms).max(0.0)) / (stats.output_length - 1) as f64;
-                tpots.push(per_token_ms);
-                itls.push(per_token_ms);
+            if let Some(tpot_ms) = stats.mean_tpot_ms() {
+                tpots.push(tpot_ms);
+                itls.extend(stats.itls_ms());
             }
         }
 
@@ -285,8 +309,8 @@ impl TraceCollector {
             .map(|stats| TraceRequestStatsSnapshot {
                 arrival_time_ms: stats.arrival_time_ms,
                 first_admit_ms: stats.first_admit_ms,
-                first_token_ms: stats.first_token_ms,
-                last_token_ms: stats.last_token_ms,
+                first_token_ms: stats.first_token_ms(),
+                last_token_ms: stats.last_token_ms(),
                 input_length: stats.input_length,
                 output_length: stats.output_length,
                 reused_input_tokens: stats.reused_input_tokens,
@@ -533,5 +557,26 @@ mod tests {
         assert_eq!(json["completed_requests"], 3);
         assert!(json.get("mean_ttft_ms").is_some());
         assert!(json.get("mean_e2e_latency_ms").is_some());
+    }
+
+    #[test]
+    fn test_replay_itl_uses_per_token_gaps() {
+        let collector = TraceCollector::default();
+        let uuid = Uuid::from_u128(11);
+
+        collector.on_arrival(uuid, 0.0, 4, 4);
+        collector.on_admit(uuid, 0.0, 0);
+        collector.on_token(uuid, 10.0);
+        collector.on_token(uuid, 11.0);
+        collector.on_token(uuid, 12.0);
+        collector.on_token(uuid, 110.0);
+
+        let report = collector.finish();
+
+        assert!((report.latency.tpot.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
+        assert!((report.latency.itl.distribution.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(report.latency.itl.distribution.median_ms, 1.0);
+        assert_eq!(report.latency.itl.distribution.p95_ms, 98.0);
+        assert_eq!(report.latency.itl.max_ms, 98.0);
     }
 }
