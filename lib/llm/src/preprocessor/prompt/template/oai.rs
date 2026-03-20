@@ -441,16 +441,10 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         normalize_tool_arguments_in_messages(&mut messages_for_template);
 
         // Inject reasoning_content as <think> blocks into content so the template
-        // sees the model's prior chain-of-thought. Only when enable_thinking is set
-        // to avoid injecting <think> tokens for non-reasoning models.
-        if req
-            .chat_template_args()
-            .and_then(|args| args.get("enable_thinking"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            inject_reasoning_content_into_messages(&mut messages_for_template);
-        }
+        // sees the model's prior chain-of-thought. The presence of reasoning_content
+        // on any assistant message is sufficient signal — a non-reasoning model would
+        // never produce it. No flag check needed.
+        inject_reasoning_content_into_messages(&mut messages_for_template);
 
         let ctx = context! {
             messages => messages_for_template,
