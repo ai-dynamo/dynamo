@@ -29,14 +29,12 @@ Enable priority-based scheduling so the engine respects the `priority` value fro
 python -m dynamo.sglang \
   --model-path <model> \
   --enable-priority-scheduling \
-  --schedule-low-priority-values-first \
   ...
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--enable-priority-scheduling` | Enables priority-based request scheduling instead of FCFS. |
-| `--schedule-low-priority-values-first` | Inverts priority ordering so lower values are scheduled first (matches vLLM convention). Without this flag, higher values = higher priority. |
 
 When priority scheduling is enabled, the engine uses the `priority` field from `nvext.agent_hints` to order requests in its internal queue. Requests with higher effective priority are scheduled before lower-priority ones. Ties are broken by arrival time.
 
@@ -77,8 +75,7 @@ Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to 
 
 | Agent Hint | Router Behavior | SGLang Engine Behavior |
 |------------|----------------|----------------------|
-| `priority` | No routing effect (forwarded to engine) | Queue ordering when `--enable-priority-scheduling` is set. Also affects radix cache eviction order when `--radix-eviction-policy priority` is set. |
-| `latency_sensitivity` | Shifts request earlier in router queue (requires `--router-queue-threshold`) | No direct engine effect. |
+| `priority` | Raises router queue priority when `--router-queue-threshold` is set. | Queue ordering when `--enable-priority-scheduling` is set. Also affects radix cache eviction order when `--radix-eviction-policy priority` is set. |
 | `osl` | Output block tracking for routing decisions (requires `--router-track-output-blocks`) | No direct engine effect. |
 | `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache. |
 
@@ -100,7 +97,6 @@ response = client.chat.completions.create(
         "nvext": {
             "agent_hints": {
                 "priority": 10,
-                "latency_sensitivity": 2.0,
                 "speculative_prefill": True,
                 "osl": 512
             }
