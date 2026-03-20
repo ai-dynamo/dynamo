@@ -6,14 +6,14 @@
 
 x-backend-base: &backend-base
   build:
-    context: ..
-    dockerfile: Dockerfile
+    context: ../../..
+    dockerfile: examples/diffusers/Dockerfile
     args:
       TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
       MAX_JOBS: ${MAX_JOBS:-4}
   image: dynamo-fastvideo-diffusers:latest
   restart: on-failure
-  command: python worker.py
+  command: python -m dynamo.fastvideo
   environment:
     - DYN_DISCOVERY_BACKEND=file
     - DYN_FILE_KV=/tmp/dynamo-discovery
@@ -34,8 +34,8 @@ x-backend-base: &backend-base
 services:
   frontend:
     build:
-      context: ..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: examples/diffusers/Dockerfile
       args:
         TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
         MAX_JOBS: ${MAX_JOBS:-4}

@@ -82,4 +82,5 @@ spec:
           workingDir: /opt/app
           command:
             - python
-            - worker.py
+            - -m
+            - dynamo.fastvideo

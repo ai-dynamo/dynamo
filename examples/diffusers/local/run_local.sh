@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXAMPLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${EXAMPLE_DIR}/../.." && pwd)"
 
 : "${PYTHON_BIN:=python3}"
 : "${MODEL:=FastVideo/LTX2-Distilled-Diffusers}"
@@ -25,10 +26,11 @@ mkdir -p "${DISCOVERY_DIR}" "${LOG_DIR}"
 
 export DYN_DISCOVERY_BACKEND=file
 export DYN_FILE_KV="${DYN_FILE_KV:-${DISCOVERY_DIR}}"
+export PYTHONPATH="${REPO_DIR}/components/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 cd "${EXAMPLE_DIR}"
 
-worker_cmd=("${PYTHON_BIN}" worker.py --model "${MODEL}" --num-gpus "${NUM_GPUS}")
+worker_cmd=("${PYTHON_BIN}" -m dynamo.fastvideo --model-path "${MODEL}" --num-gpus "${NUM_GPUS}")
 if [[ -n "${WORKER_EXTRA_ARGS}" ]]; then
   # shellcheck disable=SC2206
   worker_extra=( ${WORKER_EXTRA_ARGS} )
