@@ -35,12 +35,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
-macro_rules! read_lock {
-    ($self:expr, $lock:expr) => {
-        $lock.read()
-    };
-}
-
 /// Thread-safe shared reference to a Block.
 type SharedBlock = Arc<RwLock<Block>>;
 
@@ -174,7 +168,7 @@ impl ConcurrentRadixTree {
 
         // Get first child from root.
         let first_child = {
-            let guard = read_lock!(self, self.root);
+            let guard = self.root.read();
             guard.children.get(&sequence[0]).cloned()
         };
 
@@ -184,7 +178,7 @@ impl ConcurrentRadixTree {
 
         // Initialize active worker set from first child.
         let (mut active, mut active_count) = {
-            let guard = read_lock!(self, first_child);
+            let guard = first_child.read();
             (guard.workers.clone(), guard.workers.len())
         };
 
@@ -221,7 +215,7 @@ impl ConcurrentRadixTree {
         // and fall back to a full membership check.
         for (idx, local_hash) in sequence.iter().enumerate().skip(1) {
             let next_block = {
-                let guard = read_lock!(self, current);
+                let guard = current.read();
                 guard.children.get(local_hash).cloned()
             };
 
@@ -230,7 +224,7 @@ impl ConcurrentRadixTree {
             };
 
             {
-                let guard = read_lock!(self, block);
+                let guard = block.read();
                 let child_count = guard.workers.len();
 
                 if child_count != active_count {
@@ -369,7 +363,7 @@ impl ConcurrentRadixTree {
                 match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
                         {
-                            let existing_guard = read_lock!(self, existing);
+                            let existing_guard = existing.read();
                             if existing_guard.block_hash != Some(block_data.block_hash) {
                                 tracing::warn!(
                                     expected = ?block_data.block_hash,
@@ -570,14 +564,14 @@ impl ConcurrentRadixTree {
         let mut queue = VecDeque::new();
 
         {
-            let root_guard = read_lock!(self, self.root);
+            let root_guard = self.root.read();
             for (tokens_hash, child_block) in &root_guard.children {
                 queue.push_back((child_block.clone(), None, *tokens_hash));
             }
         }
 
         while let Some((current_block, parent_hash, tokens_hash)) = queue.pop_front() {
-            let current_guard = read_lock!(self, current_block);
+            let current_guard = current_block.read();
 
             // Get this block's hash (same for all workers)
             let block_hash = current_guard
