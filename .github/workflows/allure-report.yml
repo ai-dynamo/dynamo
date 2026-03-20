@@ -135,11 +135,8 @@ jobs:
           if [ -f allure-v3-history.jsonl ]; then
             cp allure-v3-history.jsonl allure-v3-workspace/history.jsonl
           fi
-          # historyPath requires a config file — create a minimal one
-          # historyPath requires a config file — create one inside the cwd
-          cat > allure-v3-workspace/allurerc.mjs << 'RCEOF'
-          export default { historyPath: "./history.jsonl" };
-          RCEOF
+          # historyPath requires a config file
+          echo 'export default { historyPath: "./history.jsonl" };' > allure-v3-workspace/allurerc.mjs
           npx allure generate --config="${GITHUB_WORKSPACE}/allure-v3-workspace/allurerc.mjs" --cwd allure-v3-workspace -o allure-report-v3
 
       - name: Generate unified dashboard
