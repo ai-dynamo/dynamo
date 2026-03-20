@@ -1,1 +1,0 @@
-DEBUG    dynamo.vllm.worker_factory:worker_factory.py:67 WorkerFactory cannot handle config: Dynamo orchestrated disaggregated prefill worker, combined with remote encode worker is not supported., provided config: { multimodal_worker: False, multimodal_decode_worker: False, multimodal_encode_worker: False, disaggregation_mode: DisaggregationMode.PREFILL, route_to_encoder: True }

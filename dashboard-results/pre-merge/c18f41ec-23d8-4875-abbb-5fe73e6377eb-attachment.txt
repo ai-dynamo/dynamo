@@ -1,0 +1,106 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4320 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4320
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4320
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2392 --advertise-client-urls http://0.0.0.0:2392 --listen-peer-urls http://0.0.0.0:2393 --initial-advertise-peer-urls http://localhost:2393 --initial-cluster default=http://localhost:2393 --data-dir /tmp/etcd_zfze3fkq in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2392
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2392
+INFO     root:conftest.py:943 Set up file storage backend in: /tmp/tmpang6xkgu
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:506 Starting SGLang indexers sync test: store_backend=etcd, durable_kv_events=False, request_plane=tcp
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:239 Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8125, kv_port=8100) with endpoint: dyn://test-namespace-jefhlwdpyp.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:239 Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8126, kv_port=8101) with endpoint: dyn://test-namespace-jefhlwdpyp.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:253 [SGLangProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:259 [SGLangProcess] Starting SGLang worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:273 [SGLangProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8100"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:277 [SGLangProcess] Worker 0 launched with PID: 2262
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:286 [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:259 [SGLangProcess] Starting SGLang worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:273 [SGLangProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8101"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:277 [SGLangProcess] Worker 1 launched with PID: 2300
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:302 [SGLangProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:305 [SGLangProcess] Waiting for health checks to complete...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:309 [SGLangProcess] Checking health for worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:314 [SGLangProcess] Worker 0 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:309 [SGLangProcess] Checking health for worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:314 [SGLangProcess] Worker 1 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:321 [SGLangProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:523 Starting 2 SGLang workers
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:524 All SGLang workers using namespace: test-namespace-jefhlwdpyp
+INFO     tests.router.common:common.py:884 Creating first KV router with its own runtime
+INFO     tests.router.helper:helper.py:263 Waiting for workers to be ready
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [7858954023024024332]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [7858954023024024332]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [7858954023024024332]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [7858954023024024332]
+INFO     tests.router.helper:helper.py:275 Found 1 instance(s): [7858954023024024332]
+INFO     tests.router.helper:helper.py:275 Found 2 instance(s): [7858954023024024334, 7858954023024024332]
+INFO     tests.router.helper:helper.py:291 Sending warmup request with 4 tokens
+INFO     tests.router.helper:helper.py:308 All 2 workers are ready
+INFO     tests.router.common:common.py:900 Sending 25 requests to first router
+INFO     tests.router.common:common.py:878 Completed 25/25 requests for Router 1
+INFO     tests.router.common:common.py:915 === NATS INTERRUPTION TEST: Phase 1 ===
+INFO     tests.router.common:common.py:916 Stopping NATS server
+INFO     tests.conftest:conftest.py:604 Stopping NATS server on port 4320
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 2237
+INFO     NatsServer:managed_process.py:31 Terminating PID: 2238 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 2238 sed
+INFO     tests.router.common:common.py:919 Sending 10 requests while NATS is down (via TCP)
+INFO     tests.router.common:common.py:878 Completed 10/10 requests for Router 1 (NATS down)
+INFO     tests.router.common:common.py:927 Restarting NATS server (fresh state)
+INFO     tests.conftest:conftest.py:609 Starting NATS server on port 4320 with fresh state
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4320 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4320
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4320
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     tests.router.common:common.py:975 Creating second KV router with its own runtime
+INFO     tests.router.common:common.py:1000 Sending 25 requests to second router
+INFO     tests.router.common:common.py:878 Completed 25/25 requests for Router 2
+INFO     tests.router.common:common.py:1013 === NATS INTERRUPTION TEST: Phase 2 ===
+INFO     tests.router.common:common.py:1014 Stopping NATS server
+INFO     tests.conftest:conftest.py:604 Stopping NATS server on port 4320
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 3108
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3109 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3109 sed
+INFO     tests.router.common:common.py:1017 Sending 10 requests while NATS is down (via TCP)
+INFO     tests.router.common:common.py:878 Completed 10/10 requests for Router 2 (NATS down)
+INFO     tests.router.common:common.py:1025 Restarting NATS server (fresh state)
+INFO     tests.conftest:conftest.py:609 Starting NATS server on port 4320 with fresh state
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4320 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4320
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4320
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     tests.router.common:common.py:1029 Sending 5 more requests after NATS recovery
+INFO     tests.router.common:common.py:878 Completed 5/5 requests for Router 1 (post-recovery)
+INFO     tests.router.common:common.py:1049 Waiting for final synchronization
+INFO     tests.router.common:common.py:1097 Skipping NATS object store verification (NATS was restarted fresh for interruption test)
+INFO     tests.router.common:common.py:1102 Dumping states from all sources
+INFO     tests.router.common:common.py:1122 Router 1 has 150 events
+INFO     tests.router.common:common.py:1123 Router 2 has 150 events
+INFO     tests.router.common:common.py:1126 Successfully verified Router 1 and Router 2 states are equal
+INFO     tests.router.common:common.py:1206 Skipping NATS consumers verification (local indexer uses NATS Core, not JetStream)
+INFO     tests.router.common:common.py:1213 Indexers sync test completed successfully
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:541 SGLang indexers sync test completed successfully
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:329 Stopping SGLang worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 2262
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 2264 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 2264 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 2263 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 2263 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:329 Stopping SGLang worker 1
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 2300
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 2302 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 2302 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 2301 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 2301 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:334 Waiting for SGLang worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 2249
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 2250 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 2250 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 3163
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3164 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3164 sed

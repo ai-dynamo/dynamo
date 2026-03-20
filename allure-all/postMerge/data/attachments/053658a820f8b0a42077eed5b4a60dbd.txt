@@ -1,1 +1,0 @@
-ERROR    dynamo.vllm.handlers:handlers.py:458 Failed to wake up engine: discovery write timeout

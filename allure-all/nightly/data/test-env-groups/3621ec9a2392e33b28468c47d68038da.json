@@ -1,1 +1,1 @@
-{"id":"3621ec9a2392e33b28468c47d68038da","fullName":"tests.serve.test_disagg_logprobs_serialization.TestDisaggLogprobsSerializationRoundtrip#test_rank_none_preserved","name":"test_rank_none_preserved","status":"passed","testResultsByEnv":{"default":"630121ba8d0db6c8c3bd113b8f7ff97c"}}
+{"id":"3621ec9a2392e33b28468c47d68038da","fullName":"tests.serve.test_disagg_logprobs_serialization.TestDisaggLogprobsSerializationRoundtrip#test_rank_none_preserved","name":"test_rank_none_preserved","status":"passed","testResultsByEnv":{"default":"9a4c489af640119aaa5ef4044278b543"}}
