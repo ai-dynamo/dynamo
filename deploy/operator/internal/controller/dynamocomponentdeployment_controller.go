@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -67,7 +66,6 @@ const (
 	KubeAnnotationDeploymentStrategy                    = "nvidia.com/deployment-strategy"
 	KubeAnnotationDeploymentRollingUpdateMaxSurge       = "nvidia.com/deployment-rolling-update-max-surge"
 	KubeAnnotationDeploymentRollingUpdateMaxUnavailable = "nvidia.com/deployment-rolling-update-max-unavailable"
-	SchedulerNameVolcano                                = "volcano"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -323,109 +321,67 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	logger := log.FromContext(ctx)
-
-	desiredReplicas := int32(1)
-	if dynamoComponentDeployment.Spec.Replicas != nil {
-		desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
-	}
-
 	anyModified := false
-	leaderWorkerSets := make([]*leaderworkersetv1.LeaderWorkerSet, 0, desiredReplicas)
-	for i := range int(desiredReplicas) {
-		volcanoPodGroupModified, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
-			return r.generateVolcanoPodGroup(ctx, generateResourceOption{
-				dynamoComponentDeployment: dynamoComponentDeployment,
-				instanceID:                &i,
-			})
-		})
-		if err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to sync the PodGroup: %w", err)
-		}
 
-		leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
-			return r.generateLeaderWorkerSet(ctx, generateResourceOption{
-				dynamoComponentDeployment: dynamoComponentDeployment,
-				instanceID:                &i,
-			})
+	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
+			dynamoComponentDeployment: dynamoComponentDeployment,
 		})
-		if err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
-		}
-
-		if leaderWorkerSetModified || volcanoPodGroupModified {
-			anyModified = true
-		}
-		leaderWorkerSets = append(leaderWorkerSets, lwsObj)
+	})
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
 
-	// Clean up any excess LeaderWorkerSets (if replicas were decreased)
-	for i := int(desiredReplicas); ; i++ {
-		nextLWSName := lwsInstanceName(dynamoComponentDeployment, i)
-		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      nextLWSName,
-			Namespace: dynamoComponentDeployment.Namespace,
-		}, lwsToDelete)
-
-		if err != nil {
-			if k8serrors.IsNotFound(err) {
-				break
-			}
-			return ComponentReconcileResult{}, fmt.Errorf("failed to get the LeaderWorkerSet for deletion: %w", err)
-		}
-
-		err = r.Delete(ctx, lwsToDelete)
-		if err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to delete the LeaderWorkerSet: %w", err)
-		}
-
-		podGroupName := nextLWSName
-		podGroupToDelete := &volcanov1beta1.PodGroup{}
-		err = r.Get(ctx, types.NamespacedName{
-			Name:      podGroupName,
-			Namespace: dynamoComponentDeployment.Namespace,
-		}, podGroupToDelete)
-
-		if err != nil {
-			if !k8serrors.IsNotFound(err) {
-				logger.Error(err, "Failed to get PodGroup for deletion", "podGroupName", podGroupName)
-			}
-		} else {
-			err = r.Delete(ctx, podGroupToDelete)
-			if err != nil {
-				logger.Error(err, "Failed to delete PodGroup", "podGroupName", podGroupName)
-			}
-		}
-
+	if leaderWorkerSetModified {
 		anyModified = true
 	}
 
-	allReady := true
-	lwsReplicaStatuses := []v1alpha1.ServiceReplicaStatus{}
-	for _, leaderWorkerSet := range leaderWorkerSets {
-		if !IsLeaderWorkerSetReady(leaderWorkerSet) {
-			allReady = false
+	// Clean up legacy per-replica LeaderWorkerSets and PodGroups (e.g. name-0, name-1...).
+	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
+	for i := 0; i < 100; i++ {
+		legacyName := fmt.Sprintf("%s-%d", baseKubeName, i)
+		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
+		err := r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, lwsToDelete)
+		if err == nil {
+			logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacyName)
+			if err := r.Delete(ctx, lwsToDelete); err != nil {
+				logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", legacyName)
+			}
+			anyModified = true
+		} else if !k8serrors.IsNotFound(err) {
+			logger.Error(err, "Failed to check legacy LeaderWorkerSet", "name", legacyName)
 		}
-		lwsReplicaStatuses = append(lwsReplicaStatuses, getLeaderWorkerSetReplicasStatus(leaderWorkerSet))
+
+		// Also delete legacy PodGroups
+		pgToDelete := &volcanov1beta1.PodGroup{}
+		err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, pgToDelete)
+		if err == nil {
+			logger.Info("Deleting legacy PodGroup", "name", legacyName)
+			if err := r.Delete(ctx, pgToDelete); err != nil {
+				logger.Error(err, "Failed to delete legacy PodGroup", "name", legacyName)
+			}
+			anyModified = true
+		}
 	}
 
-	if allReady {
+	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
+	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
 			modified:             anyModified,
 			status:               metav1.ConditionTrue,
-			reason:               "AllLeaderWorkerSetsReady",
-			message:              "All LeaderWorkerSets are ready",
-			serviceReplicaStatus: combineLWSReplicaStatuses(lwsReplicaStatuses),
+			reason:               "LeaderWorkerSetReady",
+			message:              "LeaderWorkerSet is ready",
+			serviceReplicaStatus: &lwsReplicaStatus,
 		}, nil
 	}
+
 	return ComponentReconcileResult{
 		modified:             anyModified,
 		status:               metav1.ConditionFalse,
-		reason:               "SomeLeaderWorkerSetsNotReady",
-		message:              "Some LeaderWorkerSets are not ready",
-		serviceReplicaStatus: combineLWSReplicaStatuses(lwsReplicaStatuses),
+		reason:               "LeaderWorkerSetNotReady",
+		message:              "LeaderWorkerSet is not ready",
+		serviceReplicaStatus: &lwsReplicaStatus,
 	}, nil
-
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
@@ -475,32 +431,6 @@ func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderW
 	}
 }
 
-func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaStatus) *v1alpha1.ServiceReplicaStatus {
-	if len(serviceReplicaStatuses) == 0 {
-		return nil
-	}
-
-	firstServiceStatus := serviceReplicaStatuses[0]
-	var readyReplicas int32 = 0
-	if firstServiceStatus.ReadyReplicas != nil {
-		readyReplicas = *firstServiceStatus.ReadyReplicas
-	}
-	allNames := append([]string{}, firstServiceStatus.ComponentNames...)
-	for _, serviceReplicaStatus := range serviceReplicaStatuses[1:] {
-		firstServiceStatus.Replicas += serviceReplicaStatus.Replicas
-		firstServiceStatus.UpdatedReplicas += serviceReplicaStatus.UpdatedReplicas
-		if serviceReplicaStatus.ReadyReplicas != nil {
-			readyReplicas += *serviceReplicaStatus.ReadyReplicas
-		}
-		allNames = append(allNames, serviceReplicaStatus.ComponentNames...)
-	}
-
-	slices.Sort(allNames)
-	firstServiceStatus.ComponentNames = allNames
-	firstServiceStatus.ReadyReplicas = &readyReplicas
-	return &firstServiceStatus
-}
-
 // IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
 func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) bool {
 	if leaderWorkerSet == nil {
@@ -533,43 +463,7 @@ func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) 
 	return false
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx context.Context, opt generateResourceOption) (*volcanov1beta1.PodGroup, bool, error) {
-	logs := log.FromContext(ctx)
-	logs.Info("Generating Volcano PodGroup")
-
-	if opt.instanceID == nil {
-		return nil, false, errors.New("generateVolcanoPodGroup: instanceID cannot be nil")
-	}
-	instanceID := *opt.instanceID
-
-	if instanceID < 0 {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
-	}
-
-	podGroupName := lwsInstanceName(opt.dynamoComponentDeployment, instanceID)
-
-	kubeNs := opt.dynamoComponentDeployment.Namespace
-
-	labels := make(map[string]string)
-	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
-
-	minMember := opt.dynamoComponentDeployment.GetNumberOfNodes()
-
-	podGroup := &volcanov1beta1.PodGroup{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podGroupName,
-			Namespace: kubeNs,
-			Labels:    labels,
-		},
-		Spec: volcanov1beta1.PodGroupSpec{
-			MinMember: minMember,
-		},
-	}
-
-	return podGroup, false, nil
-}
-
-func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
+func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string) (*corev1.PodTemplateSpec, error) {
 	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleLeader)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
@@ -577,15 +471,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 
 	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
-	leaderPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
-
-	if leaderPodTemplateSpec.ObjectMeta.Annotations == nil {
-		leaderPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
-	}
-	leaderPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
-
-	leaderPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
 	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
 
@@ -627,7 +513,7 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 	return nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
+func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string) (*corev1.PodTemplateSpec, error) {
 	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleWorker)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
@@ -635,15 +521,7 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 
 	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
-	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
-
-	workerPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
-
-	if workerPodTemplateSpec.ObjectMeta.Annotations == nil {
-		workerPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
-	}
-	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
 	err = checkMainContainer(&workerPodTemplateSpec.Spec)
 
@@ -658,29 +536,19 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	return workerPodTemplateSpec, nil
 }
 
-// generateLeaderWorkerSet creates a LeaderWorkerSet resource from the DynamoComponentDeployment
+// generateLeaderWorkerSet creates a single LeaderWorkerSet resource from the DynamoComponentDeployment
+// with Spec.Replicas set to the desired replica count, allowing LWS to natively manage scaling.
 func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx context.Context, opt generateResourceOption) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
-	if opt.instanceID == nil {
-		return nil, false, errors.New("generateLeaderWorkerSet: instanceID cannot be nil")
-	}
-	instanceID := *opt.instanceID
-
-	if instanceID < 0 {
-		return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
-	}
-
-	kubeName := lwsInstanceName(opt.dynamoComponentDeployment, instanceID)
-
+	kubeName := r.getKubeName(opt.dynamoComponentDeployment, false)
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
 
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -694,7 +562,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	for k, v := range labels {
 		leaderPodLabels[k] = v
 	}
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, kubeName, leaderPodLabels, instanceID)
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, kubeName, leaderPodLabels)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
 	}
@@ -703,17 +571,19 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	for k, v := range labels {
 		workerPodLabels[k] = v
 	}
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, kubeName, workerPodLabels, instanceID)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, kubeName, workerPodLabels)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
 	}
 
-	// Each individual LeaderWorkerSet always has exactly 1 replica
-	singleReplica := int32(1)
+	desiredReplicas := int32(1)
+	if opt.dynamoComponentDeployment.Spec.Replicas != nil {
+		desiredReplicas = *opt.dynamoComponentDeployment.Spec.Replicas
+	}
 	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
-		Replicas:      &singleReplica,
+		Replicas:      &desiredReplicas,
 		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
 		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
 			LeaderTemplate: leaderPodTemplateSpec,
@@ -725,9 +595,6 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	return leaderWorkerSet, false, nil
 }
 
-func lwsInstanceName(dcd *v1alpha1.DynamoComponentDeployment, instanceID int) string {
-	return fmt.Sprintf("%s-%d", dcd.Name, instanceID)
-}
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
@@ -1019,7 +886,6 @@ func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]
 
 type generateResourceOption struct {
 	dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment
-	instanceID                *int
 }
 
 //nolint:gocyclo,nakedret
