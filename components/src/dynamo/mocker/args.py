@@ -139,6 +139,8 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
             engine_args["aic_backend_version"] = args.aic_backend_version
         if getattr(args, "aic_tp_size", None):
             engine_args["aic_tp_size"] = args.aic_tp_size
+        if getattr(args, "model_path", None):
+            engine_args["aic_model_path"] = args.model_path
 
     # Parse --reasoning JSON string into a nested object
     reasoning_str = getattr(args, "reasoning", None)

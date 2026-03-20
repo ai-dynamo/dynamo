@@ -260,6 +260,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_tp_size: Option<usize>,
 
+    /// HuggingFace model path for AIC latency prediction (e.g., "nvidia/Llama-3.1-8B-Instruct-FP8").
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_model_path: Option<String>,
+
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
@@ -363,6 +368,7 @@ impl MockEngineArgs {
             "aic_system",
             "aic_backend_version",
             "aic_tp_size",
+            "aic_model_path",
             "enable_local_indexer",
             "bootstrap_port",
             "kv_bytes_per_token",
@@ -599,6 +605,11 @@ impl MockEngineArgs {
             && let Some(n) = tp.as_u64()
         {
             builder = builder.aic_tp_size(Some(n as usize));
+        }
+        if let Some(mp) = extra_args.get("aic_model_path")
+            && let Some(s) = mp.as_str()
+        {
+            builder = builder.aic_model_path(Some(s.to_string()));
         }
         // Build the MockEngineArgs with either defaults or overridden values
         builder

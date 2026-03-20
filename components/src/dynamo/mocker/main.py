@@ -73,7 +73,9 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
-    profile_data_result = None
+    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
+    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
+    args.planner_profile_data = profile_data_result.npz_path
 
     # Offline replay does not need planner profile conversion or runtime setup.
     if args.trace_file is not None:
@@ -100,10 +102,6 @@ async def worker():
                     logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
                 except Exception as e:
                     logger.warning(f"Failed to clean up temporary file: {e}")
-
-    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
-    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
-    args.planner_profile_data = profile_data_result.npz_path
 
     # Handle extra_engine_args: either use provided file or create from CLI args
     if args.extra_engine_args:

@@ -438,7 +438,10 @@ async fn select_engine(
             if let Some(ref backend_name) = mocker_args.aic_backend {
                 let backend = backend_name.clone();
                 let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
-                let model_name = local_model.card().source_path();
+                let model_name = mocker_args
+                    .aic_model_path
+                    .as_deref()
+                    .unwrap_or_else(|| local_model.card().source_path());
                 let backend_version = mocker_args.aic_backend_version.as_deref();
                 let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
                 match Python::with_gil(|py| {
@@ -509,19 +512,53 @@ pub fn run_mocker_trace_replay(
     num_workers: usize,
     replay_concurrency: Option<isize>,
 ) -> PyResult<PyObject> {
-    let report = py.allow_threads(move || {
-        let args = if let Some(extra_args_path) = extra_engine_args {
-            MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to load mocker args from {:?}: {}",
-                    extra_args_path,
-                    e
-                )
-            })?
-        } else {
-            MockEngineArgs::default()
-        };
+    // Load args before allow_threads so we can use the GIL for AIC callback creation.
+    let mut args = if let Some(ref extra_args_path) = extra_engine_args {
+        MockEngineArgs::from_json_file(extra_args_path).map_err(|e| {
+            PyException::new_err(format!(
+                "Failed to load mocker args from {:?}: {}",
+                extra_args_path, e
+            ))
+        })?
+    } else {
+        MockEngineArgs::default()
+    };
 
+    // Create AIC callback if requested (requires GIL, must be done before allow_threads).
+    if let Some(ref backend_name) = args.aic_backend.clone() {
+        let backend = backend_name.clone();
+        let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
+        let model_name = args
+            .aic_model_path
+            .clone()
+            .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
+        let backend_version = args.aic_backend_version.clone();
+        let tp_size = args.aic_tp_size.unwrap_or(1);
+        let callback = create_aic_callback(
+            py,
+            &backend,
+            &system,
+            &model_name,
+            tp_size,
+            backend_version.as_deref(),
+        )
+        .map_err(|e| {
+            PyException::new_err(format!(
+                "Failed to create AIC callback (--aic-perf-model was requested): {}",
+                e
+            ))
+        })?;
+        tracing::info!(
+            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+            backend,
+            system,
+            model_name,
+            backend_version
+        );
+        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+    }
+
+    let report = py.allow_threads(move || {
         let replay_concurrency = replay_concurrency
             .map(usize::try_from)
             .transpose()
