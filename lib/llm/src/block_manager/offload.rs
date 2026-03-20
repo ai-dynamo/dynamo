@@ -35,10 +35,10 @@
 use super::block::{
     BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
     locality::LocalityProvider,
-    transfer::{PoolConfig, TransferContext},
+    transfer::{DeviceStream, PoolConfig, TransferContext},
 };
 use super::pool::{BlockPool, BlockPoolError};
-use super::storage::{Cuda, Storage};
+use super::storage::{Cuda, Storage, StorageError, Ze};
 use super::{DeviceStorage, DiskStorage, KvManagerModelConfig, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
 use std::sync::{
@@ -143,10 +143,35 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             bypass_cpu_mem: config.bypass_cpu_mem,
         });
 
-        let cuda_ctx = Cuda::device_or_create(0)?;
+        let make_stream_input = || -> Result<DeviceStream> {
+            let cuda_try = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Cuda::device_or_create(0)
+            }));
+
+            if let Ok(Ok(cuda_ctx)) = cuda_try {
+                return Ok(DeviceStream::Cuda(cuda_ctx.new_stream()?));
+            }
+
+            // Only try Ze if the loader library exists
+            if !crate::block_manager::storage::is_ze_available() {
+                return Err(StorageError::OperationFailed(
+                    "No device backend available: CUDA failed and Level Zero not installed".to_string()
+                ).into());
+            }
+
+            let ze_ctx = Ze::device_or_create(0)?;
+            if let DeviceStream::Ze(ze_queue) = ze_ctx.stream() {
+                return Ok(DeviceStream::Ze(ze_queue.clone()));
+            }
+
+            Err(StorageError::OperationFailed(
+                "ZE context stream is not a ZE command queue".to_string(),
+            )
+            .into())
+        };
 
         let pool_config = PoolConfig {
-            enable_pool: true,
+            enable_pool: false,
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: config.model_config.outer_dim,
@@ -157,7 +182,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         let device_offload_transfer_ctx = Arc::new(
             TransferContext::new(
                 config.nixl_agent.clone(),
-                cuda_ctx.new_stream()?,
+                make_stream_input()?,
                 config.async_rt_handle.clone(),
                 Some(pool_config.clone()),
             )
@@ -205,7 +230,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         let transfer_ctx = Arc::new(
             TransferContext::new(
                 config.nixl_agent.clone(),
-                cuda_ctx.new_stream()?,
+                make_stream_input()?,
                 config.async_rt_handle.clone(),
                 Some(pool_config),
             )

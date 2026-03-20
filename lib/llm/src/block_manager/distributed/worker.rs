@@ -12,12 +12,16 @@ use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
     block::{
         Block, layout_to_blocks, locality,
-        transfer::{PoolConfig, TransferContext},
+        transfer::{DeviceStream, PoolConfig, TransferContext},
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
-    storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
+    storage::{
+        DeviceAllocator, DeviceBackend, DeviceStorage, DiskAllocator, PinnedAllocator,
+        Cuda, Ze, is_ze_available,
+        torch::{TorchTensor, is_cuda_tensors, is_ze_tensors},
+    },
 };
 
 use derive_builder::Builder;
@@ -54,10 +58,24 @@ pub fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
-    let mut shape = None;
+    if tensors.is_empty() {
+        return Err(anyhow::anyhow!("No tensors provided"));
+    }
 
+    // Detect backend from tensors
+    let backend = if is_cuda_tensors(tensors) {
+        DeviceBackend::Cuda
+    } else if is_ze_tensors(tensors) {
+        DeviceBackend::Ze
+    } else {
+        return Err(anyhow::anyhow!(
+            "Unsupported or mixed device types in tensors. All tensors must be either CUDA or XPU/Ze/SYCL"
+        ));
+    };
+
+    let mut shape = None;
     let mut device_tensors = Vec::with_capacity(tensors.len());
-    let allocator = DeviceAllocator::new(device_id)?;
+    let allocator = DeviceAllocator::new(device_id, backend)?;
 
     for tensor in tensors {
         // Check the stride, and ensure our tensor is contiguous.
@@ -82,7 +100,8 @@ pub fn load_and_validate_tensors(
         }
 
         // Build the storage object from the tensor.
-        let device_tensor = DeviceStorage::new_from_torch(allocator.ctx(), tensor.clone())?;
+        let device_tensor =
+            DeviceStorage::new_from_torch(allocator.ctx().as_ref(), tensor.clone())?;
 
         device_tensors.push(device_tensor);
     }
@@ -114,16 +133,50 @@ async fn perform_allocation_and_build_handler(
 ) -> anyhow::Result<BlockTransferHandler> {
     let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
     let pool_config = PoolConfig {
-        enable_pool: true,
+        enable_pool: false,
         max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
         max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
+
+    // Detect device backend: try both CUDA and Ze
+    let cuda_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Cuda::device_or_create(device_id)
+    }));
+
+    // Only try Ze if the loader library exists (prevents segfaults)
+    let ze_result = if is_ze_available() {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Ze::device_or_create(device_id)
+        }))
+    } else {
+        tracing::debug!("Level Zero loader not found, skipping Ze backend");
+        Err(Box::new("Ze loader not available") as Box<dyn std::any::Any + Send>)
+    };
+
+    // Select backend based on availability
+    let (backend, stream) = if let Ok(Ok(cuda_ctx)) = cuda_result {
+        tracing::info!("Using CUDA backend for device {}", device_id);
+        let stream = cuda_ctx.new_stream()?;
+        (DeviceBackend::Cuda, DeviceStream::Cuda(stream))
+    } else if let Ok(Ok(ze_ctx)) = ze_result {
+        tracing::info!("Using Ze backend for device {}", device_id);
+        let queue = ze_ctx.new_commandqueue().map_err(|e| anyhow::anyhow!("Failed to create Ze command queue: {:?}", e))?;
+        (DeviceBackend::Ze, DeviceStream::Ze(queue))
+    } else {
+        panic!(
+            "No device backend available for device {}. \
+             Both CUDA and Ze initialization failed. \
+             Please ensure either CUDA or Intel XPU/Level Zero is properly installed.",
+            device_id
+        );
+    };
+
     let transfer_context = Arc::new(
         TransferContext::new(
             Arc::new(Some(agent)),
-            DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+            stream,
             Handle::current(),
             Some(pool_config),
         )
@@ -148,7 +201,7 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id, backend)?);
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?

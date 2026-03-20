@@ -562,10 +562,15 @@ fn _get_current_context() -> CUcontext {
 }
 
 pub fn event_sync_blocking(event: u64) {
-    let status = unsafe { cuEventSynchronize(event as CUevent) };
-    assert_eq!(
-        status,
-        cudaError_enum::CUDA_SUCCESS,
-        "cuEventSynchronize failed"
-    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let status = unsafe { cuEventSynchronize(event as CUevent) };
+        assert_eq!(
+            status,
+            cudaError_enum::CUDA_SUCCESS,
+            "cuEventSynchronize failed"
+        );
+    }));
+    if result.is_err() {
+        tracing::error!("event_sync_blocking panic caught; continuing");
+    }
 }

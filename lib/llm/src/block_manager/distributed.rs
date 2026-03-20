@@ -75,7 +75,7 @@ mod tests {
 
     impl MockTensor {
         fn new(shape: Vec<usize>) -> Self {
-            let allocator = DeviceAllocator::new(0).unwrap();
+            let allocator = DeviceAllocator::new(0, DeviceBackend::Cuda).unwrap();
 
             // Multiply by 2 for fp16.
             let size = shape.iter().product::<usize>() * 2;
