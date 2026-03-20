@@ -9,7 +9,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -77,6 +78,14 @@ DYN_WORKER_GPU=${DYN_WORKER_GPU:-1}
 # GPU memory fractions for workers (used with --mem-fraction-static)
 DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_WORKER_GPU_MEM=${DYN_WORKER_GPU_MEM:-0.9}
+
+# Profiler override: split _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE between workers
+# preserving the ratio set by the env vars.
+if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" && "$SINGLE_GPU" == "true" ]]; then
+    _TOTAL_FRAC=$(awk -v e="$DYN_ENCODE_GPU_MEM" -v w="$DYN_WORKER_GPU_MEM" 'BEGIN { printf "%.4f", e + w }')
+    DYN_ENCODE_GPU_MEM=$(awk -v o="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" -v e="$DYN_ENCODE_GPU_MEM" -v t="$_TOTAL_FRAC" 'BEGIN { printf "%.2f", o * e / t }')
+    DYN_WORKER_GPU_MEM=$(awk -v o="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" -v w="$DYN_WORKER_GPU_MEM" -v t="$_TOTAL_FRAC" 'BEGIN { printf "%.2f", o * w / t }')
+fi
 
 ENCODE_EXTRA_ARGS=""
 WORKER_EXTRA_ARGS=""

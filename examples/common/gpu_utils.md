@@ -76,7 +76,7 @@ kv_cache_total = kv_cache_per_token * max_model_len * max_concurrent_seqs
 
 overhead ≈ engine-dependent (auto-computed by estimate_worker_vram):
            vllm:   1.2 + 1.0 * sqrt(params_b) GiB  (0.6B≈2.0, 8B≈4.0)
-           sglang: 2.5 + 1.5 * sqrt(params_b) GiB  (0.6B≈3.7, 8B≈6.7)
+           sglang: 1.5 + 1.0 * sqrt(params_b) GiB  (0.6B≈2.3, 8B≈4.3)
            trtllm: 2.0 + 1.2 * sqrt(params_b) GiB  (0.6B≈2.9, 8B≈5.4)
 ```
 
@@ -104,11 +104,27 @@ This is slightly different from vLLM (which includes activations in the budget).
 sglang recommends keeping 5-8 GiB free for activations and overhead. If you
 see OOM errors, decrease `--mem-fraction-static` by 0.01-0.05 increments.
 
-### How `--context-length` works
+### How `--context-length` and `--max-running-requests` work
 
-Equivalent to vLLM's `--max-model-len`. Defaults to the model's native context
-window. Reducing it shrinks the per-request KV cache requirement and allows more
-concurrent sequences.
+Unlike vLLM (where `--max-model-len` directly affects KV cache sizing), sglang's
+`--context-length` and `--max-running-requests` do **not** affect KV cache
+allocation. The KV cache pool is sized entirely from `--mem-fraction-static`:
+
+```
+kv_cache_pool = total_vram * mem_fraction_static - model_weights
+```
+
+Profiling confirmed this: changing `--context-length` from 512 to 40960 produced
+identical `max_total_num_tokens` values (269,136 on a 48 GiB GPU at fraction 0.95).
+
+These flags only affect **request scheduling**:
+- `--context-length` caps the per-request token usage from the KV pool
+- `--max-running-requests` limits concurrent request slots (allocated from
+  memory outside the `--mem-fraction-static` budget)
+
+Setting `--max-running-requests` too high at high fractions can cause OOM because
+the request slot pool competes for the small amount of memory left after KV cache
+allocation.
 
 ### Estimating total GPU usage
 
@@ -117,9 +133,9 @@ total_vram ≈ model_weights + kv_cache_pool + activations_and_overhead
 
 kv_cache_pool = total_vram * mem_fraction_static - model_weights
 
-activations_and_overhead ≈ 1-8 GiB (depends on model size, batch size, seq len;
-                           ~1-2 GiB for small models like 0.6B,
-                           ~5-8 GiB for larger models like 8B+ with CUDA graphs)
+activations_and_overhead ≈ 1-2 GiB for small models (0.6B-4B)
+                           ~3-5 GiB for larger models (7B+)
+  (CUDA context, graphs, request pools — allocated outside mem_fraction_static)
 ```
 
 ---

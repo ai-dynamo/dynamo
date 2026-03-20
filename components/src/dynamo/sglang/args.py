@@ -368,6 +368,13 @@ async def parse_args(args: list[str]) -> Config:
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
 
+    if getattr(server_args, "schedule_low_priority_values_first", False):
+        raise ValueError(
+            "--schedule-low-priority-values-first is not supported in Dynamo's "
+            "SGLang integration. Dynamo normalizes request priority so higher "
+            "values are always higher priority at the API layer."
+        )
+
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
     # tokens since last output), not cumulative tokens. When stream_output=True,
     # SGLang sends disjoint segments which Dynamo passes through directly.

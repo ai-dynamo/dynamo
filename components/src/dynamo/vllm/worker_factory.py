@@ -64,7 +64,7 @@ class WorkerFactory:
             WorkerFactory._validate_config(config)
             return True
         except (ValueError, NotImplementedError) as e:
-            logger.debug(
+            logger.error(
                 f"WorkerFactory cannot handle config: {e}, provided config: {WorkerFactory._config_str(config)}"
             )
             return False
@@ -115,21 +115,6 @@ class WorkerFactory:
                 raise ValueError(
                     "Multimodal worker with DECODE disaggregation mode is not supported."
                 )
-        # [gluo FIXME]
-        # 'route_to_encoder' hints standalone encode worker is used
-        # 'legacy_multimodal_llm_worker == False' hints Dynamo runtime will orchestrate
-        # P/D disagg and base P/D worker class should be used.
-        # In such a case, we can't use factory for P/D disaggregation modes because
-        # the current Dynamo runtime orchestrator is not aware of the extra mm data
-        # passing between P and D, P/D classes can't consume it properly untill
-        # the protocol is updated.
-        elif (
-            config.route_to_encoder
-            and config.disaggregation_mode == DisaggregationMode.PREFILL
-        ):
-            raise NotImplementedError(
-                "Dynamo orchestrated disaggregated prefill worker, combined with remote encode worker is not supported."
-            )
 
     async def create(
         self,
@@ -140,6 +125,7 @@ class WorkerFactory:
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+        WorkerFactory._validate_config(config)
 
         # Standalone encode worker
         if config.multimodal_encode_worker:
@@ -463,12 +449,12 @@ class WorkerFactory:
 
         handler = DecodeWorkerHandler(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -646,12 +632,12 @@ class WorkerFactory:
 
         handler = PrefillWorkerHandler(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,

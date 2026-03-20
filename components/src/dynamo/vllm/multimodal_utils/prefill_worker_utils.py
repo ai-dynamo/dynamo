@@ -306,7 +306,6 @@ class MultiModalEmbeddingLoader:
         request_id: str,
         *,
         model: str,
-        embeddings_dtype: torch.dtype,
         context=None,
     ) -> Dict[str, Any]:
         """Fetch embeddings and build engine-ready ``multi_modal_data``.
@@ -316,7 +315,7 @@ class MultiModalEmbeddingLoader:
 
         Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
         """
-        if not self._encode_worker_client or not image_urls:
+        if self._encode_worker_client is None or not image_urls:
             return {}
 
         groups, pending = await _fetch_embeddings(
@@ -337,7 +336,7 @@ class MultiModalEmbeddingLoader:
                 _accumulate_embeddings(
                     multi_modal_data,
                     model,
-                    embeddings_dtype,
+                    group.loaded_embedding.dtype,
                     group.loaded_embedding,
                     group.image_grid_thw,
                 )
