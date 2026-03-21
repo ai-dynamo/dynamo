@@ -164,7 +164,7 @@ impl HfTokenizerConfigJsonFormatter {
         // Detect if the template natively handles reasoning_content (e.g. Nemotron, Qwen3).
         // If so, we must NOT inject <think> blocks — the template does it itself.
         let template_handles_reasoning = env.templates().any(|(_, tmpl)| {
-            tmpl.source().is_some_and(|s| s.contains("reasoning_content"))
+            tmpl.source().contains("reasoning_content")
         });
 
         Ok(HfTokenizerConfigJsonFormatter {
