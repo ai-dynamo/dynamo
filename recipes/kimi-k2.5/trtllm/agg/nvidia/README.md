@@ -1,6 +1,6 @@
 # Kimi-K2.5 nvidia/Kimi-K2.5-NVFP4 — Aggregated Deployments on Kubernetes
 
-> Upstream TensorRT-LLM does not yet include native support for Kimi K2.5. This recipe works around that limitation by directly patching the container image with an append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path. See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch) for the patch script and full instructions.
+> Upstream TensorRT-LLM does not yet include native support for Kimi K2.5. This recipe works around that limitation by directly patching the container image with an append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path. See [`patch/`](patch/) for the patch script and full instructions.
 
 > **Note**: The two standard deployment (`deploy.yaml` and `deploy-kvbm.yaml`) for nvidia/Kimi-K2.5-NVFP4 model requires a patched TensorRT-LLM container image because upstream TRT-LLM support for Kimi K2.5 has not yet been released. You must build the patched image before deploying either configuration below. See patch/ for the script and instructions. **`deploy-specdec.yaml` speculative decoding recipe doesn't need the image patch**.
 
