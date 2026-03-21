@@ -118,7 +118,7 @@ The artifact set gave us a clean before-and-after story here.
 
 First, the Anthropic baseline. Via cc-proxy in passthrough mode, a 6-request Claude Code session produced `53,992` cache creation tokens and `215,102` cache read tokens. After the first request, the session is effectively all cache reads. That is what good harness behavior looks like: one cold write, then repeated reuse of the same high-value prefix.
 
-Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token prompt, keeping the per-session header in the prefix produced `911ms` TTFT. Removing that header before tokenization brought TTFT down to `169ms`. On this workload, the unstable header costs `743ms` per request and turns a reusable system prompt into a cold prefill.
+Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill.
 
 We also verified the control case: a prompt with no extra header lands at the same fast path as the stripped version. That is useful as validation, but it is not the main comparison. The real question is whether the per-session header stays in the prefix or gets removed before tokenization.
 
@@ -167,9 +167,9 @@ This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/
 
 3. **Template truncation**: Nemotron's chat template defaults `truncate_history_thinking` to `true`, which strips `<think>` content from all assistant turns before the last user message. This is correct for non-agentic chat (saves context window) but wrong for tool-calling flows where the model needs its prior reasoning. NVIDIA's own SWE training pipeline sets `truncate_history_thinking: false` — the model was trained to see historical reasoning in agentic contexts. The Anthropic handler now passes this flag automatically when a reasoning parser is configured.
 
-This section is strongest as a structural argument, and the post should say that plainly. The artifact set supports the claim that incorrect reconstruction breaks the prefix. It does not yet support a strong latency number on the measured deployment. The prompts are small, the deployment is aggregated, and the timing signal is noisy. The important result is not "we saved X milliseconds." It is that a replay path can look fine to a human and still be wrong for the cache.
+The structural argument is still the core of this section, but we now have a measured post-fix result as well. After the round-trip bug was fixed, a localhost B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking produced `167ms` TTFT when the prior thinking was replayed exactly and `322ms` when the thinking block was mutated. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix.
 
-That is what made this bug class interesting. A flattened replay can render correctly, pass a casual eyeball test, and still be functionally wrong for KV reuse. Cache reuse depends on token order, not on whether two prompts feel semantically equivalent. Preserving interleaved reasoning and tool calls was therefore less about pretty transcripts and more about making turn `N+1` look exactly like turn `N` did to the cache.
+That result matters because it turns a format bug into a cache bug you can measure. A flattened or otherwise incorrect replay can render correctly, pass a casual eyeball test, and still be functionally wrong for KV reuse. Cache reuse depends on token order, not on whether two prompts feel semantically equivalent. Preserving interleaved reasoning and tool calls was therefore less about pretty transcripts and more about making turn `N+1` look exactly like turn `N` did to the cache.
 
 ```text
 Original generation:    [think][r0][/think][tool0][think][r1][/think][tool1]
@@ -179,13 +179,17 @@ Flat reconstruction:    [think][r0][r1][/think][tool0][tool1]                  -
 
 As we push harder on disaggregated serving, this becomes more important, not less. When the prefix has to survive movement across workers and storage tiers, prompt shape stops being an API nicety and becomes part of the cache key story.
 
-TODO: replace the structural close to this section with a stronger quantitative result once the longer-prefix or disaggregated reasoning-order experiment lands.
-
 ## Streaming Actionable State
 
 Streaming tokens is not enough for harnesses. Agent loops need actionable state as soon as it exists: completed tool calls, completed reasoning blocks, and token accounting that clients can trust while the stream is still in flight.
 
-The original intuition here was that early dispatch might show up as an obvious latency win. The artifact set points to a more careful and more interesting conclusion. Dynamo's streaming dispatch work is primarily about structure, not about a large measured wall-time reduction on the current workload.
+The updated artifact set points to a more precise framing than the one we started with. Dynamo's streaming work has three distinct states:
+
+1. the old buffered behavior, where tool-call chunks were withheld until `finish_reason: "tool_calls"`
+2. the current inline-streaming behavior, where tool-call deltas appear as soon as they are generated
+3. the dispatch path, where Dynamo emits a typed `event: tool_call_dispatch` side channel at that same moment
+
+The important change is from state 1 to states 2 and 3. That is where the harness stops being blind until stream end.
 
 Without dispatch, the harness sees a regular token stream and has to infer when a tool call is complete by accumulating deltas and waiting for enough structure to be present. With dispatch enabled, Dynamo can emit a typed SSE side channel:
 
@@ -196,18 +200,13 @@ data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function"
 
 That event tells the harness, in one shot, that the tool call is ready to execute. No client-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness.
 
-The important nuance is that we should not oversell the current timing result. On this measured workload, dispatch does not produce a compelling end-to-end wall-time win by itself. What it does do is turn tool readiness into an explicit protocol event instead of an inference the client has to reconstruct from token deltas.
+The timing result needs to be stated carefully. On the localhost B200 runs, dispatch did not create a large end-to-end wall-time win by itself. The dispatch event fires at essentially the same moment as the inline tool delta. What changed is that the server now exposes tool readiness as a typed protocol event instead of forcing the client to reconstruct it from a stream of partial deltas.
 
-That matters more than it sounds. A tool call is a state transition, not just another substring in the stream. When the server can tell the harness exactly when that transition happens, the harness gets something reliable to build against. This simplifies clients immediately and creates a cleaner base for future overlap between tool execution and model generation when the workload actually has room for it.
+That is still a real systems improvement. A tool call is a state transition, not just another substring in the stream. In the old buffered path, the harness learned about that transition only at stream end. In the current path, it learns about it as soon as the tool call is structurally complete. With dispatch enabled, it learns the same fact in a cleaner form: parsed, typed, and ready to act on.
 
-![Representative streaming timeline without dispatch. The key phase boundary is not "stream ended" but "tool call became structurally complete."](./agentic-harnesses-timeline-no-dispatch.png)
+The localhost multi-turn measurements make the right claim narrower, not weaker. On the 30-city workload, the harness learned about each tool call about `9-10ms` before `finish_reason`, and the cumulative earlier feedback over many turns was real but modest. That is not a dramatic latency chart. It is a protocol improvement that removes blind buffering and gives the harness actionable state immediately.
 
-We are still tightening the stronger version of this story with additional experiments, especially around tool execution overlap and more complex reasoning traces. For now, the safe claim is the right one: streaming dispatch makes actionable state explicit.
-
-TODO: update this section once the stronger streaming tool-call experiment lands. In particular:
-- decide whether we now have a real wall-time overlap story or should keep this section purely structural
-- add the best measured workload and replace the current cautionary language if the data supports it
-- consider adding a second figure if the new experiment is materially clearer than the current timeline
+So this section should not pretend to be a benchmark victory. It is better than that. It shows that the stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
 
 ## Anthropic and Claude Code API Fidelity
 
@@ -226,7 +225,7 @@ This is a good example of harness compatibility being more than "the field exist
 
 The right tone for this section is checklist-driven rather than benchmark-driven. The artifact set already has the useful table: what Claude Code expects, what Dynamo returned, and which details turned out to matter in practice. The throughline is simple. Claude Code support stopped feeling hypothetical once Dynamo behaved like a backend the harness could reason about, not just one that could generate the next token.
 
-TODO: add one concrete before/after API snippet here once the final fidelity fixes and exact examples are settled.
+TODO: add one concrete curl snippet here, ideally the `GET /v1/models/{id}` miss or the `message_start` token-count example.
 
 ## Responses and Codex Fidelity
 
@@ -265,7 +264,7 @@ Codex surfaced a different failure mode than Claude Code. The issue was not whet
 
 This section should stay shorter than the Claude Code sections. One diagram and one concrete replay example are enough. The important point is that protocol fidelity on the Responses side is still part of the serving problem. A lossy conversion path quietly erases the structure the harness depends on.
 
-TODO: add the final field-preservation diagram or one realistic replay example from the Responses artifact set.
+TODO: add one concrete Responses request/response pair from the artifacts so this section has a small worked example, not just the diagram.
 
 ## Closing the Loop
 
