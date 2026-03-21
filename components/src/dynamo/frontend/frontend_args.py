@@ -75,6 +75,7 @@ class FrontendConfig(KvRouterConfigBase):
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
 
@@ -387,6 +388,17 @@ class FrontendArgGroup(ArgGroup):
                 "single 'event: reasoning_dispatch' SSE event on /v1/chat/completions "
                 "with the complete reasoning block once thinking ends. "
                 "Can be combined with --enable-streaming-tool-dispatch."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help=(
+                "Exclude tool definitions from the chat template when "
+                "tool_choice='none'. Prevents models from generating raw XML "
+                "tool calls in the content field."
             ),
         )
         add_argument(
