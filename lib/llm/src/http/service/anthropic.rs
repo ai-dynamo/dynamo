@@ -254,6 +254,11 @@ async fn anthropic_messages(
             .get_or_insert_with(Default::default);
         args.entry("enable_thinking".to_string())
             .or_insert(serde_json::Value::Bool(true));
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        args.entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
     }
 
     let request = context.map(|_req| chat_request);
