@@ -86,7 +86,7 @@ pub struct PrefillResult {
     pub disaggregated_params: serde_json::Value,
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
+    pub prompt_tokens_details: Option<dynamo_protocols::types::PromptTokensDetails>,
 }
 
 /// Optional multimodal routing-only data.

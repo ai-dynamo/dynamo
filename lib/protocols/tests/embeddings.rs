@@ -9,7 +9,7 @@
 // Licensed under Apache 2.0
 
 //! This test is primarily to make sure that macros_rules for From traits are correct.
-use dynamo_async_openai::types::EmbeddingInput;
+use dynamo_protocols::types::EmbeddingInput;
 
 fn embedding_input<T>(input: T) -> EmbeddingInput
 where

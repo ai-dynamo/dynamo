@@ -9,8 +9,8 @@
 # Licensed under Apache 2.0
 
 [package]
-name = "dynamo-async-openai"
-description = "Fork of async-openai customized for Dynamo."
+name = "dynamo-protocols"
+description = "Protocol types for OpenAI-compatible inference APIs, forked from async-openai."
 license = "Apache-2.0 AND MIT"
 version.workspace = true
 edition.workspace = true

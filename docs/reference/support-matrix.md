@@ -193,7 +193,7 @@ For version-specific artifact details, installation commands, and release histor
 - **Rust Crates**:
   - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/)
   - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
-  - [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai/)
+  - [dynamo-protocols](https://crates.io/crates/dynamo-protocols/)
   - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
   - [dynamo-config](https://crates.io/crates/dynamo-config/) *(New in v0.8.0)*
   - [dynamo-memory](https://crates.io/crates/dynamo-memory/) *(New in v0.8.0)*

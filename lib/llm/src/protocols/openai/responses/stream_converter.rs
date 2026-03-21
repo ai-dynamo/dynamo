@@ -12,7 +12,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
-use dynamo_async_openai::types::responses::{
+use dynamo_protocols::types::responses::{
     AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
@@ -24,7 +24,7 @@ use dynamo_async_openai::types::responses::{
 };
 use uuid::Uuid;
 
-use dynamo_async_openai::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::ChatCompletionMessageContent;
 
 use super::ResponseParams;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
@@ -654,7 +654,7 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
     };
@@ -685,7 +685,7 @@ mod tests {
     ) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
                     index: 0,
@@ -723,7 +723,7 @@ mod tests {
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
                     index: 0,

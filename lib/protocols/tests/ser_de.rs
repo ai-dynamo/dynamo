@@ -8,7 +8,7 @@
 // Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
 };

@@ -12,7 +12,7 @@ pub async fn try_tool_call_parse_aggregate(
     parser_str: Option<&str>,
     tools: Option<&[super::ToolDefinition]>,
 ) -> anyhow::Result<(
-    Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>,
+    Vec<dynamo_protocols::types::ChatCompletionMessageToolCall>,
     Option<String>,
 )> {
     if parser_str.is_none() {
@@ -28,10 +28,10 @@ pub async fn try_tool_call_parse_aggregate(
         parsed
             .into_iter()
             .map(
-                |parsed| dynamo_async_openai::types::ChatCompletionMessageToolCall {
+                |parsed| dynamo_protocols::types::ChatCompletionMessageToolCall {
                     id: parsed.id,
-                    r#type: dynamo_async_openai::types::ChatCompletionToolType::Function,
-                    function: dynamo_async_openai::types::FunctionCall {
+                    r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
                         name: parsed.function.name,
                         arguments: parsed.function.arguments,
                     },
@@ -50,7 +50,7 @@ pub async fn try_tool_call_parse_stream(
     parser_str: Option<&str>,
     tools: Option<&[super::ToolDefinition]>,
 ) -> anyhow::Result<(
-    Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk>,
+    Vec<dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     Option<String>,
 )> {
     let (parsed, content) = detect_and_parse_tool_call(message, parser_str, tools).await?;
@@ -62,11 +62,11 @@ pub async fn try_tool_call_parse_stream(
             .into_iter()
             .enumerate()
             .map(
-                |(idx, parsed)| dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                |(idx, parsed)| dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: idx as u32,
                     id: Some(parsed.id),
-                    r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
-                    function: Some(dynamo_async_openai::types::FunctionCallStream {
+                    r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                    function: Some(dynamo_protocols::types::FunctionCallStream {
                         name: Some(parsed.function.name),
                         arguments: Some(parsed.function.arguments),
                     }),

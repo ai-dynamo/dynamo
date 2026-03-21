@@ -213,9 +213,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         Value::from_serialize(&messages_json)
     }
 
-    fn typed_messages(
-        &self,
-    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
         Some(self.inner.messages.as_slice())
     }
 
@@ -255,7 +253,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         //     .map(|last| {
         //         !matches!(
         //             last,
-        //             dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
+        //             dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(_)
         //         )
         //     })
         //     .unwrap_or(true)
@@ -279,9 +277,9 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
         self.inner.model.clone()
     }
     fn messages(&self) -> minijinja::value::Value {
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     crate::protocols::openai::completions::prompt_to_string(&self.inner.prompt),
                 ),
                 name: None,
@@ -297,16 +295,16 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn prompt_input_type(&self) -> PromptInput {
         match &self.inner.prompt {
-            dynamo_async_openai::types::Prompt::IntegerArray(_) => {
+            dynamo_protocols::types::Prompt::IntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Single(vec![]))
             }
-            dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
+            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Batch(vec![]))
             }
-            dynamo_async_openai::types::Prompt::String(_) => {
+            dynamo_protocols::types::Prompt::String(_) => {
                 PromptInput::Text(TextInput::Single(String::new()))
             }
-            dynamo_async_openai::types::Prompt::StringArray(_) => {
+            dynamo_protocols::types::Prompt::StringArray(_) => {
                 PromptInput::Text(TextInput::Batch(vec![]))
             }
         }
@@ -314,10 +312,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn extract_tokens(&self) -> Option<TokenInput> {
         match &self.inner.prompt {
-            dynamo_async_openai::types::Prompt::IntegerArray(tokens) => {
+            dynamo_protocols::types::Prompt::IntegerArray(tokens) => {
                 Some(TokenInput::Single(tokens.clone()))
             }
-            dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => {
+            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arrays) => {
                 Some(TokenInput::Batch(arrays.clone()))
             }
             _ => None,
@@ -326,10 +324,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn extract_text(&self) -> Option<TextInput> {
         match &self.inner.prompt {
-            dynamo_async_openai::types::Prompt::String(text) => {
+            dynamo_protocols::types::Prompt::String(text) => {
                 Some(TextInput::Single(text.to_string()))
             }
-            dynamo_async_openai::types::Prompt::StringArray(texts) => {
+            dynamo_protocols::types::Prompt::StringArray(texts) => {
                 Some(TextInput::Batch(texts.to_vec()))
             }
             _ => None,
@@ -398,7 +396,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::ChatCompletionRequestMessage as Msg;
+    use dynamo_protocols::types::ChatCompletionRequestMessage as Msg;
     use minijinja::{Environment, context};
 
     /// Tests that media URL content parts are converted to empty placeholders.
