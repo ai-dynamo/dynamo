@@ -26,7 +26,7 @@ MODEL = "test-model"
 DTYPE = torch.float16
 
 
-class TestMultimodalEmbeddingsLoader:
+class TestMultimodalEmbeddingLoader:
     @pytest.mark.asyncio
     async def test_all_cached(self):
         """All URLs cached -> no encode worker call, returns accumulated mm_data."""

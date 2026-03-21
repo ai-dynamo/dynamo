@@ -246,6 +246,36 @@ class DynamoVllmConfig(ConfigBase):
                 )
                 self.disaggregation_mode = DisaggregationMode.DECODE
 
+        # Porting multimodal legacy flags
+        if (
+            self.multimodal_decode_worker
+            or self.multimodal_encode_worker
+            or self.multimodal_worker
+        ):
+            if self.multimodal_decode_worker:
+                warnings.warn(
+                    "--multimodal-decode-worker is deprecated, use --disaggregation-mode=decode and --enable-multimodal",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.DECODE
+            if self.multimodal_encode_worker:
+                warnings.warn(
+                    "--multimodal-encode-worker is deprecated, use --disaggregation-mode=encode and --enable-multimodal",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.ENCODE
+            if self.multimodal_worker:
+                warnings.warn(
+                    "--multimodal-worker is deprecated, use --disaggregation-mode=agg or --disaggregation-mode=prefill and --enable-multimodal",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                # NO-OP here, '--multimodal-worker' may be specified with '--disaggregation-mode=prefill'
+                # as prefill workers in P/D disaggregation or without for aggregation. In both cases,
+                # 'self.disaggregation_mode' will be properly setup.
+
         # Apply default if neither new flag nor legacy flags were provided
         if self.disaggregation_mode is None:
             self.disaggregation_mode = DisaggregationMode.AGGREGATED

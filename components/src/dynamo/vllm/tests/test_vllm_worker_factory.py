@@ -33,53 +33,6 @@ def _make_config(**overrides) -> Mock:
     return Mock(**defaults)
 
 
-class TestHandles:
-    """Test WorkerFactory.handles() config detection."""
-
-    # Legacy worker config
-    @pytest.mark.parametrize("route_to_encode", [True, False])
-    def test_multimodal_encode_worker(self, route_to_encode: bool) -> None:
-        # 'route_to_encoder' can be passed, the worker creation may ignore it.
-        config = _make_config(
-            multimodal_encode_worker=True, route_to_encoder=route_to_encode
-        )
-        assert WorkerFactory.handles(config)
-
-    @pytest.mark.parametrize("route_to_encode", [True, False])
-    def test_multimodal_worker(self, route_to_encode: bool) -> None:
-        config = _make_config(multimodal_worker=True, route_to_encoder=route_to_encode)
-        assert WorkerFactory.handles(config)
-
-    @pytest.mark.parametrize("route_to_encode", [True, False])
-    def test_multimodal_decode_worker(self, route_to_encode: bool) -> None:
-        config = _make_config(
-            multimodal_decode_worker=True, route_to_encoder=route_to_encode
-        )
-        assert WorkerFactory.handles(config)
-
-    # Tests for no standalone encode worker setting
-    @pytest.mark.parametrize("route_to_encode", [True, False])
-    def test_no_multimodal_flags(self, route_to_encode: bool) -> None:
-        config = _make_config(route_to_encoder=route_to_encode)
-        assert WorkerFactory.handles(config)
-
-    @pytest.mark.parametrize("route_to_encode", [True, False])
-    def test_prefill(self, route_to_encode: bool) -> None:
-        config = _make_config(
-            disaggregation_mode=DisaggregationMode.PREFILL,
-            route_to_encoder=route_to_encode,
-        )
-        assert WorkerFactory.handles(config)
-
-    @pytest.mark.parametrize("route_to_encode", [True, False])
-    def test_decode(self, route_to_encode: bool) -> None:
-        config = _make_config(
-            disaggregation_mode=DisaggregationMode.DECODE,
-            route_to_encoder=route_to_encode,
-        )
-        assert WorkerFactory.handles(config)
-
-
 @pytest.mark.asyncio
 class TestCreate:
     """Test WorkerFactory.create() routing."""
@@ -173,6 +126,32 @@ class TestCreate:
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
+
+    async def test_raises_error_for_invalid_config(
+        self, factory: WorkerFactory
+    ) -> None:
+        config = _make_config(
+            multimodal_decode_worker=True,
+            disaggregation_mode=DisaggregationMode.PREFILL,
+        )
+        shutdown_event = asyncio.Event()
+
+        with pytest.raises(
+            ValueError,
+            match="Multimodal decode worker with PREFILL disaggregation mode is not supported.",
+        ):
+            await factory.create(Mock(), config, shutdown_event, [])
+
+        config = _make_config(
+            multimodal_worker=True, disaggregation_mode=DisaggregationMode.DECODE
+        )
+        with pytest.raises(
+            ValueError,
+            match="Multimodal worker with DECODE disaggregation mode is not supported.",
+        ):
+            await factory.create(Mock(), config, shutdown_event, [])
+
+    # End of tests with legacy worker config.
 
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(multimodal_worker=True)
