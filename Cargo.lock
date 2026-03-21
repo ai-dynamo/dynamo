@@ -3980,6 +3980,7 @@ dependencies = [
  "clap 4.6.0",
  "cudarc",
  "half 2.7.1",
+ "libloading 0.8.9",
  "ndarray 0.17.2",
  "rand 0.9.2",
  "syclrc",

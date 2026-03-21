@@ -4,6 +4,9 @@
 pub mod tensor_kernels;
 pub mod ze_vectorized_copy;
 
+#[cfg(feature = "sycl-kernel")]
+pub mod sycl_vectorized_copy;
+
 // Always available - core transfer functionality
 pub use tensor_kernels::{
     MemcpyBatchMode, is_memcpy_batch_available, is_using_stubs, memcpy_batch, vectorized_copy,

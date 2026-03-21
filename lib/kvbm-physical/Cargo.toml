@@ -40,6 +40,7 @@ testing = []
 testing-kvbm = []
 testing-nixl-gds = []
 level-zero = ["dynamo-memory/level-zero", "dep:syclrc", "kvbm-kernels/level-zero"]
+sycl-kernel = ["level-zero", "kvbm-kernels/sycl-kernel"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }

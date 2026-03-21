@@ -11,6 +11,31 @@
 //!
 //! Async completion is tracked via [`ZeEvent`] signals and polled by the
 //! notification subsystem, mirroring the CUDA event pattern.
+//!
+//! # SYCL kernel override
+//!
+//! By default, D2D FC↔LW transfers use the raw Level Zero SPIR-V kernel
+//! (`vectorized_copy.spv` via `ZeModule::from_spirv`), which has the
+//! lowest host-side dispatch latency.
+//!
+//! An alternative SYCL runtime path is available behind the `sycl-kernel`
+//! feature. When enabled, set `KVBM_USE_SYCL_KERNEL=1` at runtime to
+//! dispatch through `sycl::queue` instead of raw L0 APIs. This exercises
+//! the full SYCL stack while sharing the same L0 context and device memory.
+//!
+//! ```sh
+//! # 1. Build the SYCL shared library (requires icpx -fsycl):
+//! make -C lib/kvbm-kernels/sycl
+//!
+//! # 2. Build Rust with the sycl-kernel feature:
+//! cargo build -p kvbm-physical --features sycl-kernel
+//!
+//! # 3. At runtime, opt in and point to the .so:
+//! export KVBM_USE_SYCL_KERNEL=1
+//! export LD_LIBRARY_PATH=lib/kvbm-kernels/sycl:$LD_LIBRARY_PATH
+//! # Or specify the exact path:
+//! export SYCL_VC_LIB_PATH=lib/kvbm-kernels/sycl/libvectorized_copy_sycl.so
+//! ```
 
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
@@ -100,6 +125,37 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
 
     map.insert(device_ordinal, res.clone());
     Ok(res)
+}
+
+/// Get or create a cached [`SyclVectorizedCopy`] for the given device.
+///
+/// The SYCL state shares the same Level Zero context as `ze_resources()`,
+/// so device memory allocated by `ZeMemPool` is directly accessible.
+#[cfg(feature = "sycl-kernel")]
+fn sycl_vc_state(
+    device_ordinal: u32,
+) -> Result<Arc<kvbm_kernels::sycl_vectorized_copy::SyclVectorizedCopy>> {
+    use kvbm_kernels::sycl_vectorized_copy::SyclVectorizedCopy;
+
+    static SYCL_STATES: OnceLock<Mutex<HashMap<u32, Arc<SyclVectorizedCopy>>>> = OnceLock::new();
+    let mut map = SYCL_STATES.get_or_init(Default::default).lock().unwrap();
+
+    if let Some(existing) = map.get(&device_ordinal) {
+        return Ok(existing.clone());
+    }
+
+    let dev = ZeDevice::new(device_ordinal as usize)
+        .map_err(|e| anyhow!("Failed to create ZeDevice {}: {}", device_ordinal, e))?;
+
+    let sycl_vc = SyclVectorizedCopy::new(
+        dev.ze_context() as *mut c_void,
+        dev.ze_device() as *mut c_void,
+    )
+    .map_err(|e| anyhow!("Failed to init SYCL vectorized_copy for device {}: {}", device_ordinal, e))?;
+
+    let arc = Arc::new(sycl_vc);
+    map.insert(device_ordinal, arc.clone());
+    Ok(arc)
 }
 
 /// Allocate a fresh [`ZeEvent`] from the per-device pool.
@@ -232,24 +288,57 @@ pub fn execute_ze_transfer(
             } else if matches!(strategy, TransferStrategy::ZeAsyncD2D) {
                 // Vectorized kernel: only for D2D (CCS kernel cannot
                 // dereference host-pinned pointers on discrete GPUs).
-                tracing::debug!(
-                    strategy = strategy_name,
-                    num_blocks = src_block_ids.len(),
-                    num_layers = layers.len(),
-                    "Using XPU vectorized_copy kernel (D2D)"
-                );
-                execute_fc_lw_vectorized_ze(
-                    src,
-                    dst,
-                    src_block_ids,
-                    dst_block_ids,
-                    layers,
-                    &cmd_copy,
-                    &cmd_compute,
-                    &kernel,
-                    &pool,
-                    &signal_event,
-                )?;
+                //
+                // Default: raw L0 SPIR-V kernel (lowest latency).
+                // Override: set KVBM_USE_SYCL_KERNEL=1 to dispatch via SYCL runtime.
+                #[cfg(feature = "sycl-kernel")]
+                let use_sycl = std::env::var("KVBM_USE_SYCL_KERNEL").is_ok();
+                #[cfg(not(feature = "sycl-kernel"))]
+                let use_sycl = false;
+
+                if use_sycl {
+                    #[cfg(feature = "sycl-kernel")]
+                    {
+                        // Lazily init SYCL state using the same L0 context.
+                        let sycl_vc = sycl_vc_state(device_ordinal)?;
+                        tracing::debug!(
+                            strategy = strategy_name,
+                            num_blocks = src_block_ids.len(),
+                            num_layers = layers.len(),
+                            "Using SYCL vectorized_copy kernel (D2D)"
+                        );
+                        execute_fc_lw_vectorized_sycl_ze(
+                            src,
+                            dst,
+                            src_block_ids,
+                            dst_block_ids,
+                            layers,
+                            &cmd_copy,
+                            &sycl_vc,
+                            &pool,
+                            &signal_event,
+                        )?;
+                    }
+                } else {
+                    tracing::debug!(
+                        strategy = strategy_name,
+                        num_blocks = src_block_ids.len(),
+                        num_layers = layers.len(),
+                        "Using XPU vectorized_copy kernel (D2D)"
+                    );
+                    execute_fc_lw_vectorized_ze(
+                        src,
+                        dst,
+                        src_block_ids,
+                        dst_block_ids,
+                        layers,
+                        &cmd_copy,
+                        &cmd_compute,
+                        &kernel,
+                        &pool,
+                        &signal_event,
+                    )?;
+                }
             } else {
                 // H2D / D2H: fall back to per-chunk BCS memcpy.
                 tracing::debug!(
@@ -552,6 +641,120 @@ fn execute_fc_lw_ze(
         total_copies,
         layer_chunk_size,
         "XPU per-layer transfer appended"
+    );
+
+    Ok(())
+}
+
+/// FC↔LW transfer using the SYCL vectorized_copy kernel (D2D only).
+///
+/// Functionally identical to [`execute_fc_lw_vectorized_ze`] but dispatches
+/// the kernel through the SYCL runtime instead of raw Level Zero APIs.
+/// This exercises the full SYCL stack (queue, event, JIT) while sharing
+/// the same L0 context, device memory, and BCS command list.
+///
+/// Steps 1-3 (build host arrays, alloc scratch, upload via BCS) are
+/// identical to the L0 version. Step 4 calls `SyclVectorizedCopy::run()`
+/// instead of `append_launch_kernel()`.
+///
+/// Requires the `sycl-kernel` feature and `libvectorized_copy_sycl.so`
+/// to be built and loadable at runtime (`make -C lib/kvbm-kernels/sycl`).
+#[cfg(feature = "sycl-kernel")]
+fn execute_fc_lw_vectorized_sycl_ze(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    layers: Range<usize>,
+    cmd_copy: &ZeImmediateCmdList,
+    sycl_vc: &kvbm_kernels::sycl_vectorized_copy::SyclVectorizedCopy,
+    pool: &ZeMemPool,
+    signal_event: &ZeEvent,
+) -> Result<()> {
+    let src_layout = src.layout();
+    let nl = layers.len();
+    let no = src_layout.outer_dim();
+    let chunk_size =
+        src_layout.page_size() * src_layout.inner_dim() * src_layout.dtype_width_bytes();
+    let num_blocks = src_block_ids.len();
+    let total_chunks = num_blocks * nl * no;
+
+    if total_chunks == 0 {
+        signal_event
+            .host_signal()
+            .map_err(|e| anyhow!("Failed to host_signal event for empty transfer: {}", e))?;
+        return Ok(());
+    }
+
+    // Build flat pointer arrays on host.
+    let mut src_ptrs: Vec<u64> = Vec::with_capacity(total_chunks);
+    let mut dst_ptrs: Vec<u64> = Vec::with_capacity(total_chunks);
+
+    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+        for layer_id in layers.clone() {
+            for outer_id in 0..no {
+                let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
+                let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+                src_ptrs.push(src_region.addr() as u64);
+                dst_ptrs.push(dst_region.addr() as u64);
+            }
+        }
+    }
+
+    // Allocate scratch device memory for pointer arrays.
+    let ptr_array_bytes = total_chunks * std::mem::size_of::<u64>();
+    let src_ptrs_dev = pool
+        .alloc(ptr_array_bytes)
+        .map_err(|e| anyhow!("ZeMemPool alloc for src_ptrs failed: {}", e))?;
+    let dst_ptrs_dev = pool
+        .alloc(ptr_array_bytes)
+        .map_err(|e| anyhow!("ZeMemPool alloc for dst_ptrs failed: {}", e))?;
+
+    // Upload pointer arrays to device via BCS.
+    unsafe {
+        cmd_copy
+            .append_memcpy(
+                src_ptrs_dev as *mut c_void,
+                src_ptrs.as_ptr() as *const c_void,
+                ptr_array_bytes,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .map_err(|e| anyhow!("Upload src_ptrs failed: {}", e))?;
+        cmd_copy
+            .append_memcpy(
+                dst_ptrs_dev as *mut c_void,
+                dst_ptrs.as_ptr() as *const c_void,
+                ptr_array_bytes,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .map_err(|e| anyhow!("Upload dst_ptrs failed: {}", e))?;
+    }
+    cmd_copy
+        .host_synchronize(u64::MAX)
+        .map_err(|e| anyhow!("BCS sync after pointer upload failed: {}", e))?;
+
+    // Dispatch via SYCL runtime (blocks until kernel completes).
+    sycl_vc
+        .run(src_ptrs_dev, dst_ptrs_dev, chunk_size as u64, total_chunks as i32)
+        .map_err(|e| anyhow!("SYCL vectorized_copy kernel failed: {}", e))?;
+
+    // Signal the event from the host (kernel already completed synchronously).
+    signal_event
+        .host_signal()
+        .map_err(|e| anyhow!("Failed to host_signal event after SYCL kernel: {}", e))?;
+
+    // Free scratch.
+    pool.free(src_ptrs_dev, ptr_array_bytes)
+        .map_err(|e| anyhow!("ZeMemPool free src_ptrs failed: {}", e))?;
+    pool.free(dst_ptrs_dev, ptr_array_bytes)
+        .map_err(|e| anyhow!("ZeMemPool free dst_ptrs failed: {}", e))?;
+
+    tracing::debug!(
+        total_chunks,
+        chunk_size,
+        "XPU SYCL vectorized_copy kernel transfer completed"
     );
 
     Ok(())
