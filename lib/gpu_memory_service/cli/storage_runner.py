@@ -97,18 +97,21 @@ def _run_load(args) -> None:
     _configure_logging(args.verbose)
     socket_path = _resolve_socket(args.device, args.socket_path)
 
+    use_gds = getattr(args, "gds", False)
     logger.info(
-        "Loading GMS state: device=%s, socket=%s, input_dir=%s, clear_existing=%s",
+        "Loading GMS state: device=%s, socket=%s, input_dir=%s, clear_existing=%s, gds=%s",
         args.device,
         socket_path,
         args.input_dir,
         not args.no_clear,
+        use_gds,
     )
 
     client = GMSStorageClient(
         socket_path=socket_path,
         device=args.device,
         timeout_ms=args.timeout_ms,
+        use_gds=use_gds,
     )
 
     id_map = client.load_to_gms(
@@ -239,6 +242,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Do not clear existing GMS allocations before loading. "
             "Default behaviour clears the server to produce an exact replica."
+        ),
+    )
+    load_p.add_argument(
+        "--gds",
+        action="store_true",
+        default=False,
+        help=(
+            "Use NIXL GDS backend for direct file-to-GPU transfers. "
+            "Requires NIXL Python bindings and GDS-capable storage."
         ),
     )
     load_p.add_argument(

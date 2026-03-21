@@ -144,11 +144,13 @@ class GMSStorageClient:
         *,
         timeout_ms: Optional[int] = None,
         shard_size_bytes: int = 4 * 1024**3,
+        use_gds: bool = False,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
         self._timeout_ms = timeout_ms
         self._shard_size = shard_size_bytes
+        self._use_gds = use_gds
 
         if socket_path is None:
             from gpu_memory_service.common.utils import get_socket_path
@@ -514,6 +516,13 @@ class GMSStorageClient:
                 "GMS client imports unavailable (missing cuda-python or torch)"
             )
 
+        if self._use_gds:
+            return self._load_to_gms_gds(
+                input_dir,
+                max_workers=max_workers,
+                clear_existing=clear_existing,
+            )
+
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
         groups = _group_entries_by_shard(manifest.allocations)
         worker_count = max(1, min(max_workers, len(groups) or 1))
@@ -548,6 +557,61 @@ class GMSStorageClient:
 
         logger.info(
             "load_to_gms complete: %d allocations, %d metadata keys",
+            len(id_map),
+            len(saved_metadata),
+        )
+        return id_map
+
+    def _load_to_gms_gds(
+        self,
+        input_dir: str,
+        *,
+        max_workers: int = 4,
+        clear_existing: bool = True,
+    ) -> Dict[str, str]:
+        """GDS restore path: read shard files directly into GPU VAs via NIXL."""
+        from gpu_memory_service.client._gms_storage_gds import NixlGDSStorageBackend
+
+        manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
+        groups = _group_entries_by_shard(manifest.allocations)
+
+        gds_backend = NixlGDSStorageBackend(device=self.device)
+        try:
+            with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
+                mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
+                if clear_existing:
+                    cleared = mm.clear_all_handles()
+                    if cleared:
+                        logger.info("Cleared %d pre-existing allocations", cleared)
+
+                # Phase A: allocate all VAs upfront (needed for NIXL VRAM registration)
+                id_map: Dict[str, str] = {}
+                va_map: Dict[str, int] = {}
+                for entry in manifest.allocations:
+                    old_id = entry.allocation_id
+                    va = mm.create_mapping(size=entry.size, tag=entry.tag)
+                    id_map[old_id] = mm.get_allocation_id(va)
+                    va_map[old_id] = va
+                logger.info(
+                    "Phase A complete: allocated %d GMS VAs",
+                    len(va_map),
+                )
+
+                # Phase B: GDS transfer — file → GPU directly
+                gds_backend.restore_shards(input_dir, groups, va_map)
+                logger.info(
+                    "Phase B complete: GDS-restored %d allocations to GMS memory",
+                    len(manifest.allocations),
+                )
+
+                self._restore_metadata(mm, saved_metadata, id_map)
+                if not mm.commit():
+                    raise RuntimeError("GMS commit failed after GDS restore")
+        finally:
+            gds_backend.close()
+
+        logger.info(
+            "load_to_gms (GDS) complete: %d allocations, %d metadata keys",
             len(id_map),
             len(saved_metadata),
         )
