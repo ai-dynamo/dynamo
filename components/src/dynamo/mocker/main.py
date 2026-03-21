@@ -30,7 +30,6 @@ from dynamo.llm import (
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
-from .replay import run_trace_replay
 from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
@@ -76,32 +75,6 @@ async def worker():
     # Resolve planner-profile-data: convert profile results dir to NPZ if needed
     profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
     args.planner_profile_data = profile_data_result.npz_path
-
-    # Offline replay does not need planner profile conversion or runtime setup.
-    if args.trace_file is not None:
-        if args.extra_engine_args:
-            extra_engine_args_path = args.extra_engine_args
-            logger.info(f"Using provided MockEngineArgs from {extra_engine_args_path}")
-        else:
-            extra_engine_args_path = create_temp_engine_args_file(args)
-            logger.info("Created MockEngineArgs from CLI arguments")
-
-        try:
-            run_trace_replay(
-                trace_file=args.trace_file,
-                output_file=args.output_file,
-                extra_engine_args=extra_engine_args_path,
-                num_workers=args.num_workers,
-                replay_concurrency=args.replay_concurrency,
-            )
-            return
-        finally:
-            if not args.extra_engine_args and extra_engine_args_path.exists():
-                try:
-                    extra_engine_args_path.unlink()
-                    logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up temporary file: {e}")
 
     # Handle extra_engine_args: either use provided file or create from CLI args
     if args.extra_engine_args:

@@ -3,7 +3,17 @@
 
 import asyncio
 import os
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+)
 
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
@@ -1252,6 +1262,7 @@ def run_mocker_trace_replay(
     extra_engine_args: Optional[str | os.PathLike[str]] = None,
     num_workers: int = 1,
     replay_concurrency: Optional[int] = None,
+    replay_mode: Literal["offline", "online"] = "offline",
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report."""
     ...

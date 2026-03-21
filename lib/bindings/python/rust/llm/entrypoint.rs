@@ -504,13 +504,14 @@ pub fn run_input<'p>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None, replay_mode="offline"))]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
     trace_file: PathBuf,
     extra_engine_args: Option<PathBuf>,
     num_workers: usize,
     replay_concurrency: Option<isize>,
+    replay_mode: &str,
 ) -> PyResult<PyObject> {
     // Load args before allow_threads so we can use the GIL for AIC callback creation.
     let mut args = if let Some(ref extra_args_path) = extra_engine_args {
@@ -558,21 +559,38 @@ pub fn run_mocker_trace_replay(
         args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
     }
 
+    let replay_mode = replay_mode.to_owned();
     let report = py.allow_threads(move || {
         let replay_concurrency = replay_concurrency
             .map(usize::try_from)
             .transpose()
             .map_err(|_| anyhow::anyhow!("replay_concurrency must be at least 1"))?;
 
-        if let Some(max_in_flight) = replay_concurrency {
-            dynamo_mocker::replay::simulate_concurrency_file(
+        match (replay_mode.as_str(), replay_concurrency) {
+            ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_file(
                 args,
                 &trace_file,
                 max_in_flight,
                 num_workers,
-            )
-        } else {
-            dynamo_mocker::replay::simulate_trace_file(args, &trace_file, num_workers)
+            ),
+            ("offline", None) => {
+                dynamo_mocker::replay::simulate_trace_file(args, &trace_file, num_workers)
+            }
+            ("online", Some(max_in_flight)) => {
+                dynamo_mocker::replay::simulate_concurrency_live_file(
+                    args,
+                    &trace_file,
+                    max_in_flight,
+                    num_workers,
+                )
+            }
+            ("online", None) => {
+                dynamo_mocker::replay::simulate_trace_live_file(args, &trace_file, num_workers)
+            }
+            (other, _) => anyhow::bail!(
+                "replay_mode must be either 'offline' or 'online', got '{}'",
+                other
+            ),
         }
     });
     let report = report.map_err(to_pyerr)?;

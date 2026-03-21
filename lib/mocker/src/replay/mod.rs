@@ -3,9 +3,14 @@
 
 mod collector;
 mod entrypoints;
+mod live;
 mod loader;
 pub(crate) mod runtime;
 mod validate;
+
+use std::collections::VecDeque;
+
+use crate::common::protocols::DirectRequest;
 
 pub(crate) use collector::TraceCollector;
 #[cfg(test)]
@@ -15,8 +20,42 @@ pub use collector::{
     TraceSimulationReport, TraceThroughputStats,
 };
 pub use entrypoints::{
-    simulate_concurrency_file, simulate_concurrency_requests, simulate_trace_file,
+    simulate_concurrency_file, simulate_concurrency_live_file, simulate_concurrency_requests,
+    simulate_trace_file, simulate_trace_live_file,
 };
+
+pub(crate) fn normalize_trace_requests(
+    mut requests: Vec<DirectRequest>,
+) -> anyhow::Result<VecDeque<DirectRequest>> {
+    requests.sort_by(|left, right| {
+        let left_ts = left
+            .arrival_timestamp_ms
+            .expect("trace replay requests must have an arrival timestamp");
+        let right_ts = right
+            .arrival_timestamp_ms
+            .expect("trace replay requests must have an arrival timestamp");
+        left_ts.total_cmp(&right_ts)
+    });
+
+    let first_arrival_ms = requests
+        .first()
+        .and_then(|request| request.arrival_timestamp_ms)
+        .ok_or_else(|| anyhow::anyhow!("trace replay requires at least one timestamped request"))?;
+
+    Ok(VecDeque::from(
+        requests
+            .into_iter()
+            .map(|mut request| {
+                let arrival_timestamp_ms = request
+                    .arrival_timestamp_ms
+                    .expect("trace replay requests must have an arrival timestamp")
+                    - first_arrival_ms;
+                request.arrival_timestamp_ms = Some(arrival_timestamp_ms);
+                request
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
 
 #[cfg(test)]
 mod tests {

@@ -51,6 +51,7 @@ impl ReplayWorkerCore {
             &mut self.hit_rates,
             &self.args,
             Some(collector),
+            None,
             now_ms,
             true,
         )

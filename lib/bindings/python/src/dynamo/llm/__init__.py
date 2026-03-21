@@ -35,7 +35,7 @@ from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
 from dynamo._core import run_input
 from dynamo._core import run_kv_indexer as run_kv_indexer
-from dynamo._core import run_mocker_trace_replay
+from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
@@ -44,3 +44,18 @@ from .exceptions import HttpError
 fetch_llm = fetch_model
 register_llm = register_model
 unregister_llm = unregister_model
+
+
+def run_mocker_trace_replay(
+    trace_file,
+    extra_engine_args=None,
+    num_workers=1,
+    replay_concurrency=None,
+):
+    return _run_mocker_trace_replay(
+        trace_file,
+        extra_engine_args=extra_engine_args,
+        num_workers=num_workers,
+        replay_concurrency=replay_concurrency,
+        replay_mode="offline",
+    )

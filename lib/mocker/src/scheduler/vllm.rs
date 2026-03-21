@@ -37,6 +37,7 @@ use crate::common::sequence::ActiveSequence;
 use crate::common::utils::sleep_until_precise;
 use crate::kv_manager::KvManager;
 use crate::replay::TraceCollector;
+use crate::scheduler::AdmissionEvent;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -190,6 +191,42 @@ impl Scheduler {
         kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
+        Self::new_internal(
+            args,
+            dp_rank,
+            output_tx,
+            kv_event_sink,
+            cancellation_token,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_admission(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        cancellation_token: Option<CancellationToken>,
+        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+    ) -> Self {
+        Self::new_internal(
+            args,
+            dp_rank,
+            output_tx,
+            kv_event_sink,
+            cancellation_token,
+            admission_tx,
+        )
+    }
+
+    fn new_internal(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        cancellation_token: Option<CancellationToken>,
+        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+    ) -> Self {
         args.validate().expect("invalid MockEngineArgs");
 
         // Create channel for request handling
@@ -227,7 +264,14 @@ impl Scheduler {
                 }
 
                 // 2. Simulate prefill + decode
-                simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+                simulate_prefill(
+                    &mut state,
+                    &mut kv_manager,
+                    &mut hit_rates,
+                    &args,
+                    admission_tx.as_ref(),
+                )
+                .await;
 
                 let output_signals = simulate_decode(&mut state, &mut kv_manager, &args).await;
                 flush_output_signals(&mut state, &mut kv_manager, &output_tx, output_signals);
@@ -309,9 +353,19 @@ async fn simulate_prefill(
     kv_manager: &mut KvManager,
     hit_rates: &mut RunningMean<f32>,
     args: &MockEngineArgs,
+    admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
 ) -> Duration {
     let start_time = Instant::now();
-    let total_time = simulate_prefill_step(state, kv_manager, hit_rates, args, None, 0.0, false);
+    let total_time = simulate_prefill_step(
+        state,
+        kv_manager,
+        hit_rates,
+        args,
+        None,
+        admission_tx,
+        0.0,
+        false,
+    );
 
     if args.speedup_ratio > 0.0 && total_time > Duration::ZERO {
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
@@ -345,12 +399,14 @@ async fn simulate_decode(
     output_signals
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_prefill_step(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     hit_rates: &mut RunningMean<f32>,
     args: &MockEngineArgs,
     mut collector: Option<&mut TraceCollector>,
+    admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     current_time_ms: f64,
     apply_speedup: bool,
 ) -> Duration {
@@ -369,13 +425,21 @@ pub(crate) fn simulate_prefill_step(
             let Some(admitted_uuid) = state.admit_one(args) else {
                 break;
             };
-            if let Some(collector) = collector.as_deref_mut() {
+            if collector.is_some() || admission_tx.is_some() {
                 let Some(Request::Active(seq)) = state.requests.get(&admitted_uuid) else {
                     panic!("Request does not exist.");
                 };
                 let prefill_cost = kv_manager.get_prefill_cost(seq);
                 let reused_input_tokens = seq.len().saturating_sub(prefill_cost.new_tokens);
-                collector.on_admit(admitted_uuid, current_time_ms, reused_input_tokens);
+                if let Some(collector) = collector.as_deref_mut() {
+                    collector.on_admit(admitted_uuid, current_time_ms, reused_input_tokens);
+                }
+                if let Some(admission_tx) = admission_tx {
+                    let _ = admission_tx.send(AdmissionEvent {
+                        uuid: admitted_uuid,
+                        reused_input_tokens,
+                    });
+                }
             }
         }
         let uuid = state.prefill[0];
@@ -874,7 +938,7 @@ mod tests {
         // ── Step 2: First simulate_prefill ──
         // Budget=12. R1 takes 8 tokens (2 blocks), fully prefilled → decode.
         // R2 takes 4 tokens (1 block, chunked), partially prefilled → stays in prefill.
-        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args, None).await;
 
         assert_eq!(state.waiting.len(), 1);
         assert_eq!(state.prefill.len(), 1);
@@ -918,7 +982,7 @@ mod tests {
         // R3 admitted, needs 2 blocks for chunk of 7. Only 1 free slot → partial.
         // Preempt R2 (LIFO) → R2 back to waiting. Retry R3 → evicts R2's
         // inactive blocks, allocates 2 more → R3 allocated_tokens=11.
-        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args, None).await;
 
         assert_eq!(state.waiting.len(), 1, "R2 preempted back to waiting");
         assert_eq!(state.waiting[0], r2_uuid);
@@ -948,7 +1012,7 @@ mod tests {
         // ── Step 6: Third simulate_prefill ──
         // R3 finishes prefill (1 token left, no new blocks) → decode.
         // R2 re-admitted, fully prefilled (2 blocks via inactive eviction) → decode.
-        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args, None).await;
 
         assert_eq!(state.waiting.len(), 0);
         assert_eq!(state.prefill.len(), 0);
@@ -959,7 +1023,7 @@ mod tests {
 
         // ── Steps 7+: Cycle until all requests complete ──
         loop {
-            simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+            simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args, None).await;
             let output_signals = simulate_decode(&mut state, &mut kv_manager, &args).await;
             flush_output_signals(&mut state, &mut kv_manager, &output_tx, output_signals);
 

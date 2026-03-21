@@ -340,6 +340,7 @@ mod tests {
                 &mut hit_rates,
                 args,
                 Some(&mut collector),
+                None,
                 current_time_ms,
                 true,
             );
@@ -415,6 +416,7 @@ mod tests {
                 &mut hit_rates,
                 args,
                 Some(&mut collector),
+                None,
                 current_time_ms,
                 true,
             );

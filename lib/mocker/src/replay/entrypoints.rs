@@ -7,8 +7,12 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 
 use super::TraceSimulationReport;
+use super::live;
 use super::loader::load_trace_requests;
-use super::validate::{validate_offline_concurrency_args, validate_offline_replay_args};
+use super::validate::{
+    validate_offline_concurrency_args, validate_offline_replay_args,
+    validate_online_concurrency_args, validate_online_replay_args,
+};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 
 pub fn simulate_trace_file(
@@ -23,6 +27,16 @@ pub fn simulate_trace_file(
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
+pub fn simulate_trace_live_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    validate_online_replay_args(&args, num_workers)?;
+    let requests = load_trace_requests(trace_path, args.block_size, true)?;
+    live::simulate_trace_live_requests(args, requests, num_workers)
+}
+
 pub fn simulate_concurrency_file(
     args: MockEngineArgs,
     trace_path: &Path,
@@ -33,6 +47,17 @@ pub fn simulate_concurrency_file(
     let started_at = Instant::now();
     let report = simulate_concurrency_requests(args, requests, max_in_flight, num_workers)?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_concurrency_live_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
+    let requests = load_trace_requests(trace_path, args.block_size, false)?;
+    live::simulate_concurrency_live_requests(args, requests, max_in_flight, num_workers)
 }
 
 pub fn simulate_concurrency_requests(

@@ -8,9 +8,16 @@ pub mod vllm;
 
 use crate::common::protocols::DirectRequest;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 pub use sglang::SglangScheduler;
 pub use vllm::{MockerMetrics, Scheduler};
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionEvent {
+    pub(crate) uuid: Uuid,
+    pub(crate) reused_input_tokens: usize,
+}
 
 /// Engine-agnostic scheduler interface.
 ///
