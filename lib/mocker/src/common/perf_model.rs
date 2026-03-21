@@ -25,6 +25,18 @@ pub trait DecodeInterpolator: Send + Sync {
     fn interp(&self, x: f64, y: f64) -> Result<f64, InterpolateError>;
 }
 
+/// Callback trait for direct AIC SDK calls.
+/// Implementors call the Python AIC SDK via PyO3 GIL.
+pub trait AicCallback: Send + Sync {
+    /// Predict prefill latency in ms.
+    /// Parameters: (batch_size, isl, prefix, osl)
+    fn predict_prefill(&self, batch_size: usize, isl: usize, prefix: usize, osl: usize) -> f64;
+
+    /// Predict decode (generation) latency in ms.
+    /// Parameters: (batch_size, isl, osl)
+    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> f64;
+}
+
 /// Wrapper to implement PrefillInterpolator for the concrete Interp1D type
 struct PrefillInterp1D {
     inner: ndarray_interp::interp1d::Interp1D<
@@ -65,11 +77,14 @@ pub enum PerfModel {
     #[default]
     Polynomial,
     /// Interpolation-based model using profiler data
-    /// Interpolators are built once and stored as trait objects
+    /// Decode axes: (active_kv_tokens, context_length)
     Interpolated {
         prefill_interp: Arc<dyn PrefillInterpolator>,
         decode_interp: Arc<dyn DecodeInterpolator>,
     },
+    /// AI Configurator SDK calls via Python callback.
+    /// Passes full parameters (batch_size, isl, prefix, osl) for maximum accuracy.
+    Aiconfigurator { callback: Arc<dyn AicCallback> },
 }
 
 impl Clone for PerfModel {
@@ -83,6 +98,9 @@ impl Clone for PerfModel {
                 prefill_interp: Arc::clone(prefill_interp),
                 decode_interp: Arc::clone(decode_interp),
             },
+            PerfModel::Aiconfigurator { callback } => PerfModel::Aiconfigurator {
+                callback: Arc::clone(callback),
+            },
         }
     }
 }
@@ -92,6 +110,7 @@ impl std::fmt::Debug for PerfModel {
         match self {
             PerfModel::Polynomial => write!(f, "PerfModel::Polynomial"),
             PerfModel::Interpolated { .. } => write!(f, "PerfModel::Interpolated {{ .. }}"),
+            PerfModel::Aiconfigurator { .. } => write!(f, "PerfModel::Aiconfigurator"),
         }
     }
 }
@@ -188,49 +207,67 @@ impl PerfModel {
         })
     }
 
-    /// Predict prefill time in milliseconds given the number of new tokens
-    pub fn predict_prefill_time(&self, new_tokens: usize) -> f64 {
+    /// Create an Aiconfigurator perf model from a callback.
+    pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
+        PerfModel::Aiconfigurator { callback }
+    }
+
+    /// Predict prefill time in milliseconds.
+    ///
+    /// Callers always pass all parameters; each variant uses what it needs:
+    /// - Polynomial/Interpolated: uses total new tokens across the batch
+    ///   (`batch_size * (isl - prefix)`), modeling GPU processing total tokens in parallel
+    /// - Aiconfigurator: passes (batch_size, isl, prefix) directly to the AIC SDK
+    pub fn predict_prefill_time(&self, batch_size: usize, isl: usize, prefix: usize) -> f64 {
+        let new_tokens_per_req = isl.saturating_sub(prefix);
         let time = match self {
             PerfModel::Polynomial => {
-                // Original polynomial formula
-                let tokens = new_tokens as f64;
+                // Total tokens across the batch — GPU processes them in parallel
+                let tokens = (batch_size * new_tokens_per_req) as f64;
                 4.209989e-07 * tokens.powi(2) + 1.518344e-02 * tokens + 1.650142e+01
             }
             PerfModel::Interpolated { prefill_interp, .. } => {
-                // Use pre-built interpolator
-                let query = new_tokens as f64;
-                prefill_interp.interp(query).unwrap_or(0.0)
+                let tokens = (batch_size * new_tokens_per_req) as f64;
+                prefill_interp.interp(tokens).unwrap_or(0.0)
+            }
+            PerfModel::Aiconfigurator { callback } => {
+                callback.predict_prefill(batch_size, isl, prefix, 1)
             }
         };
-        // Ensure non-negative timing
-        let result = time.max(0.0);
-        tracing::trace!("Prefill time prediction: new_tokens={new_tokens}, time={result:.2}ms");
-        result
+        time.max(0.0)
     }
 
-    /// Predict decode time in milliseconds given active KV tokens and context length
+    /// Predict decode time in milliseconds.
     ///
-    /// For the Polynomial variant, this computes active percentage as active_kv_tokens / 16384.
-    /// For the Interpolated variant, this performs 2D bilinear interpolation.
-    pub fn predict_decode_time(&self, active_kv_tokens: usize, context_length: usize) -> f64 {
+    /// Callers always pass all parameters; each variant uses what it needs:
+    /// - Polynomial: uses active_kv_tokens
+    /// - Interpolated: uses (active_kv_tokens, context_length)
+    /// - Aiconfigurator: uses (batch_size, context_length)
+    pub fn predict_decode_time(
+        &self,
+        batch_size: usize,
+        active_kv_tokens: usize,
+        context_length: usize,
+    ) -> f64 {
+        if batch_size == 0 {
+            return 0.0;
+        }
         let time = match self {
             PerfModel::Polynomial => {
-                // Compute active percentage using default capacity
                 let active_perc = active_kv_tokens as f64 / 16384.0;
-                // Original polynomial formula
                 -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
             }
-            PerfModel::Interpolated { decode_interp, .. } => {
-                // Use pre-built interpolator
-                let query_x = active_kv_tokens as f64;
-                let query_y = context_length as f64;
-                decode_interp.interp(query_x, query_y).unwrap_or(0.0)
+            PerfModel::Interpolated { decode_interp, .. } => decode_interp
+                .interp(active_kv_tokens as f64, context_length as f64)
+                .unwrap_or(0.0),
+            PerfModel::Aiconfigurator { callback } => {
+                callback.predict_decode(batch_size, context_length, 2)
             }
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
         tracing::trace!(
-            "Decode time prediction: active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
+            "Decode time prediction: batch_size={batch_size}, active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );
         result
     }

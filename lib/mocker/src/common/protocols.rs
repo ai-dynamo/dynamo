@@ -61,6 +61,9 @@ pub struct DirectRequest {
 pub struct PrefillCost {
     pub new_blocks: usize,
     pub new_tokens: usize,
+    /// Number of tokens already cached (prefix hit).
+    /// isl = cached_tokens + new_tokens
+    pub cached_tokens: usize,
 }
 
 impl PrefillCost {
@@ -70,7 +73,8 @@ impl PrefillCost {
         perf_model: &PerfModel,
     ) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        perf_model.predict_prefill_time(tokens)
+        let isl = self.cached_tokens + tokens;
+        perf_model.predict_prefill_time(1, isl, self.cached_tokens)
     }
 }
 
@@ -232,6 +236,35 @@ pub struct MockEngineArgs {
     #[builder(default = "Arc::new(PerfModel::default())")]
     pub perf_model: Arc<PerfModel>,
 
+    /// If set, indicates direct AIC SDK calls should be used.
+    /// The value is the backend name (e.g., "sglang", "vllm").
+    /// The Python layer reads this and overrides perf_model with an Aiconfigurator callback.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_backend: Option<String>,
+
+    /// AIC GPU system name (e.g., "h200_sxm"). Required when aic_backend is set.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_system: Option<String>,
+
+    /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
+    /// If None, uses the default version for the backend.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_backend_version: Option<String>,
+
+    /// Tensor parallel size for AIC latency prediction.
+    /// Only affects AIC performance model lookups, not mocker scheduling.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_tp_size: Option<usize>,
+
+    /// HuggingFace model path for AIC latency prediction (e.g., "nvidia/Llama-3.1-8B-Instruct-FP8").
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_model_path: Option<String>,
+
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
@@ -331,6 +364,11 @@ impl MockEngineArgs {
             "is_prefill",
             "is_decode",
             "planner_profile_data",
+            "aic_backend",
+            "aic_system",
+            "aic_backend_version",
+            "aic_tp_size",
+            "aic_model_path",
             "enable_local_indexer",
             "bootstrap_port",
             "kv_bytes_per_token",
@@ -523,7 +561,7 @@ impl MockEngineArgs {
         };
         builder = builder.worker_type(worker_type);
 
-        // Load performance model from NPZ file if provided
+        // Load performance model from NPZ file if provided.
         let perf_model = if let Some(path_str) = extra_args.get("planner_profile_data")
             && let Some(path_str) = path_str.as_str()
         {
@@ -547,6 +585,32 @@ impl MockEngineArgs {
         };
         builder = builder.perf_model(perf_model);
 
+        // Check for AIC direct mode fields
+        if let Some(backend) = extra_args.get("aic_backend")
+            && let Some(backend_str) = backend.as_str()
+        {
+            builder = builder.aic_backend(Some(backend_str.to_string()));
+        }
+        if let Some(system) = extra_args.get("aic_system")
+            && let Some(s) = system.as_str()
+        {
+            builder = builder.aic_system(Some(s.to_string()));
+        }
+        if let Some(version) = extra_args.get("aic_backend_version")
+            && let Some(s) = version.as_str()
+        {
+            builder = builder.aic_backend_version(Some(s.to_string()));
+        }
+        if let Some(tp) = extra_args.get("aic_tp_size")
+            && let Some(n) = tp.as_u64()
+        {
+            builder = builder.aic_tp_size(Some(n as usize));
+        }
+        if let Some(mp) = extra_args.get("aic_model_path")
+            && let Some(s) = mp.as_str()
+        {
+            builder = builder.aic_model_path(Some(s.to_string()));
+        }
         // Build the MockEngineArgs with either defaults or overridden values
         builder
             .build()
