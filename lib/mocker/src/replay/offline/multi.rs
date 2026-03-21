@@ -248,9 +248,10 @@ pub(crate) fn simulate_trace_multi(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     num_workers: usize,
+    arrival_speedup_ratio: f64,
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
-    let pending = normalize_trace_requests(requests)?;
+    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     let collector = OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace).run()?;
     Ok(collector.finish())
 }
@@ -295,7 +296,7 @@ mod tests {
         requests: Vec<DirectRequest>,
         num_workers: usize,
     ) -> TraceCollector {
-        let pending = normalize_trace_requests(requests).unwrap();
+        let pending = normalize_trace_requests(requests, 1.0).unwrap();
         OfflineRuntime::new(args, pending, num_workers, ReplayMode::Trace)
             .run()
             .unwrap()

@@ -15,11 +15,12 @@ pub(crate) fn simulate_trace(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     num_workers: usize,
+    arrival_speedup_ratio: f64,
 ) -> anyhow::Result<TraceSimulationReport> {
     if num_workers == 1 {
-        single::simulate_trace_single(args, requests)
+        single::simulate_trace_single(args, requests, arrival_speedup_ratio)
     } else {
-        multi::simulate_trace_multi(args, requests, num_workers)
+        multi::simulate_trace_multi(args, requests, num_workers, arrival_speedup_ratio)
     }
 }
 

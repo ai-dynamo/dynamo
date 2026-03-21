@@ -25,6 +25,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("offline", "online"),
         default="offline",
     )
+    parser.add_argument(
+        "--router-mode",
+        choices=("round_robin", "kv_router"),
+        default="round_robin",
+    )
+    parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     report = run_trace_replay(
@@ -33,6 +39,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_workers=args.num_workers,
         replay_concurrency=args.replay_concurrency,
         replay_mode=args.replay_mode,
+        router_mode=args.router_mode,
+        arrival_speedup_ratio=args.arrival_speedup_ratio,
     )
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

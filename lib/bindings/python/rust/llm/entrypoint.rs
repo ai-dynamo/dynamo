@@ -504,7 +504,8 @@ pub fn run_input<'p>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None, replay_mode="offline"))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0))]
+#[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
     trace_file: PathBuf,
@@ -512,6 +513,8 @@ pub fn run_mocker_trace_replay(
     num_workers: usize,
     replay_concurrency: Option<isize>,
     replay_mode: &str,
+    router_mode: &str,
+    arrival_speedup_ratio: f64,
 ) -> PyResult<PyObject> {
     // Load args before allow_threads so we can use the GIL for AIC callback creation.
     let mut args = if let Some(ref extra_args_path) = extra_engine_args {
@@ -560,6 +563,16 @@ pub fn run_mocker_trace_replay(
     }
 
     let replay_mode = replay_mode.to_owned();
+    let router_mode = match router_mode {
+        "round_robin" => dynamo_mocker::replay::ReplayRouterMode::RoundRobin,
+        "kv_router" => dynamo_mocker::replay::ReplayRouterMode::KvRouter,
+        other => {
+            return Err(PyException::new_err(format!(
+                "router_mode must be either 'round_robin' or 'kv_router', got '{}'",
+                other
+            )));
+        }
+    };
     let report = py.allow_threads(move || {
         let replay_concurrency = replay_concurrency
             .map(usize::try_from)
@@ -567,26 +580,38 @@ pub fn run_mocker_trace_replay(
             .map_err(|_| anyhow::anyhow!("replay_concurrency must be at least 1"))?;
 
         match (replay_mode.as_str(), replay_concurrency) {
-            ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_file(
-                args,
-                &trace_file,
-                max_in_flight,
-                num_workers,
-            ),
-            ("offline", None) => {
-                dynamo_mocker::replay::simulate_trace_file(args, &trace_file, num_workers)
-            }
-            ("online", Some(max_in_flight)) => {
-                dynamo_mocker::replay::simulate_concurrency_live_file(
+            ("offline", Some(max_in_flight)) => {
+                dynamo_mocker::replay::simulate_concurrency_file_with_router_mode(
                     args,
                     &trace_file,
                     max_in_flight,
                     num_workers,
+                    router_mode,
                 )
             }
-            ("online", None) => {
-                dynamo_mocker::replay::simulate_trace_live_file(args, &trace_file, num_workers)
+            ("offline", None) => dynamo_mocker::replay::simulate_trace_file_with_router_mode(
+                args,
+                &trace_file,
+                num_workers,
+                arrival_speedup_ratio,
+                router_mode,
+            ),
+            ("online", Some(max_in_flight)) => {
+                dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode(
+                    args,
+                    &trace_file,
+                    max_in_flight,
+                    num_workers,
+                    router_mode,
+                )
             }
+            ("online", None) => dynamo_mocker::replay::simulate_trace_live_file_with_router_mode(
+                args,
+                &trace_file,
+                num_workers,
+                arrival_speedup_ratio,
+                router_mode,
+            ),
             (other, _) => anyhow::bail!(
                 "replay_mode must be either 'offline' or 'online', got '{}'",
                 other

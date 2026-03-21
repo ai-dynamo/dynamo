@@ -140,9 +140,10 @@ impl SingleRuntime {
 pub(crate) fn simulate_trace_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
-    let pending = normalize_trace_requests(requests)?;
+    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace).run()?;
     Ok(collector.finish())
 }
@@ -632,7 +633,7 @@ mod tests {
     ) {
         let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
         let manual = run_trace_manually(&args, replay_fixture());
-        let replay_report = simulate_trace_single(args, replay_fixture()).unwrap();
+        let replay_report = simulate_trace_single(args, replay_fixture(), 1.0).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();

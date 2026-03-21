@@ -3,9 +3,10 @@
 
 mod collector;
 mod entrypoints;
-mod live;
 mod loader;
-pub(crate) mod runtime;
+pub(crate) mod offline;
+mod online;
+mod router;
 mod validate;
 
 use std::collections::VecDeque;
@@ -19,14 +20,30 @@ pub use collector::{
     TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
     TraceSimulationReport, TraceThroughputStats,
 };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayRouterMode {
+    RoundRobin,
+    KvRouter,
+}
+
 pub use entrypoints::{
-    simulate_concurrency_file, simulate_concurrency_live_file, simulate_concurrency_requests,
-    simulate_trace_file, simulate_trace_live_file,
+    simulate_concurrency_file, simulate_concurrency_file_with_router_mode,
+    simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
+    simulate_concurrency_requests, simulate_concurrency_requests_with_router_mode,
+    simulate_trace_file, simulate_trace_file_with_router_mode, simulate_trace_live_file,
+    simulate_trace_live_file_with_router_mode,
 };
 
 pub(crate) fn normalize_trace_requests(
     mut requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
 ) -> anyhow::Result<VecDeque<DirectRequest>> {
+    if !arrival_speedup_ratio.is_finite() || arrival_speedup_ratio <= 0.0 {
+        anyhow::bail!(
+            "arrival_speedup_ratio must be a finite positive number, got {arrival_speedup_ratio}"
+        );
+    }
+
     requests.sort_by(|left, right| {
         let left_ts = left
             .arrival_timestamp_ms
@@ -50,6 +67,7 @@ pub(crate) fn normalize_trace_requests(
                     .arrival_timestamp_ms
                     .expect("trace replay requests must have an arrival timestamp")
                     - first_arrival_ms;
+                let arrival_timestamp_ms = arrival_timestamp_ms / arrival_speedup_ratio;
                 request.arrival_timestamp_ms = Some(arrival_timestamp_ms);
                 request
             })
@@ -93,5 +111,33 @@ mod tests {
             report.latency.output_token_throughput_per_user.max_ms,
             1000.0
         );
+    }
+
+    #[test]
+    fn test_normalize_trace_requests_applies_arrival_speedup_ratio() {
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(1)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+            DirectRequest {
+                tokens: vec![2; 4],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(2)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(200.0),
+            },
+        ];
+
+        let normalized = normalize_trace_requests(requests, 10.0).unwrap();
+        let arrivals = normalized
+            .into_iter()
+            .map(|request| request.arrival_timestamp_ms.unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arrivals, vec![0.0, 10.0]);
     }
 }

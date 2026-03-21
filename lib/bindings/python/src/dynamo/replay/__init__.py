@@ -11,6 +11,8 @@ def run_trace_replay(
     num_workers=1,
     replay_concurrency=None,
     replay_mode="offline",
+    router_mode="round_robin",
+    arrival_speedup_ratio=1.0,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -18,6 +20,8 @@ def run_trace_replay(
         num_workers=num_workers,
         replay_concurrency=replay_concurrency,
         replay_mode=replay_mode,
+        router_mode=router_mode,
+        arrival_speedup_ratio=arrival_speedup_ratio,
     )
 
 

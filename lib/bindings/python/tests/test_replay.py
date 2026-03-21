@@ -65,6 +65,21 @@ def test_run_trace_replay_offline_smoke(tmp_path):
     assert report["total_output_tokens"] == 4
 
 
+def test_run_trace_replay_accepts_arrival_speedup_ratio(tmp_path):
+    trace_path, args_path = _write_trace_and_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=args_path,
+        num_workers=1,
+        replay_mode="offline",
+        arrival_speedup_ratio=10.0,
+    )
+
+    assert report["num_requests"] == 2
+    assert report["completed_requests"] == 2
+
+
 def test_run_trace_replay_online_smoke(tmp_path):
     trace_path, args_path = _write_trace_and_args(tmp_path)
 
@@ -73,6 +88,22 @@ def test_run_trace_replay_online_smoke(tmp_path):
         extra_engine_args=args_path,
         num_workers=1,
         replay_mode="online",
+    )
+
+    assert report["num_requests"] == 2
+    assert report["completed_requests"] == 2
+    assert report["total_output_tokens"] == 4
+
+
+def test_run_trace_replay_online_kv_router_smoke(tmp_path):
+    trace_path, args_path = _write_trace_and_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=args_path,
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
     )
 
     assert report["num_requests"] == 2
@@ -103,3 +134,5 @@ def test_dynamo_replay_cli_help():
 
     assert result.returncode == 0
     assert "replay-mode" in result.stdout
+    assert "router-mode" in result.stdout
+    assert "arrival-speedup-ratio" in result.stdout

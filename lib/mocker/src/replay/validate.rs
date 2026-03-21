@@ -3,6 +3,7 @@
 
 use anyhow::{Result, bail};
 
+use super::ReplayRouterMode;
 use crate::common::protocols::{EngineType, MockEngineArgs, WorkerType};
 
 fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
@@ -31,10 +32,19 @@ fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -
     Ok(())
 }
 
+fn validate_router_mode(router_mode: ReplayRouterMode, mode: &str) -> Result<()> {
+    if router_mode == ReplayRouterMode::KvRouter {
+        bail!("{mode} only supports router_mode=round_robin");
+    }
+    Ok(())
+}
+
 pub(super) fn validate_offline_replay_args(
     args: &MockEngineArgs,
     num_workers: usize,
+    router_mode: ReplayRouterMode,
 ) -> Result<()> {
+    validate_router_mode(router_mode, "offline replay")?;
     validate_replay_args(args, num_workers, "trace replay")
 }
 
@@ -42,11 +52,13 @@ pub(super) fn validate_offline_concurrency_args(
     args: &MockEngineArgs,
     num_workers: usize,
     max_in_flight: usize,
+    router_mode: ReplayRouterMode,
 ) -> Result<()> {
     if max_in_flight == 0 {
         bail!("concurrency replay requires max_in_flight >= 1");
     }
 
+    validate_router_mode(router_mode, "offline replay")?;
     validate_replay_args(args, num_workers, "concurrency replay")
 }
 
