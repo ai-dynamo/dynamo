@@ -208,12 +208,26 @@ runs:
 
         echo "### VCLUSTER OPERATOR DEPLOYMENT FAILED" | tee -a $GITHUB_STEP_SUMMARY
 
-        echo "::group::Pod status (vCluster)"
-        kubectl --kubeconfig=${VKUBECONFIG} get pods -A -o wide 2>&1 || true
-        echo "::endgroup::"
-
         echo "::group::Pod status (host namespace)"
         kubectl get pods -n ${NAMESPACE} -o wide 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Events (host namespace)"
+        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Describe pods (host namespace)"
+        kubectl describe pods -n ${NAMESPACE} 2>&1 || true
+        echo "::endgroup::"
+
+        if [ ! -f "${VKUBECONFIG}" ]; then
+          echo "::warning::vCluster kubeconfig not found — vCluster never connected successfully"
+          echo "- **vCluster kubeconfig missing** — connect-vcluster step failed before writing .kubeconfig-vcluster" >> $GITHUB_STEP_SUMMARY
+          exit 0
+        fi
+
+        echo "::group::Pod status (vCluster)"
+        kubectl --kubeconfig=${VKUBECONFIG} get pods -A -o wide 2>&1 || true
         echo "::endgroup::"
 
         NOT_READY=$(kubectl --kubeconfig=${VKUBECONFIG} get pods -n default --no-headers 2>/dev/null \
