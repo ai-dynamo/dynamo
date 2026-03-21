@@ -96,6 +96,9 @@ async fn create_message_handler(
     message_rx: flume::Receiver<(Bytes, Bytes)>,
     hub: Arc<DispatcherHub>,
 ) -> anyhow::Result<()> {
+    // Wait for system initialization before processing messages
+    hub.wait_for_system().await;
+
     while let Ok((header, payload)) = message_rx.recv_async().await {
         match decode_active_message(header, payload) {
             Ok(message) => {
