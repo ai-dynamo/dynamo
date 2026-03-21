@@ -669,7 +669,9 @@ mod tests {
                         index: 0,
                         delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
                             role: Some(dynamo_async_openai::types::Role::Assistant),
-                            content: Some(ChatCompletionMessageContent::Text("Choice 0".to_string())),
+                            content: Some(ChatCompletionMessageContent::Text(
+                                "Choice 0".to_string(),
+                            )),
                             function_call: None,
                             tool_calls: None,
                             refusal: None,
@@ -683,7 +685,9 @@ mod tests {
                         index: 1,
                         delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
                             role: Some(dynamo_async_openai::types::Role::Assistant),
-                            content: Some(ChatCompletionMessageContent::Text("Choice 1".to_string())),
+                            content: Some(ChatCompletionMessageContent::Text(
+                                "Choice 1".to_string(),
+                            )),
                             function_call: None,
                             tool_calls: None,
                             refusal: None,

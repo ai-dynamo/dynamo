@@ -725,7 +725,11 @@ async fn test_chat_streaming_with_cached_tokens_propagation() {
 
     assert_eq!(chunks.len(), 4, "Should have 3 content + 1 usage chunk");
     if let Some(final_resp) = &chunks[3].data {
-        let usage = final_resp.inner.usage.as_ref().expect("Usage must be present");
+        let usage = final_resp
+            .inner
+            .usage
+            .as_ref()
+            .expect("Usage must be present");
         let cached = usage
             .prompt_tokens_details
             .as_ref()

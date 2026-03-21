@@ -445,7 +445,11 @@ fn test_no_tool_choice_outputs_normal_text() {
         .expect("normal text");
 
     assert_eq!(
-        response.inner.choices[0].delta.content.as_ref().map(get_text),
+        response.inner.choices[0]
+            .delta
+            .content
+            .as_ref()
+            .map(get_text),
         Some("Hello world")
     );
     assert!(response.inner.choices[0].delta.tool_calls.is_none());

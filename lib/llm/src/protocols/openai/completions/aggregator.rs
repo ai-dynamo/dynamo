@@ -170,7 +170,10 @@ impl DeltaAggregator {
             choices,
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: aggregator.nvext };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: aggregator.nvext,
+        };
 
         Ok(response)
     }

@@ -441,7 +441,9 @@ mod tests {
         );
 
         // When jail ends, accumulated content should be released
-        let unjailed_content = &results[1].data.as_ref().unwrap().inner.choices[0].delta.content;
+        let unjailed_content = &results[1].data.as_ref().unwrap().inner.choices[0]
+            .delta
+            .content;
         assert!(unjailed_content.is_some());
         assert!(
             extract_text(unjailed_content.as_ref().unwrap())
@@ -1716,7 +1718,14 @@ mod tests {
             results[1].data.as_ref().unwrap().inner.choices.is_empty(),
             "Usage chunk should have no choices"
         );
-        let usage = results[1].data.as_ref().unwrap().inner.usage.as_ref().unwrap();
+        let usage = results[1]
+            .data
+            .as_ref()
+            .unwrap()
+            .inner
+            .usage
+            .as_ref()
+            .unwrap();
         assert_eq!(usage.prompt_tokens, 11);
         assert_eq!(usage.completion_tokens, 3);
         assert_eq!(usage.total_tokens, 14);
@@ -2704,7 +2713,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.inner.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2794,7 +2804,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.inner.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2864,7 +2875,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.inner.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2942,7 +2954,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.inner.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2989,7 +3002,8 @@ mod parallel_jail_tests {
         // Should try to parse whatever content was accumulated
         let has_some_content = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.inner.choices
+                d.inner
+                    .choices
                     .iter()
                     .any(|c| c.delta.content.is_some() || c.delta.tool_calls.is_some())
             })
@@ -3039,7 +3053,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.inner.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
