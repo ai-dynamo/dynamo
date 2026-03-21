@@ -90,6 +90,17 @@
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --device 2 --num-blocks 1,4 --tokens-per-block 16 \
 //!   --warmup 3 --iters 10
+//!
+//! # --- SYCL kernel A/B comparison (requires sycl-kernel feature) ---
+//!
+//! # L0 SPIR-V vs SYCL kernel, D2D:
+//! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
+//!   --direction d2d --backend vectorized,vectorized_sycl --pattern lw_to_fc \
+//!   --num-blocks 32,64,128 2>/dev/null
+//!
+//! # Just the SYCL kernel:
+//! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
+//!   --direction d2d --backend sycl
 //! ```
 
 use std::ffi::c_void;
@@ -100,6 +111,8 @@ use syclrc::level_zero::ze::sys;
 use syclrc::{ZeDevice, ZeHostSlice, ZeImmediateCmdList, ZeKernel, ZeModule, ZeSlice};
 
 use kvbm_kernels::ze_vectorized_copy as vc;
+#[cfg(feature = "sycl-kernel")]
+use kvbm_kernels::sycl_vectorized_copy::SyclVectorizedCopy;
 
 // ---------------------------------------------------------------------------
 // Llama 3.1 70B, bf16 KV cache dimensions
@@ -236,6 +249,8 @@ impl Pattern {
 enum Backend {
     Vectorized,
     Memcpy,
+    #[cfg(feature = "sycl-kernel")]
+    VectorizedSycl,
 }
 
 impl Backend {
@@ -243,6 +258,8 @@ impl Backend {
         match self {
             Backend::Vectorized => "vectorized",
             Backend::Memcpy => "memcpy",
+            #[cfg(feature = "sycl-kernel")]
+            Backend::VectorizedSycl => "vectorized_sycl",
         }
     }
 
@@ -250,12 +267,18 @@ impl Backend {
         match s {
             "vectorized" | "vec" => Some(Backend::Vectorized),
             "memcpy" | "append_memcpy" => Some(Backend::Memcpy),
+            #[cfg(feature = "sycl-kernel")]
+            "vectorized_sycl" | "vec_sycl" | "sycl" => Some(Backend::VectorizedSycl),
             _ => None,
         }
     }
 
     fn all_labels() -> &'static str {
-        "vectorized (or vec), memcpy (or append_memcpy)"
+        if cfg!(feature = "sycl-kernel") {
+            "vectorized (or vec), memcpy (or append_memcpy), vectorized_sycl (or sycl)"
+        } else {
+            "vectorized (or vec), memcpy (or append_memcpy)"
+        }
     }
 }
 
@@ -519,6 +542,65 @@ unsafe fn execute_memcpy(
     cmd_copy.host_synchronize(u64::MAX).expect("sync");
 }
 
+#[cfg(feature = "sycl-kernel")]
+fn get_sycl_vc(dev: &Arc<ZeDevice>) -> &'static SyclVectorizedCopy {
+    use std::sync::OnceLock;
+    static SYCL_VC: OnceLock<SyclVectorizedCopy> = OnceLock::new();
+    SYCL_VC.get_or_init(|| {
+        SyclVectorizedCopy::new(
+            dev.ze_context() as *mut c_void,
+            dev.ze_device() as *mut c_void,
+        )
+        .expect("Failed to initialize SyclVectorizedCopy")
+    })
+}
+
+#[cfg(feature = "sycl-kernel")]
+unsafe fn execute_vectorized_sycl(
+    cmd_copy: &ZeImmediateCmdList,
+    sycl_vc: &SyclVectorizedCopy,
+    src_addrs: &[u64],
+    dst_addrs: &[u64],
+    src_addrs_dev: &ZeSlice<u8>,
+    dst_addrs_dev: &ZeSlice<u8>,
+    ptr_array_bytes: usize,
+    copy_size: usize,
+    num_copies: usize,
+) {
+    // Upload pointer arrays to device (same as L0 path).
+    unsafe {
+        cmd_copy
+            .append_memcpy(
+                src_addrs_dev.as_ptr() as *mut c_void,
+                src_addrs.as_ptr() as *const c_void,
+                ptr_array_bytes,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .expect("upload src_addrs");
+        cmd_copy
+            .append_memcpy(
+                dst_addrs_dev.as_ptr() as *mut c_void,
+                dst_addrs.as_ptr() as *const c_void,
+                ptr_array_bytes,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .expect("upload dst_addrs");
+    }
+    cmd_copy.host_synchronize(u64::MAX).expect("sync copy");
+
+    // Dispatch via SYCL runtime.
+    sycl_vc
+        .run(
+            src_addrs_dev.as_ptr() as u64,
+            dst_addrs_dev.as_ptr() as u64,
+            copy_size as u64,
+            num_copies as i32,
+        )
+        .expect("sycl_vc_run failed");
+}
+
 // ---------------------------------------------------------------------------
 // Run one benchmark configuration
 // ---------------------------------------------------------------------------
@@ -569,12 +651,18 @@ fn run_benchmark(
     // Scratch for vectorized backend (device-side pointer arrays).
     let queue = dev.new_queue().expect("queue");
     let ptr_array_bytes = num_copies * std::mem::size_of::<u64>();
-    let src_addrs_dev: Option<ZeSlice<u8>> = if matches!(backend, Backend::Vectorized) {
+    let needs_ptr_arrays = match backend {
+        Backend::Vectorized => true,
+        #[cfg(feature = "sycl-kernel")]
+        Backend::VectorizedSycl => true,
+        _ => false,
+    };
+    let src_addrs_dev: Option<ZeSlice<u8>> = if needs_ptr_arrays {
         Some(unsafe { queue.alloc::<u8>(ptr_array_bytes).expect("alloc src_addrs_dev") })
     } else {
         None
     };
-    let dst_addrs_dev: Option<ZeSlice<u8>> = if matches!(backend, Backend::Vectorized) {
+    let dst_addrs_dev: Option<ZeSlice<u8>> = if needs_ptr_arrays {
         Some(unsafe { queue.alloc::<u8>(ptr_array_bytes).expect("alloc dst_addrs_dev") })
     } else {
         None
@@ -599,6 +687,18 @@ fn run_benchmark(
                 Backend::Memcpy => {
                     execute_memcpy(cmd_copy, &src_addrs, &dst_addrs, copy_size, num_copies)
                 }
+                #[cfg(feature = "sycl-kernel")]
+                Backend::VectorizedSycl => execute_vectorized_sycl(
+                    cmd_copy,
+                    get_sycl_vc(dev),
+                    &src_addrs,
+                    &dst_addrs,
+                    src_addrs_dev.as_ref().unwrap(),
+                    dst_addrs_dev.as_ref().unwrap(),
+                    ptr_array_bytes,
+                    copy_size,
+                    num_copies,
+                ),
             }
         }
     }
@@ -624,6 +724,18 @@ fn run_benchmark(
                 Backend::Memcpy => {
                     execute_memcpy(cmd_copy, &src_addrs, &dst_addrs, copy_size, num_copies)
                 }
+                #[cfg(feature = "sycl-kernel")]
+                Backend::VectorizedSycl => execute_vectorized_sycl(
+                    cmd_copy,
+                    get_sycl_vc(dev),
+                    &src_addrs,
+                    &dst_addrs,
+                    src_addrs_dev.as_ref().unwrap(),
+                    dst_addrs_dev.as_ref().unwrap(),
+                    ptr_array_bytes,
+                    copy_size,
+                    num_copies,
+                ),
             }
         }
         host_elapsed.push(t0.elapsed().as_micros() as f64);
