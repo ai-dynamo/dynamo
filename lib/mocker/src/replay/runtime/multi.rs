@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::core::ReplayWorkerCore;
+use super::events::WorkerCompletion;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::replay::{TraceCollector, TraceSimulationReport};
 use anyhow::bail;
-use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
 use uuid::Uuid;
 use validator::Validate;
@@ -36,40 +36,6 @@ impl OfflineWorkerState {
             core: ReplayWorkerCore::new(args),
             busy: false,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WorkerCompletion {
-    at_ms: f64,
-    worker_idx: usize,
-    completed_requests: usize,
-}
-
-impl PartialEq for WorkerCompletion {
-    fn eq(&self, other: &Self) -> bool {
-        self.at_ms.to_bits() == other.at_ms.to_bits()
-            && self.worker_idx == other.worker_idx
-            && self.completed_requests == other.completed_requests
-    }
-}
-
-impl Eq for WorkerCompletion {}
-
-impl PartialOrd for WorkerCompletion {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for WorkerCompletion {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .at_ms
-            .partial_cmp(&self.at_ms)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| other.worker_idx.cmp(&self.worker_idx))
-            .then_with(|| other.completed_requests.cmp(&self.completed_requests))
     }
 }
 

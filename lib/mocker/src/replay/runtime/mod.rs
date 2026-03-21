@@ -5,6 +5,7 @@ use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::replay::TraceSimulationReport;
 
 pub(crate) mod core;
+pub(crate) mod events;
 pub(crate) mod multi;
 pub(crate) mod single;
 
