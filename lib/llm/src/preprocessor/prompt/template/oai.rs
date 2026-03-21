@@ -433,7 +433,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             tools
         };
         // has_tools should be true if tools is a non-empty array
-        let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
+        let has_tools = tools.as_ref().map_or(false, |v| v.len().unwrap_or(0) > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
 
         tracing::trace!(
