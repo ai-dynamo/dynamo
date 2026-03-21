@@ -362,11 +362,11 @@ async def test_gaie_deployment(
         logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
 
         gateway_svcs = list(
-            kr8s.get("services", "inference-gateway", namespace="kgateway-system")
+            kr8s.get("services", "inference-gateway", namespace=namespace)
         )
         assert (
             len(gateway_svcs) > 0
-        ), "inference-gateway service not found in kgateway-system"
+        ), f"inference-gateway service not found in namespace {namespace}"
         gateway_pf = gateway_svcs[0].portforward(remote_port=80, local_port=0)
         gateway_pf.start()
         time.sleep(2)
