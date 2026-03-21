@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Concurrency sweep for MM Router vs RR Baseline vs No-MM-Worker benchmarks.
+# Concurrency sweep for MM Router vs RR Baseline vs No-MM-Worker vs Rust Frontend benchmarks.
 #
 # Runs aiperf for all combinations of:
-#   - router: mm (MM Router), rr (RR Baseline), no-mm (no mm_router_worker, frontend KV routing)
+#   - router: mm (MM Router), rr (RR Baseline), no-mm (no mm_router_worker, frontend KV routing),
+#             rust (Rust frontend mm routing, no mm_router_worker, no --dyn-chat-processor vllm)
 #   - transport: http, datauri
 #   - concurrency: 1, 4, 8, 16, 32, 64
 #   - pool: 10pool (~90% reuse), 60pool (~50% reuse), Npool (0% reuse)
@@ -16,11 +17,13 @@
 #   mm    : {N}w_{n}req_1img_{pool}pool_{mode}_conc{c}
 #   rr    : rr_{N}w_{n}req_...
 #   no-mm : no_mm_{N}w_{n}req_...
+#   rust  : rust_{N}w_{n}req_...
 #
 # Usage:
 #   bash run_sweep.sh --router mm     --dataset-dir ./datasets --log-dir ./logs
 #   bash run_sweep.sh --router rr     --dataset-dir ./datasets --log-dir ./logs
 #   bash run_sweep.sh --router no-mm  --dataset-dir ./datasets --log-dir ./logs
+#   bash run_sweep.sh --router rust   --dataset-dir ./datasets --log-dir ./logs
 #   bash run_sweep.sh --router all    --dataset-dir ./datasets --log-dir ./logs
 #
 
@@ -31,7 +34,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
 URL="${AIPERF_URL:-http://127.0.0.1:8000}"
-ROUTER="${ROUTER:-all}"         # mm | rr | no-mm | all
+ROUTER="${ROUTER:-all}"         # mm | rr | no-mm | rust | all
 DATASET_DIR="${DATASET_DIR:-$(dirname "$0")/datasets}"
 LOG_DIR="${LOG_DIR:-$(dirname "$0")/logs}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-5}"
@@ -60,7 +63,7 @@ mkdir -p "${LOG_DIR}"
 
 echo "=== MM Concurrency Sweep ==="
 echo "Model      : ${MODEL}"
-echo "Router     : ${ROUTER}  (mm | rr | no-mm | all)"
+echo "Router     : ${ROUTER}  (mm | rr | no-mm | rust | all)"
 echo "Dataset dir: ${DATASET_DIR}"
 echo "Log dir    : ${LOG_DIR}"
 echo "Workers    : ${NUM_WORKERS}"
@@ -131,6 +134,7 @@ _run_pools() {
 run_mm()    { _run_pools "mm"; }
 run_rr()    { _run_pools "rr"; }
 run_no_mm() { _run_pools "no_mm"; }
+run_rust()  { _run_pools "rust"; }
 
 # ---------------------------------------------------------------------------
 # Main
@@ -141,8 +145,9 @@ case "${ROUTER}" in
     mm)    run_mm ;;
     rr)    run_rr ;;
     no-mm) run_no_mm ;;
-    all)   run_mm; run_rr; run_no_mm ;;
-    *)     echo "Unknown --router value: ${ROUTER} (use mm | rr | no-mm | all)"; exit 1 ;;
+    rust)  run_rust ;;
+    all)   run_mm; run_rr; run_no_mm; run_rust ;;
+    *)     echo "Unknown --router value: ${ROUTER} (use mm | rr | no-mm | rust | all)"; exit 1 ;;
 esac
 
 echo "=== Sweep complete. Logs in ${LOG_DIR} ==="

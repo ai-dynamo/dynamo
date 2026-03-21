@@ -17,6 +17,7 @@ from typing import Any, Sequence
 from PIL import Image
 
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
@@ -74,11 +75,13 @@ async def process_multimodal(
     pil_images = await image_loader.load_image_batch(image_mm_items)
     image_dims = [(img.width, img.height) for img in pil_images]
 
-    tokens, image_ranges = _get_expanded_tokens(
-        prompt, image_dims, pil_images, tokenizer, processor
-    )
+    with _nvtx.annotate("mm_router:expand_tokens", color="yellow"):
+        tokens, image_ranges = _get_expanded_tokens(
+            prompt, image_dims, pil_images, tokenizer, processor
+        )
 
-    mm_uuids = compute_mm_uuids_from_images(pil_images)
+    with _nvtx.annotate("mm_router:compute_mm_uuids", color="cyan"):
+        mm_uuids = compute_mm_uuids_from_images(pil_images)
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
 
     return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)

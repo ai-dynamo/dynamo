@@ -179,6 +179,88 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+/// Attempt to auto-detect [`MultimodalConfig`] from the model directory.
+///
+/// Reads `preprocessor_config.json` to identify the image processor type and extract
+/// patch parameters, then reads `tokenizer_config.json` to find the `<|image_pad|>` token ID.
+///
+/// Returns `Ok(None)` for unrecognised architectures (no regression for text-only models).
+/// Returns `Err` only for recognised architectures where required fields are missing/malformed.
+fn detect_multimodal_config(local_path: &Path) -> anyhow::Result<Option<MultimodalConfig>> {
+    let preprocessor_path = local_path.join("preprocessor_config.json");
+    if !preprocessor_path.exists() {
+        return Ok(None);
+    }
+
+    let preprocessor: serde_json::Value = {
+        let f = std::fs::File::open(&preprocessor_path)?;
+        serde_json::from_reader(std::io::BufReader::new(f))?
+    };
+
+    let image_processor_type = match preprocessor.get("image_processor_type").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return Ok(None), // not an image processor we know
+    };
+
+    // Qwen2-VL family: Qwen2VLImageProcessor (2.5-VL) or Qwen2VLImageProcessorFast (3-VL)
+    if !image_processor_type.starts_with("Qwen2VLImageProcessor") {
+        return Ok(None);
+    }
+
+    let patch_size: u32 = preprocessor
+        .get("patch_size")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Qwen2VLImageProcessor missing patch_size"))? as u32;
+
+    let merge_size: u32 = preprocessor
+        .get("merge_size")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Qwen2VLImageProcessor missing merge_size"))? as u32;
+
+    let temporal_patch_size: u32 = preprocessor
+        .get("temporal_patch_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2) as u32; // Qwen2-VL default is 2
+
+    // Find image_token_id from tokenizer_config.json: the token whose content is "<|image_pad|>"
+    let image_token_id = find_image_pad_token_id(local_path)
+        .ok_or_else(|| anyhow::anyhow!("Could not find <|image_pad|> token in tokenizer_config.json"))?;
+
+    tracing::debug!(
+        image_processor_type,
+        patch_size,
+        merge_size,
+        temporal_patch_size,
+        image_token_id,
+        "Auto-detected QwenVL multimodal config"
+    );
+
+    Ok(Some(MultimodalConfig {
+        image_token_id,
+        formula: MultimodalTokenFormula::QwenVL {
+            patch_size,
+            merge_size,
+            temporal_patch_size,
+        },
+    }))
+}
+
+/// Scan `tokenizer_config.json` `added_tokens_decoder` for the token whose `content` is
+/// `"<|image_pad|>"` and return its integer ID.
+fn find_image_pad_token_id(local_path: &Path) -> Option<u32> {
+    let tokenizer_config_path = local_path.join("tokenizer_config.json");
+    let f = std::fs::File::open(tokenizer_config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(f)).ok()?;
+
+    let decoder = config.get("added_tokens_decoder")?.as_object()?;
+    for (id_str, token_obj) in decoder {
+        if token_obj.get("content").and_then(|v| v.as_str()) == Some("<|image_pad|>") {
+            return id_str.parse::<u32>().ok();
+        }
+    }
+    None
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -254,8 +336,38 @@ pub struct ModelDeploymentCard {
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
 
+    /// Optional multimodal configuration for Rust-side image token expansion and mm_hash routing.
+    /// When present, the Rust preprocessor computes mm_routing_info directly without a separate
+    /// MM router worker. Specify patch_size and merge_size from the model's preprocessor_config.json.
+    #[serde(default)]
+    pub multimodal_config: Option<MultimodalConfig>,
+
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+}
+
+/// Multimodal token expansion configuration for Rust-side KV routing.
+/// Contains the image placeholder token ID and the formula used to compute
+/// how many tokens each image expands to.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MultimodalConfig {
+    /// Token ID used as image placeholder in the tokenized prompt (e.g. `<|image_pad|>` for Qwen2-VL).
+    pub image_token_id: u32,
+    /// Formula used to compute token count from image dimensions.
+    pub formula: MultimodalTokenFormula,
+}
+
+/// How to compute the number of image tokens given image dimensions (height, width).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+pub enum MultimodalTokenFormula {
+    /// Qwen2-VL / Qwen2.5-VL / Qwen3-VL family.
+    /// tokens = ceil(h/patch_size) * ceil(w/patch_size) * temporal_patch_size / merge_size²
+    QwenVL {
+        patch_size: u32,
+        merge_size: u32,
+        temporal_patch_size: u32,
+    },
 }
 
 /// LoRA adapter information for routing decisions
@@ -711,6 +823,15 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::chat_template_from_disk(local_path)?
         };
 
+        // Auto-detect multimodal config from preprocessor_config.json + tokenizer_config.json.
+        // Currently supports Qwen2-VL family (Qwen2VLImageProcessor / Qwen2VLImageProcessorFast).
+        // Returns None silently for unrecognised architectures — no regression.
+        let multimodal_config =
+            detect_multimodal_config(local_path).unwrap_or_else(|e| {
+                tracing::debug!("multimodal_config auto-detect skipped: {e}");
+                None
+            });
+
         // This gets replaced when we `set_name`
         let display_name = local_path.display().to_string();
 
@@ -734,6 +855,7 @@ impl ModelDeploymentCard {
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,
             media_fetcher: None,
+            multimodal_config,
             checksum: OnceLock::new(),
         })
     }

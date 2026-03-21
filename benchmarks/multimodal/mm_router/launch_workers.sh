@@ -150,7 +150,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 
     echo "=== Starting vLLM backend worker #${i} (GPU ${gpu_id}) ==="
     env "${COMMON_ENV[@]}" \
-        "CUDA_VISIBLE_DEVICES=${gpu_id}" \
+        "CUDA_VISIBLE_DEVICES=0" \
         "DYN_SYSTEM_PORT=${system_port}" \
         "DYN_VLLM_KV_EVENT_PORT=${kv_port}" \
         "${PYTHON_BIN}" -m dynamo.vllm \

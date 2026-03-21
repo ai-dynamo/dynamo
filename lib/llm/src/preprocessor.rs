@@ -33,8 +33,11 @@ use tracing;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
+use crate::kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
+use crate::model_card::{MultimodalConfig, MultimodalTokenFormula};
+use nvtx::range;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
+    MmRoutingInfo, MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -150,6 +153,10 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// Optional multimodal config for Rust-side token expansion and mm_hash routing.
+    multimodal_config: Option<MultimodalConfig>,
+    /// KV cache block size, used when building block_mm_infos for mm_routing_info.
+    block_size: u32,
 }
 
 impl OpenAIPreprocessor {
@@ -190,6 +197,8 @@ impl OpenAIPreprocessor {
         };
 
         let context_length = mdc.context_length;
+        let multimodal_config = mdc.multimodal_config.clone();
+        let block_size = mdc.kv_cache_block_size;
 
         Ok(Arc::new(Self {
             formatter,
@@ -201,6 +210,8 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            multimodal_config,
+            block_size,
         }))
     }
     /// Encode a string to it's tokens
@@ -228,6 +239,8 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let _nvtx_preprocess = range!("preprocess_request");
+        let t_total = Instant::now();
         let mut builder = self.builder(request)?;
         let formatted_prompt = self
             .apply_template(request)
@@ -241,12 +254,56 @@ impl OpenAIPreprocessor {
             .as_ref()
             .is_some_and(|p| p.trim_end().ends_with("<think>"));
 
-        let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
-            .with_context(|| "Failed to gather tokens")?;
-        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
-            .await
-            .with_context(|| "Failed to gather multimodal data")?;
+        let t_tokenize = Instant::now();
+        let (annotations, base_token_ids) = {
+            let _nvtx = range!("tokenize");
+            self.gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
+                .with_context(|| "Failed to gather tokens")?
+        };
+        let tokenize_ms = t_tokenize.elapsed().as_secs_f64() * 1000.0;
+
+        let t_media = Instant::now();
+        let decoded_images = {
+            let _nvtx = range!("media_fetch_decode");
+            self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
+                .await
+                .with_context(|| "Failed to gather multimodal data")?
+        };
+        let media_ms = t_media.elapsed().as_secs_f64() * 1000.0;
+
+        // Build mm_routing_info when multimodal_config is present and images were decoded.
+        tracing::debug!(
+            has_multimodal_config = self.multimodal_config.is_some(),
+            decoded_image_count = decoded_images.len(),
+            base_token_count = base_token_ids.len(),
+            "preprocess_request: mm_routing_info check"
+        );
+        let t_mm_routing = Instant::now();
+        {
+            let _nvtx = range!("mm_routing_info");
+            if let Some(ref mm_config) = self.multimodal_config {
+                if !decoded_images.is_empty() {
+                    let mm_info = build_mm_routing_info(
+                        &base_token_ids,
+                        &decoded_images,
+                        mm_config,
+                        self.block_size,
+                    )?;
+                    builder.mm_routing_info(Some(mm_info));
+                }
+            }
+        }
+        let mm_routing_ms = t_mm_routing.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+        tracing::info!(
+            tokenize_ms = format!("{:.3}", tokenize_ms),
+            media_fetch_decode_ms = format!("{:.3}", media_ms),
+            mm_routing_info_ms = format!("{:.3}", mm_routing_ms),
+            total_preprocess_ms = format!("{:.3}", total_ms),
+            n_images = decoded_images.len(),
+            "preprocess_request: timing"
+        );
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
     }
@@ -358,18 +415,20 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Returns `(mm_hash, height, width)` for each decoded image, in request order.
+    /// Only populated when `media_loader` is configured and images are present.
     pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Vec<(u64, usize, usize)>> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
         let Some(messages) = request.typed_messages() else {
-            return Ok(());
+            return Ok(vec![]);
         };
         for message in messages.iter() {
             let content_parts = match message {
@@ -399,7 +458,7 @@ impl OpenAIPreprocessor {
                     continue;
                 }
 
-                //Fallback: ust pass the URL through
+                //Fallback: just pass the URL through
                 media_map
                     .entry(type_str)
                     .or_default()
@@ -408,6 +467,7 @@ impl OpenAIPreprocessor {
         }
 
         // Execute all fetch tasks
+        let mut decoded_images: Vec<(u64, usize, usize)> = Vec::new();
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
@@ -419,6 +479,24 @@ impl OpenAIPreprocessor {
             for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
+
+                // Extract mm_hash and dimensions from image metadata for mm_routing_info.
+                if type_str == "image_url" {
+                    if let Some(crate::preprocessor::media::DecodedMediaMetadata::Image(
+                        ref img_meta,
+                    )) = rdma_descriptor.tensor_info.metadata
+                    {
+                        // shape is [height, width, channels]
+                        if rdma_descriptor.tensor_info.shape.len() >= 2 {
+                            decoded_images.push((
+                                img_meta.mm_hash,
+                                rdma_descriptor.tensor_info.shape[0], // height
+                                rdma_descriptor.tensor_info.shape[1], // width
+                            ));
+                        }
+                    }
+                }
+
                 media_map
                     .entry(type_str)
                     .or_default()
@@ -442,7 +520,7 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        Ok(())
+        Ok(decoded_images)
     }
 
     pub fn gather_tokens<
@@ -458,9 +536,10 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
         tracker: Option<&RequestTracker>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<(HashMap<String, String>, Vec<u32>)> {
         let mut annotations = HashMap::new();
         let mut token_count: Option<usize> = None;
+        let mut captured_token_ids: Vec<u32> = Vec::new();
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
@@ -468,11 +547,13 @@ impl OpenAIPreprocessor {
                     match token_input {
                         TokenInput::Single(tokens) => {
                             token_count = Some(tokens.len());
+                            captured_token_ids = tokens.clone();
                             builder.token_ids(tokens);
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
                                 token_count = Some(token_batches[0].len());
+                                captured_token_ids = token_batches[0].clone();
                                 builder.token_ids(token_batches[0].clone());
                             } else {
                                 bail!(
@@ -538,6 +619,7 @@ impl OpenAIPreprocessor {
                             }
 
                             token_count = Some(tokens_vec.len());
+                            captured_token_ids = tokens_vec.clone();
                             builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
@@ -545,6 +627,7 @@ impl OpenAIPreprocessor {
                                 let encoding = self.encode_with_timing(&texts[0], tracker)?;
                                 let tokens = encoding.token_ids().to_vec();
                                 token_count = Some(tokens.len());
+                                captured_token_ids = tokens.clone();
                                 builder.token_ids(tokens);
                             } else {
                                 bail!(
@@ -563,7 +646,7 @@ impl OpenAIPreprocessor {
             Self::validate_token_count(count, self.context_length)?;
         }
 
-        Ok(annotations)
+        Ok((annotations, captured_token_ids))
     }
 
     /// Validate that the prompt token count does not consume the model's entire context length.
@@ -1208,6 +1291,92 @@ impl OpenAIPreprocessor {
     }
 }
 
+/// Build [`MmRoutingInfo`] from base (unexpanded) token IDs and decoded image metadata.
+///
+/// Expands image placeholder tokens using the dimension-based formula from `MultimodalConfig`.
+/// The expanded token sequence is used only for KV routing; the original `token_ids` are
+/// sent to the worker, which performs its own expansion during inference.
+fn build_mm_routing_info(
+    base_token_ids: &[u32],
+    decoded_images: &[(u64, usize, usize)], // (mm_hash, height, width)
+    mm_config: &MultimodalConfig,
+    block_size: u32,
+) -> Result<MmRoutingInfo> {
+    let image_token_id = mm_config.image_token_id;
+
+    // Compute token count per image based on the model-specific formula.
+    let tokens_per_image: Vec<usize> = decoded_images
+        .iter()
+        .map(|(_, h, w)| match &mm_config.formula {
+            MultimodalTokenFormula::QwenVL {
+                patch_size,
+                merge_size,
+                temporal_patch_size,
+            } => {
+                let h_patches = h.div_ceil(*patch_size as usize);
+                let w_patches = w.div_ceil(*patch_size as usize);
+                (h_patches * w_patches * (*temporal_patch_size as usize))
+                    / ((*merge_size as usize) * (*merge_size as usize))
+            }
+        })
+        .collect();
+
+    // Expand base_token_ids: replace each image_token_id placeholder with N repeated tokens,
+    // recording the (start, end) range for each image in the expanded sequence.
+    let extra = tokens_per_image.iter().sum::<usize>();
+    let mut expanded: Vec<u32> = Vec::with_capacity(base_token_ids.len() + extra);
+    let mut image_ranges: Vec<(usize, usize)> = Vec::with_capacity(decoded_images.len());
+    let mut img_idx = 0usize;
+
+    for &token in base_token_ids {
+        if token == image_token_id && img_idx < tokens_per_image.len() {
+            let start = expanded.len();
+            let n = tokens_per_image[img_idx];
+            expanded.extend(std::iter::repeat(image_token_id).take(n));
+            image_ranges.push((start, start + n));
+            img_idx += 1;
+        } else {
+            expanded.push(token);
+        }
+    }
+
+    // Build RequestExtraInfo and convert to block-level BlockExtraInfo.
+    let mm_objects: Vec<RequestMmObjectInfo> = decoded_images
+        .iter()
+        .zip(image_ranges.iter())
+        .map(|((mm_hash, _, _), (start, end))| RequestMmObjectInfo {
+            mm_hash: *mm_hash,
+            offsets: vec![(*start, *end)],
+        })
+        .collect();
+
+    let req_extra = RequestExtraInfo { mm_objects };
+    let block_mm_infos = req_extra.to_block_level(block_size as usize, expanded.len());
+
+    // Debug: log the routing token sequence so it can be compared against vLLM's
+    // KV event block count (total_blocks * block_size = actual image tokens used).
+    // If routing_blocks != vllm_blocks the block hashes won't match → 0 overlap.
+    let routing_blocks = block_mm_infos.len();
+    let mm_blocks = block_mm_infos.iter().filter(|b| b.is_some()).count();
+    tracing::debug!(
+        n_images = decoded_images.len(),
+        base_tokens = base_token_ids.len(),
+        expanded_tokens = expanded.len(),
+        routing_blocks,
+        mm_blocks,
+        block_size,
+        tokens_per_image = ?tokens_per_image,
+        image_ranges = ?image_ranges,
+        mm_hashes = ?decoded_images.iter().map(|(h, _, _)| h).collect::<Vec<_>>(),
+        "build_mm_routing_info: token expansion complete"
+    );
+
+    Ok(MmRoutingInfo {
+        routing_token_ids: expanded,
+        block_mm_infos,
+    })
+}
+
 // for pals, we do not want to add the generation prompt to the formatted prompt
 // we also need to know if the template support this add_generation_prompt bool
 // any prompt template that does not support this should return an error
@@ -1383,7 +1552,9 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?
+            let (annotations, _) =
+                self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?;
+            annotations
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
