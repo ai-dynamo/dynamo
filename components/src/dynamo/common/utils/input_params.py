@@ -4,6 +4,48 @@
 from typing import Any, Optional
 
 
+def _inject_reasoning_content(messages: list) -> None:
+    """Inject reasoning_content as <think> blocks into content.
+
+    Chat templates only reference message["content"] — they don't see
+    reasoning_content. This converts it back to <think> blocks so the
+    model sees its own prior chain-of-thought across turns.
+    """
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        reasoning = msg.get("reasoning_content")
+        if not reasoning:
+            continue
+
+        # Build <think> wrapped text
+        if isinstance(reasoning, str):
+            think_text = f"<think>{reasoning}</think>" if reasoning else ""
+        elif isinstance(reasoning, list):
+            # Segments variant: wrap each non-empty segment
+            parts = [f"<think>{seg}</think>" for seg in reasoning if seg]
+            think_text = "".join(parts)
+        else:
+            continue
+
+        if not think_text:
+            continue
+
+        # Prepend to content
+        existing = msg.get("content")
+        if isinstance(existing, str):
+            msg["content"] = think_text + existing
+        elif isinstance(existing, list):
+            # Multimodal content array — prepend as text part
+            msg["content"] = [{"type": "text", "text": think_text}] + existing
+        else:
+            # null or absent
+            msg["content"] = think_text
+
+        # Remove so template doesn't see both
+        msg.pop("reasoning_content", None)
+
+
 class InputParamManager:
     def __init__(self, tokenizer: Any) -> None:
         self.tokenizer = tokenizer
@@ -30,6 +72,14 @@ class InputParamManager:
                 # TypeError: got multiple values for keyword argument.
                 for reserved in ("tokenize", "add_generation_prompt"):
                     extra_kwargs.pop(reserved, None)
+
+                # Inject reasoning_content as <think> blocks into content
+                # before template rendering. Chat templates only reference
+                # message["content"] — reasoning_content is invisible to them.
+                # This is the Python-side equivalent of the Rust injection in
+                # oai.rs for the ModelInput::Tokens path.
+                _inject_reasoning_content(request["messages"])
+
                 return self.tokenizer.apply_chat_template(
                     request["messages"],
                     tokenize=False,
