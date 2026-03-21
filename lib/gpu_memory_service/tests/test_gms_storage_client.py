@@ -32,6 +32,7 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
+from gpu_memory_service.client import _gms_storage_gds as _gds_module
 
 # ---------------------------------------------------------------------------
 # Availability guards
@@ -1295,19 +1296,31 @@ class TestGMSStorageClientLoadMock:
         mock_mm: MagicMock,
         *,
         clear_existing: bool = True,
+        core_imports_available: bool = True,
+        full_imports_available: bool = True,
+        use_gds: bool = False,
         tensor_from_pointer: Any = None,
         tensor_from_pointer_side_effect: Any = None,
         read_shard_to_queue: Any = None,
     ) -> Dict[str, str]:
-        client = GMSStorageClient(tmpdir, socket_path="/tmp/fake.sock", device=0)
+        client = GMSStorageClient(
+            tmpdir,
+            socket_path="/tmp/fake.sock",
+            device=0,
+            use_gds=use_gds,
+        )
         patches = [
             patch(
                 "gpu_memory_service.client.gms_storage_client.GMSClientMemoryManager",
                 return_value=mock_mm,
             ),
             patch(
+                "gpu_memory_service.client.gms_storage_client._GMS_CORE_IMPORTS_AVAILABLE",
+                core_imports_available,
+            ),
+            patch(
                 "gpu_memory_service.client.gms_storage_client._GMS_IMPORTS_AVAILABLE",
-                True,
+                full_imports_available,
             ),
             patch(
                 "gpu_memory_service.client.gms_storage_client._tensor_from_pointer",
@@ -1558,6 +1571,116 @@ class TestGMSStorageClientLoadMock:
                     mock_mm,
                     read_shard_to_queue=_failing_read,
                 )
+
+    def test_load_to_gms_gds_does_not_require_torch_pipeline_imports(self):
+        """The GDS path should run with only the core GMS client imports present."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._build_dump_dir(tmpdir, num_allocs=2)
+            mock_mm, _ = self._build_mock_rw_mm(None)
+            gds_backend = MagicMock()
+
+            with (
+                patch(
+                    "gpu_memory_service.client.gms_storage_client.GMSClientMemoryManager",
+                    return_value=mock_mm,
+                ),
+                patch(
+                    "gpu_memory_service.client._gms_storage_gds.NixlGDSStorageBackend",
+                    return_value=gds_backend,
+                ),
+            ):
+                id_map = self._run_load_to_gms(
+                    tmpdir,
+                    mock_mm,
+                    core_imports_available=True,
+                    full_imports_available=False,
+                    use_gds=True,
+                )
+
+        assert id_map == {"orig-0": "new-0", "orig-1": "new-1"}
+        gds_backend.restore_shards.assert_called_once()
+        (
+            restore_input_dir,
+            restore_groups,
+            restore_va_map,
+        ) = gds_backend.restore_shards.call_args.args
+        assert restore_input_dir == tmpdir
+        assert set(restore_groups) == {"tensors/orig-0.pt", "tensors/orig-1.pt"}
+        assert restore_va_map == {"orig-0": 0x1000_0000, "orig-1": 0x1100_0000}
+        gds_backend.close.assert_called_once()
+        mock_mm.metadata_put.assert_any_call("key0", "new-0", 0, b"v0")
+        mock_mm.metadata_put.assert_any_call("key1", "new-1", 8, b"v1")
+        mock_mm.commit.assert_called_once()
+
+    def test_load_to_gms_gds_closes_backend_on_restore_failure(self):
+        """The GDS backend must still be closed when shard restore fails."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._build_dump_dir(tmpdir, num_allocs=1)
+            mock_mm, _ = self._build_mock_rw_mm(None)
+            gds_backend = MagicMock()
+            gds_backend.restore_shards.side_effect = RuntimeError("gds failed")
+
+            with (
+                patch(
+                    "gpu_memory_service.client.gms_storage_client.GMSClientMemoryManager",
+                    return_value=mock_mm,
+                ),
+                patch(
+                    "gpu_memory_service.client._gms_storage_gds.NixlGDSStorageBackend",
+                    return_value=gds_backend,
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="gds failed"):
+                    self._run_load_to_gms(
+                        tmpdir,
+                        mock_mm,
+                        core_imports_available=True,
+                        use_gds=True,
+                    )
+
+        gds_backend.close.assert_called_once()
+        mock_mm.commit.assert_not_called()
+
+
+class TestNixlGDSStorageBackend:
+    def test_restore_shards_cleans_up_partial_registration_failure(self):
+        """Per-shard setup failures should release the file registration and fd."""
+        agent = MagicMock()
+        file_reg = MagicMock()
+        agent.register_memory.side_effect = [file_reg, RuntimeError("vram boom")]
+
+        with (
+            patch.object(_gds_module, "_NIXL_AVAILABLE", True),
+            patch.object(_gds_module, "nixl_agent", return_value=agent),
+            patch.object(_gds_module, "nixl_agent_config", return_value=MagicMock()),
+        ):
+            backend = _gds_module.NixlGDSStorageBackend(device=0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shards_dir = os.path.join(tmpdir, "shards")
+            os.makedirs(shards_dir)
+            shard_path = os.path.join(shards_dir, "shard_0000.bin")
+            with open(shard_path, "wb") as f:
+                f.write(b"x" * 64)
+
+            entry = _make_entry(
+                alloc_id="alloc-1",
+                size=64,
+                aligned_size=64,
+                tensor_file="shards/shard_0000.bin",
+            )
+
+            with patch.object(_gds_module.os, "close", wraps=os.close) as close_mock:
+                with pytest.raises(RuntimeError, match="vram boom"):
+                    backend.restore_shards(
+                        tmpdir,
+                        {"shards/shard_0000.bin": [entry]},
+                        {"alloc-1": 0x1234},
+                    )
+
+        agent.deregister_memory.assert_called_once_with(file_reg)
+        agent.release_xfer_handle.assert_not_called()
+        close_mock.assert_called_once()
 
     def test_drain_restore_pipeline_cancels_and_finalizes_after_disk_error(self):
         """Disk errors should still cancel the pipeline and run final cleanup."""
