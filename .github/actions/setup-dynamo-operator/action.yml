@@ -128,6 +128,8 @@ runs:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
         echo "::group::Wait for vCluster pod"
+        # Give the API server a moment to register the new pod
+        sleep 20
         kubectl wait --for=condition=ready pod \
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
