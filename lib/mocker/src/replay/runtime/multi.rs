@@ -184,14 +184,6 @@ impl OfflineRuntime {
                 };
                 changed = true;
 
-                if !executed.made_progress {
-                    bail!(
-                        "offline replay worker {} made no progress at {} ms",
-                        self.workers[worker_idx].worker_idx(),
-                        self.now_ms
-                    );
-                }
-
                 if executed.end_ms == self.now_ms {
                     self.apply_completed_requests(worker_idx, executed.completed_requests);
                     continue;

@@ -226,7 +226,8 @@ impl Scheduler {
                 // 2. Simulate prefill + decode
                 simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
 
-                simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
+                let output_signals = simulate_decode(&mut state, &mut kv_manager, &args).await;
+                flush_output_signals(&mut state, &mut kv_manager, &output_tx, output_signals);
 
                 // 3. Send metrics once per forward pass (after all prefill and decode processing)
                 let _ = metrics_tx.send(MockerMetrics {
@@ -324,11 +325,11 @@ async fn simulate_prefill(
 async fn simulate_decode(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
-    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
     args: &MockEngineArgs,
-) -> Duration {
+) -> Vec<OutputSignal> {
     let start_time = Instant::now();
-    let total_time = simulate_decode_step(state, kv_manager, output_tx, args, None, 0.0, false);
+    let (total_time, output_signals) =
+        simulate_decode_step_internal(state, kv_manager, args, None, 0.0, false);
 
     let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
     if effective_ratio > 0.0 && total_time > Duration::ZERO {
@@ -338,7 +339,7 @@ async fn simulate_decode(
         sleep_until_precise(deadline).await;
     }
 
-    total_time
+    output_signals
 }
 
 pub(crate) fn simulate_prefill_step(
@@ -482,12 +483,58 @@ pub(crate) fn simulate_decode_step(
     kv_manager: &mut KvManager,
     output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
     args: &MockEngineArgs,
-    mut collector: Option<&mut TraceCollector>,
+    collector: Option<&mut TraceCollector>,
     current_time_ms: f64,
     apply_speedup: bool,
 ) -> Duration {
+    let (total_time, output_signals) = simulate_decode_step_internal(
+        state,
+        kv_manager,
+        args,
+        collector,
+        current_time_ms,
+        apply_speedup,
+    );
+
+    flush_output_signals(state, kv_manager, output_tx, output_signals);
+
+    total_time
+}
+
+fn flush_output_signals(
+    state: &mut SchedulerState,
+    kv_manager: &mut KvManager,
+    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
+    output_signals: Vec<OutputSignal>,
+) {
+    let Some(tx) = output_tx.as_ref() else {
+        return;
+    };
+
+    for signal in output_signals {
+        if tx.send(signal.clone()).is_ok() {
+            continue;
+        }
+
+        if let Some(sequence) = state.run(signal.uuid) {
+            for free_signal in &sequence.free_signal() {
+                kv_manager.process(free_signal);
+            }
+        }
+        state.complete(&signal.uuid);
+    }
+}
+
+fn simulate_decode_step_internal(
+    state: &mut SchedulerState,
+    kv_manager: &mut KvManager,
+    args: &MockEngineArgs,
+    mut collector: Option<&mut TraceCollector>,
+    current_time_ms: f64,
+    apply_speedup: bool,
+) -> (Duration, Vec<OutputSignal>) {
     if state.decode.is_empty() {
-        return Duration::ZERO;
+        return (Duration::ZERO, Vec::new());
     }
 
     let decode_start_ms = current_time_ms;
@@ -501,7 +548,7 @@ pub(crate) fn simulate_decode_step(
         })
         .collect::<Vec<_>>();
     if decode_lengths.is_empty() {
-        return Duration::ZERO;
+        return (Duration::ZERO, Vec::new());
     }
 
     let count = decode_lengths.len();
@@ -523,6 +570,7 @@ pub(crate) fn simulate_decode_step(
     // Process decoding.
     let uuids: Vec<Uuid> = state.decode.iter().copied().collect();
     let mut emitted_any = false;
+    let mut output_signals = Vec::with_capacity(uuids.len());
     for uuid in uuids {
         let mut allocated = false;
         loop {
@@ -565,31 +613,21 @@ pub(crate) fn simulate_decode_step(
 
         // Check completion and send notification.
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
-
-        let send_failed = output_tx.as_ref().is_some_and(|tx| {
-            tx.send(OutputSignal {
-                uuid,
-                completed: is_complete,
-            })
-            .is_err()
+        output_signals.push(OutputSignal {
+            uuid,
+            completed: is_complete,
         });
 
-        if send_failed {
-            for signal in &sequence.free_signal() {
-                kv_manager.process(signal);
-            }
-        }
-
-        if send_failed || is_complete {
+        if is_complete {
             state.complete(&uuid);
         }
     }
 
     if !emitted_any {
-        return Duration::ZERO;
+        return (Duration::ZERO, output_signals);
     }
 
-    total_time
+    (total_time, output_signals)
 }
 
 /// Processes MoveBlock signals with the KvManager.
@@ -858,7 +896,8 @@ mod tests {
 
         // ── Step 3: First simulate_decode ──
         // R1 generates 1 token, gains a partial block.
-        simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
+        let output_signals = simulate_decode(&mut state, &mut kv_manager, &args).await;
+        flush_output_signals(&mut state, &mut kv_manager, &output_tx, output_signals);
 
         assert_eq!(state.decode.len(), 1);
         assert_eq!(state.decode[0], r1_uuid);
@@ -893,7 +932,8 @@ mod tests {
 
         // ── Step 5: Second simulate_decode ──
         // R1 generates 2nd token → complete. Frees 3 blocks (1 destroyed, 2 deactivated).
-        simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
+        let output_signals = simulate_decode(&mut state, &mut kv_manager, &args).await;
+        flush_output_signals(&mut state, &mut kv_manager, &output_tx, output_signals);
 
         assert!(!state.requests.contains_key(&r1_uuid), "R1 completed");
         assert_eq!(state.decode.len(), 0);
@@ -916,7 +956,8 @@ mod tests {
         // ── Steps 7+: Cycle until all requests complete ──
         loop {
             simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
-            simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
+            let output_signals = simulate_decode(&mut state, &mut kv_manager, &args).await;
+            flush_output_signals(&mut state, &mut kv_manager, &output_tx, output_signals);
 
             if state.is_empty() {
                 break;

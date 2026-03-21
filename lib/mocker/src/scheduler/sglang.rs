@@ -240,19 +240,14 @@ impl SglangScheduler {
                 }
 
                 // 5. Simulate decode (may retract requests under memory pressure)
-                let retracted = simulate_decode(
-                    &mut running,
-                    &mut kv_manager,
-                    &output_tx,
-                    &config,
-                    dp_rank,
-                    &metrics_tx,
-                )
-                .await;
+                let retracted =
+                    simulate_decode(&mut running, &mut kv_manager, &config, dp_rank, &metrics_tx)
+                        .await;
+                flush_output_signals(&output_tx, &retracted.output_signals);
 
-                if !retracted.is_empty() {
+                if !retracted.requests.is_empty() {
                     // Retracted requests go back to the front of the waiting queue
-                    for req in retracted.into_iter().rev() {
+                    for req in retracted.requests.into_iter().rev() {
                         waiting.push_front(req);
                     }
                     // Reset new_token_ratio like SGLang does after retraction
@@ -580,13 +575,12 @@ fn check_decode_mem(
 async fn simulate_decode(
     running: &mut Vec<SglangRequest>,
     kv_manager: &mut SglangKvManager,
-    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
     config: &SglangConfig,
     dp_rank: u32,
     metrics_tx: &tokio::sync::watch::Sender<MockerMetrics>,
-) -> Vec<SglangRequest> {
+) -> DecodeResult {
     if running.is_empty() {
-        return Vec::new();
+        return DecodeResult::default();
     }
 
     let start = Instant::now();
@@ -606,6 +600,7 @@ async fn simulate_decode(
 
     // Retract requests if not enough memory for one decode step
     let retracted = check_decode_mem(running, kv_manager);
+    let mut output_signals = Vec::with_capacity(running.len());
 
     for req in running.iter_mut() {
         if kv_manager.cache().token_pool.available() == 0 {
@@ -624,13 +619,10 @@ async fn simulate_decode(
     let mut completed_indices = Vec::new();
     for (i, req) in running.iter_mut().enumerate() {
         let is_complete = req.output_len >= req.max_output_tokens;
-
-        if let Some(tx) = output_tx {
-            let _ = tx.send(OutputSignal {
-                uuid: req.uuid,
-                completed: is_complete,
-            });
-        }
+        output_signals.push(OutputSignal {
+            uuid: req.uuid,
+            completed: is_complete,
+        });
 
         if is_complete {
             let mut all_tokens = req.token_ids.clone();
@@ -692,7 +684,29 @@ async fn simulate_decode(
         sleep_until_precise(start + sleep_duration).await;
     }
 
-    retracted
+    DecodeResult {
+        requests: retracted,
+        output_signals,
+    }
+}
+
+#[derive(Default)]
+struct DecodeResult {
+    requests: Vec<SglangRequest>,
+    output_signals: Vec<OutputSignal>,
+}
+
+fn flush_output_signals(
+    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
+    output_signals: &[OutputSignal],
+) {
+    let Some(tx) = output_tx.as_ref() else {
+        return;
+    };
+
+    for signal in output_signals {
+        let _ = tx.send(signal.clone());
+    }
 }
 
 #[cfg(test)]

@@ -8,24 +8,18 @@ use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
 
 pub(crate) struct OfflineWorkerState {
-    worker_idx: usize,
     core: ReplayWorkerCore,
     busy: bool,
     in_flight: usize,
 }
 
 impl OfflineWorkerState {
-    pub(crate) fn new(worker_idx: usize, args: MockEngineArgs) -> Self {
+    pub(crate) fn new(_worker_idx: usize, args: MockEngineArgs) -> Self {
         Self {
-            worker_idx,
             core: ReplayWorkerCore::new(args),
             busy: false,
             in_flight: 0,
         }
-    }
-
-    pub(crate) fn worker_idx(&self) -> usize {
-        self.worker_idx
     }
 
     pub(crate) fn in_flight(&self) -> usize {
@@ -64,15 +58,4 @@ impl OfflineWorkerState {
     ) -> ExecutedPass {
         self.core.execute_pass(collector, now_ms)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WorkerProgressSnapshot {
-    pub(crate) waiting_len: usize,
-    pub(crate) prefill_len: usize,
-    pub(crate) decode_len: usize,
-    pub(crate) request_count: usize,
-    pub(crate) total_generated_tokens: usize,
-    pub(crate) total_allocated_tokens: usize,
-    pub(crate) active_blocks: usize,
 }
