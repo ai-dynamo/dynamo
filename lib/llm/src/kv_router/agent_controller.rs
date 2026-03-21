@@ -12,6 +12,7 @@
 //! - Fires `open_session` inline (fail-fast if the client can't connect)
 //! - Captures a deferred `SessionCloseAction` for execution after generation
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -32,6 +33,8 @@ pub type EventPlaneClient = PushRouter<serde_json::Value, Annotated<serde_json::
 
 /// Default capacity for session KV slots (characters).
 const DEFAULT_SESSION_CAPACITY: u64 = 65_536;
+/// Extra worker-side timeout so router affinity expiry closes sessions first.
+const SESSION_TIMEOUT_FALLBACK_BUFFER_SECS: u64 = 30;
 
 /// Deferred session close, executed after generation completes.
 pub struct SessionCloseAction {
@@ -75,6 +78,38 @@ impl AgentController {
         }
     }
 
+    pub fn close_expired_session(self: Arc<Self>, session_id: String, instance_id: u64) {
+        tokio::spawn(async move {
+            match self.get_session_control_client().await {
+                Ok(client) => {
+                    tracing::info!(
+                        worker_id = instance_id,
+                        session_id = %session_id,
+                        "Session affinity expired, closing worker session"
+                    );
+                    spawn_session_request(
+                        client,
+                        serde_json::json!({
+                            "action": "close_session",
+                            "session_id": session_id.clone(),
+                        }),
+                        instance_id,
+                        &session_id,
+                        "session-affinity-reaper",
+                        "close_session",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        worker_id = instance_id,
+                        session_id = %session_id,
+                        "Failed to create session_control client for affinity expiry close: {e}"
+                    );
+                }
+            }
+        });
+    }
+
     /// Called after worker selection. Fires open_session if needed,
     /// returns a deferred close action for RequestGuard::finish().
     ///
@@ -106,6 +141,9 @@ impl AgentController {
             SessionAction::Open => {
                 // Fail fast if we can't connect to the session_control endpoint.
                 let client = self.get_session_control_client().await?;
+                let worker_timeout_secs = sc
+                    .timeout
+                    .saturating_add(SESSION_TIMEOUT_FALLBACK_BUFFER_SECS);
 
                 // Bind affinity so subsequent turns route to this worker.
                 if let Some(sticky) = sticky {
@@ -118,7 +156,7 @@ impl AgentController {
                 let request = serde_json::json!({
                     "action": "open_session",
                     "session_id": sc.session_id,
-                    "timeout": sc.timeout,
+                    "timeout": worker_timeout_secs,
                     "capacity_of_str_len": DEFAULT_SESSION_CAPACITY,
                 });
                 match client.direct(SingleIn::new(request), instance_id).await {
@@ -128,6 +166,8 @@ impl AgentController {
                                 request_id = %context_id,
                                 worker_id = instance_id,
                                 session_id = %sc.session_id,
+                                router_ttl_secs = sc.timeout,
+                                worker_timeout_secs,
                                 ?resp,
                                 "open_session response"
                             );

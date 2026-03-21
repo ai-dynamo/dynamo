@@ -27,6 +27,8 @@ use uuid::Uuid;
 use dynamo_async_openai::types::ChatCompletionMessageContent;
 
 use super::ResponseParams;
+use super::parse_tool_call_text;
+use super::strip_tool_call_text;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
 /// State machine that converts a chat completion stream into Responses API events.
@@ -40,9 +42,11 @@ pub struct ResponseStreamConverter {
     message_item_id: String,
     message_started: bool,
     message_output_index: u32,
+    raw_text: String,
     accumulated_text: String,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
+    fallback_tool_calls_emitted: usize,
     // Output index counter
     next_output_index: u32,
     // Usage stats from the backend's final chunk
@@ -77,8 +81,10 @@ impl ResponseStreamConverter {
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
             message_started: false,
             message_output_index: 0,
+            raw_text: String::new(),
             accumulated_text: String::new(),
             function_call_items: Vec::new(),
+            fallback_tool_calls_emitted: 0,
             next_output_index: 0,
             usage: None,
         }
@@ -88,6 +94,193 @@ impl ResponseStreamConverter {
         let seq = self.sequence_number;
         self.sequence_number += 1;
         seq
+    }
+
+    fn append_raw_text(&mut self, content: &str) {
+        if content.is_empty() || content == self.raw_text {
+            return;
+        }
+
+        if content.starts_with(&self.raw_text) {
+            self.raw_text = content.to_string();
+        } else {
+            self.raw_text.push_str(content);
+        }
+    }
+
+    fn ensure_message_started(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if self.message_started {
+            return;
+        }
+
+        self.message_started = true;
+        self.message_output_index = self.next_output_index;
+        let output_index = self.message_output_index;
+        self.next_output_index += 1;
+
+        let item_added =
+            ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
+                sequence_number: self.next_seq(),
+                output_index,
+                item: OutputItem::Message(OutputMessage {
+                    id: Some(self.message_item_id.clone()),
+                    content: vec![],
+                    role: AssistantRole::Assistant,
+                    status: Some(OutputStatus::InProgress),
+                }),
+            });
+        events.push(make_sse_event(&item_added));
+
+        let part_added =
+            ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
+                sequence_number: self.next_seq(),
+                item_id: self.message_item_id.clone(),
+                output_index,
+                content_index: 0,
+                part: OutputContent::OutputText(OutputTextContent {
+                    text: String::new(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+            });
+        events.push(make_sse_event(&part_added));
+    }
+
+    fn emit_visible_text_delta(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        visible_text: &str,
+    ) {
+        let Some(delta) = visible_text.strip_prefix(&self.accumulated_text) else {
+            return;
+        };
+        if delta.is_empty() {
+            return;
+        }
+
+        self.ensure_message_started(events);
+        self.accumulated_text = visible_text.to_string();
+
+        let text_delta = ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
+            sequence_number: self.next_seq(),
+            item_id: self.message_item_id.clone(),
+            output_index: self.message_output_index,
+            content_index: 0,
+            delta: delta.to_string(),
+            logprobs: Some(vec![]),
+        });
+        events.push(make_sse_event(&text_delta));
+    }
+
+    fn emit_fallback_tool_call(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        name: String,
+        arguments: String,
+    ) {
+        let item_id = format!("fc_{}", Uuid::new_v4().simple());
+        let call_id = format!("call_{}", Uuid::new_v4().simple());
+        let output_index = self.next_output_index;
+        self.next_output_index += 1;
+
+        self.function_call_items.push(FunctionCallState {
+            item_id: item_id.clone(),
+            call_id: call_id.clone(),
+            name: name.clone(),
+            accumulated_args: arguments.clone(),
+            output_index,
+            started: true,
+            done: true,
+        });
+
+        let item_added =
+            ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
+                sequence_number: self.next_seq(),
+                output_index,
+                item: OutputItem::FunctionCall(FunctionToolCall {
+                    id: Some(item_id.clone()),
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments: String::new(),
+                    status: Some(OutputStatus::InProgress),
+                }),
+            });
+        events.push(make_sse_event(&item_added));
+
+        let args_done = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
+            ResponseFunctionCallArgumentsDoneEvent {
+                sequence_number: self.next_seq(),
+                item_id: item_id.clone(),
+                output_index,
+                arguments: arguments.clone(),
+                name: Some(name.clone()),
+            },
+        );
+        events.push(make_sse_event(&args_done));
+
+        let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+            sequence_number: self.next_seq(),
+            output_index,
+            item: OutputItem::FunctionCall(FunctionToolCall {
+                id: Some(item_id),
+                call_id,
+                name,
+                arguments,
+                status: Some(OutputStatus::Completed),
+            }),
+        });
+        events.push(make_sse_event(&item_done));
+    }
+
+    fn finish_message_if_started(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if !self.message_started {
+            return;
+        }
+
+        let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
+            sequence_number: self.next_seq(),
+            item_id: self.message_item_id.clone(),
+            output_index: self.message_output_index,
+            content_index: 0,
+            text: self.accumulated_text.clone(),
+            logprobs: Some(vec![]),
+        });
+        events.push(make_sse_event(&text_done));
+
+        let part_done =
+            ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
+                sequence_number: self.next_seq(),
+                item_id: self.message_item_id.clone(),
+                output_index: self.message_output_index,
+                content_index: 0,
+                part: OutputContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+            });
+        events.push(make_sse_event(&part_done));
+
+        let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+            sequence_number: self.next_seq(),
+            output_index: self.message_output_index,
+            item: OutputItem::Message(OutputMessage {
+                id: Some(self.message_item_id.clone()),
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+                role: AssistantRole::Assistant,
+                status: Some(OutputStatus::Completed),
+            }),
+        });
+        events.push(make_sse_event(&item_done));
+
+        self.message_started = false;
+        self.message_item_id = format!("msg_{}", Uuid::new_v4().simple());
+        self.message_output_index = 0;
+        self.accumulated_text.clear();
     }
 
     fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
@@ -220,59 +413,35 @@ impl ResponseStreamConverter {
             if let Some(content) = content_text
                 && !content.is_empty()
             {
-                // Emit output_item.added + content_part.added on first text
-                if !self.message_started {
-                    self.message_started = true;
-                    self.message_output_index = self.next_output_index;
-                    let output_index = self.message_output_index;
-                    self.next_output_index += 1;
+                self.append_raw_text(content);
 
-                    let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
-                        ResponseOutputItemAddedEvent {
-                            sequence_number: self.next_seq(),
-                            output_index,
-                            item: OutputItem::Message(OutputMessage {
-                                id: Some(self.message_item_id.clone()),
-                                content: vec![],
-                                role: AssistantRole::Assistant,
-                                status: Some(OutputStatus::InProgress),
-                            }),
-                        },
-                    );
-                    events.push(make_sse_event(&item_added));
-
-                    let part_added = ResponseStreamEvent::ResponseContentPartAdded(
-                        ResponseContentPartAddedEvent {
-                            sequence_number: self.next_seq(),
-                            item_id: self.message_item_id.clone(),
-                            output_index,
-                            content_index: 0,
-                            part: OutputContent::OutputText(OutputTextContent {
-                                text: String::new(),
-                                annotations: vec![],
-                                logprobs: Some(vec![]),
-                            }),
-                        },
-                    );
-                    events.push(make_sse_event(&part_added));
+                // Fallback for models that emit tool calls as raw <tool_call> text instead of
+                // structured delta.tool_calls chunks.
+                if delta
+                    .tool_calls
+                    .as_ref()
+                    .is_none_or(|tool_calls| tool_calls.is_empty())
+                {
+                    let parsed_calls = parse_tool_call_text(&self.raw_text);
+                    for (name, arguments) in parsed_calls
+                        .iter()
+                        .skip(self.fallback_tool_calls_emitted)
+                        .cloned()
+                    {
+                        self.emit_fallback_tool_call(&mut events, name, arguments);
+                    }
+                    self.fallback_tool_calls_emitted = parsed_calls.len();
                 }
 
-                // Emit text delta
-                self.accumulated_text.push_str(content);
-                let text_delta =
-                    ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
-                        sequence_number: self.next_seq(),
-                        item_id: self.message_item_id.clone(),
-                        output_index: self.message_output_index,
-                        content_index: 0,
-                        delta: content.to_string(),
-                        logprobs: Some(vec![]),
-                    });
-                events.push(make_sse_event(&text_delta));
+                let visible_text = strip_tool_call_text(&self.raw_text).into_owned();
+                self.emit_visible_text_delta(&mut events, &visible_text);
             }
 
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
+                if !tool_calls.is_empty() {
+                    self.finish_message_if_started(&mut events);
+                }
                 for tc in tool_calls {
                     let tc_index = tc.index as usize;
 
@@ -403,46 +572,7 @@ impl ResponseStreamConverter {
 
         // Close text message if it was started
         if self.message_started {
-            let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
-                sequence_number: self.next_seq(),
-                item_id: self.message_item_id.clone(),
-                output_index: self.message_output_index,
-                content_index: 0,
-                text: self.accumulated_text.clone(),
-                logprobs: Some(vec![]),
-            });
-            events.push(make_sse_event(&text_done));
-
-            let part_done =
-                ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
-                    sequence_number: self.next_seq(),
-                    item_id: self.message_item_id.clone(),
-                    output_index: self.message_output_index,
-                    content_index: 0,
-                    part: OutputContent::OutputText(OutputTextContent {
-                        text: self.accumulated_text.clone(),
-                        annotations: vec![],
-                        logprobs: Some(vec![]),
-                    }),
-                });
-            events.push(make_sse_event(&part_done));
-
-            let item_done =
-                ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                    sequence_number: self.next_seq(),
-                    output_index: self.message_output_index,
-                    item: OutputItem::Message(OutputMessage {
-                        id: Some(self.message_item_id.clone()),
-                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                            text: self.accumulated_text.clone(),
-                            annotations: vec![],
-                            logprobs: Some(vec![]),
-                        })],
-                        role: AssistantRole::Assistant,
-                        status: Some(OutputStatus::Completed),
-                    }),
-                });
-            events.push(make_sse_event(&item_done));
+            self.finish_message_if_started(&mut events);
         }
 
         // Close any function call items not already done inline

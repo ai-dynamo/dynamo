@@ -204,19 +204,28 @@ impl KvPushRouter {
 
         let enable_event_plane = chooser.kv_router_config().router_enable_cache_control;
 
-        // Sticky sessions are always available -- no event plane needed.
-        // Created alongside the agent controller since session lifecycle RPCs
-        // (open/close) also manage affinity bindings.
-        let sticky_sessions = if enable_event_plane {
-            Some(Arc::new(StickySessionRouter::new(InMemoryAffinityStore::new())))
-        } else {
-            None
-        };
-
         // Agent controller manages session lifecycle RPCs (open/close).
         let agent_controller = if enable_event_plane {
             let component = chooser.client().endpoint.component().clone();
             Some(Arc::new(AgentController::new(component)))
+        } else {
+            None
+        };
+
+        // Sticky sessions share expiry handling with the agent controller so
+        // router-side reap also closes the worker session.
+        let sticky_sessions = if enable_event_plane {
+            let on_expire = agent_controller.as_ref().map(|controller| {
+                let controller = controller.clone();
+                Arc::new(move |session_id: String, worker_id: u64| {
+                    controller
+                        .clone()
+                        .close_expired_session(session_id, worker_id);
+                }) as Arc<dyn Fn(String, u64) + Send + Sync>
+            });
+            Some(Arc::new(StickySessionRouter::new(
+                InMemoryAffinityStore::new_with_on_expire(on_expire),
+            )))
         } else {
             None
         };
@@ -380,7 +389,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Resolve session affinity: if the request has a session_id, inject the
         // pinned worker_id into backend_instance_id before worker selection.
         if let Some(ref sticky) = self.sticky_sessions {
-            if request.routing.as_ref().and_then(|r| r.backend_instance_id).is_none() {
+            if request
+                .routing
+                .as_ref()
+                .and_then(|r| r.backend_instance_id)
+                .is_none()
+            {
                 if let Some(worker_id) = sticky.resolve(&request) {
                     request.routing_mut().backend_instance_id = Some(worker_id);
                 }
@@ -501,9 +515,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // This replaces the old pin_prefix RPC -- the backend uses retention_seconds
         // for priority-based KV cache eviction with time decay.
         if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
-            let extra = request
-                .extra_args
-                .get_or_insert_with(|| json!({}));
+            let extra = request.extra_args.get_or_insert_with(|| json!({}));
             if let serde_json::Value::Object(map) = extra {
                 map.insert("retention_seconds".to_string(), json!(ttl));
             }

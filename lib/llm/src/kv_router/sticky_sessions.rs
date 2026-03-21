@@ -19,6 +19,8 @@ use crate::preprocessor::PreprocessedRequest;
 /// Interval between sweeps of the background reaper that removes expired entries.
 const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
+type ExpiryHandler = Arc<dyn Fn(String, u64) + Send + Sync>;
+
 /// Trait for session affinity storage backends.
 pub trait AffinityStore: Send + Sync {
     /// Look up the worker for a session. Returns `None` if unknown or expired.
@@ -42,31 +44,46 @@ struct AffinityEntry {
 /// Default in-memory affinity store backed by `DashMap`.
 ///
 /// A background tokio task sweeps expired entries every [`REAPER_INTERVAL`].
+#[derive(Clone)]
 pub struct InMemoryAffinityStore {
     map: Arc<DashMap<String, AffinityEntry>>,
+    on_expire: Option<ExpiryHandler>,
 }
 
 impl InMemoryAffinityStore {
     pub fn new() -> Self {
+        Self::new_with_on_expire(None)
+    }
+
+    pub fn new_with_on_expire(on_expire: Option<ExpiryHandler>) -> Self {
         let map = Arc::new(DashMap::new());
 
-        let reaper_map = map.clone();
+        let store = InMemoryAffinityStore { map, on_expire };
+
+        let reaper_store = store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(REAPER_INTERVAL);
             loop {
                 interval.tick().await;
-                let now = Instant::now();
-                reaper_map.retain(|session_id, entry: &mut AffinityEntry| {
-                    let alive = entry.expires_at > now;
-                    if !alive {
-                        tracing::debug!(%session_id, "Session affinity expired, removing");
-                    }
-                    alive
-                });
+                reaper_store.reap_expired(Instant::now());
             }
         });
 
-        InMemoryAffinityStore { map }
+        store
+    }
+
+    fn reap_expired(&self, now: Instant) {
+        let on_expire = self.on_expire.clone();
+        self.map.retain(|session_id, entry: &mut AffinityEntry| {
+            let alive = entry.expires_at > now;
+            if !alive {
+                tracing::debug!(%session_id, "Session affinity expired, removing");
+                if let Some(handler) = &on_expire {
+                    handler(session_id.clone(), entry.worker_id);
+                }
+            }
+            alive
+        });
     }
 }
 
@@ -74,9 +91,13 @@ impl AffinityStore for InMemoryAffinityStore {
     fn get(&self, session_id: &str) -> Option<u64> {
         let mut entry = self.map.get_mut(session_id)?;
         if entry.expires_at <= Instant::now() {
+            let worker_id = entry.worker_id;
             drop(entry);
             self.map.remove(session_id);
             tracing::debug!(%session_id, "Session affinity expired during resolve");
+            if let Some(handler) = &self.on_expire {
+                handler(session_id.to_owned(), worker_id);
+            }
             return None;
         }
         // Refresh TTL on access (sliding window)
@@ -124,7 +145,10 @@ impl StickySessionRouter {
     /// Returns `None` if no session control is present or the session is unknown/expired.
     pub fn resolve(&self, request: &PreprocessedRequest) -> Option<u64> {
         let routing = request.routing.as_ref()?;
-        let session_id = routing.session_control.as_ref().map(|sc| sc.session_id.as_str())?;
+        let session_id = routing
+            .session_control
+            .as_ref()
+            .map(|sc| sc.session_id.as_str())?;
         self.store.get(session_id)
     }
 
@@ -143,6 +167,8 @@ impl StickySessionRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
     use crate::protocols::openai::nvext::SessionControl;
@@ -171,6 +197,7 @@ mod tests {
     fn resolve_returns_none_for_unknown_session() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
+            on_expire: None,
         };
         let router = StickySessionRouter::new(store);
         let req = make_request(Some("unknown-session"));
@@ -181,6 +208,7 @@ mod tests {
     fn resolve_returns_none_when_no_session_id() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
+            on_expire: None,
         };
         let router = StickySessionRouter::new(store);
         let req = make_request(None);
@@ -191,6 +219,7 @@ mod tests {
     fn bind_then_resolve_returns_worker() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
+            on_expire: None,
         };
         let router = StickySessionRouter::new(store);
         router.bind("sess-1", 42, Duration::from_secs(300));
@@ -203,6 +232,7 @@ mod tests {
     fn unbind_removes_affinity() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
+            on_expire: None,
         };
         let router = StickySessionRouter::new(store);
         router.bind("sess-1", 42, Duration::from_secs(300));
@@ -216,6 +246,7 @@ mod tests {
     fn expired_entry_returns_none() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
+            on_expire: None,
         };
         // Insert with zero TTL so it's already expired
         store.map.insert(
@@ -247,7 +278,10 @@ mod tests {
                 expires_at: Instant::now() + Duration::from_secs(5),
             },
         );
-        let store = InMemoryAffinityStore { map: map.clone() };
+        let store = InMemoryAffinityStore {
+            map: map.clone(),
+            on_expire: None,
+        };
         let router = StickySessionRouter::new(store);
 
         let req = make_request(Some("sess-refresh"));
@@ -260,6 +294,74 @@ mod tests {
         assert!(
             remaining > Duration::from_secs(50),
             "TTL should have been refreshed, but remaining={remaining:?}"
+        );
+    }
+
+    #[test]
+    fn expired_entry_triggers_close_callback_on_resolve() {
+        let expired_sessions = Arc::new(Mutex::new(Vec::new()));
+        let on_expire = {
+            let expired_sessions = expired_sessions.clone();
+            Arc::new(move |session_id: String, worker_id: u64| {
+                expired_sessions
+                    .lock()
+                    .unwrap()
+                    .push((session_id, worker_id));
+            })
+        };
+        let store = InMemoryAffinityStore {
+            map: Arc::new(DashMap::new()),
+            on_expire: Some(on_expire),
+        };
+        store.map.insert(
+            "sess-expired".to_owned(),
+            AffinityEntry {
+                worker_id: 99,
+                ttl: Duration::from_secs(0),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+        let router = StickySessionRouter::new(store);
+
+        let req = make_request(Some("sess-expired"));
+        assert!(router.resolve(&req).is_none());
+        assert_eq!(
+            expired_sessions.lock().unwrap().as_slice(),
+            &[("sess-expired".to_string(), 99)]
+        );
+    }
+
+    #[test]
+    fn reaper_triggers_close_callback_for_expired_entry() {
+        let expired_sessions = Arc::new(Mutex::new(Vec::new()));
+        let on_expire = {
+            let expired_sessions = expired_sessions.clone();
+            Arc::new(move |session_id: String, worker_id: u64| {
+                expired_sessions
+                    .lock()
+                    .unwrap()
+                    .push((session_id, worker_id));
+            })
+        };
+        let store = InMemoryAffinityStore {
+            map: Arc::new(DashMap::new()),
+            on_expire: Some(on_expire),
+        };
+        store.map.insert(
+            "sess-reaped".to_owned(),
+            AffinityEntry {
+                worker_id: 17,
+                ttl: Duration::from_secs(30),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        store.reap_expired(Instant::now());
+
+        assert!(store.map.get("sess-reaped").is_none());
+        assert_eq!(
+            expired_sessions.lock().unwrap().as_slice(),
+            &[("sess-reaped".to_string(), 17)]
         );
     }
 }

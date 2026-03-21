@@ -40,7 +40,6 @@ pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
 pub mod agent_controller;
-pub mod sticky_sessions;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -51,13 +50,14 @@ pub mod recorder;
 pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;
+pub mod sticky_sessions;
 pub mod subscriber;
 pub mod worker_query;
 
 pub use agent_controller::AgentController;
-pub use sticky_sessions::StickySessionRouter;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub use sticky_sessions::StickySessionRouter;
 
 use crate::{
     discovery::RuntimeConfigWatch,

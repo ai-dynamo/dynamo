@@ -24,6 +24,7 @@ from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
     _build_dynamo_preproc,
     _map_finish_reason,
+    _runtime_config_parser_name,
 )
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
 
@@ -424,6 +425,29 @@ class TestCreateParsers:
         )
         assert tcp is not None
         assert rp is not None
+
+
+class TestRuntimeConfigParserName:
+    def test_missing_runtime_config_returns_none(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return None
+
+        assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") is None
+
+    def test_missing_key_returns_none(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {"reasoning_parser": "qwen3"}
+
+        assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") is None
+
+    def test_reads_non_empty_string_value(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {"tool_call_parser": "hermes"}
+
+        assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") == "hermes"
 
 
 # ---------------------------------------------------------------------------

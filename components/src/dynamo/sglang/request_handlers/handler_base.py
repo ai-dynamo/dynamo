@@ -535,6 +535,17 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _session_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
+        routing = request.get("routing") or {}
+        session_control = routing.get("session_control") or {}
+        session_id = session_control.get("session_id")
+        if not session_id:
+            return {}
+
+        # Streaming sessions only need the session identifier on each turn.
+        return {"session_params": {"id": session_id}}
+
+    @staticmethod
     def _generate_bootstrap_room() -> int:
         """Generate a unique bootstrap room ID for disaggregated serving.
 
