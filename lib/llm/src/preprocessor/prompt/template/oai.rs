@@ -454,11 +454,13 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 
         normalize_tool_arguments_in_messages(&mut messages_for_template);
 
-        // Inject reasoning_content as <think> blocks into content so the template
-        // sees the model's prior chain-of-thought. enable_thinking controls output
-        // (whether the model generates new reasoning), not input — prior reasoning
-        // should always be visible regardless of the current turn's thinking mode.
-        inject_reasoning_content_into_messages(&mut messages_for_template);
+        // Inject reasoning_content as <think> blocks into content — but only if
+        // the template doesn't handle it natively. Templates like Nemotron and
+        // Qwen3 reference reasoning_content directly in their Jinja logic; injecting
+        // would produce duplicate <think> blocks.
+        if !self.template_handles_reasoning {
+            inject_reasoning_content_into_messages(&mut messages_for_template);
+        }
 
         let ctx = context! {
             messages => messages_for_template,
@@ -1640,6 +1642,91 @@ NORMAL_MODE
         assert!(
             !rendered.contains("reasoning_content"),
             "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    // Template that does NOT reference reasoning_content — injection should happen.
+    #[test]
+    fn test_reasoning_injected_when_template_ignores_it() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        // Formatter uses a simple template that doesn't reference reasoning_content
+        assert!(!formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "The user said hello."
+                },
+                {"role": "user", "content": "Bye"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+        assert!(
+            rendered.contains("<think>The user said hello.</think>"),
+            "injection must happen when template ignores reasoning_content, got: {}",
+            rendered
+        );
+    }
+
+    // Template that DOES reference reasoning_content — injection must be skipped.
+    #[test]
+    fn test_reasoning_not_injected_when_template_handles_it() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        // Template that natively renders reasoning_content (like Nemotron/Qwen3)
+        let template = r#"{%- for message in messages %}{%- if message.role == "assistant" and message.reasoning_content is defined and message.reasoning_content %}<think>{{ message.reasoning_content }}</think>
+{%- endif %}{{ message.role }}: {{ message.content }}
+{%- endfor %}
+{%- if add_generation_prompt %}assistant:{%- endif %}"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        // Verify detection worked
+        assert!(formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "The user said hello."
+                },
+                {"role": "user", "content": "Bye"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // Template renders reasoning natively — no duplicate injection
+        assert!(
+            rendered.contains("<think>The user said hello.</think>"),
+            "template must render reasoning_content natively, got: {}",
+            rendered
+        );
+        // Must NOT have double <think> blocks
+        let think_count = rendered.matches("<think>").count();
+        assert_eq!(
+            think_count, 1,
+            "must have exactly one <think> block (from template), got {} in: {}",
+            think_count, rendered
         );
     }
 }

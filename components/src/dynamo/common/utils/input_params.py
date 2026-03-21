@@ -73,12 +73,13 @@ class InputParamManager:
                 for reserved in ("tokenize", "add_generation_prompt"):
                     extra_kwargs.pop(reserved, None)
 
-                # Inject reasoning_content as <think> blocks into content
-                # before template rendering. Chat templates only reference
-                # message["content"] — reasoning_content is invisible to them.
-                # This is the Python-side equivalent of the Rust injection in
-                # oai.rs for the ModelInput::Tokens path.
-                _inject_reasoning_content(request["messages"])
+                # Inject reasoning_content as <think> blocks into content,
+                # but only if the template doesn't handle it natively.
+                # Templates like Nemotron and Qwen3 reference reasoning_content
+                # directly — injecting would produce duplicate <think> blocks.
+                chat_template_src = getattr(self.tokenizer, "chat_template", "") or ""
+                if "reasoning_content" not in chat_template_src:
+                    _inject_reasoning_content(request["messages"])
 
                 return self.tokenizer.apply_chat_template(
                     request["messages"],

@@ -168,3 +168,69 @@ class TestInjectReasoningContent:
         # User messages untouched
         assert messages[0]["content"] == "What is sqrt(144) + sqrt(256)?"
         assert messages[4]["content"] == "Thanks!"
+
+
+class TestInputParamManagerReasoningInjection:
+    """Test that InputParamManager respects template introspection."""
+
+    def test_injects_when_template_ignores_reasoning(self):
+        """Templates without reasoning_content get injection."""
+        from unittest.mock import MagicMock
+
+        tokenizer = MagicMock()
+        tokenizer.chat_template = (
+            "{% for m in messages %}{{ m.role }}: {{ m.content }}{% endfor %}"
+        )
+        tokenizer.apply_chat_template = MagicMock(return_value="rendered")
+
+        from dynamo.common.utils.input_params import InputParamManager
+
+        mgr = InputParamManager(tokenizer)
+        request = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "thinking...",
+                },
+                {"role": "user", "content": "Bye"},
+            ]
+        }
+        mgr.get_input_param(request, use_tokenizer=True)
+
+        # Verify injection happened: reasoning_content removed, content has <think>
+        called_messages = tokenizer.apply_chat_template.call_args[0][0]
+        assert "reasoning_content" not in called_messages[0]
+        assert called_messages[0]["content"].startswith("<think>thinking...</think>")
+
+    def test_skips_injection_when_template_handles_reasoning(self):
+        """Templates with reasoning_content are left alone."""
+        from unittest.mock import MagicMock
+
+        tokenizer = MagicMock()
+        tokenizer.chat_template = (
+            "{% for m in messages %}"
+            "{% if m.reasoning_content %}<think>{{ m.reasoning_content }}</think>{% endif %}"
+            "{{ m.role }}: {{ m.content }}{% endfor %}"
+        )
+        tokenizer.apply_chat_template = MagicMock(return_value="rendered")
+
+        from dynamo.common.utils.input_params import InputParamManager
+
+        mgr = InputParamManager(tokenizer)
+        request = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "thinking...",
+                },
+                {"role": "user", "content": "Bye"},
+            ]
+        }
+        mgr.get_input_param(request, use_tokenizer=True)
+
+        # Verify injection was skipped: reasoning_content still present, content unchanged
+        called_messages = tokenizer.apply_chat_template.call_args[0][0]
+        assert called_messages[0]["reasoning_content"] == "thinking..."
+        assert called_messages[0]["content"] == "Hi."
