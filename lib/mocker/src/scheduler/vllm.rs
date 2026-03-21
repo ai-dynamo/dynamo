@@ -36,7 +36,7 @@ use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
 use crate::common::utils::sleep_until_precise;
 use crate::kv_manager::KvManager;
-use crate::simulation::{TraceCollector, TraceSimulationReport};
+use crate::replay::TraceCollector;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};
@@ -576,192 +576,6 @@ pub(crate) fn simulate_decode_step(
     total_time
 }
 
-pub fn simulate_trace(
-    args: MockEngineArgs,
-    mut requests: Vec<DirectRequest>,
-) -> anyhow::Result<TraceSimulationReport> {
-    args.validate()?;
-
-    requests.sort_by(|left, right| {
-        let left_ts = left
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        let right_ts = right
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        left_ts.total_cmp(&right_ts)
-    });
-
-    let first_arrival_ms = requests
-        .first()
-        .and_then(|request| request.arrival_timestamp_ms)
-        .ok_or_else(|| anyhow::anyhow!("trace replay requires at least one timestamped request"))?;
-    let mut pending = VecDeque::from(
-        requests
-            .into_iter()
-            .map(|mut request| {
-                let arrival_timestamp_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp")
-                    - first_arrival_ms;
-                request.arrival_timestamp_ms = Some(arrival_timestamp_ms);
-                request
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut state = SchedulerState::default();
-    let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
-    let mut hit_rates = RunningMean::new(1000);
-    let mut collector = TraceCollector::default();
-    let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
-    let mut current_time_ms = 0.0;
-
-    while !pending.is_empty() || !state.is_empty() {
-        enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
-
-        if state.is_empty() {
-            let Some(next_arrival_ms) = pending
-                .front()
-                .and_then(|request| request.arrival_timestamp_ms)
-            else {
-                break;
-            };
-            current_time_ms = next_arrival_ms;
-            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
-            continue;
-        }
-
-        let prefill_time = simulate_prefill_step(
-            &mut state,
-            &mut kv_manager,
-            &mut hit_rates,
-            &args,
-            Some(&mut collector),
-            current_time_ms,
-            true,
-        );
-        current_time_ms += prefill_time.as_secs_f64() * 1000.0;
-        enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
-
-        let decode_time = simulate_decode_step(
-            &mut state,
-            &mut kv_manager,
-            &output_tx,
-            &args,
-            Some(&mut collector),
-            current_time_ms,
-            true,
-        );
-        current_time_ms += decode_time.as_secs_f64() * 1000.0;
-    }
-
-    Ok(collector.finish())
-}
-
-pub fn simulate_concurrency(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-) -> anyhow::Result<TraceSimulationReport> {
-    args.validate()?;
-
-    let mut pending = VecDeque::from(requests);
-    let mut state = SchedulerState::default();
-    let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
-    let mut hit_rates = RunningMean::new(1000);
-    let mut collector = TraceCollector::default();
-    let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
-    let mut current_time_ms = 0.0;
-
-    while !pending.is_empty() || !state.is_empty() {
-        enqueue_concurrency_arrivals(
-            &mut pending,
-            &mut state,
-            &mut collector,
-            current_time_ms,
-            max_in_flight,
-        );
-
-        if state.is_empty() {
-            break;
-        }
-
-        let prefill_time = simulate_prefill_step(
-            &mut state,
-            &mut kv_manager,
-            &mut hit_rates,
-            &args,
-            Some(&mut collector),
-            current_time_ms,
-            true,
-        );
-        current_time_ms += prefill_time.as_secs_f64() * 1000.0;
-
-        let decode_time = simulate_decode_step(
-            &mut state,
-            &mut kv_manager,
-            &output_tx,
-            &args,
-            Some(&mut collector),
-            current_time_ms,
-            true,
-        );
-        current_time_ms += decode_time.as_secs_f64() * 1000.0;
-    }
-
-    Ok(collector.finish())
-}
-fn enqueue_trace_arrivals(
-    pending: &mut VecDeque<DirectRequest>,
-    state: &mut SchedulerState,
-    collector: &mut TraceCollector,
-    current_time_ms: f64,
-) {
-    loop {
-        let Some(next_arrival_ms) = pending
-            .front()
-            .and_then(|request| request.arrival_timestamp_ms)
-        else {
-            break;
-        };
-        if next_arrival_ms > current_time_ms {
-            break;
-        }
-
-        let request = pending
-            .pop_front()
-            .expect("front request must exist when arrival is available");
-        let arrival_ms = request
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        let input_length = request.tokens.len();
-        let output_length = request.max_output_tokens;
-        let uuid = state.receive(request);
-        collector.on_arrival(uuid, arrival_ms, input_length, output_length);
-    }
-}
-
-fn enqueue_concurrency_arrivals(
-    pending: &mut VecDeque<DirectRequest>,
-    state: &mut SchedulerState,
-    collector: &mut TraceCollector,
-    current_time_ms: f64,
-    max_in_flight: usize,
-) {
-    while state.requests.len() < max_in_flight {
-        let Some(mut request) = pending.pop_front() else {
-            break;
-        };
-
-        request.arrival_timestamp_ms = Some(current_time_ms);
-        let input_length = request.tokens.len();
-        let output_length = request.max_output_tokens;
-        let uuid = state.receive(request);
-        collector.on_arrival(uuid, current_time_ms, input_length, output_length);
-    }
-}
-
 /// Processes MoveBlock signals with the KvManager.
 ///
 /// When a signal fails, this function verifies that the failure is for an expected case:
@@ -805,8 +619,9 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replay::runtime::single::{simulate_concurrency, simulate_trace};
+    use crate::replay::{TraceCollector, TraceRequestStatsSnapshot};
     use crate::scheduler::SchedulerHandle;
-    use crate::simulation::{TraceCollector, TraceRequestStatsSnapshot};
     use rstest::rstest;
     use std::collections::HashMap;
     use std::time::Duration;

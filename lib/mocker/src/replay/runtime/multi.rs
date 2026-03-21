@@ -1,18 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::vllm::{
-    Request, SchedulerState, simulate_concurrency as simulate_single_worker_concurrency,
-    simulate_decode_step, simulate_prefill_step, simulate_trace as simulate_single_worker_trace,
+use super::core::ReplayWorkerCore;
+use super::single::{
+    simulate_concurrency as simulate_single_worker_concurrency,
+    simulate_trace as simulate_single_worker_trace,
 };
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
-use crate::common::running_mean::RunningMean;
-use crate::kv_manager::KvManager;
-use crate::simulation::{TraceCollector, TraceSimulationReport};
+use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::replay::{TraceCollector, TraceSimulationReport};
 use anyhow::bail;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
-use tokio::sync::mpsc;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -31,9 +29,7 @@ struct ClusterSnapshot {
 
 struct OfflineWorkerState {
     worker_idx: usize,
-    scheduler: SchedulerState,
-    kv_manager: KvManager,
-    hit_rates: RunningMean<f32>,
+    core: ReplayWorkerCore,
     busy: bool,
 }
 
@@ -41,75 +37,8 @@ impl OfflineWorkerState {
     fn new(worker_idx: usize, args: &MockEngineArgs) -> Self {
         Self {
             worker_idx,
-            scheduler: SchedulerState::default(),
-            kv_manager: KvManager::new(args.num_gpu_blocks, args.block_size),
-            hit_rates: RunningMean::new(1000),
+            core: ReplayWorkerCore::new(args),
             busy: false,
-        }
-    }
-
-    fn progress_snapshot(&self) -> WorkerProgressSnapshot {
-        let mut total_generated_tokens = 0;
-        let mut total_allocated_tokens = 0;
-
-        for request in self.scheduler.requests.values() {
-            if let Request::Active(sequence) = request {
-                total_generated_tokens += sequence.generated_tokens();
-                total_allocated_tokens += sequence.num_allocated_tokens();
-            }
-        }
-
-        WorkerProgressSnapshot {
-            waiting_len: self.scheduler.waiting.len(),
-            prefill_len: self.scheduler.prefill.len(),
-            decode_len: self.scheduler.decode.len(),
-            request_count: self.scheduler.requests.len(),
-            total_generated_tokens,
-            total_allocated_tokens,
-            active_blocks: self.kv_manager.num_active_blocks(),
-        }
-    }
-
-    // Eagerly run one worker pass (prefill + decode) and summarize the result
-    // for the cluster runtime without exposing worker-local internals.
-    fn execute_pass(
-        &mut self,
-        args: &MockEngineArgs,
-        collector: &mut TraceCollector,
-        now_ms: f64,
-    ) -> ExecutedPass {
-        let before = self.progress_snapshot();
-        let requests_before = self.scheduler.requests.len();
-        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
-
-        let prefill_time = simulate_prefill_step(
-            &mut self.scheduler,
-            &mut self.kv_manager,
-            &mut self.hit_rates,
-            args,
-            Some(collector),
-            now_ms,
-            true,
-        );
-        let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let decode_time = simulate_decode_step(
-            &mut self.scheduler,
-            &mut self.kv_manager,
-            &output_tx,
-            args,
-            Some(collector),
-            decode_start_ms,
-            true,
-        );
-        let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
-
-        let after = self.progress_snapshot();
-        let requests_after = self.scheduler.requests.len();
-
-        ExecutedPass {
-            end_ms,
-            completed_requests: requests_before.saturating_sub(requests_after),
-            made_progress: end_ms > now_ms || before != after,
         }
     }
 }
@@ -207,7 +136,7 @@ impl OfflineRuntime {
         // TODO: If future cluster scheduling needs worker-local metrics beyond the
         // in-flight counts in ClusterSnapshot, promote those metrics into the
         // snapshot or move to a finer event model.
-        self.workers[worker_idx].scheduler.receive(request);
+        self.workers[worker_idx].core.receive(request);
 
         uuid
     }
@@ -224,7 +153,7 @@ impl OfflineRuntime {
             && self
                 .workers
                 .iter()
-                .all(|worker| !worker.busy && worker.scheduler.is_empty())
+                .all(|worker| !worker.busy && worker.core.scheduler.is_empty())
     }
 
     fn next_timestamp(&self) -> Option<f64> {
@@ -313,13 +242,15 @@ impl OfflineRuntime {
                 if self.workers[worker_idx].busy {
                     break;
                 }
-                if self.workers[worker_idx].scheduler.is_empty() {
+                if self.workers[worker_idx].core.scheduler.is_empty() {
                     break;
                 }
 
                 let executed = {
                     let (workers, collector) = (&mut self.workers, &mut self.collector);
-                    workers[worker_idx].execute_pass(args, collector, self.snapshot.now_ms)
+                    workers[worker_idx]
+                        .core
+                        .execute_pass(args, collector, self.snapshot.now_ms)
                 };
 
                 if !executed.made_progress {
@@ -379,24 +310,6 @@ impl OfflineRuntime {
 
         Ok(self.collector)
     }
-}
-
-#[derive(Debug)]
-struct ExecutedPass {
-    end_ms: f64,
-    completed_requests: usize,
-    made_progress: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerProgressSnapshot {
-    waiting_len: usize,
-    prefill_len: usize,
-    decode_len: usize,
-    request_count: usize,
-    total_generated_tokens: usize,
-    total_allocated_tokens: usize,
-    active_blocks: usize,
 }
 
 fn normalize_trace_requests(
