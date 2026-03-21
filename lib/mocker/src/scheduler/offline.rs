@@ -44,6 +44,69 @@ impl OfflineWorkerState {
             busy: false,
         }
     }
+
+    fn progress_snapshot(&self) -> WorkerProgressSnapshot {
+        let mut total_generated_tokens = 0;
+        let mut total_allocated_tokens = 0;
+
+        for request in self.scheduler.requests.values() {
+            if let Request::Active(sequence) = request {
+                total_generated_tokens += sequence.generated_tokens();
+                total_allocated_tokens += sequence.num_allocated_tokens();
+            }
+        }
+
+        WorkerProgressSnapshot {
+            waiting_len: self.scheduler.waiting.len(),
+            prefill_len: self.scheduler.prefill.len(),
+            decode_len: self.scheduler.decode.len(),
+            request_count: self.scheduler.requests.len(),
+            total_generated_tokens,
+            total_allocated_tokens,
+            active_blocks: self.kv_manager.num_active_blocks(),
+        }
+    }
+
+    fn execute_pass(
+        &mut self,
+        args: &MockEngineArgs,
+        collector: &mut TraceCollector,
+        now_ms: f64,
+    ) -> ExecutedPass {
+        let before = self.progress_snapshot();
+        let requests_before = self.scheduler.requests.len();
+        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+
+        let prefill_time = simulate_prefill_step(
+            &mut self.scheduler,
+            &mut self.kv_manager,
+            &mut self.hit_rates,
+            args,
+            Some(collector),
+            now_ms,
+            true,
+        );
+        let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
+        let decode_time = simulate_decode_step(
+            &mut self.scheduler,
+            &mut self.kv_manager,
+            &output_tx,
+            args,
+            Some(collector),
+            decode_start_ms,
+            true,
+        );
+        let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
+
+        let after = self.progress_snapshot();
+        let requests_after = self.scheduler.requests.len();
+
+        ExecutedPass {
+            end_ms,
+            completed_requests: requests_before.saturating_sub(requests_after),
+            made_progress: end_ms > now_ms || before != after,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +153,215 @@ struct OfflineRuntime {
     mode: ReplayMode,
 }
 
+impl OfflineRuntime {
+    fn new(
+        args: &MockEngineArgs,
+        pending: VecDeque<DirectRequest>,
+        num_workers: usize,
+        mode: ReplayMode,
+    ) -> Self {
+        Self {
+            snapshot: ClusterSnapshot {
+                now_ms: 0.0,
+                cluster_in_flight: 0,
+                per_worker_in_flight: vec![0; num_workers],
+            },
+            next_worker_idx: 0,
+            pending,
+            workers: (0..num_workers)
+                .map(|worker_idx| OfflineWorkerState::new(worker_idx, args))
+                .collect(),
+            collector: TraceCollector::default(),
+            completions: BinaryHeap::new(),
+            mode,
+        }
+    }
+
+    fn assign_request(&mut self, mut request: DirectRequest, arrival_time_ms: f64) -> Uuid {
+        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        request.uuid = Some(uuid);
+        if matches!(self.mode, ReplayMode::Concurrency { .. }) {
+            request.arrival_timestamp_ms = Some(arrival_time_ms);
+        }
+
+        self.collector.on_arrival(
+            uuid,
+            arrival_time_ms,
+            request.tokens.len(),
+            request.max_output_tokens,
+        );
+
+        let worker_idx = self.next_worker_idx;
+        self.next_worker_idx = (self.next_worker_idx + 1) % self.workers.len();
+
+        self.snapshot.cluster_in_flight += 1;
+        self.snapshot.per_worker_in_flight[worker_idx] += 1;
+
+        // TODO: If future cluster scheduling needs worker-local metrics beyond the
+        // in-flight counts in ClusterSnapshot, promote those metrics into the
+        // snapshot or move to a finer event model.
+        self.workers[worker_idx].scheduler.receive(request);
+
+        uuid
+    }
+
+    fn is_done(&self) -> bool {
+        self.pending.is_empty()
+            && self.completions.is_empty()
+            && self.snapshot.cluster_in_flight == 0
+            && self
+                .snapshot
+                .per_worker_in_flight
+                .iter()
+                .all(|count| *count == 0)
+            && self
+                .workers
+                .iter()
+                .all(|worker| !worker.busy && worker.scheduler.is_empty())
+    }
+
+    fn next_timestamp(&self) -> Option<f64> {
+        let next_completion_ms = self.completions.peek().map(|completion| completion.at_ms);
+        let next_arrival_ms = match self.mode {
+            ReplayMode::Trace => self
+                .pending
+                .front()
+                .and_then(|request| request.arrival_timestamp_ms),
+            ReplayMode::Concurrency { .. } => None,
+        };
+
+        match (next_arrival_ms, next_completion_ms) {
+            (Some(arrival_ms), Some(completion_ms)) => Some(arrival_ms.min(completion_ms)),
+            (Some(arrival_ms), None) => Some(arrival_ms),
+            (None, Some(completion_ms)) => Some(completion_ms),
+            (None, None) => None,
+        }
+    }
+
+    fn apply_completed_requests(&mut self, worker_idx: usize, completed_requests: usize) {
+        self.snapshot.cluster_in_flight = self
+            .snapshot
+            .cluster_in_flight
+            .saturating_sub(completed_requests);
+        self.snapshot.per_worker_in_flight[worker_idx] =
+            self.snapshot.per_worker_in_flight[worker_idx].saturating_sub(completed_requests);
+    }
+
+    fn apply_worker_completions(&mut self) {
+        while self
+            .completions
+            .peek()
+            .is_some_and(|completion| completion.at_ms == self.snapshot.now_ms)
+        {
+            let completion = self
+                .completions
+                .pop()
+                .expect("completion must exist after peek");
+            let worker = &mut self.workers[completion.worker_idx];
+            worker.busy = false;
+            self.apply_completed_requests(completion.worker_idx, completion.completed_requests);
+        }
+    }
+
+    fn release_trace_arrivals(&mut self) {
+        while self
+            .pending
+            .front()
+            .and_then(|request| request.arrival_timestamp_ms)
+            .is_some_and(|arrival_ms| arrival_ms <= self.snapshot.now_ms)
+        {
+            let request = self
+                .pending
+                .pop_front()
+                .expect("front request must exist when arrival is ready");
+            let arrival_ms = request
+                .arrival_timestamp_ms
+                .expect("trace replay requests must have an arrival timestamp");
+            self.assign_request(request, arrival_ms);
+        }
+    }
+
+    fn top_off_concurrency(&mut self, max_in_flight: usize) {
+        while self.snapshot.cluster_in_flight < max_in_flight {
+            let Some(request) = self.pending.pop_front() else {
+                break;
+            };
+            self.assign_request(request, self.snapshot.now_ms);
+        }
+    }
+
+    fn drive_ready_workers(&mut self, args: &MockEngineArgs) -> anyhow::Result<()> {
+        for worker_idx in 0..self.workers.len() {
+            loop {
+                if self.workers[worker_idx].busy {
+                    break;
+                }
+                if self.workers[worker_idx].scheduler.is_empty() {
+                    break;
+                }
+
+                let executed = {
+                    let (workers, collector) = (&mut self.workers, &mut self.collector);
+                    workers[worker_idx].execute_pass(args, collector, self.snapshot.now_ms)
+                };
+
+                if !executed.made_progress {
+                    bail!(
+                        "offline replay worker {} made no progress at {} ms",
+                        self.workers[worker_idx].worker_idx,
+                        self.snapshot.now_ms
+                    );
+                }
+
+                if executed.end_ms == self.snapshot.now_ms {
+                    self.apply_completed_requests(worker_idx, executed.completed_requests);
+                    continue;
+                }
+
+                self.workers[worker_idx].busy = true;
+                self.completions.push(WorkerCompletion {
+                    at_ms: executed.end_ms,
+                    worker_idx,
+                    completed_requests: executed.completed_requests,
+                });
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run(mut self, args: &MockEngineArgs) -> anyhow::Result<TraceCollector> {
+        match self.mode {
+            ReplayMode::Trace => self.release_trace_arrivals(),
+            ReplayMode::Concurrency { max_in_flight } => self.top_off_concurrency(max_in_flight),
+        }
+        self.drive_ready_workers(args)?;
+
+        while !self.is_done() {
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline replay reached a dead end with {} in-flight requests remaining",
+                    self.snapshot.cluster_in_flight
+                );
+            };
+
+            self.snapshot.now_ms = next_timestamp_ms;
+            self.apply_worker_completions();
+
+            match self.mode {
+                ReplayMode::Trace => self.release_trace_arrivals(),
+                ReplayMode::Concurrency { max_in_flight } => {
+                    self.top_off_concurrency(max_in_flight)
+                }
+            }
+            self.drive_ready_workers(args)?;
+        }
+
+        Ok(self.collector)
+    }
+}
+
 #[derive(Debug)]
 struct ExecutedPass {
     end_ms: f64,
@@ -106,28 +378,6 @@ struct WorkerProgressSnapshot {
     total_generated_tokens: usize,
     total_allocated_tokens: usize,
     active_blocks: usize,
-}
-
-fn snapshot_worker_progress(worker: &OfflineWorkerState) -> WorkerProgressSnapshot {
-    let mut total_generated_tokens = 0;
-    let mut total_allocated_tokens = 0;
-
-    for request in worker.scheduler.requests.values() {
-        if let Request::Active(sequence) = request {
-            total_generated_tokens += sequence.generated_tokens();
-            total_allocated_tokens += sequence.num_allocated_tokens();
-        }
-    }
-
-    WorkerProgressSnapshot {
-        waiting_len: worker.scheduler.waiting.len(),
-        prefill_len: worker.scheduler.prefill.len(),
-        decode_len: worker.scheduler.decode.len(),
-        request_count: worker.scheduler.requests.len(),
-        total_generated_tokens,
-        total_allocated_tokens,
-        active_blocks: worker.kv_manager.num_active_blocks(),
-    }
 }
 
 fn normalize_trace_requests(
@@ -163,269 +413,6 @@ fn normalize_trace_requests(
     ))
 }
 
-fn assign_request(
-    runtime: &mut OfflineRuntime,
-    mut request: DirectRequest,
-    arrival_time_ms: f64,
-) -> Uuid {
-    let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-    request.uuid = Some(uuid);
-    if matches!(runtime.mode, ReplayMode::Concurrency { .. }) {
-        request.arrival_timestamp_ms = Some(arrival_time_ms);
-    }
-
-    runtime.collector.on_arrival(
-        uuid,
-        arrival_time_ms,
-        request.tokens.len(),
-        request.max_output_tokens,
-    );
-
-    let worker_idx = runtime.next_worker_idx;
-    runtime.next_worker_idx = (runtime.next_worker_idx + 1) % runtime.workers.len();
-
-    runtime.snapshot.cluster_in_flight += 1;
-    runtime.snapshot.per_worker_in_flight[worker_idx] += 1;
-
-    // TODO: If future cluster scheduling needs worker-local metrics beyond the
-    // in-flight counts in ClusterSnapshot, promote those metrics into the
-    // snapshot or move to a finer event model.
-    runtime.workers[worker_idx].scheduler.receive(request);
-
-    uuid
-}
-
-fn execute_worker_pass(
-    worker: &mut OfflineWorkerState,
-    args: &MockEngineArgs,
-    collector: &mut TraceCollector,
-    now_ms: f64,
-) -> ExecutedPass {
-    let before = snapshot_worker_progress(worker);
-    let requests_before = worker.scheduler.requests.len();
-    let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
-
-    let prefill_time = simulate_prefill_step(
-        &mut worker.scheduler,
-        &mut worker.kv_manager,
-        &mut worker.hit_rates,
-        args,
-        Some(collector),
-        now_ms,
-        true,
-    );
-    let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-    let decode_time = simulate_decode_step(
-        &mut worker.scheduler,
-        &mut worker.kv_manager,
-        &output_tx,
-        args,
-        Some(collector),
-        decode_start_ms,
-        true,
-    );
-    let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
-
-    let after = snapshot_worker_progress(worker);
-    let requests_after = worker.scheduler.requests.len();
-
-    ExecutedPass {
-        end_ms,
-        completed_requests: requests_before.saturating_sub(requests_after),
-        made_progress: end_ms > now_ms || before != after,
-    }
-}
-
-fn simulation_done(runtime: &OfflineRuntime) -> bool {
-    runtime.pending.is_empty()
-        && runtime.completions.is_empty()
-        && runtime.snapshot.cluster_in_flight == 0
-        && runtime
-            .snapshot
-            .per_worker_in_flight
-            .iter()
-            .all(|count| *count == 0)
-        && runtime
-            .workers
-            .iter()
-            .all(|worker| !worker.busy && worker.scheduler.is_empty())
-}
-
-fn next_runtime_timestamp(runtime: &OfflineRuntime) -> Option<f64> {
-    let next_completion_ms = runtime
-        .completions
-        .peek()
-        .map(|completion| completion.at_ms);
-    let next_arrival_ms = match runtime.mode {
-        ReplayMode::Trace => runtime
-            .pending
-            .front()
-            .and_then(|request| request.arrival_timestamp_ms),
-        ReplayMode::Concurrency { .. } => None,
-    };
-
-    match (next_arrival_ms, next_completion_ms) {
-        (Some(arrival_ms), Some(completion_ms)) => Some(arrival_ms.min(completion_ms)),
-        (Some(arrival_ms), None) => Some(arrival_ms),
-        (None, Some(completion_ms)) => Some(completion_ms),
-        (None, None) => None,
-    }
-}
-
-fn apply_worker_completions(runtime: &mut OfflineRuntime) {
-    while runtime
-        .completions
-        .peek()
-        .is_some_and(|completion| completion.at_ms == runtime.snapshot.now_ms)
-    {
-        let completion = runtime
-            .completions
-            .pop()
-            .expect("completion must exist after peek");
-        let worker = &mut runtime.workers[completion.worker_idx];
-        worker.busy = false;
-        runtime.snapshot.cluster_in_flight = runtime
-            .snapshot
-            .cluster_in_flight
-            .saturating_sub(completion.completed_requests);
-        runtime.snapshot.per_worker_in_flight[completion.worker_idx] =
-            runtime.snapshot.per_worker_in_flight[completion.worker_idx]
-                .saturating_sub(completion.completed_requests);
-    }
-}
-
-fn release_trace_arrivals(runtime: &mut OfflineRuntime) {
-    while runtime
-        .pending
-        .front()
-        .and_then(|request| request.arrival_timestamp_ms)
-        .is_some_and(|arrival_ms| arrival_ms <= runtime.snapshot.now_ms)
-    {
-        let request = runtime
-            .pending
-            .pop_front()
-            .expect("front request must exist when arrival is ready");
-        let arrival_ms = request
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        assign_request(runtime, request, arrival_ms);
-    }
-}
-
-fn top_off_concurrency(runtime: &mut OfflineRuntime, max_in_flight: usize) {
-    while runtime.snapshot.cluster_in_flight < max_in_flight {
-        let Some(request) = runtime.pending.pop_front() else {
-            break;
-        };
-        assign_request(runtime, request, runtime.snapshot.now_ms);
-    }
-}
-
-fn drive_ready_workers(runtime: &mut OfflineRuntime, args: &MockEngineArgs) -> anyhow::Result<()> {
-    for worker_idx in 0..runtime.workers.len() {
-        loop {
-            if runtime.workers[worker_idx].busy {
-                break;
-            }
-            if runtime.workers[worker_idx].scheduler.is_empty() {
-                break;
-            }
-
-            let executed = {
-                let (workers, collector) = (&mut runtime.workers, &mut runtime.collector);
-                execute_worker_pass(
-                    &mut workers[worker_idx],
-                    args,
-                    collector,
-                    runtime.snapshot.now_ms,
-                )
-            };
-
-            if !executed.made_progress {
-                bail!(
-                    "offline replay worker {} made no progress at {} ms",
-                    runtime.workers[worker_idx].worker_idx,
-                    runtime.snapshot.now_ms
-                );
-            }
-
-            if executed.end_ms == runtime.snapshot.now_ms {
-                runtime.snapshot.cluster_in_flight = runtime
-                    .snapshot
-                    .cluster_in_flight
-                    .saturating_sub(executed.completed_requests);
-                runtime.snapshot.per_worker_in_flight[worker_idx] =
-                    runtime.snapshot.per_worker_in_flight[worker_idx]
-                        .saturating_sub(executed.completed_requests);
-                continue;
-            }
-
-            runtime.workers[worker_idx].busy = true;
-            runtime.completions.push(WorkerCompletion {
-                at_ms: executed.end_ms,
-                worker_idx,
-                completed_requests: executed.completed_requests,
-            });
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-fn run_offline_simulation(
-    args: MockEngineArgs,
-    pending: VecDeque<DirectRequest>,
-    num_workers: usize,
-    mode: ReplayMode,
-) -> anyhow::Result<TraceCollector> {
-    let mut runtime = OfflineRuntime {
-        snapshot: ClusterSnapshot {
-            now_ms: 0.0,
-            cluster_in_flight: 0,
-            per_worker_in_flight: vec![0; num_workers],
-        },
-        next_worker_idx: 0,
-        pending,
-        workers: (0..num_workers)
-            .map(|worker_idx| OfflineWorkerState::new(worker_idx, &args))
-            .collect(),
-        collector: TraceCollector::default(),
-        completions: BinaryHeap::new(),
-        mode,
-    };
-
-    match runtime.mode {
-        ReplayMode::Trace => release_trace_arrivals(&mut runtime),
-        ReplayMode::Concurrency { max_in_flight } => {
-            top_off_concurrency(&mut runtime, max_in_flight);
-        }
-    }
-    drive_ready_workers(&mut runtime, &args)?;
-
-    while !simulation_done(&runtime) {
-        let Some(next_timestamp_ms) = next_runtime_timestamp(&runtime) else {
-            bail!(
-                "offline replay reached a dead end with {} in-flight requests remaining",
-                runtime.snapshot.cluster_in_flight
-            );
-        };
-
-        runtime.snapshot.now_ms = next_timestamp_ms;
-        apply_worker_completions(&mut runtime);
-
-        match runtime.mode {
-            ReplayMode::Trace => release_trace_arrivals(&mut runtime),
-            ReplayMode::Concurrency { max_in_flight } => {
-                top_off_concurrency(&mut runtime, max_in_flight);
-            }
-        }
-        drive_ready_workers(&mut runtime, &args)?;
-    }
-
-    Ok(runtime.collector)
-}
-
 pub fn simulate_trace_multi(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
@@ -433,7 +420,8 @@ pub fn simulate_trace_multi(
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
     let pending = normalize_trace_requests(requests)?;
-    let collector = run_offline_simulation(args, pending, num_workers, ReplayMode::Trace)?;
+    let collector =
+        OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace).run(&args)?;
     Ok(collector.finish())
 }
 
@@ -445,12 +433,13 @@ pub fn simulate_concurrency_multi(
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
     let pending = VecDeque::from(requests);
-    let collector = run_offline_simulation(
-        args,
+    let collector = OfflineRuntime::new(
+        &args,
         pending,
         num_workers,
         ReplayMode::Concurrency { max_in_flight },
-    )?;
+    )
+    .run(&args)?;
     Ok(collector.finish())
 }
 
@@ -477,7 +466,9 @@ mod tests {
         num_workers: usize,
     ) -> TraceCollector {
         let pending = normalize_trace_requests(requests).unwrap();
-        run_offline_simulation(args.clone(), pending, num_workers, ReplayMode::Trace).unwrap()
+        OfflineRuntime::new(args, pending, num_workers, ReplayMode::Trace)
+            .run(args)
+            .unwrap()
     }
 
     fn run_concurrency_multi_collect(
@@ -486,12 +477,13 @@ mod tests {
         max_in_flight: usize,
         num_workers: usize,
     ) -> TraceCollector {
-        run_offline_simulation(
-            args.clone(),
+        OfflineRuntime::new(
+            args,
             VecDeque::from(requests),
             num_workers,
             ReplayMode::Concurrency { max_in_flight },
         )
+        .run(args)
         .unwrap()
     }
 
