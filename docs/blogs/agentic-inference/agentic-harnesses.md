@@ -22,7 +22,7 @@ autossh -M 0 -f -N \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=no \
-  umbriel-b200-039
+  <gpu-node>
 
 ANTHROPIC_BASE_URL=http://localhost:8000 \
 ANTHROPIC_API_KEY=dummy \
@@ -39,7 +39,7 @@ autossh -M 0 -f -N \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=no \
-  umbriel-b200-039
+  <gpu-node>
 
 ANTHROPIC_BASE_URL=http://localhost:8000 \
 pnpx openclaw
@@ -159,7 +159,13 @@ pub enum ReasoningContent {
 
 The contract matters more than the type name. `segments[i]` is the reasoning that appeared before `tool_calls[i]`, and `segments[N]` is any trailing reasoning after the last tool call. That preserves the original token order instead of reconstructing a lossy approximation.
 
-At the moment, this section is also blocked by a more basic issue in the path we are testing: reasoning content is being dropped on the round trip. Until that is fixed, this section should be treated as the intended correctness story and the design motivation for the fix, not as a settled experimental result.
+This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The bug had three layers:
+
+1. **Double parsing**: the Anthropic streaming handler applied a second reasoning parser on top of the engine stream, which already had reasoning correctly split. The second parser re-classified all content as reasoning.
+
+2. **Silent drop**: chat templates only reference `{{ message.content }}` — they ignore `reasoning_content`. Without explicit injection, the model never saw its own prior chain-of-thought. The fix injects `reasoning_content` back into `content` as `<think>` blocks before template rendering, on both the Rust preprocessor path (`ModelInput::Tokens`) and the Python worker path (`ModelInput::Text`). Templates that natively handle `reasoning_content` (Nemotron, Qwen3) are detected at load time and left alone.
+
+3. **Template truncation**: Nemotron's chat template defaults `truncate_history_thinking` to `true`, which strips `<think>` content from all assistant turns before the last user message. This is correct for non-agentic chat (saves context window) but wrong for tool-calling flows where the model needs its prior reasoning. NVIDIA's own SWE training pipeline sets `truncate_history_thinking: false` — the model was trained to see historical reasoning in agentic contexts. The Anthropic handler now passes this flag automatically when a reasoning parser is configured.
 
 This section is strongest as a structural argument, and the post should say that plainly. The artifact set supports the claim that incorrect reconstruction breaks the prefix. It does not yet support a strong latency number on the measured deployment. The prompts are small, the deployment is aggregated, and the timing signal is noisy. The important result is not "we saved X milliseconds." It is that a replay path can look fine to a human and still be wrong for the cache.
 
