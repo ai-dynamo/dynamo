@@ -249,13 +249,28 @@ fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
             _ => continue,
         };
 
-        let existing_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        let new_content = if existing_content.is_empty() {
-            reasoning
-        } else {
-            format!("{}{}", reasoning, existing_content)
-        };
-        msg["content"] = serde_json::Value::String(new_content);
+        match msg.get("content") {
+            // Content is a string or null — prepend reasoning as text
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                msg["content"] =
+                    serde_json::Value::String(format!("{}{}", reasoning, s));
+            }
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {
+                msg["content"] = serde_json::Value::String(reasoning);
+            }
+            // Content is an array (multimodal) — prepend as a text part
+            Some(serde_json::Value::Array(_)) => {
+                let think_part = serde_json::json!({
+                    "type": "text",
+                    "text": reasoning
+                });
+                if let Some(arr) = msg.get_mut("content").and_then(|v| v.as_array_mut()) {
+                    arr.insert(0, think_part);
+                }
+            }
+            // Other types (number, bool, object) — skip, don't corrupt
+            _ => continue,
+        }
 
         // Remove so the template doesn't see both the injected <think> in content
         // and the original reasoning_content field.
