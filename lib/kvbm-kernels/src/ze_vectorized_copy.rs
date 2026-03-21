@@ -39,3 +39,23 @@ pub const WORK_GROUP_SIZE: u32 = 128;
 /// When `num_pairs > MAX_GROUPS`, the kernel grid-strides over the remaining
 /// pairs (identical to the CUDA `min(num_pairs, 65535)` launch pattern).
 pub const MAX_GROUPS: u32 = 65535;
+
+/// Entry-point name of the indirect-args kernel variant.
+///
+/// This kernel reads all four parameters from a device-side buffer instead of
+/// receiving them as `zeKernelSetArgumentValue` calls.  The Rust side uploads
+/// the 32-byte args struct via BCS memcpy alongside the pointer arrays, then
+/// dispatches with zero `set_arg` overhead.
+pub const KERNEL_NAME_INDIRECT: &std::ffi::CStr = c"vectorized_copy_indirect";
+
+/// Size in bytes of the device-side indirect-args buffer (4 × u64).
+///
+/// Layout:
+/// | Offset | Field              | Rust type |
+/// |--------|--------------------|-----------|
+/// | 0      | src_addrs dev ptr  | `u64`     |
+/// | 8      | dst_addrs dev ptr  | `u64`     |
+/// | 16     | copy_size_in_bytes | `u64`     |
+/// | 24     | num_pairs          | `u64`     |
+pub const INDIRECT_ARGS_BYTES: usize = 4 * std::mem::size_of::<u64>();
+

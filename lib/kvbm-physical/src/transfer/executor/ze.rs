@@ -64,6 +64,11 @@ struct ZeDeviceResources {
     next_event_idx: u32,
     /// SPIR-V vectorized_copy kernel (loaded lazily on first use).
     kernel: Arc<ZeKernel>,
+    /// Indirect-args kernel variant — reads params from a device buffer.
+    kernel_indirect: Arc<ZeKernel>,
+    /// Persistent 32-byte device buffer for indirect kernel arguments.
+    /// Uploaded via BCS each dispatch; eliminates per-dispatch `set_arg`.
+    args_dev: u64,
     /// Scratch memory pool for pointer arrays.
     pool: Arc<ZeMemPool>,
     /// Module kept alive so kernel handle remains valid.
@@ -107,11 +112,29 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
         .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
         .map_err(|e| anyhow!("Failed to set kernel group size for device {}: {}", device_ordinal, e))?;
 
+    // Indirect-args kernel: same SPIR-V module, different entry point.
+    let kernel_indirect = ZeKernel::new(&module, vc::KERNEL_NAME_INDIRECT)
+        .map_err(|e| anyhow!("Failed to create indirect ZeKernel for device {}: {}", device_ordinal, e))?;
+    kernel_indirect
+        .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
+        .map_err(|e| anyhow!("Failed to set indirect kernel group size for device {}: {}", device_ordinal, e))?;
+
     // Scratch memory pool (16 MB reserve, 64 MB release threshold).
     let pool = ZeMemPool::builder(Arc::clone(&dev), 16 * 1024 * 1024)
         .release_threshold(64 * 1024 * 1024)
         .build()
         .map_err(|e| anyhow!("Failed to create ZeMemPool for device {}: {}", device_ordinal, e))?;
+
+    // Persistent device buffer for indirect kernel args (32 bytes).
+    // Allocated once; contents updated via BCS memcpy each dispatch.
+    let args_dev = pool
+        .alloc(vc::INDIRECT_ARGS_BYTES)
+        .map_err(|e| anyhow!("ZeMemPool alloc for indirect args failed: {}", e))?;
+    unsafe {
+        kernel_indirect
+            .set_arg(0, &args_dev)
+            .map_err(|e| anyhow!("set_arg(0) for indirect kernel failed: {}", e))?;
+    }
 
     let res = Arc::new(Mutex::new(ZeDeviceResources {
         cmd_copy: Arc::new(cmd_copy),
@@ -119,6 +142,8 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
         event_pool: Arc::new(event_pool),
         next_event_idx: 0,
         kernel: Arc::new(kernel),
+        kernel_indirect: Arc::new(kernel_indirect),
+        args_dev,
         pool: Arc::new(pool),
         _module: module,
     }));
@@ -252,6 +277,8 @@ pub fn execute_ze_transfer(
     let cmd_copy = ze_cmdlist.unwrap_or_else(|| resources.cmd_copy.clone());
     let cmd_compute = resources.cmd_compute.clone();
     let kernel = resources.kernel.clone();
+    let kernel_indirect = resources.kernel_indirect.clone();
+    let args_dev = resources.args_dev;
     let pool = resources.pool.clone();
     let signal_event = allocate_event(&mut resources)?;
 
@@ -334,7 +361,8 @@ pub fn execute_ze_transfer(
                         layers,
                         &cmd_copy,
                         &cmd_compute,
-                        &kernel,
+                        &kernel_indirect,
+                        args_dev,
                         &pool,
                         &signal_event,
                     )?;
@@ -457,6 +485,7 @@ fn execute_fc_lw_vectorized_ze(
     cmd_copy: &ZeImmediateCmdList,
     cmd_compute: &ZeImmediateCmdList,
     kernel: &ZeKernel,
+    args_dev: u64,
     pool: &ZeMemPool,
     signal_event: &ZeEvent,
 ) -> Result<()> {
@@ -499,7 +528,17 @@ fn execute_fc_lw_vectorized_ze(
         .alloc(ptr_array_bytes)
         .map_err(|e| anyhow!("ZeMemPool alloc for dst_ptrs failed: {}", e))?;
 
-    // Upload pointer arrays to device via BCS.
+    // Build indirect-args buffer (dev pointers known from pool.alloc above).
+    // The kernel's arg 0 was set once at init to point at args_dev;
+    // we only update its *contents* here via BCS memcpy.
+    let args_host: [u64; 4] = [
+        src_ptrs_dev,
+        dst_ptrs_dev,
+        chunk_size as u64,
+        total_chunks as u64,
+    ];
+
+    // Upload pointer arrays + indirect args to device via BCS (single batch).
     unsafe {
         cmd_copy
             .append_memcpy(
@@ -519,20 +558,19 @@ fn execute_fc_lw_vectorized_ze(
                 &mut [],
             )
             .map_err(|e| anyhow!("Upload dst_ptrs failed: {}", e))?;
+        cmd_copy
+            .append_memcpy(
+                args_dev as *mut c_void,
+                args_host.as_ptr() as *const c_void,
+                vc::INDIRECT_ARGS_BYTES,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .map_err(|e| anyhow!("Upload indirect args failed: {}", e))?;
     }
     cmd_copy
         .host_synchronize(u64::MAX)
-        .map_err(|e| anyhow!("BCS sync after pointer upload failed: {}", e))?;
-
-    // Set kernel arguments and launch on CCS.
-    let copy_sz = chunk_size as u64;
-    let n_pairs = total_chunks as i32;
-    unsafe {
-        kernel.set_arg(0, &src_ptrs_dev).map_err(|e| anyhow!("set_arg(0) failed: {}", e))?;
-        kernel.set_arg(1, &dst_ptrs_dev).map_err(|e| anyhow!("set_arg(1) failed: {}", e))?;
-        kernel.set_arg(2, &copy_sz).map_err(|e| anyhow!("set_arg(2) failed: {}", e))?;
-        kernel.set_arg(3, &n_pairs).map_err(|e| anyhow!("set_arg(3) failed: {}", e))?;
-    }
+        .map_err(|e| anyhow!("BCS sync after upload failed: {}", e))?;
 
     let num_groups = std::cmp::min(total_chunks as u32, vc::MAX_GROUPS);
     let group_count = sys::ze_group_count_t {
