@@ -350,11 +350,14 @@ fn simulate_prefill_step(
     current_time_ms: f64,
     apply_speedup: bool,
 ) -> Duration {
-    let mut total_time = Duration::ZERO;
-
     let mut token_budget = args
         .max_num_batched_tokens
         .map_or(usize::MAX, |t| t.saturating_sub(state.decode.len()));
+
+    // Accumulate batch-level prefill stats for a single predict call after the loop.
+    let mut batch_count: usize = 0;
+    let mut batch_total_isl: usize = 0;
+    let mut batch_total_prefix: usize = 0;
 
     'prefill: while token_budget > 0 {
         // Drain prefill first, then pull from waiting one at a time.
@@ -426,13 +429,13 @@ fn simulate_prefill_step(
             seq.commit_allocation(cumulative);
         }
 
-        // Accumulate prefill compute time only for the new tokens in this chunk.
+        // Accumulate per-request (isl, prefix) for batch-level prediction.
         let new_tokens_in_chunk = chunk.min(remaining);
         if args.worker_type != WorkerType::Decode && new_tokens_in_chunk > 0 {
-            total_time += Duration::from_secs_f64(
-                prefill_cost.predict_prefill_compute(Some(new_tokens_in_chunk), &args.perf_model)
-                    / 1000.0,
-            );
+            let isl = prefill_cost.cached_tokens + new_tokens_in_chunk;
+            batch_total_isl += isl;
+            batch_total_prefix += prefill_cost.cached_tokens;
+            batch_count += 1;
         }
 
         // Hit rate: fraction of tokens that were already cached.
@@ -454,6 +457,18 @@ fn simulate_prefill_step(
             break;
         }
     }
+
+    // One batch-level prefill prediction instead of summing per-request predictions.
+    let total_time = if batch_count > 0 {
+        let mean_isl = batch_total_isl / batch_count;
+        let mean_prefix = batch_total_prefix / batch_count;
+        let ms = args
+            .perf_model
+            .predict_prefill_time(batch_count, mean_isl, mean_prefix);
+        Duration::from_secs_f64(ms / 1000.0)
+    } else {
+        Duration::ZERO
+    };
 
     if !apply_speedup || args.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
         return total_time;
@@ -489,12 +504,13 @@ fn simulate_decode_step(
         return Duration::ZERO;
     }
 
+    let count = decode_lengths.len();
     let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
     let total_length: usize = decode_lengths.iter().sum();
-    let context_length = total_length / decode_lengths.len();
-    let decoding_time = args
-        .perf_model
-        .predict_decode_time(active_kv_tokens, context_length);
+    let context_length = total_length / count;
+    let decoding_time =
+        args.perf_model
+            .predict_decode_time(count, active_kv_tokens, context_length);
     let unscaled_time = Duration::from_secs_f64(decoding_time / 1000.0);
     let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
     let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
