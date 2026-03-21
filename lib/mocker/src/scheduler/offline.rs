@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::vllm::{Request, SchedulerState, simulate_decode_step, simulate_prefill_step};
+use super::vllm::{
+    Request, SchedulerState, simulate_concurrency as simulate_single_worker_concurrency,
+    simulate_decode_step, simulate_prefill_step, simulate_trace as simulate_single_worker_trace,
+};
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::common::running_mean::RunningMean;
 use crate::kv_manager::KvManager;
@@ -429,7 +432,7 @@ fn normalize_trace_requests(
     ))
 }
 
-pub fn simulate_trace_multi(
+fn simulate_trace_multi_worker(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     num_workers: usize,
@@ -441,7 +444,7 @@ pub fn simulate_trace_multi(
     Ok(collector.finish())
 }
 
-pub fn simulate_concurrency_multi(
+fn simulate_concurrency_multi_worker(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
@@ -457,6 +460,31 @@ pub fn simulate_concurrency_multi(
     )
     .run(&args)?;
     Ok(collector.finish())
+}
+
+pub fn simulate_trace(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+) -> anyhow::Result<TraceSimulationReport> {
+    if num_workers == 1 {
+        simulate_single_worker_trace(args, requests)
+    } else {
+        simulate_trace_multi_worker(args, requests, num_workers)
+    }
+}
+
+pub fn simulate_concurrency(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> anyhow::Result<TraceSimulationReport> {
+    if num_workers == 1 {
+        simulate_single_worker_concurrency(args, requests, max_in_flight)
+    } else {
+        simulate_concurrency_multi_worker(args, requests, max_in_flight, num_workers)
+    }
 }
 
 #[cfg(test)]
