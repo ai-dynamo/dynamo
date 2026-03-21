@@ -8,11 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-// ---------------------------------------------------------------------------
-// Cache control (Anthropic-native concept)
-// ---------------------------------------------------------------------------
-
 /// Anthropic-style cache control hint for prefix pinning with TTL.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct CacheControl {
@@ -57,11 +52,6 @@ impl CacheControl {
         raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Custom deserializers
-// ---------------------------------------------------------------------------
-
 /// Parsed system prompt content, preserving cache_control from block arrays.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemContent {
@@ -113,11 +103,6 @@ where
         }
     }))
 }
-
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 /// Top-level request body for `POST /v1/messages`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicCreateMessageRequest {
@@ -592,11 +577,6 @@ pub struct AnthropicToolChoiceNamed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_parallel_tool_use: Option<bool>,
 }
-
-// ---------------------------------------------------------------------------
-// Response types
-// ---------------------------------------------------------------------------
-
 /// Response body for `POST /v1/messages` (non-streaming).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicMessageResponse {
@@ -682,11 +662,6 @@ pub enum AnthropicStopReason {
     /// The model refused to generate content (safety refusal).
     Refusal,
 }
-
-// ---------------------------------------------------------------------------
-// Streaming types
-// ---------------------------------------------------------------------------
-
 /// SSE event types for the Anthropic streaming API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -747,11 +722,6 @@ pub struct AnthropicMessageDeltaBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
 /// Anthropic API error response wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicErrorResponse {
@@ -802,11 +772,6 @@ impl AnthropicErrorResponse {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Count tokens
-// ---------------------------------------------------------------------------
-
 /// Request body for `POST /v1/messages/count_tokens`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnthropicCountTokensRequest {

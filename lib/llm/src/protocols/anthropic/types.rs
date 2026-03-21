@@ -29,11 +29,6 @@ use crate::protocols::openai::chat_completions::{
 };
 use crate::protocols::openai::common_ext::CommonExt;
 use crate::protocols::openai::nvext::NvExt;
-
-// ---------------------------------------------------------------------------
-// Conversion: AnthropicCreateMessageRequest -> NvCreateChatCompletionRequest
-// ---------------------------------------------------------------------------
-
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -458,11 +453,6 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Conversion: NvCreateChatCompletionResponse -> AnthropicMessageResponse
-// ---------------------------------------------------------------------------
-
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -568,11 +558,6 @@ pub fn chat_completion_to_anthropic_response(
         usage,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
