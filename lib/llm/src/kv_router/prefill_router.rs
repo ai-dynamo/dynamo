@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use futures::StreamExt;
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -115,8 +115,8 @@ pub struct PrefillRouter {
     enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
-    /// Namespace used to look up the correct WorkerSet's worker monitor
-    namespace: String,
+    /// Decode WorkerSet key used to look up the correct worker monitor
+    worker_set_key: String,
 }
 
 impl PrefillRouter {
@@ -133,21 +133,21 @@ impl PrefillRouter {
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
-            model_name: String::new(), // Not used for disabled router
-            namespace: String::new(),  // Not used for disabled router
+            model_name: String::new(),     // Not used for disabled router
+            worker_set_key: String::new(), // Not used for disabled router
         })
     }
 
     #[expect(clippy::too_many_arguments)]
     pub fn new(
-        activation_rx: oneshot::Receiver<Endpoint>,
+        mut activation_rx: watch::Receiver<Option<Endpoint>>,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
         model_name: String,
-        namespace: String,
+        worker_set_key: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -160,30 +160,40 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name,
-            namespace,
+            worker_set_key,
         });
 
-        // Spawn background task to wait for activation
+        // Spawn background task to wait for the shared prefill endpoint.
         let router_clone = router.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                result = activation_rx => {
-                    let Ok(endpoint) = result else {
-                        tracing::debug!("Prefill router activation channel closed without receiving endpoint");
-                        return;
-                    };
-
-                    if let Err(e) = router_clone.activate(
-                        endpoint,
-                        model_manager,
-                        kv_cache_block_size,
-                        kv_router_config,
-                    ).await {
+            loop {
+                let endpoint = { activation_rx.borrow().clone() };
+                if let Some(endpoint) = endpoint {
+                    if let Err(e) = router_clone
+                        .activate(
+                            endpoint,
+                            model_manager,
+                            kv_cache_block_size,
+                            kv_router_config,
+                        )
+                        .await
+                    {
                         tracing::error!(error = %e, "Failed to activate prefill router");
                     }
+                    return;
                 }
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("Prefill router activation cancelled");
+
+                tokio::select! {
+                    result = activation_rx.changed() => {
+                        if result.is_err() {
+                            tracing::debug!("Prefill router activation channel closed without receiving endpoint");
+                            return;
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        tracing::debug!("Prefill router activation cancelled");
+                        return;
+                    }
                 }
             }
         });
@@ -229,8 +239,8 @@ impl PrefillRouter {
             let client = kv_chooser.client().clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) =
-                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            if let Some(monitor) = model_manager
+                .get_worker_monitor_for_worker_set(&self.model_name, &self.worker_set_key)
             {
                 monitor.set_prefill_client(client.clone());
             }
@@ -251,8 +261,8 @@ impl PrefillRouter {
             let client = endpoint.client().await?;
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) =
-                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            if let Some(monitor) = model_manager
+                .get_worker_monitor_for_worker_set(&self.model_name, &self.worker_set_key)
             {
                 monitor.set_prefill_client(client.clone());
             }

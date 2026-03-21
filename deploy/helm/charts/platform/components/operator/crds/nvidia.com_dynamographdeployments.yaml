@@ -11173,6 +11173,15 @@ spec:
                         required:
                           - nodeCount
                         type: object
+                      priority:
+                        description: |-
+                          Priority for worker selection routing. Higher values are preferred by the
+                          frontend when multiple workers serve the same model. Workers at the highest
+                          priority tier receive all traffic; lower tiers only receive traffic when all
+                          higher-tier workers are unhealthy. Default: 0 (lowest priority).
+                        format: int32
+                        minimum: 0
+                        type: integer
                       readinessProbe:
                         description: ReadinessProbe to signal when the container is ready to receive traffic.
                         properties:
