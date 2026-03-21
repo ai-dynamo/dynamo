@@ -43,6 +43,10 @@ kvbench-xpu = ["dep:clap", "dep:syclrc", "level-zero"]
 # but this feature is provided so consumers can express the intent.
 level-zero = []
 
+# Enable SYCL kernel path (runtime-loads libvectorized_copy_sycl.so).
+# Requires libloading for dlopen at runtime.
+sycl-kernel = ["dep:libloading", "level-zero"]
+
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]
@@ -57,6 +61,7 @@ cudarc = { workspace = true }
 # kvbench
 clap = { version = "4", features = ["derive"], optional = true }
 syclrc = { path = "../../../zxue2_syclrc", optional = true }
+libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
 ndarray = "0.17.2"
