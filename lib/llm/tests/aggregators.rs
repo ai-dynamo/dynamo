@@ -45,6 +45,7 @@ async fn test_openai_chat_stream() {
     assert_eq!(
         get_text(
             result
+                .inner
                 .choices
                 .first()
                 .unwrap()
@@ -70,6 +71,7 @@ async fn test_openai_chat_edge_case_multi_line_data() {
     assert_eq!(
         get_text(
             result
+                .inner
                 .choices
                 .first()
                 .unwrap()
@@ -95,6 +97,7 @@ async fn test_openai_chat_edge_case_comments_per_response() {
     assert_eq!(
         get_text(
             result
+                .inner
                 .choices
                 .first()
                 .unwrap()

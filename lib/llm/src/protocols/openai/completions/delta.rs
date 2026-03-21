@@ -218,10 +218,9 @@ impl DeltaGenerator {
             } else {
                 None
             },
-            nvext: None, // Will be populated by router layer if needed
         };
 
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 
     /// Creates a final usage-only chunk for OpenAI compliance.
@@ -240,10 +239,9 @@ impl DeltaGenerator {
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
-            nvext: None, // Will be populated by router layer if needed
         };
 
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 
     /// Check if usage tracking is enabled
@@ -343,7 +341,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                response.inner.nvext = Some(nvext_json);
+                response.nvext = Some(nvext_json);
                 if let Some(ref info) = worker_id_info {
                     tracing::debug!(
                         "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
