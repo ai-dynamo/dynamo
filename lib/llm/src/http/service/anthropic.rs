@@ -257,6 +257,8 @@ async fn anthropic_messages(
         // Preserve reasoning from prior turns. Some templates (Nemotron)
         // strip historical <think> content by default to save context.
         // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
         args.entry("truncate_history_thinking".to_string())
             .or_insert(serde_json::Value::Bool(false));
     }
