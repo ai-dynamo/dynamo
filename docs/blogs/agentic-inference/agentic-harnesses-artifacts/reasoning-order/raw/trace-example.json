@@ -1,0 +1,32 @@
+{
+  "description": "Multi-turn conversation with interleaved reasoning and tool calls",
+  "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+  "original_generation_order": [
+    {"type": "thinking", "content": "The user wants sqrt(144) first. sqrt(144) = 12. I should use calculator."},
+    {"type": "tool_call", "name": "calculator", "arguments": "{\"expression\":\"sqrt(144)\"}"},
+    {"type": "thinking", "content": "Got 12. Now multiply by 7."},
+    {"type": "tool_call", "name": "calculator", "arguments": "{\"expression\":\"12 * 7\"}"}
+  ],
+  "correct_reconstruction": {
+    "reasoning_content": [
+      "The user wants sqrt(144) first. sqrt(144) = 12. I should use calculator.",
+      "Got 12. Now multiply by 7.",
+      ""
+    ],
+    "tool_calls": [
+      {"id": "call_01", "type": "function", "function": {"name": "calculator", "arguments": "{\"expression\":\"sqrt(144)\"}"}},
+      {"id": "call_02", "type": "function", "function": {"name": "calculator", "arguments": "{\"expression\":\"12 * 7\"}"}}
+    ],
+    "token_order": "<think>reasoning_0</think> tool_call_0 <think>reasoning_1</think> tool_call_1",
+    "note": "Preserves original interleaving — segments[i] precedes tool_calls[i]"
+  },
+  "incorrect_reconstruction": {
+    "reasoning_content": "The user wants sqrt(144) first. sqrt(144) = 12. I should use calculator.\nGot 12. Now multiply by 7.\n",
+    "tool_calls": [
+      {"id": "call_01", "type": "function", "function": {"name": "calculator", "arguments": "{\"expression\":\"sqrt(144)\"}"}},
+      {"id": "call_02", "type": "function", "function": {"name": "calculator", "arguments": "{\"expression\":\"12 * 7\"}"}}
+    ],
+    "token_order": "<think>reasoning_0 reasoning_1</think> tool_call_0 tool_call_1",
+    "note": "All reasoning collapsed before all tool calls — prefix diverges from original generation"
+  }
+}
