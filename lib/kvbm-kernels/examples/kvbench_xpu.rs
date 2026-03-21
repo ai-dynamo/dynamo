@@ -467,7 +467,6 @@ unsafe fn execute_vectorized(
     src_addrs_dev: &ZeSlice<u8>,
     dst_addrs_dev: &ZeSlice<u8>,
     ptr_array_bytes: usize,
-    copy_size: usize,
     num_copies: usize,
 ) {
     unsafe {
@@ -493,17 +492,8 @@ unsafe fn execute_vectorized(
     }
     cmd_copy.host_synchronize(u64::MAX).expect("sync copy");
 
-    // Set kernel arguments.
-    let src_ptr = src_addrs_dev.as_ptr() as u64;
-    let dst_ptr = dst_addrs_dev.as_ptr() as u64;
-    let copy_sz = copy_size as u64;
-    let n_pairs = num_copies as i32;
-    unsafe {
-        kernel.set_arg(0, &src_ptr).expect("arg0");
-        kernel.set_arg(1, &dst_ptr).expect("arg1");
-        kernel.set_arg(2, &copy_sz).expect("arg2");
-        kernel.set_arg(3, &n_pairs).expect("arg3");
-    }
+    // Kernel arguments are set once by the caller (run_benchmark),
+    // not per iteration — they don't change between iterations.
 
     let num_groups = std::cmp::min(num_copies as u32, vc::MAX_GROUPS);
     let group_count = sys::ze_group_count_t {
@@ -668,6 +658,20 @@ fn run_benchmark(
         None
     };
 
+    // Set kernel arguments once (they don't change across iterations).
+    if matches!(backend, Backend::Vectorized) {
+        let src_ptr = src_addrs_dev.as_ref().unwrap().as_ptr() as u64;
+        let dst_ptr = dst_addrs_dev.as_ref().unwrap().as_ptr() as u64;
+        let copy_sz = copy_size as u64;
+        let n_pairs = num_copies as i32;
+        unsafe {
+            kernel.set_arg(0, &src_ptr).expect("arg0");
+            kernel.set_arg(1, &dst_ptr).expect("arg1");
+            kernel.set_arg(2, &copy_sz).expect("arg2");
+            kernel.set_arg(3, &n_pairs).expect("arg3");
+        }
+    }
+
     // Warmup.
     for _ in 0..warmup_iters {
         unsafe {
@@ -681,7 +685,6 @@ fn run_benchmark(
                     src_addrs_dev.as_ref().unwrap(),
                     dst_addrs_dev.as_ref().unwrap(),
                     ptr_array_bytes,
-                    copy_size,
                     num_copies,
                 ),
                 Backend::Memcpy => {
@@ -718,7 +721,6 @@ fn run_benchmark(
                     src_addrs_dev.as_ref().unwrap(),
                     dst_addrs_dev.as_ref().unwrap(),
                     ptr_array_bytes,
-                    copy_size,
                     num_copies,
                 ),
                 Backend::Memcpy => {
