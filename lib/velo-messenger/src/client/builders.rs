@@ -235,12 +235,21 @@ impl From<ResolveError> for anyhow::Error {
 /// Result wrapper for sync operations (acknowledgment only)
 pub struct SyncResult {
     awaiter: Option<crate::common::responses::ResponseAwaiter>,
+    immediate_error: Option<anyhow::Error>,
 }
 
 impl SyncResult {
     fn new(awaiter: crate::common::responses::ResponseAwaiter) -> Self {
         Self {
             awaiter: Some(awaiter),
+            immediate_error: None,
+        }
+    }
+
+    fn error(err: anyhow::Error) -> Self {
+        Self {
+            awaiter: None,
+            immediate_error: Some(err),
         }
     }
 }
@@ -249,6 +258,10 @@ impl Future for SyncResult {
     type Output = Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(err) = self.immediate_error.take() {
+            return Poll::Ready(Err(err));
+        }
+
         let awaiter = self
             .awaiter
             .as_mut()
@@ -270,12 +283,21 @@ impl Future for SyncResult {
 /// Result wrapper for unary operations returning raw bytes
 pub struct UnaryResult {
     awaiter: Option<crate::common::responses::ResponseAwaiter>,
+    immediate_error: Option<anyhow::Error>,
 }
 
 impl UnaryResult {
     fn new(awaiter: crate::common::responses::ResponseAwaiter) -> Self {
         Self {
             awaiter: Some(awaiter),
+            immediate_error: None,
+        }
+    }
+
+    fn error(err: anyhow::Error) -> Self {
+        Self {
+            awaiter: None,
+            immediate_error: Some(err),
         }
     }
 }
@@ -284,6 +306,10 @@ impl Future for UnaryResult {
     type Output = Result<Bytes>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(err) = self.immediate_error.take() {
+            return Poll::Ready(Err(err));
+        }
+
         let awaiter = self
             .awaiter
             .as_mut()
@@ -306,6 +332,7 @@ impl Future for UnaryResult {
 /// Result wrapper for typed unary operations with deserialization
 pub struct TypedUnaryResult<R> {
     awaiter: Option<crate::common::responses::ResponseAwaiter>,
+    immediate_error: Option<anyhow::Error>,
     _marker: std::marker::PhantomData<R>,
 }
 
@@ -313,6 +340,15 @@ impl<R> TypedUnaryResult<R> {
     fn new(awaiter: crate::common::responses::ResponseAwaiter) -> Self {
         Self {
             awaiter: Some(awaiter),
+            immediate_error: None,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn error(err: anyhow::Error) -> Self {
+        Self {
+            awaiter: None,
+            immediate_error: Some(err),
             _marker: std::marker::PhantomData,
         }
     }
@@ -324,6 +360,11 @@ impl<R: DeserializeOwned> Future for TypedUnaryResult<R> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY: TypedUnaryResult is Unpin because ResponseAwaiter and PhantomData are both Unpin
         let this = unsafe { self.get_unchecked_mut() };
+
+        if let Some(err) = this.immediate_error.take() {
+            return Poll::Ready(Err(err));
+        }
+
         let awaiter = this
             .awaiter
             .as_mut()
@@ -618,7 +659,7 @@ impl MessageBuilder {
             Ok(awaiter) => awaiter,
             Err(e) => {
                 tracing::error!(target: "velo_messenger::client", error = %e, "Failed to register outcome");
-                panic!("Failed to register outcome: {}", e);
+                return SyncResult::error(anyhow!("Failed to register outcome: {}", e));
             }
         };
 
@@ -673,7 +714,7 @@ impl MessageBuilder {
             Ok(awaiter) => awaiter,
             Err(e) => {
                 tracing::error!(target: "velo_messenger::client", error = %e, "Failed to register outcome");
-                panic!("Failed to register outcome: {}", e);
+                return UnaryResult::error(anyhow!("Failed to register outcome: {}", e));
             }
         };
 
@@ -731,7 +772,7 @@ impl MessageBuilder {
             Ok(awaiter) => awaiter,
             Err(e) => {
                 tracing::error!(target: "velo_messenger::client", error = %e, "Failed to register outcome");
-                panic!("Failed to register outcome: {}", e);
+                return TypedUnaryResult::error(anyhow!("Failed to register outcome: {}", e));
             }
         };
 
