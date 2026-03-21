@@ -183,7 +183,8 @@ impl OfflineRuntime {
 
     // Apply every worker completion at the current timestamp before releasing
     // new arrivals or topping off replay-concurrency.
-    fn apply_worker_completions(&mut self) {
+    fn apply_worker_completions(&mut self) -> bool {
+        let mut changed = false;
         while self
             .completions
             .peek()
@@ -196,12 +197,16 @@ impl OfflineRuntime {
             let worker = &mut self.workers[completion.worker_idx];
             worker.busy = false;
             self.apply_completed_requests(completion.worker_idx, completion.completed_requests);
+            changed = true;
         }
+
+        changed
     }
 
     // Trace mode keeps arrivals in timestamp order and drains every request that
     // is visible at the current simulated time.
-    fn release_trace_arrivals(&mut self) {
+    fn release_trace_arrivals(&mut self) -> bool {
+        let mut released_any = false;
         while self
             .pending
             .front()
@@ -216,23 +221,31 @@ impl OfflineRuntime {
                 .arrival_timestamp_ms
                 .expect("trace replay requests must have an arrival timestamp");
             self.assign_request(request, arrival_ms);
+            released_any = true;
         }
+
+        released_any
     }
 
     // Replay-concurrency uses the cluster snapshot as the sole source of truth
     // for whether more requests may be released right now.
-    fn top_off_concurrency(&mut self, max_in_flight: usize) {
+    fn top_off_concurrency(&mut self, max_in_flight: usize) -> bool {
+        let mut released_any = false;
         while self.snapshot.cluster_in_flight < max_in_flight {
             let Some(request) = self.pending.pop_front() else {
                 break;
             };
             self.assign_request(request, self.snapshot.now_ms);
+            released_any = true;
         }
+
+        released_any
     }
 
     // Run every idle worker until it either blocks on a future completion event
     // or becomes empty. Zero-duration completions are applied inline.
-    fn drive_ready_workers(&mut self, args: &MockEngineArgs) -> anyhow::Result<()> {
+    fn drive_ready_workers(&mut self, args: &MockEngineArgs) -> anyhow::Result<bool> {
+        let mut changed = false;
         for worker_idx in 0..self.workers.len() {
             loop {
                 if self.workers[worker_idx].busy {
@@ -248,6 +261,7 @@ impl OfflineRuntime {
                         .core
                         .execute_pass(args, collector, self.snapshot.now_ms)
                 };
+                changed = true;
 
                 if !executed.made_progress {
                     bail!(
@@ -272,17 +286,34 @@ impl OfflineRuntime {
             }
         }
 
+        Ok(changed)
+    }
+
+    fn drain_current_timestamp(&mut self, args: &MockEngineArgs) -> anyhow::Result<()> {
+        loop {
+            let mut changed = self.apply_worker_completions();
+
+            changed |= match self.mode {
+                ReplayMode::Trace => self.release_trace_arrivals(),
+                ReplayMode::Concurrency { max_in_flight } => {
+                    self.top_off_concurrency(max_in_flight)
+                }
+            };
+
+            changed |= self.drive_ready_workers(args)?;
+
+            if !changed {
+                break;
+            }
+        }
+
         Ok(())
     }
 
     // Global event loop: apply completions at a timestamp, release any arrivals
     // now visible at that same timestamp, then drive newly idle workers.
     fn run(mut self, args: &MockEngineArgs) -> anyhow::Result<TraceCollector> {
-        match self.mode {
-            ReplayMode::Trace => self.release_trace_arrivals(),
-            ReplayMode::Concurrency { max_in_flight } => self.top_off_concurrency(max_in_flight),
-        }
-        self.drive_ready_workers(args)?;
+        self.drain_current_timestamp(args)?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
@@ -293,15 +324,7 @@ impl OfflineRuntime {
             };
 
             self.snapshot.now_ms = next_timestamp_ms;
-            self.apply_worker_completions();
-
-            match self.mode {
-                ReplayMode::Trace => self.release_trace_arrivals(),
-                ReplayMode::Concurrency { max_in_flight } => {
-                    self.top_off_concurrency(max_in_flight)
-                }
-            }
-            self.drive_ready_workers(args)?;
+            self.drain_current_timestamp(args)?;
         }
 
         Ok(self.collector)
