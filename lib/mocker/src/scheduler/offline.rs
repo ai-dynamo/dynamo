@@ -67,6 +67,8 @@ impl OfflineWorkerState {
         }
     }
 
+    // Eagerly run one worker pass (prefill + decode) and summarize the result
+    // for the cluster runtime without exposing worker-local internals.
     fn execute_pass(
         &mut self,
         args: &MockEngineArgs,
@@ -177,6 +179,8 @@ impl OfflineRuntime {
         }
     }
 
+    // Record a request release in the cluster snapshot, then enqueue it on the
+    // next worker selected by deterministic round robin.
     fn assign_request(&mut self, mut request: DirectRequest, arrival_time_ms: f64) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -238,6 +242,8 @@ impl OfflineRuntime {
         }
     }
 
+    // Only the runtime-owned snapshot is allowed to drive cluster decisions, so
+    // request completions become visible here rather than by probing workers.
     fn apply_completed_requests(&mut self, worker_idx: usize, completed_requests: usize) {
         self.snapshot.cluster_in_flight = self
             .snapshot
@@ -247,6 +253,8 @@ impl OfflineRuntime {
             self.snapshot.per_worker_in_flight[worker_idx].saturating_sub(completed_requests);
     }
 
+    // Apply every worker completion at the current timestamp before releasing
+    // new arrivals or topping off replay-concurrency.
     fn apply_worker_completions(&mut self) {
         while self
             .completions
@@ -263,6 +271,8 @@ impl OfflineRuntime {
         }
     }
 
+    // Trace mode keeps arrivals in timestamp order and drains every request that
+    // is visible at the current simulated time.
     fn release_trace_arrivals(&mut self) {
         while self
             .pending
@@ -281,6 +291,8 @@ impl OfflineRuntime {
         }
     }
 
+    // Replay-concurrency uses the cluster snapshot as the sole source of truth
+    // for whether more requests may be released right now.
     fn top_off_concurrency(&mut self, max_in_flight: usize) {
         while self.snapshot.cluster_in_flight < max_in_flight {
             let Some(request) = self.pending.pop_front() else {
@@ -290,6 +302,8 @@ impl OfflineRuntime {
         }
     }
 
+    // Run every idle worker until it either blocks on a future completion event
+    // or becomes empty. Zero-duration completions are applied inline.
     fn drive_ready_workers(&mut self, args: &MockEngineArgs) -> anyhow::Result<()> {
         for worker_idx in 0..self.workers.len() {
             loop {
@@ -331,6 +345,8 @@ impl OfflineRuntime {
         Ok(())
     }
 
+    // Global event loop: apply completions at a timestamp, release any arrivals
+    // now visible at that same timestamp, then drive newly idle workers.
     fn run(mut self, args: &MockEngineArgs) -> anyhow::Result<TraceCollector> {
         match self.mode {
             ReplayMode::Trace => self.release_trace_arrivals(),
