@@ -129,6 +129,19 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
         "engine_type": getattr(args, "engine_type", None),
     }
 
+    # If --aic-perf-model is set, add AIC fields
+    if getattr(args, "aic_perf_model", False):
+        engine_type = getattr(args, "engine_type", None) or "vllm"
+        engine_args["aic_backend"] = engine_type
+        if getattr(args, "aic_system", None):
+            engine_args["aic_system"] = args.aic_system
+        if getattr(args, "aic_backend_version", None):
+            engine_args["aic_backend_version"] = args.aic_backend_version
+        if getattr(args, "aic_tp_size", None):
+            engine_args["aic_tp_size"] = args.aic_tp_size
+        if getattr(args, "model_path", None):
+            engine_args["aic_model_path"] = args.model_path
+
     # Parse --reasoning JSON string into a nested object
     reasoning_str = getattr(args, "reasoning", None)
     if reasoning_str:
@@ -363,6 +376,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to profile results directory containing selected_prefill_interpolation/ and "
         "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
+    )
+    parser.add_argument(
+        "--aic-perf-model",
+        action="store_true",
+        default=False,
+        help="Use direct AIC SDK calls for latency prediction. "
+        "Requires aiconfigurator SDK installed.",
+    )
+    parser.add_argument(
+        "--aic-system",
+        type=str,
+        default=None,
+        help="AIC system name (e.g., 'h200_sxm'). Used with --aic-perf-model.",
+    )
+    parser.add_argument(
+        "--aic-backend-version",
+        type=str,
+        default=None,
+        help="AIC backend engine version (e.g., '0.12.0' for vLLM, '0.5.6.post2' for SGLang). "
+        "If not set, uses the default version for the backend.",
+    )
+    parser.add_argument(
+        "--aic-tp-size",
+        type=int,
+        default=None,
+        help="Tensor parallel size for AIC latency prediction (default: 1). "
+        "Only affects AIC performance model lookups, not mocker scheduling.",
     )
     parser.add_argument(
         "--num-workers",

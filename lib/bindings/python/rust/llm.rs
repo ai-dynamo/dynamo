@@ -23,6 +23,7 @@
 /// integration between Python tools and the Dynamo runtime.
 use super::*;
 
+pub mod aic_callback;
 pub mod entrypoint;
 pub mod fpm;
 pub mod kv;
