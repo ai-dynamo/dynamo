@@ -252,8 +252,7 @@ fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
         match msg.get("content") {
             // Content is a string or null — prepend reasoning as text
             Some(serde_json::Value::String(s)) if !s.is_empty() => {
-                msg["content"] =
-                    serde_json::Value::String(format!("{}{}", reasoning, s));
+                msg["content"] = serde_json::Value::String(format!("{}{}", reasoning, s));
             }
             None | Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {
                 msg["content"] = serde_json::Value::String(reasoning);
@@ -1523,7 +1522,6 @@ NORMAL_MODE
         assert!(messages[0].get("reasoning_content").is_some());
     }
 
-
     // Helper: create a formatter with a minimal chat template for render tests
     fn make_test_formatter() -> HfTokenizerConfigJsonFormatter {
         use super::tokcfg::ChatTemplate;
@@ -1602,7 +1600,7 @@ NORMAL_MODE
                         "type": "function",
                         "function": {
                             "name": "calculator",
-                            "arguments": "{"expr": "sqrt(144)"}"
+                            "arguments": "{\"expr\": \"sqrt(144)\"}"
                         }
                     }]
                 },
