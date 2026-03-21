@@ -598,7 +598,7 @@ impl ConcurrentRadixTreeCompressed {
         };
 
         let num_blocks = op.blocks.len();
-        self.insert_blocks_from(lookup, worker, &parent, &op.blocks);
+        self.insert_blocks_from(lookup, worker, &parent, op.parent_hash, &op.blocks);
 
         match self.tree_sizes.get(&worker) {
             Some(size) => {
@@ -617,6 +617,7 @@ impl ConcurrentRadixTreeCompressed {
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         parent: &SharedNode,
+        seed_hash: Option<ExternalSequenceBlockHash>,
         blocks: &[KvCacheStoredBlockData],
     ) {
         let mut current_parent = parent.clone();
@@ -627,7 +628,11 @@ impl ConcurrentRadixTreeCompressed {
         // hash into a new suffix child. We detect this cheaply inside the write
         // lock we already take on `current_parent`, so no extra lock is needed
         // in the common case.
-        let mut last_ext_hash: Option<ExternalSequenceBlockHash> = None;
+        //
+        // Seeded with parent_hash so the very first iteration detects a split
+        // that occurred after apply_stored released its write lock but before
+        // we acquired ours here.
+        let mut last_ext_hash: Option<ExternalSequenceBlockHash> = seed_hash;
 
         while !remaining.is_empty() {
             let first_local = remaining[0].tokens_hash;
