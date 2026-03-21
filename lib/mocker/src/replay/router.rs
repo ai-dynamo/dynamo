@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::future;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::config::KvRouterConfig;
@@ -143,14 +145,12 @@ impl KvCacheEventSink for ReplayKvEventSink {
 
 #[derive(Default)]
 pub(super) struct RoundRobinRouter {
-    next_worker_idx: usize,
+    next_worker_idx: AtomicUsize,
 }
 
 impl RoundRobinRouter {
-    fn select_worker(&mut self, num_workers: usize) -> usize {
-        let worker_idx = self.next_worker_idx % num_workers;
-        self.next_worker_idx = (self.next_worker_idx + 1) % num_workers;
-        worker_idx
+    fn select_worker(&self, num_workers: usize) -> usize {
+        self.next_worker_idx.fetch_add(1, Ordering::AcqRel) % num_workers
     }
 }
 
@@ -165,8 +165,8 @@ pub(super) struct KvReplayRouter {
             DefaultWorkerSelector,
         >,
     >,
-    event_tx: Option<mpsc::UnboundedSender<RouterEvent>>,
-    event_task: Option<tokio::task::JoinHandle<()>>,
+    event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
+    event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
 }
 
@@ -226,20 +226,23 @@ impl KvReplayRouter {
             config,
             block_size: args.block_size as u32,
             scheduler,
-            event_tx: Some(event_tx),
-            event_task: Some(event_task),
+            event_tx: Mutex::new(Some(event_tx)),
+            event_task: Mutex::new(Some(event_task)),
             indexer,
         }
     }
 
     fn sink(&self, worker_id: WorkerId) -> Arc<dyn KvCacheEventSink> {
+        let event_tx = self
+            .event_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("router event channel should exist while runtime is active")
+            .clone();
         Arc::new(ReplayKvEventSink {
             worker_id,
-            event_tx: self
-                .event_tx
-                .as_ref()
-                .expect("router event channel should exist while runtime is active")
-                .clone(),
+            event_tx,
         })
     }
 
@@ -293,9 +296,9 @@ impl KvReplayRouter {
             .map_err(anyhow::Error::from)
     }
 
-    async fn shutdown(&mut self) -> Result<()> {
-        self.event_tx.take();
-        let Some(event_task) = self.event_task.take() else {
+    async fn shutdown(&self) -> Result<()> {
+        self.event_tx.lock().unwrap().take();
+        let Some(event_task) = self.event_task.lock().unwrap().take() else {
             return Ok(());
         };
         event_task
@@ -330,7 +333,7 @@ impl ReplayRouter {
     }
 
     pub(super) async fn select_worker(
-        &mut self,
+        &self,
         request: &DirectRequest,
         num_workers: usize,
     ) -> Result<usize> {
@@ -360,7 +363,7 @@ impl ReplayRouter {
         }
     }
 
-    pub(super) async fn shutdown(&mut self) -> Result<()> {
+    pub(super) async fn shutdown(&self) -> Result<()> {
         match self {
             Self::RoundRobin(_) => Ok(()),
             Self::Kv(router) => router.shutdown().await,
