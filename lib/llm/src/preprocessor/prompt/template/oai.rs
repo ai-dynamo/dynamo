@@ -1508,12 +1508,14 @@ NORMAL_MODE
         assert!(messages[0].get("reasoning_content").is_some());
     }
 
-    #[test]
-    fn test_reasoning_content_survives_into_rendered_prompt() {
-        use super::tokcfg::ChatTemplate;
-        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
 
-        // Minimal chat template that renders message content verbatim
+    // Helper: create a formatter with a minimal chat template for render tests
+    fn make_test_formatter() -> HfTokenizerConfigJsonFormatter {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        // Minimal template that renders content verbatim — enough to verify
+        // that reasoning_content injection works through the full pipeline.
         let template = r#"{%- for message in messages %}{{ message.role }}: {{ message.content }}
 {%- endfor %}
 {%- if add_generation_prompt %}assistant:{%- endif %}"#;
@@ -1523,47 +1525,108 @@ NORMAL_MODE
         }))
         .unwrap();
 
-        let formatter =
-            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+        HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap()
+    }
 
-        // Multi-turn conversation: assistant's prior turn has reasoning_content
+    // Verify reasoning_content (Text variant) from a prior assistant turn
+    // appears as a <think> block in the rendered prompt.
+    #[test]
+    fn test_reasoning_content_text_roundtrip_render() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [
-                {
-                    "role": "user",
-                    "content": "What is sqrt(144)?"
-                },
+                {"role": "user", "content": "What is sqrt(144)?"},
                 {
                     "role": "assistant",
                     "content": "The answer is 12.",
                     "reasoning_content": "I need to compute the square root of 144."
                 },
-                {
-                    "role": "user",
-                    "content": "Are you sure?"
-                }
+                {"role": "user", "content": "Are you sure?"}
             ]
         }))
         .unwrap();
 
         let rendered = formatter.render(&request).unwrap();
 
-        // The rendered prompt MUST contain the reasoning from the prior turn
         assert!(
             rendered.contains("<think>I need to compute the square root of 144.</think>"),
-            "reasoning_content must appear as <think> block in rendered prompt, got: {}",
+            "reasoning_content must appear as <think> block, got: {}",
             rendered
         );
-        // The original content must also be present
         assert!(
             rendered.contains("The answer is 12."),
-            "original content must be preserved in rendered prompt"
+            "original content must be preserved"
         );
-        // reasoning_content should NOT appear as a raw field (it was removed)
         assert!(
             !rendered.contains("reasoning_content"),
-            "reasoning_content field should not leak into rendered prompt"
+            "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    // Verify a full agentic flow: assistant reasons, calls a tool, gets a
+    // result, then reasons again before answering. Both reasoning turns must
+    // survive into the rendered prompt.
+    #[test]
+    fn test_reasoning_content_agentic_tool_call_roundtrip_render() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "What is sqrt(144) + sqrt(256)?"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "I need to compute both square roots. Let me start with sqrt(144).",
+                    "tool_calls": [{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{"expr": "sqrt(144)"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_0",
+                    "content": "12"
+                },
+                {
+                    "role": "assistant",
+                    "content": "sqrt(144) = 12 and sqrt(256) = 16, so the answer is 28.",
+                    "reasoning_content": "Got 12 for sqrt(144). Now sqrt(256) = 16. Sum is 28."
+                },
+                {"role": "user", "content": "Thanks!"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // First assistant turn: reasoning with tool call, null content
+        assert!(
+            rendered.contains("<think>I need to compute both square roots"),
+            "first turn reasoning must be in prompt, got: {}",
+            rendered
+        );
+        // Second assistant turn: reasoning with final answer
+        assert!(
+            rendered.contains("<think>Got 12 for sqrt(144)"),
+            "second turn reasoning must be in prompt"
+        );
+        assert!(
+            rendered.contains("the answer is 28"),
+            "final answer content must be preserved"
+        );
+        // No raw reasoning_content in output
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "raw reasoning_content field should not leak into prompt"
         );
     }
 }
