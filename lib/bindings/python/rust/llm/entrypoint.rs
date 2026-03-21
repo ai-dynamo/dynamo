@@ -565,14 +565,14 @@ pub fn run_mocker_trace_replay(
             .map_err(|_| anyhow::anyhow!("replay_concurrency must be at least 1"))?;
 
         if let Some(max_in_flight) = replay_concurrency {
-            dynamo_mocker::simulation::simulate_concurrency_file(
+            dynamo_mocker::replay::simulate_concurrency_file(
                 args,
                 &trace_file,
                 max_in_flight,
                 num_workers,
             )
         } else {
-            dynamo_mocker::simulation::simulate_trace_file(args, &trace_file, num_workers)
+            dynamo_mocker::replay::simulate_trace_file(args, &trace_file, num_workers)
         }
     });
     let report = report.map_err(to_pyerr)?;
