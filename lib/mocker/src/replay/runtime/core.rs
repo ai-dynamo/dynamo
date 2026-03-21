@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::state::WorkerProgressSnapshot;
 use crate::common::protocols::{MockEngineArgs, OutputSignal};
 use crate::common::running_mean::RunningMean;
 use crate::kv_manager::KvManager;
@@ -11,16 +12,18 @@ use crate::scheduler::vllm::{
 use tokio::sync::mpsc;
 
 pub(crate) struct ReplayWorkerCore {
+    args: MockEngineArgs,
     pub(crate) scheduler: SchedulerState,
     pub(crate) kv_manager: KvManager,
     hit_rates: RunningMean<f32>,
 }
 
 impl ReplayWorkerCore {
-    pub(crate) fn new(args: &MockEngineArgs) -> Self {
+    pub(crate) fn new(args: MockEngineArgs) -> Self {
         Self {
-            scheduler: SchedulerState::default(),
             kv_manager: KvManager::new(args.num_gpu_blocks, args.block_size),
+            args,
+            scheduler: SchedulerState::default(),
             hit_rates: RunningMean::new(1000),
         }
     }
@@ -42,7 +45,6 @@ impl ReplayWorkerCore {
 
     pub(crate) fn run_prefill_step(
         &mut self,
-        args: &MockEngineArgs,
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> std::time::Duration {
@@ -50,7 +52,7 @@ impl ReplayWorkerCore {
             &mut self.scheduler,
             &mut self.kv_manager,
             &mut self.hit_rates,
-            args,
+            &self.args,
             Some(collector),
             now_ms,
             true,
@@ -59,7 +61,6 @@ impl ReplayWorkerCore {
 
     pub(crate) fn run_decode_step(
         &mut self,
-        args: &MockEngineArgs,
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> std::time::Duration {
@@ -68,7 +69,7 @@ impl ReplayWorkerCore {
             &mut self.scheduler,
             &mut self.kv_manager,
             &output_tx,
-            args,
+            &self.args,
             Some(collector),
             now_ms,
             true,
@@ -99,15 +100,14 @@ impl ReplayWorkerCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        args: &MockEngineArgs,
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> ExecutedPass {
         let before = self.progress_snapshot();
         let requests_before = self.scheduler.requests.len();
-        let prefill_time = self.run_prefill_step(args, collector, now_ms);
+        let prefill_time = self.run_prefill_step(collector, now_ms);
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let decode_time = self.run_decode_step(args, collector, decode_start_ms);
+        let decode_time = self.run_decode_step(collector, decode_start_ms);
         let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
         let after = self.progress_snapshot();
@@ -126,15 +126,4 @@ pub(crate) struct ExecutedPass {
     pub(crate) end_ms: f64,
     pub(crate) completed_requests: usize,
     pub(crate) made_progress: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WorkerProgressSnapshot {
-    waiting_len: usize,
-    prefill_len: usize,
-    decode_len: usize,
-    request_count: usize,
-    total_generated_tokens: usize,
-    total_allocated_tokens: usize,
-    active_blocks: usize,
 }

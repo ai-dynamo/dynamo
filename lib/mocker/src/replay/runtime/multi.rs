@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::core::ReplayWorkerCore;
 use super::events::WorkerCompletion;
+use super::normalize_trace_requests;
+use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::replay::{TraceCollector, TraceSimulationReport};
 use anyhow::bail;
@@ -16,31 +17,8 @@ enum ReplayMode {
     Concurrency { max_in_flight: usize },
 }
 
-#[derive(Debug, Clone)]
-struct ClusterSnapshot {
-    now_ms: f64,
-    cluster_in_flight: usize,
-    per_worker_in_flight: Vec<usize>,
-}
-
-struct OfflineWorkerState {
-    worker_idx: usize,
-    core: ReplayWorkerCore,
-    busy: bool,
-}
-
-impl OfflineWorkerState {
-    fn new(worker_idx: usize, args: &MockEngineArgs) -> Self {
-        Self {
-            worker_idx,
-            core: ReplayWorkerCore::new(args),
-            busy: false,
-        }
-    }
-}
-
 struct OfflineRuntime {
-    snapshot: ClusterSnapshot,
+    now_ms: f64,
     next_worker_idx: usize,
     pending: VecDeque<DirectRequest>,
     workers: Vec<OfflineWorkerState>,
@@ -57,15 +35,11 @@ impl OfflineRuntime {
         mode: ReplayMode,
     ) -> Self {
         Self {
-            snapshot: ClusterSnapshot {
-                now_ms: 0.0,
-                cluster_in_flight: 0,
-                per_worker_in_flight: vec![0; num_workers],
-            },
+            now_ms: 0.0,
             next_worker_idx: 0,
             pending,
             workers: (0..num_workers)
-                .map(|worker_idx| OfflineWorkerState::new(worker_idx, args))
+                .map(|worker_idx| OfflineWorkerState::new(worker_idx, args.clone()))
                 .collect(),
             collector: TraceCollector::default(),
             completions: BinaryHeap::new(),
@@ -73,7 +47,11 @@ impl OfflineRuntime {
         }
     }
 
-    // Record a request release in the cluster snapshot, then enqueue it on the
+    fn cluster_in_flight(&self) -> usize {
+        self.workers.iter().map(OfflineWorkerState::in_flight).sum()
+    }
+
+    // Record a request release on the selected worker, then enqueue it on the
     // next worker selected by deterministic round robin.
     fn assign_request(&mut self, mut request: DirectRequest, arrival_time_ms: f64) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
@@ -92,13 +70,10 @@ impl OfflineRuntime {
         let worker_idx = self.next_worker_idx;
         self.next_worker_idx = (self.next_worker_idx + 1) % self.workers.len();
 
-        self.snapshot.cluster_in_flight += 1;
-        self.snapshot.per_worker_in_flight[worker_idx] += 1;
-
-        // TODO: If future cluster scheduling needs worker-local metrics beyond the
-        // in-flight counts in ClusterSnapshot, promote those metrics into the
-        // snapshot or move to a finer event model.
-        self.workers[worker_idx].core.receive(request);
+        // TODO: If future cluster scheduling needs worker-local metrics beyond
+        // these runtime-approved counters, promote them into OfflineWorkerState
+        // or move to a finer event model.
+        self.workers[worker_idx].receive_request(request);
 
         uuid
     }
@@ -106,16 +81,8 @@ impl OfflineRuntime {
     fn is_done(&self) -> bool {
         self.pending.is_empty()
             && self.completions.is_empty()
-            && self.snapshot.cluster_in_flight == 0
-            && self
-                .snapshot
-                .per_worker_in_flight
-                .iter()
-                .all(|count| *count == 0)
-            && self
-                .workers
-                .iter()
-                .all(|worker| !worker.busy && worker.core.scheduler.is_empty())
+            && self.cluster_in_flight() == 0
+            && self.workers.iter().all(OfflineWorkerState::is_drained)
     }
 
     fn next_timestamp(&self) -> Option<f64> {
@@ -136,15 +103,8 @@ impl OfflineRuntime {
         }
     }
 
-    // Only the runtime-owned snapshot is allowed to drive cluster decisions, so
-    // request completions become visible here rather than by probing workers.
     fn apply_completed_requests(&mut self, worker_idx: usize, completed_requests: usize) {
-        self.snapshot.cluster_in_flight = self
-            .snapshot
-            .cluster_in_flight
-            .saturating_sub(completed_requests);
-        self.snapshot.per_worker_in_flight[worker_idx] =
-            self.snapshot.per_worker_in_flight[worker_idx].saturating_sub(completed_requests);
+        self.workers[worker_idx].mark_completed(completed_requests);
     }
 
     // Apply every worker completion at the current timestamp before releasing
@@ -154,14 +114,14 @@ impl OfflineRuntime {
         while self
             .completions
             .peek()
-            .is_some_and(|completion| completion.at_ms == self.snapshot.now_ms)
+            .is_some_and(|completion| completion.at_ms == self.now_ms)
         {
             let completion = self
                 .completions
                 .pop()
                 .expect("completion must exist after peek");
             let worker = &mut self.workers[completion.worker_idx];
-            worker.busy = false;
+            worker.mark_idle();
             self.apply_completed_requests(completion.worker_idx, completion.completed_requests);
             changed = true;
         }
@@ -177,7 +137,7 @@ impl OfflineRuntime {
             .pending
             .front()
             .and_then(|request| request.arrival_timestamp_ms)
-            .is_some_and(|arrival_ms| arrival_ms <= self.snapshot.now_ms)
+            .is_some_and(|arrival_ms| arrival_ms <= self.now_ms)
         {
             let request = self
                 .pending
@@ -193,15 +153,15 @@ impl OfflineRuntime {
         released_any
     }
 
-    // Replay-concurrency uses the cluster snapshot as the sole source of truth
-    // for whether more requests may be released right now.
+    // Replay-concurrency uses the runtime-approved worker in-flight counters as
+    // the sole source of truth for whether more requests may be released now.
     fn top_off_concurrency(&mut self, max_in_flight: usize) -> bool {
         let mut released_any = false;
-        while self.snapshot.cluster_in_flight < max_in_flight {
+        while self.cluster_in_flight() < max_in_flight {
             let Some(request) = self.pending.pop_front() else {
                 break;
             };
-            self.assign_request(request, self.snapshot.now_ms);
+            self.assign_request(request, self.now_ms);
             released_any = true;
         }
 
@@ -210,39 +170,34 @@ impl OfflineRuntime {
 
     // Run every idle worker until it either blocks on a future completion event
     // or becomes empty. Zero-duration completions are applied inline.
-    fn drive_ready_workers(&mut self, args: &MockEngineArgs) -> anyhow::Result<bool> {
+    fn drive_ready_workers(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
         for worker_idx in 0..self.workers.len() {
             loop {
-                if self.workers[worker_idx].busy {
-                    break;
-                }
-                if self.workers[worker_idx].core.scheduler.is_empty() {
+                if !self.workers[worker_idx].is_ready() {
                     break;
                 }
 
                 let executed = {
                     let (workers, collector) = (&mut self.workers, &mut self.collector);
-                    workers[worker_idx]
-                        .core
-                        .execute_pass(args, collector, self.snapshot.now_ms)
+                    workers[worker_idx].execute_pass(collector, self.now_ms)
                 };
                 changed = true;
 
                 if !executed.made_progress {
                     bail!(
                         "offline replay worker {} made no progress at {} ms",
-                        self.workers[worker_idx].worker_idx,
-                        self.snapshot.now_ms
+                        self.workers[worker_idx].worker_idx(),
+                        self.now_ms
                     );
                 }
 
-                if executed.end_ms == self.snapshot.now_ms {
+                if executed.end_ms == self.now_ms {
                     self.apply_completed_requests(worker_idx, executed.completed_requests);
                     continue;
                 }
 
-                self.workers[worker_idx].busy = true;
+                self.workers[worker_idx].mark_busy();
                 self.completions.push(WorkerCompletion {
                     at_ms: executed.end_ms,
                     worker_idx,
@@ -255,7 +210,7 @@ impl OfflineRuntime {
         Ok(changed)
     }
 
-    fn drain_current_timestamp(&mut self, args: &MockEngineArgs) -> anyhow::Result<()> {
+    fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
             let mut changed = self.apply_worker_completions();
 
@@ -266,7 +221,7 @@ impl OfflineRuntime {
                 }
             };
 
-            changed |= self.drive_ready_workers(args)?;
+            changed |= self.drive_ready_workers()?;
 
             if !changed {
                 break;
@@ -278,56 +233,23 @@ impl OfflineRuntime {
 
     // Global event loop: apply completions at a timestamp, release any arrivals
     // now visible at that same timestamp, then drive newly idle workers.
-    fn run(mut self, args: &MockEngineArgs) -> anyhow::Result<TraceCollector> {
-        self.drain_current_timestamp(args)?;
+    fn run(mut self) -> anyhow::Result<TraceCollector> {
+        self.drain_current_timestamp()?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
                 bail!(
                     "offline replay reached a dead end with {} in-flight requests remaining",
-                    self.snapshot.cluster_in_flight
+                    self.cluster_in_flight()
                 );
             };
 
-            self.snapshot.now_ms = next_timestamp_ms;
-            self.drain_current_timestamp(args)?;
+            self.now_ms = next_timestamp_ms;
+            self.drain_current_timestamp()?;
         }
 
         Ok(self.collector)
     }
-}
-
-fn normalize_trace_requests(
-    mut requests: Vec<DirectRequest>,
-) -> anyhow::Result<VecDeque<DirectRequest>> {
-    requests.sort_by(|left, right| {
-        let left_ts = left
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        let right_ts = right
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        left_ts.total_cmp(&right_ts)
-    });
-
-    let first_arrival_ms = requests
-        .first()
-        .and_then(|request| request.arrival_timestamp_ms)
-        .ok_or_else(|| anyhow::anyhow!("trace replay requires at least one timestamped request"))?;
-
-    Ok(VecDeque::from(
-        requests
-            .into_iter()
-            .map(|mut request| {
-                let arrival_timestamp_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp")
-                    - first_arrival_ms;
-                request.arrival_timestamp_ms = Some(arrival_timestamp_ms);
-                request
-            })
-            .collect::<Vec<_>>(),
-    ))
 }
 
 pub(crate) fn simulate_trace_multi(
@@ -337,8 +259,7 @@ pub(crate) fn simulate_trace_multi(
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
     let pending = normalize_trace_requests(requests)?;
-    let collector =
-        OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace).run(&args)?;
+    let collector = OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace).run()?;
     Ok(collector.finish())
 }
 
@@ -356,7 +277,7 @@ pub(crate) fn simulate_concurrency_multi(
         num_workers,
         ReplayMode::Concurrency { max_in_flight },
     )
-    .run(&args)?;
+    .run()?;
     Ok(collector.finish())
 }
 
@@ -384,7 +305,7 @@ mod tests {
     ) -> TraceCollector {
         let pending = normalize_trace_requests(requests).unwrap();
         OfflineRuntime::new(args, pending, num_workers, ReplayMode::Trace)
-            .run(args)
+            .run()
             .unwrap()
     }
 
@@ -400,7 +321,7 @@ mod tests {
             num_workers,
             ReplayMode::Concurrency { max_in_flight },
         )
-        .run(args)
+        .run()
         .unwrap()
     }
 
@@ -463,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_worker_concurrency_uses_cluster_snapshot_for_cap_checks() {
+    fn test_multi_worker_concurrency_uses_worker_in_flight_for_cap_checks() {
         let args = replay_args(false, false);
         let collector = run_concurrency_multi_collect(
             &args,
