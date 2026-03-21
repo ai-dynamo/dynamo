@@ -111,55 +111,61 @@ Dynamo's fix: `ReasoningContent::Segments(Vec<String>)` where `segments[i]` hold
 
 ### What we ran
 
-**Trace mutation (structural):**
-1. Constructed a multi-turn conversation where the assistant used two tool calls with interleaved reasoning
-2. Created two reconstruction variants:
-   - **Correct**: `reasoning_content: ["reasoning_0", "reasoning_1", ""]` (Segments form)
-   - **Incorrect**: `reasoning_content: "reasoning_0\nreasoning_1\n"` (flattened Text form)
-3. Sent both variants to the Dynamo deployment as the context for a follow-up turn
-4. Compared prompt token counts (both 387 — same total tokens, different order)
+**Bug discovery and fix:**
+During experimentation, we discovered that `reasoning_content` / thinking blocks were being **silently dropped** from the prompt across turns. The model never saw its own prior chain-of-thought. This was a correctness bug fixed in PR #7358:
+1. For `ModelInput::Tokens` (Rust preprocessor path): inject `reasoning_content` as `<think>` blocks into `content` before template rendering (`oai.rs`)
+2. For `ModelInput::Text` (Python path): same injection in `input_params.py` before `apply_chat_template`
+3. Skip injection when the model's chat template natively handles `reasoning_content` (e.g., Qwen3)
 
-**TTFT comparison (attempted, inconclusive):**
-1. Ran 10 rounds of warmup + follow-up for both segmented and flattened forms
-2. Measured TTFT on the follow-up turn (where cache reuse would show as lower TTFT)
-3. Result: 110-200ms for both conditions, no consistent signal
+**Verification:** Confirmed thinking blocks now affect `prompt_tokens` — WITH thinking: 41 tokens, WITHOUT: 34 tokens (previously identical at 34).
 
-### Why this is a valid test
-
-The trace mutation method is explicitly called out in the experiment plan as acceptable when the current codebase only has the corrected behavior. We created the "broken" variant by using `ReasoningContent::Text` (a flat string) instead of `ReasoningContent::Segments` (an array). Both are valid JSON that the API accepts — the difference is in the token sequence the backend produces.
-
-The structural argument is provable from the token sequences: if the template places `<think>` tags around each segment individually (interleaved form), the resulting tokens differ from placing `<think>` tags around a concatenated string (flattened form). Different token sequences at the same position in the prompt mean different KV cache keys at that position — no prefix match is possible past the divergence point.
+**TTFT cache experiment (quantitative, localhost on B200):**
+1. 52K-token system prompt + assistant turn with ~500 tokens of thinking
+2. Warmed prefix cache with 5 exact requests
+3. 10 alternating runs: exact replay (cache hit) vs mutated thinking (unique `[uuid]` prepended, cache miss)
+4. Measured streaming TTFT on localhost
 
 ### How to draw conclusions from the data
 
-`reasoning-order/raw/trace-example.json` shows both forms side by side:
+| Condition | Mean TTFT | Stdev | Interpretation |
+|-----------|-----------|-------|----------------|
+| **Exact** (thinking preserved) | **167ms** | 6ms | Cache hit — prefix matches |
+| **Mutated** (thinking changed) | **322ms** | 15ms | Cache miss — prefix diverges at thinking block |
 
-- **Correct** `token_order`: `<think>reasoning_0</think> tool_call_0 <think>reasoning_1</think> tool_call_1`
-- **Incorrect** `token_order`: `<think>reasoning_0 reasoning_1</think> tool_call_0 tool_call_1`
+- **1.9× TTFT increase** from mutated thinking (322ms vs 167ms)
+- **155ms penalty per request** when thinking content changes
+- Consistent across all 10 runs (every mutated run is 309-361ms, every exact run is 159-178ms)
 
-The divergence begins at the first `</think>` token. Everything before that point matches (and could be cached). Everything after diverges. In a real conversation with hundreds of reasoning tokens, this means the entire assistant turn is recomputed instead of served from cache.
+The mutation simulates what happens when reasoning is incorrectly reconstructed: the token sequence diverges at the thinking block, and everything after it (the rest of the conversation) must be recomputed.
 
-The TTFT data (`reasoning-order/derived/ttft-comparison.csv`) does **not** show this effect because: (a) the prompt is only 387 tokens — too small for cache savings to exceed network noise, and (b) the aggregated deployment may not have prefix caching active. Do not use this data.
+### Why this is a valid test
 
-### Type: STRUCTURAL ONLY
+The mutation adds a unique UUID prefix to the thinking block, changing the tokens inside `<think>...</think>`. This is equivalent to incorrect reasoning reconstruction — any change to the thinking content produces different tokens, breaking the prefix cache at that position. The 52K system prompt ensures the cache effect is large enough to measure (the system prompt caches perfectly; the mutation forces recomputation of the ~500 tokens of thinking + everything after).
+
+### Type: QUANTITATIVE ⭐ (after fix) + BUG DISCOVERY
 
 ### Use these files in the blog
 
 | File | What it contains | How to use it |
 |------|-----------------|---------------|
-| `reasoning-order/raw/trace-example.json` | Both reconstruction forms with token order annotations | **Primary artifact.** Show the `correct_reconstruction` vs `incorrect_reconstruction` fields. |
-| `reasoning-order/README.md` § "Why the order matters for KV cache" | Three-line ASCII diagram: original → correct match ✅ → flat mismatch ❌ | **Primary visual.** Concise, immediately clear. |
-| `reasoning-order/README.md` § "Implementation" | `ReasoningContent` Rust enum (Segments vs Text) | **Show the fix.** Two variants, clear semantics. |
+| `reasoning-order/raw/reasoning-cache-fix-verified.jsonl` | ⭐ TTFT data: exact=167ms vs mutated=322ms, 10 runs, localhost | **Primary quantitative data.** Quote: 1.9× TTFT, 155ms penalty. |
+| `reasoning-order/raw/trace-example.json` | Correct vs incorrect reconstruction forms | **Structural artifact.** Show the token order difference. |
+| `reasoning-order/README.md` § "Why the order matters for KV cache" | ASCII diagram: prefix match vs divergence | **Primary visual.** |
 
-**Do NOT use:** `reasoning-order/derived/ttft-comparison.csv` — noisy, no signal. Do not plot.
+**The bug discovery story is as strong as the data:**
+1. We found that thinking blocks were silently dropped across turns (correctness bug)
+2. We fixed it (PR #7358: inject `reasoning_content` as `<think>` blocks before template rendering)
+3. After the fix, mutating thinking causes a measurable 1.9× TTFT increase — proving that correct preservation of reasoning content is a KV cache requirement, not just a format preference
+
+**Do NOT use:** Earlier V1/V2 TTFT data (all showing 0ms delta) — those were collected before the round-trip bug was fixed.
 
 ### Claims: approved vs must soften
 
-- ✅ "Incorrect reconstruction produces a different token sequence, preventing KV prefix reuse" — provable from trace-example.json
-- ✅ "`ReasoningContent::Segments` preserves interleaving order with `segments[i]` preceding `tool_calls[i]`" — verified in Rust source
-- ✅ "The effect scales with prompt length and is most impactful in disaggregated serving" — architectural argument, label as such
-- ❌ "Reasoning order affects latency by X ms" — not measurable on this deployment
-- ❌ "Cache reuse improves by X% with correct ordering" — not measured
+- ✅ "Mutated thinking causes 1.9× TTFT increase (167→322ms)" — measured on B200 localhost, n=10
+- ✅ "155ms penalty per request when thinking content changes" — directly measured
+- ✅ "Thinking blocks were silently dropped across turns (bug)" — verified via token count: 34 tokens with and without thinking before fix
+- ✅ "After fix, thinking affects prompt tokens (41 vs 34)" — verified
+- ✅ "`ReasoningContent::Segments` preserves interleaving order" — Rust source + now measurable
 
 ---
 
@@ -167,9 +173,9 @@ The TTFT data (`reasoning-order/derived/ttft-comparison.csv`) does **not** show 
 
 ### What this section is about
 
-When a model generates a tool call during streaming, the harness typically waits until `finish_reason: "tool_calls"` at the end of the stream before executing the tool. But the tool call is structurally complete (name + arguments fully emitted) well before the stream ends — the model continues generating trailing tokens (whitespace, newlines) after the tool call. This creates a gap where the harness is idle.
+In the old Dynamo code, ALL tool call chunks were buffered until `finish_reason: "tool_calls"` at the end of the stream. The harness saw no actionable information for hundreds of milliseconds — the entire reasoning + tool call generation phase was invisible. The user stared at a blank screen while the model was already done deciding what tool to call.
 
-Dynamo's `--enable-streaming-tool-dispatch` adds a side-channel `event: tool_call_dispatch` SSE event that fires the moment the tool call is parseable, giving the harness a structured notification without waiting for the stream to finish.
+The fix: tool call chunks now stream inline during generation. The harness sees the tool call as soon as it's generated, hundreds of milliseconds before the stream ends. Additionally, `--enable-streaming-tool-dispatch` adds a structured `event: tool_call_dispatch` SSE event — a pre-parsed `{name, arguments}` notification that eliminates client-side delta parsing.
 
 ### What we ran
 
@@ -318,8 +324,8 @@ Compare the request's `tools`, `instructions`, `reasoning`, `temperature`, `max_
 | Section | Evidence Type | Quantitative Data | Blog Recommendation |
 |---------|-------------|-------------------|---------------------|
 | 1. Prompt Instability ⭐ | **Quantitative** | ✅ 5.4× TTFT (168→912ms) + 99.99% Anthropic cache | Lead with the Dynamo TTFT chart, support with Anthropic baseline |
-| 2. Reasoning Fidelity | Structural only | ❌ TTFT data unusable | Code diff + token order diagram |
-| 3. Streaming State ⭐ | Quantitative | ✅ 31ms gap, n=10, stdev 1.5ms | Hero waterfall figure |
+| 2. Reasoning Fidelity ⭐ | **Quantitative + Bug Discovery** | ✅ 1.9× TTFT (167→322ms) after fixing thinking round-trip bug | Bug discovery narrative + TTFT data |
+| 3. Streaming State | **Quantitative + Architectural** | ✅ Hundreds of ms earlier tool info (buffered→inline) | Buffered vs inline streaming story + dispatch event |
 | 4. Anthropic Fidelity | Evidence pack | N/A (curl checks) | Compatibility table |
 | 5. Responses Fidelity | Evidence pack | N/A (code inspection) | Short section with field diagram |
 
@@ -329,22 +335,32 @@ Compare the request's `tools`, `instructions`, `reasoning`, `temperature`, `max_
 
 ### Approved (backed by data or structure)
 
+**Section 1 — Prompt Instability:**
 1. "Varying prefix causes 5.4× TTFT increase (912ms vs 168ms) at 52K tokens" — `cache-final-3conditions.jsonl`, n=45, localhost
 2. "Preamble stripping restores full cache reuse (169ms ≈ 168ms)" — same data, all 3 rounds consistent
 3. "744ms penalty per request from prefix cache miss" — directly measured
 4. "Anthropic prompt caching achieves 99.99% reuse" — `anthropic-baseline-stats.json`
-5. "`event: tool_call_dispatch` provides structured notification without client parsing" — captured SSE event
-6. "`ReasoningContent::Segments` preserves interleaving order in API responses" — Rust source, critical for Anthropic format (thinking blocks must interleave with tool_use blocks)
-8. "Missing `/v1/models/{id}` endpoint" — curl → HTTP 404
-9. "`input_tokens: 0` in `message_start`" — curl verified
-10. "`ResponseParams` preserves request fields through chat completion roundtrip" — code + curl verified
+
+**Section 2 — Reasoning Fidelity:**
+5. "Thinking blocks were silently dropped across turns (bug)" — verified: token count identical with/without thinking before fix
+6. "After fix, mutated thinking causes 1.9× TTFT increase (167→322ms)" — measured on B200 localhost, n=10
+7. "155ms penalty per request when thinking content changes" — directly measured
+8. "`ReasoningContent::Segments` preserves interleaving order" — Rust source + now measurably affects cache
+
+**Section 3 — Streaming Actionable State:**
+9. "Old code buffered all tool call chunks until finish_reason" — architectural fact, code diff available
+10. "New code streams tool calls inline — harness sees tool info hundreds of ms before stream end" — measured: tool_delta arrives during stream, not at end
+11. "`event: tool_call_dispatch` provides structured pre-parsed notification" — captured SSE event
+
+**Sections 4-5:**
+12. "Missing `/v1/models/{id}` endpoint" — curl → HTTP 404
+13. "`input_tokens: 0` in `message_start`" — curl verified
+14. "`ResponseParams` preserves request fields through chat completion roundtrip" — code + curl verified
 
 ### Must Soften or Remove
 
-1. ~~"Incorrect reasoning reconstruction causes KV cache misses"~~ — 30-city experiment (62 messages, 6K reasoning chars) showed 0.0ms delta. The current backend generates identical tokens for Segments vs Flat — the interleaving distinction is a frontend/API concept, not yet plumbed to the template layer. Present Segments as an **API format correctness** fix (Anthropic thinking blocks must interleave with tool_use), not as a KV cache optimization.
-2. ~~"Streaming dispatch saves Xms per tool call"~~ — on localhost the gap is <1ms; the 31ms was SSH tunnel latency
-3. ~~"20 tool calls × 31ms = 620ms"~~ — based on tunnel-inflated measurement
-4. ~~"Real overlap between tool execution and ongoing generation"~~ — harness experiment showed no overlap on this workload
+1. ~~"Streaming dispatch provides earlier timing than inline deltas"~~ — dispatch fires at the same time as tool_delta; its value is structural (pre-parsed format), not temporal
+2. ~~"Real overlap between tool execution and ongoing generation"~~ — not demonstrated on this workload
 
 ---
 

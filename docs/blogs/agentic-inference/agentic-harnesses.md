@@ -4,15 +4,13 @@ Pointing an agent harness at a new backend is easy. Making the harness feel corr
 
 Claude Code, OpenClaw, and Codex all depend on details that live above raw token generation: prompt shape, replay order, stream semantics, model metadata, and tool-call readiness. Get those details wrong and the failure mode is not just uglier JSON. It is broken cache reuse, idle tool loops, and clients that behave as if the model is slower or less reliable than it really is.
 
-Our [first post](./agentic-inference.md) focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. This post stays closer to the harness boundary. The question here is simpler and more practical:
-
-What had to change in Dynamo to make real agent harnesses like Claude Code, OpenClaw, and Codex feel correct, cache-efficient, and fast?
+Our [first post](./agentic-inference.md) focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. This post stays closer to the harness boundary. The question here is simpler and more practical: what had to change in Dynamo to make real agent harnesses like Claude Code, OpenClaw, and Codex feel correct, cache-efficient, and fast?
 
 Claude Code is the main anchor throughout. It puts pressure on nearly every layer at once: a large reusable system prompt, Anthropic-flavored API expectations, interleaved reasoning and tool calls, and long-running sessions where small compatibility gaps compound quickly. OpenClaw broadens the story to long-lived and background loops. Codex gives us the `v1/responses` side of the same problem.
 
 ## Tiny Setup
 
-This is not a setup post, but it helps to show the shape of the integration and the knobs that mattered in the experiments.
+This is not a setup post, but it is useful to show the shape of the integration and the knobs that mattered in the experiments.
 
 For Claude Code, the setup we actually used is just an SSH tunnel plus a few environment variables:
 
@@ -114,7 +112,7 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
 }
 ```
 
-The artifact set gave us a clean before-and-after story here.
+The artifact set gave us a clean before-and-after story.
 
 First, the Anthropic baseline. Via cc-proxy in passthrough mode, a 6-request Claude Code session produced `53,992` cache creation tokens and `215,102` cache read tokens. After the first request, the session is effectively all cache reads. That is what good harness behavior looks like: one cold write, then repeated reuse of the same high-value prefix.
 
@@ -122,7 +120,7 @@ Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token pr
 
 We also verified the control case: a prompt with no extra header lands at the same fast path as the stripped version. That is useful as validation, but it is not the main comparison. The real question is whether the per-session header stays in the prefix or gets removed before tokenization.
 
-That is the important framing for this section. Anthropic is the baseline for how the harness is meant to behave. Dynamo's result is the systems lesson: a harness quirk that looks incidental at the API boundary can destroy cache reuse if it perturbs the prefix too early.
+That is the right framing for this section. Anthropic is the baseline for how the harness is meant to behave. Dynamo's result is the systems lesson: a harness quirk that looks incidental at the API boundary can destroy cache reuse if it perturbs the prefix too early.
 
 Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Strip it before tokenization, and the system prompt becomes shareable again across requests and even across sessions that would otherwise differ only in that header.
 
@@ -169,7 +167,7 @@ This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/
 
 The structural argument is still the core of this section, but we now have a measured post-fix result as well. After the round-trip bug was fixed, a localhost B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking produced `167ms` TTFT when the prior thinking was replayed exactly and `322ms` when the thinking block was mutated. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix.
 
-That result matters because it turns a format bug into a cache bug you can measure. A flattened or otherwise incorrect replay can render correctly, pass a casual eyeball test, and still be functionally wrong for KV reuse. Cache reuse depends on token order, not on whether two prompts feel semantically equivalent. Preserving interleaved reasoning and tool calls was therefore less about pretty transcripts and more about making turn `N+1` look exactly like turn `N` did to the cache.
+What makes that result useful is that it turns a format bug into a cache bug you can measure. A flattened or otherwise incorrect replay can render correctly, pass a casual eyeball test, and still be functionally wrong for KV reuse. Cache reuse depends on token order, not on whether two prompts feel semantically equivalent. Preserving interleaved reasoning and tool calls was therefore less about pretty transcripts and more about making turn `N+1` look exactly like turn `N` did to the cache.
 
 ```text
 Original generation:    [think][r0][/think][tool0][think][r1][/think][tool1]
@@ -200,13 +198,13 @@ data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function"
 
 That event tells the harness, in one shot, that the tool call is ready to execute. No client-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness.
 
-The timing result needs to be stated carefully. On the localhost B200 runs, dispatch did not create a large end-to-end wall-time win by itself. The dispatch event fires at essentially the same moment as the inline tool delta. What changed is that the server now exposes tool readiness as a typed protocol event instead of forcing the client to reconstruct it from a stream of partial deltas.
+The timing result needs to be stated carefully. On the localhost B200 runs, dispatch did not create a large end-to-end wall-time win by itself. The dispatch event fires at essentially the same moment as the inline tool delta. What changed is that the server now exposes tool readiness as a typed protocol event instead of forcing the client to reconstruct it from partial deltas.
 
-That is still a real systems improvement. A tool call is a state transition, not just another substring in the stream. In the old buffered path, the harness learned about that transition only at stream end. In the current path, it learns about it as soon as the tool call is structurally complete. With dispatch enabled, it learns the same fact in a cleaner form: parsed, typed, and ready to act on.
+It is still a real systems improvement. A tool call is a state transition, not just another substring in the stream. In the old buffered path, the harness learned about that transition only at stream end. In the current path, it learns about it as soon as the tool call is structurally complete. With dispatch enabled, it learns the same fact in a cleaner form: parsed, typed, and ready to act on.
 
 The localhost multi-turn measurements make the right claim narrower, not weaker. On the 30-city workload, the harness learned about each tool call about `9-10ms` before `finish_reason`, and the cumulative earlier feedback over many turns was real but modest. That is not a dramatic latency chart. It is a protocol improvement that removes blind buffering and gives the harness actionable state immediately.
 
-So this section should not pretend to be a benchmark victory. It is better than that. It shows that the stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
+So this section should not pretend to be a benchmark victory. The better claim is that the stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
 
 ## Anthropic and Claude Code API Fidelity
 
@@ -223,7 +221,7 @@ The fixes in this area were not glamorous, but they mattered. Claude Code does n
 
 This is a good example of harness compatibility being more than "the field exists somewhere." Retrieval path, identifier handling, response shape, and timing all matter. A backend can be broadly Anthropic-flavored and still be just off enough to make a harness feel brittle.
 
-The right tone for this section is checklist-driven rather than benchmark-driven. The artifact set already has the useful table: what Claude Code expects, what Dynamo returned, and which details turned out to matter in practice. The throughline is simple. Claude Code support stopped feeling hypothetical once Dynamo behaved like a backend the harness could reason about, not just one that could generate the next token.
+The right tone for this section is checklist-driven rather than benchmark-driven. The artifact set already has the useful table: what Claude Code expects, what Dynamo returned, and which details turned out to matter in practice. The throughline is simple: Claude Code support stopped feeling hypothetical once Dynamo behaved like a backend the harness could reason about, not just one that could generate the next token.
 
 TODO: add one concrete curl snippet here, ideally the `GET /v1/models/{id}` miss or the `message_start` token-count example.
 
