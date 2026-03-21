@@ -23,6 +23,7 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
+    PreprocessedRequest,
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -192,7 +193,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
         # Build SglangMultimodalRequest from the pre-tokenized request
         request = SglangMultimodalRequest(
-            request=raw_request,
+            request=PreprocessedRequest(**raw_request),
             multimodal_inputs=multimodal_groups,
         )
 
