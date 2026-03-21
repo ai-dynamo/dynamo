@@ -10,6 +10,12 @@ use crate::handlers::{Handler, HandlerManager};
 use super::VeloEvents;
 
 /// Register the three event system handlers with the handler manager.
+///
+/// These are fire-and-forget active messages — the handler return value has no
+/// observable effect on the caller, so errors are intentionally logged and
+/// discarded rather than propagated. For `_event_trigger_request`, ACK/NACK
+/// semantics are managed internally via response channels in `handle_trigger_request`,
+/// not through the handler's `Result`.
 pub(crate) fn register_event_handlers(
     handlers: &HandlerManager,
     events: Arc<VeloEvents>,
