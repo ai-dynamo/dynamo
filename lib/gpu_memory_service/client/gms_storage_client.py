@@ -53,15 +53,23 @@ logger = logging.getLogger(__name__)
 
 try:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
     from gpu_memory_service.common.types import RequestedLockType
 
-    _GMS_IMPORTS_AVAILABLE = True
+    _GMS_CORE_IMPORTS_AVAILABLE = True
 except ImportError:
-    _GMS_IMPORTS_AVAILABLE = False
+    _GMS_CORE_IMPORTS_AVAILABLE = False
     GMSClientMemoryManager = None  # type: ignore[assignment,misc]
-    _tensor_from_pointer = None  # type: ignore[assignment]
     RequestedLockType = None  # type: ignore[assignment]
+
+try:
+    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+
+    _GMS_TENSOR_IMPORTS_AVAILABLE = True
+except ImportError:
+    _GMS_TENSOR_IMPORTS_AVAILABLE = False
+    _tensor_from_pointer = None  # type: ignore[assignment]
+
+_GMS_IMPORTS_AVAILABLE = _GMS_CORE_IMPORTS_AVAILABLE and _GMS_TENSOR_IMPORTS_AVAILABLE
 
 try:
     import torch
@@ -511,16 +519,19 @@ class GMSStorageClient:
         max_workers: int = 4,
         clear_existing: bool = True,
     ) -> Dict[str, str]:
-        if not _GMS_IMPORTS_AVAILABLE:
-            raise RuntimeError(
-                "GMS client imports unavailable (missing cuda-python or torch)"
-            )
+        if not _GMS_CORE_IMPORTS_AVAILABLE:
+            raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
 
         if self._use_gds:
             return self._load_to_gms_gds(
                 input_dir,
                 max_workers=max_workers,
                 clear_existing=clear_existing,
+            )
+
+        if not _GMS_IMPORTS_AVAILABLE:
+            raise RuntimeError(
+                "GMS client imports unavailable (missing cuda-python or torch)"
             )
 
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)

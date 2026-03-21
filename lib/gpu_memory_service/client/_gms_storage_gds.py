@@ -21,6 +21,8 @@ try:
     _NIXL_AVAILABLE = True
 except ImportError:
     _NIXL_AVAILABLE = False
+    nixl_agent = None  # type: ignore[assignment]
+    nixl_agent_config = None  # type: ignore[assignment]
 
 
 class NixlGDSStorageBackend:
@@ -76,33 +78,48 @@ class NixlGDSStorageBackend:
             # Register all files and VAs, then post transfers concurrently
             for rel_path, entries in groups.items():
                 abs_path = os.path.join(input_dir, rel_path)
-                fd = os.open(abs_path, os.O_RDONLY)
+                fd = None
+                file_reg = None
+                vram_reg = None
+                handle = None
+                try:
+                    fd = os.open(abs_path, os.O_RDONLY)
 
-                # FILE descriptors: (offset, length, fd, meta)
-                file_descs = [
-                    (entry.tensor_offset, entry.aligned_size, fd, "")
-                    for entry in entries
-                ]
-                file_reg = self._agent.register_memory(file_descs, "FILE")
+                    # FILE descriptors: (offset, length, fd, meta)
+                    file_descs = [
+                        (entry.tensor_offset, entry.aligned_size, fd, "")
+                        for entry in entries
+                    ]
+                    file_reg = self._agent.register_memory(file_descs, "FILE")
 
-                # VRAM descriptors: (addr, length, device_id, meta)
-                vram_descs = [
-                    (va_map[entry.allocation_id], entry.aligned_size, self._device, "")
-                    for entry in entries
-                ]
-                vram_reg = self._agent.register_memory(vram_descs, "VRAM")
+                    # VRAM descriptors: (addr, length, device_id, meta)
+                    vram_descs = [
+                        (
+                            va_map[entry.allocation_id],
+                            entry.aligned_size,
+                            self._device,
+                            "",
+                        )
+                        for entry in entries
+                    ]
+                    vram_reg = self._agent.register_memory(vram_descs, "VRAM")
 
-                # Post transfer: FILE → VRAM
-                vram_xfer = vram_reg.trim()
-                file_xfer = file_reg.trim()
-                handle = self._agent.initialize_xfer(
-                    "READ", vram_xfer, file_xfer, self._agent_name
-                )
-                state = self._agent.transfer(handle)
-                if state == "ERR":
-                    raise RuntimeError(f"GDS transfer failed to start for {rel_path}")
+                    # Post transfer: FILE -> VRAM
+                    vram_xfer = vram_reg.trim()
+                    file_xfer = file_reg.trim()
+                    handle = self._agent.initialize_xfer(
+                        "READ", vram_xfer, file_xfer, self._agent_name
+                    )
+                    state = self._agent.transfer(handle)
+                    if state == "ERR":
+                        raise RuntimeError(
+                            f"GDS transfer failed to start for {rel_path}"
+                        )
 
-                pending.append((handle, file_reg, vram_reg, fd))
+                    pending.append((handle, file_reg, vram_reg, fd))
+                except Exception:
+                    self._release_transfer_resources(handle, file_reg, vram_reg, fd)
+                    raise
 
             # Wait for all transfers to complete
             for handle, file_reg, vram_reg, fd in pending:
@@ -123,23 +140,36 @@ class NixlGDSStorageBackend:
 
         finally:
             for handle, file_reg, vram_reg, fd in pending:
-                try:
-                    self._agent.release_xfer_handle(handle)
-                except Exception:
-                    pass
-                try:
-                    self._agent.deregister_memory(vram_reg)
-                except Exception:
-                    pass
-                try:
-                    self._agent.deregister_memory(file_reg)
-                except Exception:
-                    pass
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+                self._release_transfer_resources(handle, file_reg, vram_reg, fd)
 
     def close(self) -> None:
         """Release NIXL agent resources."""
         self._agent = None
+
+    def _release_transfer_resources(
+        self,
+        handle: object,
+        file_reg: object,
+        vram_reg: object,
+        fd: int | None,
+    ) -> None:
+        if handle is not None:
+            try:
+                self._agent.release_xfer_handle(handle)
+            except Exception:
+                pass
+        if vram_reg is not None:
+            try:
+                self._agent.deregister_memory(vram_reg)
+            except Exception:
+                pass
+        if file_reg is not None:
+            try:
+                self._agent.deregister_memory(file_reg)
+            except Exception:
+                pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
