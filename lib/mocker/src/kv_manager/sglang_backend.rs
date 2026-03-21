@@ -218,11 +218,8 @@ impl SglangKvManager {
         let mut running_hash = parent_hash.map_or(0u64, |h| h.0);
         for (i, &idx) in indices.iter().enumerate() {
             // tokens_hash: per-token content hash for router prefix matching
-            let token_bytes: Vec<u8> = token_ids
-                .get(i)
-                .unwrap_or(&(idx as u64))
-                .to_le_bytes()
-                .to_vec();
+            let token = token_ids.get(i).copied().unwrap_or(idx as u64);
+            let token_bytes = token.to_le_bytes();
             let tokens_hash = dynamo_kv_router::protocols::compute_block_hash(&token_bytes);
 
             // block_hash: cumulative hash (parent_hash, token_id) so it's unique

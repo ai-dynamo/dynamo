@@ -134,13 +134,12 @@ impl ActiveSequence {
         let hashes = self.block_hashes[hash_start..hash_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
-            let all_token_ids: Vec<Vec<u32>> = self
-                .tokens
-                .blocks()
-                .iter()
-                .map(|b| b.tokens().to_vec())
-                .collect();
-            Some(all_token_ids[hash_start..hash_end].to_vec())
+            Some(
+                self.tokens.blocks()[hash_start..hash_end]
+                    .iter()
+                    .map(|b| b.tokens().to_vec())
+                    .collect(),
+            )
         } else {
             None
         };

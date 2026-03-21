@@ -493,8 +493,9 @@ async fn simulate_prefill(
 }
 
 /// Check if the pool has enough tokens for one decode step of the entire batch.
-/// Tries eviction first; if still short, retracts requests by output_len desc
-/// (matching SGLang's retract_decode policy) until enough memory is available.
+/// Tries eviction first; if still short, retracts requests using the same
+/// sort-descend-then-pop-tail order as current upstream SGLang's
+/// `retract_decode` implementation until enough memory is available.
 /// Returns retracted requests that should go back to the waiting queue.
 fn check_decode_mem(
     running: &mut Vec<SglangRequest>,
@@ -513,11 +514,12 @@ fn check_decode_mem(
     }
 
     // Not enough even after full eviction — retract requests.
-    // Sort indices by output_len descending (longest-running first, like SGLang).
+    // Mirror current upstream SGLang: sort descending, then pop from the tail.
     let mut sorted_indices: Vec<usize> = (0..running.len()).collect();
     sorted_indices.sort_by(|&a, &b| running[b].output_len.cmp(&running[a].output_len));
 
     let mut freed = 0usize;
+    let mut remove_indices = Vec::new();
 
     while available + evictable + freed < sorted_indices.len() {
         if sorted_indices.len() <= 1 {
@@ -533,15 +535,9 @@ fn check_decode_mem(
             kv_manager.free_request(last_node);
         }
         freed += kv_len;
-        // Mark index for removal (we'll collect in a second pass)
-        sorted_indices.retain(|&i| i != idx);
+        remove_indices.push(idx);
     }
 
-    // Remove retracted requests from running (those NOT in sorted_indices).
-    let remaining_set: std::collections::HashSet<usize> = sorted_indices.into_iter().collect();
-    let mut remove_indices: Vec<usize> = (0..running.len())
-        .filter(|i| !remaining_set.contains(i))
-        .collect();
     remove_indices.sort_unstable_by(|a, b| b.cmp(a));
     let mut retracted = Vec::with_capacity(remove_indices.len());
     for idx in remove_indices {
@@ -642,8 +638,10 @@ async fn simulate_decode(
 
             // Free excess token indices not covered by the cached sequence.
             if req.kv_indices.len() > tokens_to_cache {
-                let excess = req.kv_indices[tokens_to_cache..].to_vec();
-                kv_manager.cache_mut().token_pool.free(&excess);
+                kv_manager
+                    .cache_mut()
+                    .token_pool
+                    .free(&req.kv_indices[tokens_to_cache..]);
             }
 
             if let Some(last_node) = req.last_node {
@@ -889,6 +887,55 @@ mod tests {
         // Should only prefill 10 tokens (chunked_prefill_size), not all 20
         assert_eq!(admit.can_run[0].prefilled_tokens, 10);
         assert!(admit.can_run[0].prefilled_tokens < admit.can_run[0].token_ids.len());
+    }
+
+    #[test]
+    fn test_check_decode_mem_preserves_current_sglang_retract_order() {
+        let mut kv_manager = SglangKvManager::new(3, 1, None, 0);
+        let long = kv_manager.cache_mut().token_pool.allocate(1).unwrap();
+        let medium = kv_manager.cache_mut().token_pool.allocate(1).unwrap();
+        let short = kv_manager.cache_mut().token_pool.allocate(1).unwrap();
+
+        let longest_uuid = Uuid::new_v4();
+        let medium_uuid = Uuid::new_v4();
+        let shortest_uuid = Uuid::new_v4();
+        let mut running = vec![
+            SglangRequest {
+                uuid: longest_uuid,
+                token_ids: vec![1],
+                max_output_tokens: 10,
+                output_len: 10,
+                last_node: None,
+                kv_indices: long,
+                prefilled_tokens: 1,
+            },
+            SglangRequest {
+                uuid: medium_uuid,
+                token_ids: vec![2],
+                max_output_tokens: 10,
+                output_len: 5,
+                last_node: None,
+                kv_indices: medium,
+                prefilled_tokens: 1,
+            },
+            SglangRequest {
+                uuid: shortest_uuid,
+                token_ids: vec![3],
+                max_output_tokens: 10,
+                output_len: 1,
+                last_node: None,
+                kv_indices: short,
+                prefilled_tokens: 1,
+            },
+        ];
+
+        let retracted = check_decode_mem(&mut running, &mut kv_manager);
+
+        assert_eq!(retracted.len(), 2);
+        assert_eq!(retracted[0].uuid, shortest_uuid);
+        assert_eq!(retracted[1].uuid, medium_uuid);
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].uuid, longest_uuid);
     }
 
     #[test]

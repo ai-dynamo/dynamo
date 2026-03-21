@@ -39,7 +39,7 @@ use crate::kv_manager::KvManager;
 use crate::replay::TraceCollector;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -66,6 +66,7 @@ pub(crate) struct SchedulerState {
     pub(crate) waiting: VecDeque<Uuid>,
     pub(crate) prefill: VecDeque<Uuid>,
     pub(crate) decode: VecDeque<Uuid>,
+    pub(crate) decode_members: HashSet<Uuid>,
     pub(crate) requests: HashMap<Uuid, Request>,
 }
 
@@ -86,7 +87,7 @@ impl SchedulerState {
     /// later in simulate_prefill when the request reaches the front of the queue.
     pub(crate) fn admit_one(&mut self, args: &MockEngineArgs) -> Option<Uuid> {
         let &uuid = self.waiting.front()?;
-        let num_active = self.prefill.len() + self.decode.len();
+        let num_active = self.prefill.len() + self.decode_members.len();
         if args.max_num_seqs.is_some_and(|limit| num_active >= limit) {
             return None;
         }
@@ -115,7 +116,7 @@ impl SchedulerState {
     }
 
     pub(crate) fn run(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
-        if !self.decode.contains(&uuid) {
+        if !self.decode_members.contains(&uuid) {
             return None;
         }
         let Some(Request::Active(sequence)) = self.requests.get_mut(&uuid) else {
@@ -127,6 +128,7 @@ impl SchedulerState {
     /// Remove a UUID and its associated Request from collections.
     pub(crate) fn complete(&mut self, uuid: &Uuid) {
         tracing::trace!("Request {uuid} will complete");
+        self.decode_members.remove(uuid);
         self.decode.retain(|u| u != uuid);
         self.requests.remove(uuid);
     }
@@ -141,6 +143,7 @@ impl SchedulerState {
             PreemptionMode::Fifo => self.decode.pop_front(),
         }
         .expect("Nothing to evict for preemption.");
+        self.decode_members.remove(&uuid);
         let request = self
             .requests
             .remove(&uuid)
@@ -353,7 +356,7 @@ pub(crate) fn simulate_prefill_step(
 ) -> Duration {
     let mut token_budget = args
         .max_num_batched_tokens
-        .map_or(usize::MAX, |t| t.saturating_sub(state.decode.len()));
+        .map_or(usize::MAX, |t| t.saturating_sub(state.decode_members.len()));
 
     // Accumulate batch-level prefill stats for a single predict call after the loop.
     let mut batch_count: usize = 0;
@@ -452,6 +455,7 @@ pub(crate) fn simulate_prefill_step(
         if cumulative >= sequence_len {
             // Fully prefilled: promote to decode queue.
             state.prefill.pop_front();
+            state.decode_members.insert(uuid);
             state.decode.push_back(uuid);
         } else {
             // Partially prefilled: resume next iteration with updated allocation state.
@@ -594,7 +598,7 @@ fn simulate_decode_step_internal(
             }
 
             // If the current request was the one preempted, stop retrying
-            if !state.decode.contains(&uuid) {
+            if !state.decode_members.contains(&uuid) {
                 break;
             }
         }
