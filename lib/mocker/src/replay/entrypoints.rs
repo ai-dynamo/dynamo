@@ -19,7 +19,7 @@ pub fn simulate_trace_file(
     validate_offline_replay_args(&args, num_workers)?;
     let requests = load_trace_requests(trace_path, args.block_size, true)?;
     let started_at = Instant::now();
-    let report = crate::replay::runtime::multi::simulate_trace(args, requests, num_workers)?;
+    let report = crate::replay::runtime::simulate_trace(args, requests, num_workers)?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -46,5 +46,5 @@ pub fn simulate_concurrency_requests(
         bail!("concurrency replay requires at least one request");
     }
 
-    crate::replay::runtime::multi::simulate_concurrency(args, requests, max_in_flight, num_workers)
+    crate::replay::runtime::simulate_concurrency(args, requests, max_in_flight, num_workers)
 }

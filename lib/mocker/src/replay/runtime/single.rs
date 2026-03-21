@@ -7,7 +7,7 @@ use crate::replay::{TraceCollector, TraceSimulationReport};
 use std::collections::VecDeque;
 use validator::Validate;
 
-pub fn simulate_trace(
+pub(crate) fn simulate_trace_single(
     args: MockEngineArgs,
     mut requests: Vec<DirectRequest>,
 ) -> anyhow::Result<TraceSimulationReport> {
@@ -71,7 +71,7 @@ pub fn simulate_trace(
     Ok(collector.finish())
 }
 
-pub fn simulate_concurrency(
+pub(crate) fn simulate_concurrency_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,

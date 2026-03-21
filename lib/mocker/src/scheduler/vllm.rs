@@ -619,8 +619,8 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::runtime::single::{simulate_concurrency, simulate_trace};
-    use crate::replay::{TraceCollector, TraceRequestStatsSnapshot};
+    use crate::replay::runtime::{simulate_concurrency, simulate_trace};
+    use crate::replay::{TraceCollector, TraceRequestStatsSnapshot, TraceSimulationReport};
     use crate::scheduler::SchedulerHandle;
     use rstest::rstest;
     use std::collections::HashMap;
@@ -983,6 +983,56 @@ mod tests {
     struct ManualConcurrencyResult {
         report: TraceSimulationReport,
         snapshots: HashMap<Uuid, TraceRequestStatsSnapshot>,
+    }
+
+    fn enqueue_trace_arrivals(
+        pending: &mut VecDeque<DirectRequest>,
+        state: &mut SchedulerState,
+        collector: &mut TraceCollector,
+        current_time_ms: f64,
+    ) {
+        loop {
+            let Some(next_arrival_ms) = pending
+                .front()
+                .and_then(|request| request.arrival_timestamp_ms)
+            else {
+                break;
+            };
+            if next_arrival_ms > current_time_ms {
+                break;
+            }
+
+            let request = pending
+                .pop_front()
+                .expect("front request must exist when arrival is available");
+            let arrival_ms = request
+                .arrival_timestamp_ms
+                .expect("trace replay requests must have an arrival timestamp");
+            let input_length = request.tokens.len();
+            let output_length = request.max_output_tokens;
+            let uuid = state.receive(request);
+            collector.on_arrival(uuid, arrival_ms, input_length, output_length);
+        }
+    }
+
+    fn enqueue_concurrency_arrivals(
+        pending: &mut VecDeque<DirectRequest>,
+        state: &mut SchedulerState,
+        collector: &mut TraceCollector,
+        current_time_ms: f64,
+        max_in_flight: usize,
+    ) {
+        while state.requests.len() < max_in_flight {
+            let Some(mut request) = pending.pop_front() else {
+                break;
+            };
+
+            request.arrival_timestamp_ms = Some(current_time_ms);
+            let input_length = request.tokens.len();
+            let output_length = request.max_output_tokens;
+            let uuid = state.receive(request);
+            collector.on_arrival(uuid, current_time_ms, input_length, output_length);
+        }
     }
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
@@ -1360,7 +1410,7 @@ mod tests {
     ) {
         let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
         let manual = run_trace_manually(&args, replay_fixture());
-        let replay_report = simulate_trace(args, replay_fixture()).unwrap();
+        let replay_report = simulate_trace(args, replay_fixture(), 1).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -1416,7 +1466,7 @@ mod tests {
             },
         ];
         let manual = run_concurrency_manually(&args, requests.clone(), 2);
-        let replay_report = simulate_concurrency(args, requests, 2).unwrap();
+        let replay_report = simulate_concurrency(args, requests, 2, 1).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();

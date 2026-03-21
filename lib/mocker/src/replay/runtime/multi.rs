@@ -2,10 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::core::ReplayWorkerCore;
-use super::single::{
-    simulate_concurrency as simulate_single_worker_concurrency,
-    simulate_trace as simulate_single_worker_trace,
-};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::replay::{TraceCollector, TraceSimulationReport};
 use anyhow::bail;
@@ -345,7 +341,7 @@ fn normalize_trace_requests(
     ))
 }
 
-fn simulate_trace_multi_worker(
+pub(crate) fn simulate_trace_multi(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     num_workers: usize,
@@ -357,7 +353,7 @@ fn simulate_trace_multi_worker(
     Ok(collector.finish())
 }
 
-fn simulate_concurrency_multi_worker(
+pub(crate) fn simulate_concurrency_multi(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
@@ -373,31 +369,6 @@ fn simulate_concurrency_multi_worker(
     )
     .run(&args)?;
     Ok(collector.finish())
-}
-
-pub fn simulate_trace(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    num_workers: usize,
-) -> anyhow::Result<TraceSimulationReport> {
-    if num_workers == 1 {
-        simulate_single_worker_trace(args, requests)
-    } else {
-        simulate_trace_multi_worker(args, requests, num_workers)
-    }
-}
-
-pub fn simulate_concurrency(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-    num_workers: usize,
-) -> anyhow::Result<TraceSimulationReport> {
-    if num_workers == 1 {
-        simulate_single_worker_concurrency(args, requests, max_in_flight)
-    } else {
-        simulate_concurrency_multi_worker(args, requests, max_in_flight, num_workers)
-    }
 }
 
 #[cfg(test)]
