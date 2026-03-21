@@ -10,11 +10,16 @@
 // remaining tail bytes one at a time.
 //
 // Compile to SPIR-V:
-//   ocloc compile -file vectorized_copy.cl -device pvc \
+//   ocloc compile -file vectorized_copy.cl -device bmg \
 //                 -out_dir . -options "-cl-std=CL2.0"
 //
-// The generated vectorized_copy_pvc.spv is loaded at runtime via
+// OR
+//
+//   ocloc compile -file vectorized_copy.cl -spv_only \
+//                 -options "-cl-std=CL2.0"
+// The generated SPIR-V binary is loaded at runtime via
 // ZeModule::from_spirv().
+//
 
 __kernel void vectorized_copy(
     __global ulong* src_addrs,          // device address array (num_pairs)
