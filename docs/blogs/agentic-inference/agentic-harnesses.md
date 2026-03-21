@@ -118,13 +118,17 @@ The artifact set gave us a clean before-and-after story here.
 
 First, the Anthropic baseline. Via cc-proxy in passthrough mode, a 6-request Claude Code session produced `53,992` cache creation tokens and `215,102` cache read tokens. After the first request, the session is effectively all cache reads. That is what good harness behavior looks like: one cold write, then repeated reuse of the same high-value prefix.
 
-Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token prompt, a stable prefix produced `168ms` TTFT. A varying prefix produced `912ms`. A billing preamble that Dynamo stripped before tokenization came back down to `169ms`. On this workload, the difference between a stable and unstable prefix was a `5.4x` swing in TTFT.
+Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token prompt, keeping the per-session header in the prefix produced `911ms` TTFT. Removing that header before tokenization brought TTFT down to `169ms`. On this workload, the unstable header costs `743ms` per request and turns a reusable system prompt into a cold prefill.
+
+We also verified the control case: a prompt with no extra header lands at the same fast path as the stripped version. That is useful as validation, but it is not the main comparison. The real question is whether the per-session header stays in the prefix or gets removed before tokenization.
 
 That is the important framing for this section. Anthropic is the baseline for how the harness is meant to behave. Dynamo's result is the systems lesson: a harness quirk that looks incidental at the API boundary can destroy cache reuse if it perturbs the prefix too early.
 
-Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Stripping it before tokenization is not a polish item. It is the difference between a 168ms cache hit and a 912ms full-prefill miss on a 52K-token prompt.
+Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Strip it before tokenization, and the system prompt becomes shareable again across requests and even across sessions that would otherwise differ only in that header.
 
-![Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168-169ms TTFT; a varying prefix jumps to ~912ms.](./agentic-harnesses-cache-effect-v2.png)
+![Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168-169ms TTFT; a varying prefix jumps to ~912ms.](./agentic-harnesses-cache-effect-clean.png)
+
+TODO: add Dynamo-side cache hit or cache-read/cache-write accounting for the "header kept" vs "header removed before tokenization" comparison once those measurements land.
 
 ## Reasoning Fidelity Is KV Correctness
 
