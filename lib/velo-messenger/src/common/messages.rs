@@ -11,6 +11,8 @@ use thiserror::Error;
 use super::responses::ResponseId;
 
 const CURRENT_SCHEMA_VERSION: u8 = 1;
+const MAX_HEADER_VALUE_LEN: usize = 1024;
+const MAX_HEADERS_LEN: usize = 16384;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveMessage {
@@ -180,7 +182,7 @@ pub(crate) fn encode_active_message(
     let headers_bytes = if let Some(ref headers) = message.metadata.headers {
         // Validate per-header size (1KB max per value)
         for (key, value) in headers.iter() {
-            if value.len() > 1024 {
+            if value.len() > MAX_HEADER_VALUE_LEN {
                 return Err(EncodeError::HeaderValueTooLarge(key.clone(), value.len()));
             }
         }
@@ -189,7 +191,7 @@ pub(crate) fn encode_active_message(
         let msgpack_bytes = rmp_serde::to_vec(headers)?;
 
         // Validate total size (16KB max)
-        if msgpack_bytes.len() > 16384 {
+        if msgpack_bytes.len() > MAX_HEADERS_LEN {
             return Err(EncodeError::TotalHeadersTooLarge(msgpack_bytes.len()));
         }
 
@@ -242,8 +244,8 @@ pub(crate) fn decode_active_message(
     let response_id = ResponseId::from_u128(header.get_u128_le());
     let handler_name_len = header.get_u16_le() as usize;
 
-    // Validate handler name length
-    if header.remaining() < handler_name_len + 2 {
+    // Validate handler name length (must be non-zero and fit in remaining bytes)
+    if handler_name_len == 0 || header.remaining() < handler_name_len + 2 {
         // +2 for headers_len field
         return Err(DecodeError::InvalidHandlerNameLength);
     }
@@ -257,8 +259,8 @@ pub(crate) fn decode_active_message(
     // Decode headers (optional, last field in header)
     let headers_len = header.get_u16_le() as usize;
     let headers = if headers_len > 0 {
-        // Validate headers length
-        if header.remaining() < headers_len {
+        // Validate headers length (must not exceed max and must fit in remaining bytes)
+        if headers_len > MAX_HEADERS_LEN || header.remaining() < headers_len {
             return Err(DecodeError::InvalidHeadersLength);
         }
 
