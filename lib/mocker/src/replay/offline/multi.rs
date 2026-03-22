@@ -20,6 +20,7 @@ enum ReplayMode {
     Concurrency { max_in_flight: usize },
 }
 
+#[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct OfflineRuntimeStats {
     dispatch_history: Vec<usize>,
@@ -30,6 +31,10 @@ struct OfflineRuntimeStats {
     freed_count: usize,
     max_router_pending: usize,
 }
+
+#[cfg(not(test))]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct OfflineRuntimeStats;
 
 struct OfflineRuntime {
     now_ms: f64,
@@ -77,7 +82,10 @@ impl OfflineRuntime {
             mode,
             router,
             prefill_completed: HashSet::new(),
+            #[cfg(test)]
             stats: OfflineRuntimeStats::default(),
+            #[cfg(not(test))]
+            stats: OfflineRuntimeStats,
         })
     }
 
@@ -90,20 +98,34 @@ impl OfflineRuntime {
     }
 
     fn record_in_flight_peak(&mut self) {
-        self.stats.max_in_flight_seen = self.stats.max_in_flight_seen.max(self.cluster_in_flight());
+        #[cfg(test)]
+        {
+            self.stats.max_in_flight_seen =
+                self.stats.max_in_flight_seen.max(self.cluster_in_flight());
+        }
     }
 
     fn record_router_pending(&mut self) {
+        #[cfg(test)]
         let Some(router) = self.router.as_ref() else {
             return;
         };
-        self.stats.max_router_pending = self.stats.max_router_pending.max(router.pending_count());
+        #[cfg(test)]
+        {
+            self.stats.max_router_pending =
+                self.stats.max_router_pending.max(router.pending_count());
+        }
     }
 
-    fn record_dispatch(&mut self, uuid: Uuid, worker_idx: usize) {
-        self.stats.dispatch_history.push(worker_idx);
-        self.stats.dispatch_order.push(uuid);
-        self.stats.assigned_worker_by_uuid.insert(uuid, worker_idx);
+    fn record_dispatch(&mut self, _uuid: Uuid, _worker_idx: usize) {
+        #[cfg(test)]
+        {
+            self.stats.dispatch_history.push(_worker_idx);
+            self.stats.dispatch_order.push(_uuid);
+            self.stats
+                .assigned_worker_by_uuid
+                .insert(_uuid, _worker_idx);
+        }
         self.record_in_flight_peak();
     }
 
@@ -225,7 +247,10 @@ impl OfflineRuntime {
         if signal.completed {
             if let Some(router) = self.router.as_mut() {
                 admissions = router.free(signal.uuid)?;
-                self.stats.freed_count += 1;
+                #[cfg(test)]
+                {
+                    self.stats.freed_count += 1;
+                }
                 self.record_router_pending();
             }
             self.prefill_completed.remove(&signal.uuid);
@@ -239,7 +264,10 @@ impl OfflineRuntime {
 
         if let Some(router) = self.router.as_mut() {
             admissions = router.mark_prefill_completed(signal.uuid)?;
-            self.stats.prefill_marked_count += 1;
+            #[cfg(test)]
+            {
+                self.stats.prefill_marked_count += 1;
+            }
             self.record_router_pending();
         }
         self.dispatch_router_admissions(admissions)?;

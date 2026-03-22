@@ -103,7 +103,10 @@ fn test_unified_pass_keeps_partial_prefill_in_running() {
         "first request should emit immediately"
     );
     assert_eq!(core.state.waiting.len(), 0);
-    assert_eq!(core.state.running, vec![r1, r2]);
+    assert_eq!(
+        core.state.running.iter().copied().collect::<Vec<_>>(),
+        vec![r1, r2]
+    );
     assert_eq!(core.state.requests.get(&r1).unwrap().num_computed_tokens, 8);
     assert_eq!(core.state.requests.get(&r2).unwrap().num_computed_tokens, 4);
     assert_eq!(
@@ -268,7 +271,7 @@ fn test_running_request_catches_up_decode_tail_before_promote() {
     assert_eq!(core.kv_manager.process(&prompt_only), 2);
     sequence.commit_allocation(sequence.num_input_tokens());
 
-    core.state.running.push(uuid);
+    core.state.insert_running_for_test(uuid);
     core.state.requests.insert(
         uuid,
         VllmRequestState {

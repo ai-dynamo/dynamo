@@ -206,6 +206,7 @@ impl OfflineReplayRouter {
         self.drain_pending()
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -294,26 +295,20 @@ impl OfflineReplayRouter {
     }
 
     fn all_workers_busy(&self, threshold: f64) -> bool {
-        let active_tokens = self.slots.active_tokens();
         let mut checked_any = false;
-
-        for (&worker_id, config) in &self.workers_with_configs {
-            let dp_size = config.data_parallel_size();
-            let dp_start_rank = config.data_parallel_start_rank();
-            let max_batched = config
-                .max_num_batched_tokens()
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-
-            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
-                checked_any = true;
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-                if (tokens as f64) <= threshold * (max_batched as f64) {
+        let any_worker_not_busy = self
+            .slots
+            .any_worker_matches_active_tokens(|worker, tokens| {
+                let Some(config) = self.workers_with_configs.get(&worker.worker_id) else {
                     return false;
-                }
-            }
-        }
+                };
+                checked_any = true;
+                let max_batched = config
+                    .max_num_batched_tokens()
+                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                (tokens as f64) <= threshold * (max_batched as f64)
+            });
 
-        checked_any
+        checked_any && !any_worker_not_busy
     }
 }

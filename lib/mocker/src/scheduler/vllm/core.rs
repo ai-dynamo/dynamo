@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +36,9 @@ pub(crate) struct VllmRequestState {
 #[derive(Default)]
 pub(crate) struct SchedulerState {
     pub(crate) waiting: VecDeque<Uuid>,
-    pub(crate) running: Vec<Uuid>,
+    waiting_members: HashSet<Uuid>,
+    pub(crate) running: VecDeque<Uuid>,
+    running_members: HashSet<Uuid>,
     pub(crate) requests: HashMap<Uuid, VllmRequestState>,
 }
 
@@ -67,34 +69,59 @@ impl SchedulerState {
     }
 
     fn push_waiting(&mut self, uuid: Uuid) {
-        if self.waiting.contains(&uuid) {
+        if !self.waiting_members.insert(uuid) {
             return;
         }
         self.waiting.push_back(uuid);
     }
 
     fn prepend_waiting(&mut self, uuid: Uuid) {
-        if self.waiting.contains(&uuid) {
-            self.waiting.retain(|queued| *queued != uuid);
+        if !self.waiting_members.insert(uuid) {
+            return;
         }
         self.waiting.push_front(uuid);
     }
 
-    fn pop_front_waiting(&mut self, uuid: Uuid) {
-        let Some(front) = self.waiting.front() else {
-            return;
-        };
-        if *front == uuid {
+    fn next_waiting_uuid(&mut self) -> Option<Uuid> {
+        loop {
+            let uuid = *self.waiting.front()?;
+            let Some(request) = self.requests.get(&uuid) else {
+                self.waiting.pop_front();
+                self.waiting_members.remove(&uuid);
+                continue;
+            };
+            if self.waiting_members.contains(&uuid) && request.status != RequestStatus::Running {
+                return Some(uuid);
+            }
             self.waiting.pop_front();
-            return;
+            self.waiting_members.remove(&uuid);
         }
-        self.waiting.retain(|queued| *queued != uuid);
+    }
+
+    fn compact_running(&mut self) {
+        let mut compacted = VecDeque::with_capacity(self.running.len());
+        while let Some(uuid) = self.running.pop_front() {
+            let is_running = self.running_members.contains(&uuid)
+                && self
+                    .requests
+                    .get(&uuid)
+                    .is_some_and(|request| request.status == RequestStatus::Running);
+            if is_running {
+                compacted.push_back(uuid);
+                continue;
+            }
+            self.running_members.remove(&uuid);
+        }
+        self.running = compacted;
     }
 
     fn transition_to_running(&mut self, uuid: Uuid) {
-        self.pop_front_waiting(uuid);
-        if !self.running.contains(&uuid) {
-            self.running.push(uuid);
+        if self.waiting.front().copied() == Some(uuid) {
+            self.waiting.pop_front();
+        }
+        self.waiting_members.remove(&uuid);
+        if self.running_members.insert(uuid) {
+            self.running.push_back(uuid);
         }
         if let Some(request) = self.requests.get_mut(&uuid) {
             request.status = RequestStatus::Running;
@@ -102,13 +129,13 @@ impl SchedulerState {
     }
 
     pub(crate) fn complete(&mut self, uuid: &Uuid) {
-        self.waiting.retain(|queued| queued != uuid);
-        self.running.retain(|running| running != uuid);
+        self.waiting_members.remove(uuid);
+        self.running_members.remove(uuid);
         self.requests.remove(uuid);
     }
 
     pub(crate) fn running_sequence_mut(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
-        if !self.running.contains(&uuid) {
+        if !self.running_members.contains(&uuid) {
             return None;
         }
         self.requests
@@ -117,11 +144,22 @@ impl SchedulerState {
     }
 
     fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
-        let idx = match mode {
-            PreemptionMode::Lifo => self.running.len().checked_sub(1)?,
-            PreemptionMode::Fifo => 0,
+        let uuid = loop {
+            let candidate = match mode {
+                PreemptionMode::Lifo => self.running.pop_back(),
+                PreemptionMode::Fifo => self.running.pop_front(),
+            }?;
+            let is_running = self.running_members.contains(&candidate)
+                && self
+                    .requests
+                    .get(&candidate)
+                    .is_some_and(|request| request.status == RequestStatus::Running);
+            if is_running {
+                break candidate;
+            }
+            self.running_members.remove(&candidate);
         };
-        let uuid = self.running.remove(idx);
+        self.running_members.remove(&uuid);
         let request = self.requests.get_mut(&uuid)?;
         request.status = RequestStatus::Preempted;
         request.num_computed_tokens = 0;
@@ -138,6 +176,12 @@ impl SchedulerState {
         }
         self.prepend_waiting(uuid);
         Some(PreemptedRequest { uuid, signals })
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert_running_for_test(&mut self, uuid: Uuid) {
+        self.running_members.insert(uuid);
+        self.running.push_back(uuid);
     }
 }
 
@@ -234,6 +278,7 @@ impl VllmCore {
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
         let requests_before = self.state.requests.len();
+        self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
         let mut scheduled = HashMap::new();
         let mut batch_count = 0usize;
@@ -278,7 +323,7 @@ impl VllmCore {
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
         while !preempted_any && self.state.running.len() < max_num_running {
-            let Some(&uuid) = self.state.waiting.front() else {
+            let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
             match self.schedule_request(
@@ -599,6 +644,7 @@ impl VllmCore {
             return (Duration::ZERO, output_signals);
         }
 
+        self.state.compact_running();
         (decode_time, output_signals)
     }
 }
@@ -662,7 +708,7 @@ fn debug_assert_vllm_scheduler_state(state: &SchedulerState) {
     #[cfg(debug_assertions)]
     {
         let mut seen = std::collections::HashSet::new();
-        for uuid in &state.waiting {
+        for uuid in &state.waiting_members {
             debug_assert!(
                 seen.insert(*uuid),
                 "request {uuid} appears multiple times across waiting/running queues"
@@ -677,7 +723,7 @@ fn debug_assert_vllm_scheduler_state(state: &SchedulerState) {
             );
             debug_assert_vllm_request_invariants(*uuid, request);
         }
-        for uuid in &state.running {
+        for uuid in &state.running_members {
             debug_assert!(
                 seen.insert(*uuid),
                 "request {uuid} appears multiple times across waiting/running queues"
@@ -694,6 +740,14 @@ fn debug_assert_vllm_scheduler_state(state: &SchedulerState) {
             );
             debug_assert_vllm_request_invariants(*uuid, request);
         }
+        debug_assert!(
+            state.waiting.len() >= state.waiting_members.len(),
+            "waiting queue dropped live membership entries"
+        );
+        debug_assert!(
+            state.running.len() >= state.running_members.len(),
+            "running queue dropped live membership entries"
+        );
     }
 }
 
