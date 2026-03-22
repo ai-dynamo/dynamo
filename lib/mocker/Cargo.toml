@@ -40,3 +40,4 @@ tokio-timerfd = "0.2"
 
 [dev-dependencies]
 rstest = "0.18.2"
+tempfile = { workspace = true }

@@ -8,7 +8,6 @@ use crate::replay::{TraceCollector, TraceSimulationReport};
 use anyhow::bail;
 use std::collections::VecDeque;
 use uuid::Uuid;
-use validator::Validate;
 
 #[derive(Debug, Clone, Copy)]
 enum SingleReplayMode {
@@ -96,19 +95,13 @@ impl SingleRuntime {
     }
 
     fn drive_worker(&mut self, admit_arrivals_between_steps: bool) {
-        let prefill_time = self
+        let pass = self
             .worker
-            .run_prefill_step(&mut self.collector, self.current_time_ms);
-        self.current_time_ms += prefill_time.as_secs_f64() * 1000.0;
-
+            .execute_pass(&mut self.collector, self.current_time_ms);
+        self.current_time_ms = pass.end_ms;
         if admit_arrivals_between_steps {
             self.enqueue_trace_arrivals();
         }
-
-        let decode_time = self
-            .worker
-            .run_decode_step(&mut self.collector, self.current_time_ms);
-        self.current_time_ms += decode_time.as_secs_f64() * 1000.0;
     }
 
     fn run(mut self) -> anyhow::Result<TraceCollector> {
@@ -142,7 +135,7 @@ pub(crate) fn simulate_trace_single(
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
 ) -> anyhow::Result<TraceSimulationReport> {
-    args.validate()?;
+    let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace).run()?;
     Ok(collector.finish())
@@ -153,7 +146,7 @@ pub(crate) fn simulate_concurrency_single(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
 ) -> anyhow::Result<TraceSimulationReport> {
-    args.validate()?;
+    let args = args.normalized()?;
     let pending = VecDeque::from(requests);
     let collector = SingleRuntime::new(
         args,
@@ -194,14 +187,9 @@ pub(super) fn run_concurrency_single_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::running_mean::RunningMean;
-    use crate::kv_manager::KvManager;
     use crate::replay::{TraceRequestStatsSnapshot, TraceSimulationReport};
-    use crate::scheduler::vllm::{SchedulerState, simulate_decode_step, simulate_prefill_step};
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};
-    use std::time::Duration;
-    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     #[derive(Debug)]
@@ -220,7 +208,7 @@ mod tests {
 
     fn enqueue_trace_arrivals_manual(
         pending: &mut VecDeque<DirectRequest>,
-        state: &mut SchedulerState,
+        worker: &mut ReplayWorkerCore,
         collector: &mut TraceCollector,
         current_time_ms: f64,
     ) {
@@ -243,19 +231,19 @@ mod tests {
                 .expect("trace replay requests must have an arrival timestamp");
             let input_length = request.tokens.len();
             let output_length = request.max_output_tokens;
-            let uuid = state.receive(request);
+            let uuid = worker.receive(request);
             collector.on_arrival(uuid, arrival_ms, input_length, output_length);
         }
     }
 
     fn enqueue_concurrency_arrivals_manual(
         pending: &mut VecDeque<DirectRequest>,
-        state: &mut SchedulerState,
+        worker: &mut ReplayWorkerCore,
         collector: &mut TraceCollector,
         current_time_ms: f64,
         max_in_flight: usize,
     ) {
-        while state.requests.len() < max_in_flight {
+        while worker.num_requests() < max_in_flight {
             let Some(mut request) = pending.pop_front() else {
                 break;
             };
@@ -263,7 +251,7 @@ mod tests {
             request.arrival_timestamp_ms = Some(current_time_ms);
             let input_length = request.tokens.len();
             let output_length = request.max_output_tokens;
-            let uuid = state.receive(request);
+            let uuid = worker.receive(request);
             collector.on_arrival(uuid, current_time_ms, input_length, output_length);
         }
     }
@@ -330,24 +318,21 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        let mut state = SchedulerState::default();
-        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
-        let mut hit_rates = RunningMean::new(1000);
+        let mut worker = ReplayWorkerCore::new(args.clone());
         let mut collector = TraceCollector::default();
-        let output_tx: Option<mpsc::UnboundedSender<crate::common::protocols::OutputSignal>> = None;
         let mut current_time_ms = 0.0;
         let mut idle_jump_ms = 0.0;
         let mut first_decode_end_ms = 0.0;
 
-        while !pending.is_empty() || !state.is_empty() {
+        while !pending.is_empty() || !worker.is_empty() {
             enqueue_trace_arrivals_manual(
                 &mut pending,
-                &mut state,
+                &mut worker,
                 &mut collector,
                 current_time_ms,
             );
 
-            if state.is_empty() {
+            if worker.is_empty() {
                 let next_arrival_ms = pending.front().unwrap().arrival_timestamp_ms.unwrap();
                 current_time_ms = next_arrival_ms;
                 if idle_jump_ms == 0.0 && current_time_ms > 0.0 {
@@ -355,44 +340,24 @@ mod tests {
                 }
                 enqueue_trace_arrivals_manual(
                     &mut pending,
-                    &mut state,
+                    &mut worker,
                     &mut collector,
                     current_time_ms,
                 );
                 continue;
             }
 
-            let prefill_time = simulate_prefill_step(
-                &mut state,
-                &mut kv_manager,
-                &mut hit_rates,
-                args,
-                Some(&mut collector),
-                None,
-                current_time_ms,
-                true,
-            );
-            current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
+                first_decode_end_ms = pass.end_ms;
+            }
+            current_time_ms = pass.end_ms;
             enqueue_trace_arrivals_manual(
                 &mut pending,
-                &mut state,
+                &mut worker,
                 &mut collector,
                 current_time_ms,
             );
-
-            let decode_time = simulate_decode_step(
-                &mut state,
-                &mut kv_manager,
-                &output_tx,
-                args,
-                Some(&mut collector),
-                current_time_ms,
-                true,
-            );
-            if first_decode_end_ms == 0.0 && decode_time > Duration::ZERO {
-                first_decode_end_ms = current_time_ms + decode_time.as_secs_f64() * 1000.0;
-            }
-            current_time_ms += decode_time.as_secs_f64() * 1000.0;
         }
 
         let snapshots = [
@@ -418,48 +383,25 @@ mod tests {
         max_in_flight: usize,
     ) -> ManualConcurrencyResult {
         let mut pending = VecDeque::from(requests);
-        let mut state = SchedulerState::default();
-        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
-        let mut hit_rates = RunningMean::new(1000);
+        let mut worker = ReplayWorkerCore::new(args.clone());
         let mut collector = TraceCollector::default();
-        let output_tx: Option<mpsc::UnboundedSender<crate::common::protocols::OutputSignal>> = None;
         let mut current_time_ms = 0.0;
 
-        while !pending.is_empty() || !state.is_empty() {
+        while !pending.is_empty() || !worker.is_empty() {
             enqueue_concurrency_arrivals_manual(
                 &mut pending,
-                &mut state,
+                &mut worker,
                 &mut collector,
                 current_time_ms,
                 max_in_flight,
             );
 
-            if state.is_empty() {
+            if worker.is_empty() {
                 break;
             }
 
-            let prefill_time = simulate_prefill_step(
-                &mut state,
-                &mut kv_manager,
-                &mut hit_rates,
-                args,
-                Some(&mut collector),
-                None,
-                current_time_ms,
-                true,
-            );
-            current_time_ms += prefill_time.as_secs_f64() * 1000.0;
-
-            let decode_time = simulate_decode_step(
-                &mut state,
-                &mut kv_manager,
-                &output_tx,
-                args,
-                Some(&mut collector),
-                current_time_ms,
-                true,
-            );
-            current_time_ms += decode_time.as_secs_f64() * 1000.0;
+            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            current_time_ms = pass.end_ms;
         }
 
         let snapshots = [

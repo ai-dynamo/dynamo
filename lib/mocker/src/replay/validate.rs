@@ -4,17 +4,11 @@
 use anyhow::{Result, bail};
 
 use super::ReplayRouterMode;
-use crate::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+use crate::common::protocols::{MockEngineArgs, WorkerType};
 
 fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
     if num_workers == 0 {
         bail!("{mode} requires num_workers >= 1");
-    }
-    if args.engine_type != EngineType::Vllm {
-        bail!(
-            "{mode} only supports engine_type=vllm, got {:?}",
-            args.engine_type,
-        );
     }
     if args.worker_type != WorkerType::Aggregated {
         bail!(

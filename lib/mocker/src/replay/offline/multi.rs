@@ -11,7 +11,6 @@ use anyhow::bail;
 use dynamo_kv_router::protocols::RouterEvent;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use uuid::Uuid;
-use validator::Validate;
 
 const OFFLINE_KV_EVENT_DELAY_MS: f64 = 1.0;
 
@@ -55,9 +54,10 @@ impl OfflineRuntime {
         mode: ReplayMode,
         router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
+        let args = args.clone().normalized()?;
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
-            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(args, num_workers)?),
+            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(&args, num_workers)?),
         };
         let capture_kv_events = router.is_some();
 
@@ -456,7 +456,7 @@ pub(crate) fn simulate_trace_multi(
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    args.validate()?;
+    let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     let (collector, _) =
         OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace, router_mode)?.run()?;
@@ -470,7 +470,7 @@ pub(crate) fn simulate_concurrency_multi(
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    args.validate()?;
+    let args = args.normalized()?;
     let pending = VecDeque::from(requests);
     let (collector, _) = OfflineRuntime::new(
         &args,
@@ -521,6 +521,7 @@ fn run_concurrency_multi_collect_with_stats(
 mod tests {
     use super::super::single::{run_concurrency_single_collect, run_trace_single_collect};
     use super::*;
+    use crate::common::protocols::{EngineType, SglangArgs};
     use dynamo_kv_router::config::RouterQueuePolicy;
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
@@ -559,6 +560,19 @@ mod tests {
             .enable_chunked_prefill(true)
             .speedup_ratio(10.0)
             .router_queue_policy(Some(policy))
+            .build()
+            .unwrap()
+    }
+
+    fn sglang_replay_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(512)
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(2),
+                ..Default::default()
+            }))
             .build()
             .unwrap()
     }
@@ -669,6 +683,67 @@ mod tests {
         );
 
         assert_eq!(stats.dispatch_history, vec![0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn test_offline_trace_replay_sglang_single_worker_completes() {
+        let args = sglang_replay_args();
+        let (collector, stats) = run_trace_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(901)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![2; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(902)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(5.0),
+                },
+            ],
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 4);
+        assert_eq!(stats.dispatch_history, vec![0, 0]);
+    }
+
+    #[test]
+    fn test_offline_trace_replay_sglang_kv_router_smoke() {
+        let args = sglang_replay_args();
+        let (collector, stats) = run_trace_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![7; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(911)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![7; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(912)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(500.0),
+                },
+            ],
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(stats.dispatch_history.len(), 2);
     }
 
     #[test]

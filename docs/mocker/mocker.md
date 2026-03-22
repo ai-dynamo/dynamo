@@ -156,6 +156,10 @@ trace-file flow still writes a report file and prints a `Replay Summary` table.
 
 For full usage, constraints, and benchmarking guidance, see [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md).
 
+Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay uses canonical
+`block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
+as it matches `block_size` when both are provided.
+
 ## Performance Modeling Setup
 
 By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, pass `--planner-profile-data` with either:

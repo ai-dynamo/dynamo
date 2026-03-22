@@ -187,8 +187,7 @@ pub struct MockEngineArgs {
     #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
 
-    #[builder(default = "64")]
-    #[validate(range(min = 2))]
+    #[builder(default = "0")]
     pub block_size: usize,
 
     // This was 1024 in the past but reverted back to 256
@@ -325,12 +324,68 @@ impl Default for MockEngineArgs {
         MockEngineArgsBuilder::default()
             .build()
             .expect("Failed to build default MockEngineArgs")
+            .normalized()
+            .expect("Failed to normalize default MockEngineArgs")
     }
 }
 
 impl MockEngineArgs {
+    const DEFAULT_VLLM_BLOCK_SIZE: usize = 64;
+    const DEFAULT_SGLANG_BLOCK_SIZE: usize = 1;
+
     pub fn builder() -> MockEngineArgsBuilder {
         MockEngineArgsBuilder::default()
+    }
+
+    pub fn normalized(mut self) -> anyhow::Result<Self> {
+        match self.engine_type {
+            EngineType::Vllm => {
+                if self.block_size == 0 {
+                    self.block_size = Self::DEFAULT_VLLM_BLOCK_SIZE;
+                }
+            }
+            EngineType::Sglang => {
+                let page_size = self.sglang.as_ref().and_then(|sglang| sglang.page_size);
+                match (self.block_size, page_size) {
+                    (0, None) => {
+                        self.block_size = Self::DEFAULT_SGLANG_BLOCK_SIZE;
+                    }
+                    (0, Some(page_size)) => {
+                        self.block_size = page_size;
+                    }
+                    (block_size, Some(page_size)) if block_size == page_size => {}
+                    (_, Some(page_size)) => {
+                        return Err(anyhow::anyhow!(
+                            "engine_type=sglang requires block_size and sglang.page_size to match when both are set, got block_size={} and sglang.page_size={page_size}",
+                            self.block_size,
+                        ));
+                    }
+                    (_, None) => {}
+                }
+            }
+        }
+
+        if self.engine_type == EngineType::Sglang
+            && let Some(chunked_prefill_size) = self
+                .sglang
+                .as_ref()
+                .and_then(|sglang| sglang.chunked_prefill_size)
+            && chunked_prefill_size % self.block_size != 0
+        {
+            return Err(anyhow::anyhow!(
+                "engine_type=sglang requires sglang.chunked_prefill_size to be divisible by block_size, got chunked_prefill_size={} and block_size={}",
+                chunked_prefill_size,
+                self.block_size,
+            ));
+        }
+
+        self.validate()
+            .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
+        if self.block_size == 0 {
+            return Err(anyhow::anyhow!("block_size must be greater than 0"));
+        }
+
+        Ok(self)
     }
 
     pub fn is_prefill(&self) -> bool {
@@ -628,12 +683,14 @@ impl MockEngineArgs {
         builder
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))
+            .and_then(Self::normalized)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_unique_block_default_uniqueness() {
@@ -659,5 +716,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_normalized_sglang_uses_page_size_alias_for_block_size() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .sglang(Some(SglangArgs {
+                page_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 16);
+    }
+
+    #[test]
+    fn test_normalized_sglang_accepts_equal_block_size_and_page_size() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(8)
+            .sglang(Some(SglangArgs {
+                page_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 8);
+    }
+
+    #[test]
+    fn test_normalized_sglang_rejects_mismatched_block_size_and_page_size() {
+        let error = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(8)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("block_size and sglang.page_size to match"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn test_normalized_sglang_defaults_block_size_to_one() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 1);
+    }
+
+    #[test]
+    fn test_from_json_file_normalizes_sglang_page_size() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("args.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "engine_type": "sglang",
+                "sglang": {
+                    "page_size": 32
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let args = MockEngineArgs::from_json_file(&path).unwrap();
+        assert_eq!(args.block_size, 32);
+    }
+
+    #[test]
+    fn test_normalized_sglang_rejects_chunked_prefill_not_divisible_by_block_size() {
+        let error = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(6),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("chunked_prefill_size to be divisible by block_size"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn test_normalized_sglang_accepts_chunked_prefill_divisible_by_block_size() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 4);
     }
 }

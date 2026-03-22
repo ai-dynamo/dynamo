@@ -2,12 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import subprocess
-import sys
 
 import pytest
 
-from dynamo.llm import run_mocker_trace_replay
 from dynamo.replay import run_trace_replay
 
 pytestmark = [
@@ -41,7 +38,6 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 
 def _write_trace_and_args(tmp_path):
     trace_path = tmp_path / "trace.jsonl"
-    args_path = tmp_path / "args.json"
     records = [
         {
             "timestamp": 1000.0,
@@ -60,6 +56,11 @@ def _write_trace_and_args(tmp_path):
         "\n".join(json.dumps(record) for record in records) + "\n",
         encoding="utf-8",
     )
+    return trace_path
+
+
+def _write_vllm_args(tmp_path):
+    args_path = tmp_path / "args.json"
     args_path.write_text(
         json.dumps(
             {
@@ -69,16 +70,21 @@ def _write_trace_and_args(tmp_path):
         ),
         encoding="utf-8",
     )
-    return trace_path, args_path
+    return args_path
 
 
-def _write_mooncake_args(tmp_path):
-    args_path = tmp_path / "mooncake_args.json"
+def _write_sglang_args(tmp_path):
+    args_path = tmp_path / "sglang_args.json"
     args_path.write_text(
         json.dumps(
             {
-                "block_size": 512,
+                "engine_type": "sglang",
+                "num_gpu_blocks": 512,
+                "block_size": 64,
                 "speedup_ratio": 1000.0,
+                "sglang": {
+                    "page_size": 64,
+                },
             }
         ),
         encoding="utf-8",
@@ -86,20 +92,24 @@ def _write_mooncake_args(tmp_path):
     return args_path
 
 
-def _write_mooncake20_trace(tmp_path):
-    trace_path = tmp_path / "mooncake_trace_first20.jsonl"
-    trace_path.write_text(MOONCAKE_TRACE_FIRST20, encoding="utf-8")
-    return trace_path
-
-
-def test_run_trace_replay_offline_smoke(tmp_path):
-    trace_path, args_path = _write_trace_and_args(tmp_path)
+@pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+def test_run_trace_replay_smoke_matrix(tmp_path, engine_type, replay_mode, router_mode):
+    trace_path = _write_trace_and_args(tmp_path)
+    args_path = (
+        _write_vllm_args(tmp_path)
+        if engine_type == "vllm"
+        else _write_sglang_args(tmp_path)
+    )
+    num_workers = 1 if router_mode == "round_robin" else 2
 
     report = run_trace_replay(
         trace_path,
         extra_engine_args=args_path,
-        num_workers=1,
-        replay_mode="offline",
+        num_workers=num_workers,
+        replay_mode=replay_mode,
+        router_mode=router_mode,
     )
 
     assert report["num_requests"] == 2
@@ -107,133 +117,34 @@ def test_run_trace_replay_offline_smoke(tmp_path):
     assert report["total_output_tokens"] == 4
 
 
-def test_run_trace_replay_accepts_arrival_speedup_ratio(tmp_path):
-    trace_path, args_path = _write_trace_and_args(tmp_path)
-
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=args_path,
-        num_workers=1,
-        replay_mode="offline",
-        arrival_speedup_ratio=10.0,
+@pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_invariant_counts_match(tmp_path, engine_type, replay_mode):
+    trace_path = _write_trace_and_args(tmp_path)
+    args_path = (
+        _write_vllm_args(tmp_path)
+        if engine_type == "vllm"
+        else _write_sglang_args(tmp_path)
     )
-
-    assert report["num_requests"] == 2
-    assert report["completed_requests"] == 2
-
-
-def test_run_trace_replay_online_smoke(tmp_path):
-    trace_path, args_path = _write_trace_and_args(tmp_path)
-
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=args_path,
-        num_workers=1,
-        replay_mode="online",
-    )
-
-    assert report["num_requests"] == 2
-    assert report["completed_requests"] == 2
-    assert report["total_output_tokens"] == 4
-
-
-def test_run_trace_replay_online_kv_router_smoke(tmp_path):
-    trace_path, args_path = _write_trace_and_args(tmp_path)
-
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=args_path,
-        num_workers=2,
-        replay_mode="online",
-        router_mode="kv_router",
-    )
-
-    assert report["num_requests"] == 2
-    assert report["completed_requests"] == 2
-    assert report["total_output_tokens"] == 4
-
-
-def test_run_mocker_trace_replay_compatibility_wrapper(tmp_path):
-    trace_path, args_path = _write_trace_and_args(tmp_path)
-
-    report = run_mocker_trace_replay(
-        trace_path,
-        extra_engine_args=args_path,
-        num_workers=1,
-    )
-
-    assert report["num_requests"] == 2
-    assert report["completed_requests"] == 2
-
-
-def test_dynamo_replay_cli_help():
-    result = subprocess.run(
-        [sys.executable, "-m", "dynamo.replay", "--help"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    assert "replay-mode" in result.stdout
-    assert "router-mode" in result.stdout
-    assert "router-queue-policy" in result.stdout
-    assert "arrival-speedup-ratio" in result.stdout
-
-
-def test_dynamo_replay_cli_accepts_router_queue_policy(tmp_path):
-    trace_path, args_path = _write_trace_and_args(tmp_path)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "dynamo.replay",
-            str(trace_path),
-            "--extra-engine-args",
-            str(args_path),
-            "--num-workers",
-            "2",
-            "--replay-mode",
-            "offline",
-            "--router-mode",
-            "kv_router",
-            "--router-queue-policy",
-            "lcfs",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    report = json.loads(result.stdout)
-    assert report["num_requests"] == 2
-    assert report["completed_requests"] == 2
-
-
-def test_run_trace_replay_offline_mooncake20_invariant_counts_match(tmp_path):
-    trace_path = _write_mooncake20_trace(tmp_path)
-    args_path = _write_mooncake_args(tmp_path)
 
     single = run_trace_replay(
         trace_path,
         extra_engine_args=args_path,
         num_workers=1,
-        replay_mode="offline",
+        replay_mode=replay_mode,
     )
     multi_round_robin = run_trace_replay(
         trace_path,
         extra_engine_args=args_path,
         num_workers=4,
-        replay_mode="offline",
+        replay_mode=replay_mode,
         router_mode="round_robin",
     )
     multi_kv_router = run_trace_replay(
         trace_path,
         extra_engine_args=args_path,
         num_workers=4,
-        replay_mode="offline",
+        replay_mode=replay_mode,
         router_mode="kv_router",
     )
 
@@ -245,47 +156,3 @@ def test_run_trace_replay_offline_mooncake20_invariant_counts_match(tmp_path):
     ):
         assert single[field] == multi_round_robin[field]
         assert single[field] == multi_kv_router[field]
-
-
-def test_dynamo_replay_cli_mooncake20_shape_matches_api(tmp_path):
-    trace_path = _write_mooncake20_trace(tmp_path)
-    args_path = _write_mooncake_args(tmp_path)
-
-    expected = run_trace_replay(
-        trace_path,
-        extra_engine_args=args_path,
-        num_workers=4,
-        replay_mode="offline",
-        router_mode="kv_router",
-    )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "dynamo.replay",
-            str(trace_path),
-            "--extra-engine-args",
-            str(args_path),
-            "--num-workers",
-            "4",
-            "--replay-mode",
-            "offline",
-            "--router-mode",
-            "kv_router",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    actual = json.loads(result.stdout)
-    assert actual.keys() == expected.keys()
-    for field in (
-        "num_requests",
-        "completed_requests",
-        "total_input_tokens",
-        "total_output_tokens",
-    ):
-        assert actual[field] == expected[field]

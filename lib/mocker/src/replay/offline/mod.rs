@@ -18,7 +18,7 @@ pub(crate) fn simulate_trace(
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    if num_workers == 1 {
+    if num_workers == 1 && args.engine_type == crate::common::protocols::EngineType::Vllm {
         single::simulate_trace_single(args, requests, arrival_speedup_ratio)
     } else {
         multi::simulate_trace_multi(
@@ -38,7 +38,7 @@ pub(crate) fn simulate_concurrency(
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    if num_workers == 1 {
+    if num_workers == 1 && args.engine_type == crate::common::protocols::EngineType::Vllm {
         single::simulate_concurrency_single(args, requests, max_in_flight)
     } else {
         multi::simulate_concurrency_multi(args, requests, max_in_flight, num_workers, router_mode)

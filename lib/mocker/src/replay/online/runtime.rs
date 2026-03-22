@@ -19,7 +19,7 @@ use crate::replay::router::ReplayRouter;
 use crate::replay::{
     ReplayRouterMode, TraceCollector, TraceSimulationReport, normalize_trace_requests,
 };
-use crate::scheduler::{AdmissionEvent, Scheduler, SchedulerHandle};
+use crate::scheduler::{AdmissionEvent, EngineScheduler, SchedulerHandle};
 
 #[derive(Clone, Copy, Debug)]
 enum LiveReplayMode {
@@ -191,7 +191,7 @@ async fn run_demux(
 struct LiveRuntime {
     pending: VecDeque<DirectRequest>,
     senders: Vec<mpsc::UnboundedSender<DirectRequest>>,
-    schedulers: Vec<Scheduler>,
+    schedulers: Vec<EngineScheduler>,
     output_rx: mpsc::UnboundedReceiver<OutputSignal>,
     admission_rx: mpsc::UnboundedReceiver<AdmissionEvent>,
     cancel_token: CancellationToken,
@@ -298,7 +298,7 @@ impl LiveRuntime {
         let mut senders = Vec::with_capacity(num_workers);
 
         for worker_idx in 0..num_workers {
-            let scheduler = Scheduler::new_with_admission(
+            let scheduler = EngineScheduler::new_with_admission(
                 args.clone(),
                 0,
                 Some(output_tx.clone()),
@@ -432,6 +432,7 @@ pub(crate) fn simulate_trace_requests(
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     let (report, _) = run_live_runtime(
         args,
@@ -450,6 +451,7 @@ pub(crate) fn simulate_concurrency_requests(
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
     if requests.is_empty() {
         bail!("online concurrency replay requires at least one request");
     }
@@ -473,6 +475,7 @@ fn simulate_trace_requests_with_stats(
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     run_live_runtime(
         args,
@@ -491,6 +494,7 @@ fn simulate_concurrency_requests_with_stats(
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    let args = args.normalized()?;
     let pending = VecDeque::from(requests);
     run_live_runtime(
         args,
@@ -504,12 +508,25 @@ fn simulate_concurrency_requests_with_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::DirectRequest;
+    use crate::common::protocols::{DirectRequest, EngineType, SglangArgs};
 
     fn replay_args() -> MockEngineArgs {
         MockEngineArgs::builder()
             .speedup_ratio(1000.0)
             .block_size(64)
+            .build()
+            .unwrap()
+    }
+
+    fn sglang_replay_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(512)
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(2),
+                ..Default::default()
+            }))
             .build()
             .unwrap()
     }
@@ -607,6 +624,31 @@ mod tests {
 
         assert_eq!(stats.dispatch_history.len(), 2);
         assert_eq!(stats.dispatch_history[0], stats.dispatch_history[1]);
+    }
+
+    #[test]
+    fn test_online_trace_replay_sglang_single_worker_completes() {
+        let args = sglang_replay_args();
+        let requests = vec![request(101, 7, Some(0.0)), request(102, 8, Some(1.0))];
+
+        let report =
+            simulate_trace_requests(args, requests, 1, 1.0, ReplayRouterMode::RoundRobin).unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 4);
+    }
+
+    #[test]
+    fn test_online_trace_replay_sglang_kv_router_smoke() {
+        let args = sglang_replay_args();
+        let requests = vec![request(111, 9, Some(0.0)), request(112, 9, Some(500.0))];
+
+        let (report, stats) =
+            simulate_trace_requests_with_stats(args, requests, 2, 1.0, ReplayRouterMode::KvRouter)
+                .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(stats.dispatch_history.len(), 2);
     }
 
     #[test]

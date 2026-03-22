@@ -1,24 +1,40 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::core::ExecutedPass;
-use super::core::ReplayWorkerCore;
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
+use crate::scheduler::{EngineCore, EnginePassResult};
 
 pub(crate) struct OfflineWorkerState {
-    core: ReplayWorkerCore,
+    core: EngineCore,
     busy: bool,
     in_flight: usize,
 }
 
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
-        let core = if capture_kv_events {
-            ReplayWorkerCore::new_with_kv_capture(args, Some(worker_idx as u64))
-        } else {
-            ReplayWorkerCore::new(args)
+        let core = match args.engine_type {
+            crate::common::protocols::EngineType::Vllm => {
+                if capture_kv_events {
+                    EngineCore::Vllm(crate::scheduler::VllmCore::new_with_kv_capture(
+                        args,
+                        worker_idx as u64,
+                    ))
+                } else {
+                    EngineCore::Vllm(crate::scheduler::VllmCore::new(args))
+                }
+            }
+            crate::common::protocols::EngineType::Sglang => {
+                if capture_kv_events {
+                    EngineCore::Sglang(crate::scheduler::SglangCore::new_with_kv_capture(
+                        args,
+                        worker_idx as u64,
+                    ))
+                } else {
+                    EngineCore::Sglang(crate::scheduler::SglangCore::new(args))
+                }
+            }
         };
 
         Self {
@@ -29,6 +45,7 @@ impl OfflineWorkerState {
     }
 
     pub(crate) fn in_flight(&self) -> usize {
+        debug_assert!(self.in_flight >= self.core.num_requests());
         self.in_flight
     }
 
@@ -61,7 +78,7 @@ impl OfflineWorkerState {
         &mut self,
         collector: &mut TraceCollector,
         now_ms: f64,
-    ) -> ExecutedPass {
+    ) -> EnginePassResult {
         self.core.execute_pass(collector, now_ms)
     }
 }

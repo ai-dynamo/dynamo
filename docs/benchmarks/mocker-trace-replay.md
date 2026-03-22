@@ -65,7 +65,10 @@ Example:
 {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
 ```
 
-The mocker synthesizes token blocks from `hash_ids` using the configured `--block-size`, so the replay block size should match the block size used when the trace was generated.
+The mocker synthesizes token blocks from `hash_ids` using the configured `--block-size`, so the
+replay block size should match the block size used when the trace was generated. For
+`engine_type=sglang`, replay still uses canonical `block_size` internally; `sglang.page_size` is
+accepted as a compatibility alias and is normalized into `block_size` before replay starts.
 
 ## Replay Surfaces
 
@@ -91,6 +94,20 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
     --extra-engine-args /path/to/mocker_args.json
+```
+
+SGLang replay uses the same CLI surface. A minimal extra-engine-args file can use either
+`block_size` directly or the compatibility alias `sglang.page_size`:
+
+```json
+{
+  "engine_type": "sglang",
+  "num_gpu_blocks": 512,
+  "speedup_ratio": 1000.0,
+  "sglang": {
+    "page_size": 2
+  }
+}
 ```
 
 ### `python -m dynamo.mocker --trace-file`
@@ -223,17 +240,18 @@ The dedicated replay CLI returns the same report schema as the Python API `dynam
 Shared replay constraints:
 
 - aggregated mode
-- `--engine-type vllm`
+- `--engine-type vllm|sglang`
 - `--data-parallel-size 1`
 
 Additional offline constraints:
 
 - offline `kv_router` requires `num_workers > 1`
-- public single-worker offline replay still behaves as the single-worker runtime path
+- public single-worker offline replay still uses the legacy single-worker runtime for `vllm`
+  while `sglang` goes through the shared multi-worker replay runtime even when `num_workers=1`
 
 Additional online constraints:
 
-- the current live replay path is intended for aggregated workers and the same vLLM-only setup
+- the current live replay path is intended for aggregated workers only
 
 If you violate those constraints, replay fails immediately with a validation error.
 

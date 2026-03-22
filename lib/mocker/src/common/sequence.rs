@@ -281,7 +281,15 @@ impl ActiveSequence {
 
     /// Free all blocks, generating appropriate signals for each block type
     pub fn free_signal(&self) -> Vec<MoveBlock> {
-        self.unique_blocks
+        let active_tokens = if self.num_allocated_tokens < self.num_input_tokens {
+            self.num_allocated_tokens
+        } else {
+            self.len()
+        };
+        let active_blocks = active_tokens
+            .div_ceil(self.block_size)
+            .min(self.unique_blocks.len());
+        self.unique_blocks[..active_blocks]
             .iter()
             .rev()
             .map(|block| match block {
