@@ -2759,6 +2759,116 @@ mod event_processor_tests {
         assert_eq!(total_blocks, 3, "All 3 blocks should be accounted for");
     }
 
+    /// Test that reusing an older parent hash breaks the current sequential batch.
+    #[tokio::test]
+    async fn test_run_event_processor_loop_reused_parent_hash_breaks_chain() {
+        let timeout_ms = Some(100); // 100ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(2),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(3),
+                    tokens_hash: LocalBlockHash(300),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        assert_eq!(
+            events.len(),
+            2,
+            "Reused parent hash should flush the current batch before starting a new one"
+        );
+
+        if let KvCacheEventData::Stored(data) = &events[0].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                2,
+                "First batch should keep the valid chain"
+            );
+            assert_eq!(
+                data.parent_hash, None,
+                "First batch should preserve the original root parent"
+            );
+        } else {
+            panic!("Expected first event to be Stored");
+        }
+
+        if let KvCacheEventData::Stored(data) = &events[1].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                1,
+                "Second batch should contain only the inconsistent event"
+            );
+            assert_eq!(
+                data.parent_hash,
+                Some(ExternalSequenceBlockHash(1)),
+                "Second batch should preserve the reused parent hash"
+            );
+        } else {
+            panic!("Expected second event to be Stored");
+        }
+    }
+
     /// Test that with short timeout and slow input, events are NOT batched
     /// Parametrized over different timeout values: 0ms, 0.1ms, 0.2ms
     /// All use 2ms delay between events, so each event times out before the next arrives
