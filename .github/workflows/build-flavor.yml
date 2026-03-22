@@ -52,11 +52,6 @@ on:
         required: false
         type: string
         default: ''
-      build_only:
-        description: 'Build and push only — enables branch-tagged images'
-        required: false
-        type: boolean
-        default: false
       run_compliance_scan:
         description: 'Run compliance scan after build'
         required: false
@@ -67,6 +62,11 @@ on:
         required: false
         type: number
         default: 10
+      sanitized_ref_name:
+        description: 'Sanitized git ref name for branch-tagged images'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -101,7 +101,7 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Build
+      - name: Build Flavor
         id: build
         uses: ./.github/actions/build-flavor
         with:
@@ -124,13 +124,7 @@ jobs:
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image }}
-      - name: Refresh BuildKit builder
-        uses: ./.github/actions/builder-refresher
-        with:
-          builder_name: ${{ inputs.builder_name }}
-          flavor: ${{ inputs.framework }}
-          arch: ${{ inputs.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
+          sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
       - name: Copy image to ACR
         if: inputs.copy_to_acr
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}

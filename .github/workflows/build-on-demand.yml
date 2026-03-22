@@ -52,7 +52,7 @@ jobs:
   vllm-pipeline:
     needs: [init]
     if: inputs.build_vllm
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: vllm
       target: runtime
@@ -60,14 +60,16 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-      build_only: true
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
       sanitized_ref_name: ${{ needs.init.outputs.sanitized_ref_name }}
     secrets: inherit
 
   sglang-pipeline:
     needs: [init]
     if: inputs.build_sglang
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: sglang
       target: runtime
@@ -75,14 +77,16 @@ jobs:
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-      build_only: true
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
       sanitized_ref_name: ${{ needs.init.outputs.sanitized_ref_name }}
     secrets: inherit
 
   trtllm-pipeline:
     needs: [init]
     if: inputs.build_trtllm
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: trtllm
       target: runtime
@@ -90,7 +94,9 @@ jobs:
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-      build_only: true
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
       sanitized_ref_name: ${{ needs.init.outputs.sanitized_ref_name }}
     secrets: inherit
 
