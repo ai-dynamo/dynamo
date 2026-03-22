@@ -286,4 +286,14 @@ pub(crate) async fn assert_scheduler_completes_all(
         "Scheduler should be idle after all requests complete, got {} active blocks",
         metrics.active_decode_blocks
     );
+    assert_eq!(
+        metrics.gpu_cache_usage_perc, 0.0,
+        "Scheduler should report zero cache usage after draining, got {}",
+        metrics.gpu_cache_usage_perc
+    );
+    assert!(
+        metrics.total_blocks > 0,
+        "Scheduler should populate total_blocks, got {}",
+        metrics.total_blocks
+    );
 }

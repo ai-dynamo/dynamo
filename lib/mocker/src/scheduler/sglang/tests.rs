@@ -564,6 +564,8 @@ async fn assert_sglang_scheduler_completes_all(
     tokio::time::sleep(Duration::from_millis(100)).await;
     let metrics = scheduler.metrics_receiver().borrow().clone();
     assert!(metrics.active_decode_blocks > 0);
+    assert!(metrics.total_blocks > 0);
+    assert!((0.0..=1.0).contains(&metrics.gpu_cache_usage_perc));
 }
 
 #[rstest]
