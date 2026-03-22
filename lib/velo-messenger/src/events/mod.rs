@@ -458,7 +458,7 @@ impl VeloEvents {
             .or_insert_with(|| Arc::new(RemoteEvent::new(self.proxy_manager.clone())))
             .clone();
 
-        match remote_event.register_waiter(generation) {
+        match remote_event.register_waiter(generation)? {
             WaitRegistration::Ready => self.immediate_ok_awaiter(),
             WaitRegistration::Poisoned(poison) => self.immediate_poison_awaiter(poison),
             WaitRegistration::Pending(waiter) => {
@@ -545,7 +545,7 @@ impl VeloEvents {
             .or_insert_with(|| Arc::new(RemoteEvent::new(self.proxy_manager.clone())))
             .clone();
 
-        match remote_event.register_waiter(generation) {
+        match remote_event.register_waiter(generation)? {
             WaitRegistration::Ready => {
                 let awaiter = self.response_manager.register_outcome()?;
                 self.response_manager
@@ -625,7 +625,7 @@ impl VeloEvents {
             .or_insert_with(|| Arc::new(RemoteEvent::new(self.proxy_manager.clone())))
             .clone();
 
-        match remote_event.register_waiter(generation) {
+        match remote_event.register_waiter(generation)? {
             WaitRegistration::Ready => {
                 let awaiter = self.response_manager.register_outcome()?;
                 self.response_manager.complete_outcome(
@@ -927,7 +927,7 @@ mod tests {
     #[test]
     fn remote_event_register_waiter_returns_pending() {
         let re = RemoteEvent::new(make_proxy_manager());
-        match re.register_waiter(1) {
+        match re.register_waiter(1).unwrap() {
             WaitRegistration::Pending(_) => {}
             other => panic!("Expected Pending, got {:?}", variant_name(&other)),
         }
@@ -936,7 +936,7 @@ mod tests {
     #[tokio::test]
     async fn remote_event_complete_trigger_wakes_waiter() {
         let re = RemoteEvent::new(make_proxy_manager());
-        let waiter = match re.register_waiter(1) {
+        let waiter = match re.register_waiter(1).unwrap() {
             WaitRegistration::Pending(w) => w,
             _ => panic!("Expected Pending"),
         };
@@ -950,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn remote_event_complete_poison_wakes_waiter() {
         let re = RemoteEvent::new(make_proxy_manager());
-        let waiter = match re.register_waiter(1) {
+        let waiter = match re.register_waiter(1).unwrap() {
             WaitRegistration::Pending(w) => w,
             _ => panic!("Expected Pending"),
         };
@@ -968,7 +968,7 @@ mod tests {
         let re = RemoteEvent::new(make_proxy_manager());
         re.complete_generation(1, CompletionKind::Triggered);
 
-        match re.register_waiter(1) {
+        match re.register_waiter(1).unwrap() {
             WaitRegistration::Ready => {}
             other => panic!("Expected Ready, got {:?}", variant_name(&other)),
         }
@@ -981,7 +981,7 @@ mod tests {
         let poison = Arc::new(EventPoison::new(handle, "bad"));
         re.complete_generation(1, CompletionKind::Poisoned(poison));
 
-        match re.register_waiter(1) {
+        match re.register_waiter(1).unwrap() {
             WaitRegistration::Poisoned(_) => {}
             other => panic!("Expected Poisoned, got {:?}", variant_name(&other)),
         }
@@ -1036,11 +1036,11 @@ mod tests {
     #[tokio::test]
     async fn remote_event_higher_generation_completes_lower() {
         let re = RemoteEvent::new(make_proxy_manager());
-        let w1 = match re.register_waiter(1) {
+        let w1 = match re.register_waiter(1).unwrap() {
             WaitRegistration::Pending(w) => w,
             _ => panic!("Expected Pending"),
         };
-        let w2 = match re.register_waiter(2) {
+        let w2 = match re.register_waiter(2).unwrap() {
             WaitRegistration::Pending(w) => w,
             _ => panic!("Expected Pending"),
         };
@@ -1090,11 +1090,11 @@ mod tests {
     #[tokio::test]
     async fn remote_event_multiple_waiters_same_generation() {
         let re = RemoteEvent::new(make_proxy_manager());
-        let w1 = match re.register_waiter(1) {
+        let w1 = match re.register_waiter(1).unwrap() {
             WaitRegistration::Pending(w) => w,
             _ => panic!("Expected Pending"),
         };
-        let w2 = match re.register_waiter(1) {
+        let w2 = match re.register_waiter(1).unwrap() {
             WaitRegistration::Pending(w) => w,
             _ => panic!("Expected Pending"),
         };

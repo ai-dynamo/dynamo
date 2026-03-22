@@ -3,7 +3,9 @@
 
 //! Remote event state management for subscriber-side tracking.
 
+use anyhow::Result;
 use parking_lot::Mutex;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -86,36 +88,36 @@ impl RemoteEvent {
             });
     }
 
-    pub fn register_waiter(&self, generation: u32) -> WaitRegistration {
+    pub fn register_waiter(&self, generation: u32) -> Result<WaitRegistration> {
         // Fast path: already complete
         if generation <= self.known_generation() {
             let completions = self.completions.lock();
-            return match completions.get(&generation) {
+            return Ok(match completions.get(&generation) {
                 Some(completion) => match completion.as_ref() {
                     CompletionKind::Triggered => WaitRegistration::Ready,
                     CompletionKind::Poisoned(p) => WaitRegistration::Poisoned(p.clone()),
                 },
                 None => WaitRegistration::Ready,
-            };
+            });
         }
 
         // Create or reuse a proxy event for this generation
         let proxy_handle = {
             let mut proxy_handles = self.proxy_handles.lock();
-            *proxy_handles.entry(generation).or_insert_with(|| {
-                let event = self
-                    .proxy_manager
-                    .new_event()
-                    .expect("Failed to create proxy event for remote subscription");
-                event.into_handle()
-            })
+            match proxy_handles.entry(generation) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let event = self.proxy_manager.new_event()?;
+                    *e.insert(event.into_handle())
+                }
+            }
         };
 
         // Create an awaiter on the proxy event
-        match self.proxy_manager.awaiter(proxy_handle) {
+        Ok(match self.proxy_manager.awaiter(proxy_handle) {
             Ok(waiter) => WaitRegistration::Pending(waiter),
             Err(_) => WaitRegistration::Ready,
-        }
+        })
     }
 
     pub fn add_pending(&self, generation: u32) -> bool {
