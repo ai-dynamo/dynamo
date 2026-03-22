@@ -153,6 +153,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         llm::entrypoint::run_mocker_trace_replay,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        llm::entrypoint::run_mocker_synthetic_trace_replay,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;

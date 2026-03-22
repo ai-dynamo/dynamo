@@ -125,6 +125,7 @@ pub(super) fn get_new_batch_prefill(
         req.kv_indices = alloc.kv_indices;
         req.materialized_tokens = chunk_end;
         req.allocated_tokens = ceil_to_block(chunk_end, config.block_size);
+        req.debug_assert_invariants(config.block_size);
 
         let is_truncated = chunk_end < req.current_sequence_len();
         let output_reserve = if is_truncated {

@@ -275,17 +275,11 @@ impl ActiveSequence {
         }
 
         // Free all blocks when we reach max tokens
-        signals.extend(self.free_signal());
+        signals.extend(self.free_signal_for_tokens(self.len()));
         signals
     }
 
-    /// Free all blocks, generating appropriate signals for each block type
-    pub fn free_signal(&self) -> Vec<MoveBlock> {
-        let active_tokens = if self.num_allocated_tokens < self.num_input_tokens {
-            self.num_allocated_tokens
-        } else {
-            self.len()
-        };
+    fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)
             .min(self.unique_blocks.len());
@@ -301,6 +295,11 @@ impl ActiveSequence {
                 }
             })
             .collect()
+    }
+
+    /// Free the currently active allocation footprint.
+    pub fn free_signal(&self) -> Vec<MoveBlock> {
+        self.free_signal_for_tokens(self.num_allocated_tokens)
     }
 
     /// Move the request to a preempted state and return the free signals from freeing current blocks.

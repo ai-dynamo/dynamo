@@ -87,6 +87,68 @@ impl SglangRequest {
         self.materialized_tokens += 1;
     }
 
+    pub(super) fn debug_assert_invariants(&self, block_size: usize) {
+        #[cfg(debug_assertions)]
+        {
+            let sequence_len = self.current_sequence_len();
+            debug_assert!(
+                self.cached_tokens <= self.materialized_tokens,
+                "request {} cached {} tokens but materialized {}",
+                self.uuid,
+                self.cached_tokens,
+                self.materialized_tokens
+            );
+            debug_assert!(
+                self.materialized_tokens <= sequence_len,
+                "request {} materialized {} tokens but sequence length is {sequence_len}",
+                self.uuid,
+                self.materialized_tokens
+            );
+            debug_assert_eq!(
+                self.kv_indices.len(),
+                self.materialized_tokens,
+                "request {} has {} kv indices but {} materialized tokens",
+                self.uuid,
+                self.kv_indices.len(),
+                self.materialized_tokens
+            );
+            debug_assert!(
+                self.allocated_tokens >= self.materialized_tokens,
+                "request {} allocated {} tokens but materialized {}",
+                self.uuid,
+                self.allocated_tokens,
+                self.materialized_tokens
+            );
+            debug_assert_eq!(
+                self.cached_tokens % block_size,
+                0,
+                "request {} cached tokens {} are not page-aligned to block size {block_size}",
+                self.uuid,
+                self.cached_tokens
+            );
+            debug_assert!(
+                self.allocated_tokens == 0 || self.allocated_tokens.is_multiple_of(block_size),
+                "request {} allocated tokens {} are not page-aligned to block size {block_size}",
+                self.uuid,
+                self.allocated_tokens
+            );
+            debug_assert!(
+                self.extra_reserved_tokens() < block_size,
+                "request {} reserves {} extra tokens with block size {block_size}",
+                self.uuid,
+                self.extra_reserved_tokens()
+            );
+            debug_assert_eq!(
+                self.last_node.is_some(),
+                self.materialized_tokens > 0,
+                "request {} has last_node={} but materialized_tokens={}",
+                self.uuid,
+                self.last_node.is_some(),
+                self.materialized_tokens
+            );
+        }
+    }
+
     pub(super) fn reset_for_retract(&mut self) {
         self.last_node = None;
         self.kv_indices.clear();

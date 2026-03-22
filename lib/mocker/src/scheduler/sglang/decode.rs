@@ -65,6 +65,7 @@ pub(super) fn cache_materialized_prefix(
         kv_manager.cache_unfinished_req(&sequence, &req.kv_indices[..aligned_tokens], last_node);
     req.last_node = Some(new_last);
     req.cached_tokens = aligned_tokens;
+    req.debug_assert_invariants(config.block_size);
 }
 
 pub(super) fn check_decode_mem(
@@ -98,6 +99,7 @@ pub(super) fn check_decode_mem(
             kv_manager.free_request(last_node);
         }
         req.reset_for_retract();
+        req.debug_assert_invariants(config.block_size);
         retracted.push(req);
     }
 
@@ -171,6 +173,7 @@ pub(super) fn simulate_decode_step(
             req.allocated_tokens += config.block_size;
         }
         req.append_output_token(req.next_output_token());
+        req.debug_assert_invariants(config.block_size);
 
         let is_complete = req.output_len() >= req.max_output_tokens;
         output_signals.push(OutputSignal {
@@ -202,6 +205,7 @@ pub(super) fn simulate_decode_step(
         }
 
         cache_materialized_prefix(req, kv_manager, config);
+        req.debug_assert_invariants(config.block_size);
     }
 
     for &idx in completed_indices.iter().rev() {

@@ -603,4 +603,42 @@ mod tests {
             "second chunk's parent should be block 3's seq_hash"
         );
     }
+
+    #[test]
+    fn test_repreempt_after_partial_recompute_only_frees_reallocated_blocks() {
+        let mut seq = ActiveSequence::new((0..6).collect(), 16, Some(4), true, false);
+        let mut manager = KvManager::new(16, 4);
+
+        let signal = seq.take_creation_signal().unwrap();
+        assert_eq!(manager.process(&signal), 2);
+
+        for _ in 0..3 {
+            let signals = seq.generate();
+            for signal in &signals {
+                manager.process(signal);
+            }
+            if seq.generated_tokens() < seq.max_output_tokens() {
+                seq.commit_allocation(seq.len());
+            }
+        }
+        assert_eq!(manager.num_active_blocks(), 3);
+
+        let first_reset = seq.reset_with_signal();
+        for signal in &first_reset {
+            manager.process(signal);
+        }
+        assert_eq!(manager.num_active_blocks(), 0);
+
+        let prompt_only = seq.prepare_allocation(seq.num_input_tokens()).unwrap();
+        assert_eq!(manager.process(&prompt_only), 2);
+        seq.commit_allocation(seq.num_input_tokens());
+        assert_eq!(manager.num_active_blocks(), 2);
+
+        let second_reset = seq.reset_with_signal();
+        for signal in &second_reset {
+            manager.process(signal);
+        }
+
+        assert_eq!(manager.num_active_blocks(), 0);
+    }
 }

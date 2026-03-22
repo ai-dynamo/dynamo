@@ -10,6 +10,7 @@ use std::sync::Arc;
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::pythonize;
+use uuid::Uuid;
 
 use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
@@ -25,7 +26,7 @@ use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingE
 use dynamo_mocker::common::perf_model::PerfModel;
 
 use super::aic_callback::create_aic_callback;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -516,68 +517,11 @@ pub fn run_mocker_trace_replay(
     router_mode: &str,
     arrival_speedup_ratio: f64,
 ) -> PyResult<PyObject> {
-    // Load args before allow_threads so we can use the GIL for AIC callback creation.
-    let mut args = if let Some(ref extra_args_path) = extra_engine_args {
-        MockEngineArgs::from_json_file(extra_args_path).map_err(|e| {
-            PyException::new_err(format!(
-                "Failed to load mocker args from {:?}: {}",
-                extra_args_path, e
-            ))
-        })?
-    } else {
-        MockEngineArgs::default()
-    };
-
-    // Create AIC callback if requested (requires GIL, must be done before allow_threads).
-    if let Some(ref backend_name) = args.aic_backend.clone() {
-        let backend = backend_name.clone();
-        let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
-        let model_name = args
-            .aic_model_path
-            .clone()
-            .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
-        let backend_version = args.aic_backend_version.clone();
-        let tp_size = args.aic_tp_size.unwrap_or(1);
-        let callback = create_aic_callback(
-            py,
-            &backend,
-            &system,
-            &model_name,
-            tp_size,
-            backend_version.as_deref(),
-        )
-        .map_err(|e| {
-            PyException::new_err(format!(
-                "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                e
-            ))
-        })?;
-        tracing::info!(
-            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-            backend,
-            system,
-            model_name,
-            backend_version
-        );
-        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
-    }
-
+    let args = load_replay_mocker_args(py, extra_engine_args)?;
     let replay_mode = replay_mode.to_owned();
-    let router_mode = match router_mode {
-        "round_robin" => dynamo_mocker::replay::ReplayRouterMode::RoundRobin,
-        "kv_router" => dynamo_mocker::replay::ReplayRouterMode::KvRouter,
-        other => {
-            return Err(PyException::new_err(format!(
-                "router_mode must be either 'round_robin' or 'kv_router', got '{}'",
-                other
-            )));
-        }
-    };
+    let router_mode = parse_replay_router_mode(router_mode)?;
     let report = py.allow_threads(move || {
-        let replay_concurrency = replay_concurrency
-            .map(usize::try_from)
-            .transpose()
-            .map_err(|_| anyhow::anyhow!("replay_concurrency must be at least 1"))?;
+        let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
 
         match (replay_mode.as_str(), replay_concurrency) {
             ("offline", Some(max_in_flight)) => {
@@ -622,6 +566,207 @@ pub fn run_mocker_trace_replay(
     pythonize(py, &report)
         .map_err(to_pyerr)
         .map(|obj| obj.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0))]
+#[allow(clippy::too_many_arguments)]
+pub fn run_mocker_synthetic_trace_replay(
+    py: Python<'_>,
+    input_tokens: usize,
+    output_tokens: usize,
+    request_count: usize,
+    extra_engine_args: Option<PathBuf>,
+    num_workers: usize,
+    replay_concurrency: Option<isize>,
+    replay_mode: &str,
+    router_mode: &str,
+    arrival_speedup_ratio: f64,
+    arrival_interval_ms: f64,
+) -> PyResult<PyObject> {
+    let args = load_replay_mocker_args(py, extra_engine_args)?;
+    let replay_mode = replay_mode.to_owned();
+    let router_mode = parse_replay_router_mode(router_mode)?;
+    let report = py.allow_threads(move || {
+        let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let requests = build_synthetic_requests(
+            input_tokens,
+            output_tokens,
+            request_count,
+            arrival_interval_ms,
+            replay_concurrency.is_none(),
+        )?;
+
+        match (replay_mode.as_str(), replay_concurrency) {
+            ("offline", Some(max_in_flight)) => {
+                dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode(
+                    args,
+                    requests,
+                    max_in_flight,
+                    num_workers,
+                    router_mode,
+                )
+            }
+            ("offline", None) => dynamo_mocker::replay::simulate_trace_requests_with_router_mode(
+                args,
+                requests,
+                num_workers,
+                arrival_speedup_ratio,
+                router_mode,
+            ),
+            ("online", Some(max_in_flight)) => {
+                dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
+                    args,
+                    requests,
+                    max_in_flight,
+                    num_workers,
+                    router_mode,
+                )
+            }
+            ("online", None) => {
+                dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode(
+                    args,
+                    requests,
+                    num_workers,
+                    arrival_speedup_ratio,
+                    router_mode,
+                )
+            }
+            (other, _) => anyhow::bail!(
+                "replay_mode must be either 'offline' or 'online', got '{}'",
+                other
+            ),
+        }
+    });
+    let report = report.map_err(to_pyerr)?;
+    pythonize(py, &report)
+        .map_err(to_pyerr)
+        .map(|obj| obj.unbind())
+}
+
+fn load_replay_mocker_args(
+    py: Python<'_>,
+    extra_engine_args: Option<PathBuf>,
+) -> PyResult<MockEngineArgs> {
+    let mut args = if let Some(ref extra_args_path) = extra_engine_args {
+        MockEngineArgs::from_json_file(extra_args_path).map_err(|e| {
+            PyException::new_err(format!(
+                "Failed to load mocker args from {:?}: {}",
+                extra_args_path, e
+            ))
+        })?
+    } else {
+        MockEngineArgs::default()
+    };
+
+    if let Some(ref backend_name) = args.aic_backend.clone() {
+        let backend = backend_name.clone();
+        let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
+        let model_name = args
+            .aic_model_path
+            .clone()
+            .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
+        let backend_version = args.aic_backend_version.clone();
+        let tp_size = args.aic_tp_size.unwrap_or(1);
+        let callback = create_aic_callback(
+            py,
+            &backend,
+            &system,
+            &model_name,
+            tp_size,
+            backend_version.as_deref(),
+        )
+        .map_err(|e| {
+            PyException::new_err(format!(
+                "Failed to create AIC callback (--aic-perf-model was requested): {}",
+                e
+            ))
+        })?;
+        tracing::info!(
+            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+            backend,
+            system,
+            model_name,
+            backend_version
+        );
+        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+    }
+
+    Ok(args)
+}
+
+fn parse_replay_router_mode(
+    router_mode: &str,
+) -> PyResult<dynamo_mocker::replay::ReplayRouterMode> {
+    match router_mode {
+        "round_robin" => Ok(dynamo_mocker::replay::ReplayRouterMode::RoundRobin),
+        "kv_router" => Ok(dynamo_mocker::replay::ReplayRouterMode::KvRouter),
+        other => Err(PyException::new_err(format!(
+            "router_mode must be either 'round_robin' or 'kv_router', got '{}'",
+            other
+        ))),
+    }
+}
+
+fn parse_replay_concurrency(replay_concurrency: Option<isize>) -> anyhow::Result<Option<usize>> {
+    match replay_concurrency {
+        Some(value) if value < 1 => anyhow::bail!("replay_concurrency must be at least 1"),
+        Some(value) => Ok(Some(value as usize)),
+        None => Ok(None),
+    }
+}
+
+fn build_synthetic_requests(
+    input_tokens: usize,
+    output_tokens: usize,
+    request_count: usize,
+    arrival_interval_ms: f64,
+    include_arrival_timestamps: bool,
+) -> anyhow::Result<Vec<DirectRequest>> {
+    if input_tokens == 0 {
+        anyhow::bail!("input_tokens must be at least 1");
+    }
+    if output_tokens == 0 {
+        anyhow::bail!("output_tokens must be at least 1");
+    }
+    if request_count == 0 {
+        anyhow::bail!("request_count must be at least 1");
+    }
+    if !arrival_interval_ms.is_finite() || arrival_interval_ms < 0.0 {
+        anyhow::bail!(
+            "arrival_interval_ms must be a finite non-negative number, got {}",
+            arrival_interval_ms
+        );
+    }
+
+    let mut requests = Vec::with_capacity(request_count);
+    for request_idx in 0..request_count {
+        let tokens = (0..input_tokens)
+            .map(|token_idx| synthetic_token_id(request_idx, token_idx))
+            .collect();
+        requests.push(DirectRequest {
+            tokens,
+            max_output_tokens: output_tokens,
+            uuid: Some(Uuid::from_u128((request_idx as u128) + 1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: include_arrival_timestamps
+                .then_some(request_idx as f64 * arrival_interval_ms),
+        });
+    }
+
+    Ok(requests)
+}
+
+fn synthetic_token_id(request_idx: usize, token_idx: usize) -> u32 {
+    let mut value =
+        (((request_idx as u64) << 32) ^ (token_idx as u64)).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    let token = value as u32;
+    if token == 0 { 1 } else { token }
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr

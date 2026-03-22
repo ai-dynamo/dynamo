@@ -68,6 +68,7 @@ impl SglangCore {
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let request = direct_to_sglang(request);
+        request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
         self.waiting.push_back(request);
         uuid
@@ -162,6 +163,7 @@ impl SglangCore {
         self.new_token_ratio = (self.new_token_ratio - self.config.new_token_ratio_decay_step)
             .max(self.config.min_new_token_ratio);
 
+        debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         EnginePassResult {
             end_ms: decode.end_ms,
             completed_requests: decode
@@ -218,4 +220,31 @@ fn simulate_prefill_duration(
     }
 
     Duration::from_secs_f64(total_time.as_secs_f64() / config.speedup_ratio)
+}
+
+fn debug_assert_sglang_scheduler_state(
+    waiting: &VecDeque<SglangRequest>,
+    running: &[SglangRequest],
+    block_size: usize,
+) {
+    #[cfg(debug_assertions)]
+    {
+        let mut seen = std::collections::HashSet::new();
+        for req in waiting {
+            debug_assert!(
+                seen.insert(req.uuid),
+                "request {} appears multiple times across waiting/running queues",
+                req.uuid
+            );
+            req.debug_assert_invariants(block_size);
+        }
+        for req in running {
+            debug_assert!(
+                seen.insert(req.uuid),
+                "request {} appears multiple times across waiting/running queues",
+                req.uuid
+            );
+            req.debug_assert_invariants(block_size);
+        }
+    }
 }

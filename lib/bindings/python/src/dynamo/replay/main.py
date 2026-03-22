@@ -13,7 +13,7 @@ from pathlib import Path
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
-from dynamo.replay import run_trace_replay
+from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 
 def _prepare_extra_engine_args(extra_engine_args, router_queue_policy):
@@ -33,8 +33,12 @@ def _prepare_extra_engine_args(extra_engine_args, router_queue_policy):
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
-    parser.add_argument("trace_file")
+    parser.add_argument("trace_file", nargs="?")
     parser.add_argument("--extra-engine-args")
+    parser.add_argument("--input-tokens", type=int)
+    parser.add_argument("--output-tokens", type=int)
+    parser.add_argument("--request-count", type=int)
+    parser.add_argument("--arrival-interval-ms", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--replay-concurrency", type=int)
     parser.add_argument(
@@ -54,21 +58,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
+    using_trace_file = args.trace_file is not None
+    synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
+    using_synthetic = any(value is not None for value in synthetic_args)
+
+    if using_trace_file == using_synthetic:
+        parser.error(
+            "provide either trace_file or all of --input-tokens/--output-tokens/--request-count"
+        )
+    if using_synthetic and not all(value is not None for value in synthetic_args):
+        parser.error(
+            "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
+        )
+
     merged_extra_engine_args, temp_dir = _prepare_extra_engine_args(
         args.extra_engine_args,
         args.router_queue_policy,
     )
 
     try:
-        report = run_trace_replay(
-            args.trace_file,
-            extra_engine_args=merged_extra_engine_args,
-            num_workers=args.num_workers,
-            replay_concurrency=args.replay_concurrency,
-            replay_mode=args.replay_mode,
-            router_mode=args.router_mode,
-            arrival_speedup_ratio=args.arrival_speedup_ratio,
-        )
+        if using_trace_file:
+            report = run_trace_replay(
+                args.trace_file,
+                extra_engine_args=merged_extra_engine_args,
+                num_workers=args.num_workers,
+                replay_concurrency=args.replay_concurrency,
+                replay_mode=args.replay_mode,
+                router_mode=args.router_mode,
+                arrival_speedup_ratio=args.arrival_speedup_ratio,
+            )
+        else:
+            report = run_synthetic_trace_replay(
+                args.input_tokens,
+                args.output_tokens,
+                args.request_count,
+                extra_engine_args=merged_extra_engine_args,
+                num_workers=args.num_workers,
+                replay_concurrency=args.replay_concurrency,
+                replay_mode=args.replay_mode,
+                router_mode=args.router_mode,
+                arrival_speedup_ratio=args.arrival_speedup_ratio,
+                arrival_interval_ms=args.arrival_interval_ms,
+            )
     finally:
         if temp_dir is not None:
             temp_dir.cleanup()

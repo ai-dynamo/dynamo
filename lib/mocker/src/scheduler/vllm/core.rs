@@ -127,6 +127,15 @@ impl SchedulerState {
         request.num_computed_tokens = 0;
         request.num_preemptions += 1;
         let signals = request.sequence.reset_with_signal();
+        debug_assert_vllm_request_invariants(uuid, request);
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                request.sequence.num_allocated_tokens(),
+                0,
+                "preempted request {uuid} should release all allocated KV"
+            );
+        }
         self.prepend_waiting(uuid);
         Some(PreemptedRequest { uuid, signals })
     }
@@ -196,6 +205,9 @@ impl VllmCore {
             },
         );
         self.state.push_waiting(uuid);
+        if let Some(request) = self.state.requests.get(&uuid) {
+            debug_assert_vllm_request_progress(uuid, request);
+        }
         uuid
     }
 
@@ -310,6 +322,7 @@ impl VllmCore {
         let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
         let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
+        debug_assert_vllm_scheduler_state(&self.state);
         EnginePassResult {
             end_ms,
             completed_requests: requests_before.saturating_sub(self.state.requests.len()),
@@ -349,6 +362,7 @@ impl VllmCore {
         let Some(request) = self.state.requests.get(&uuid) else {
             return ScheduleOutcome::Blocked;
         };
+        debug_assert_vllm_request_invariants(uuid, request);
         let prefill_cost = self.kv_manager.get_prefill_cost(&request.sequence);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
             prefill_cost.cached_tokens
@@ -383,11 +397,7 @@ impl VllmCore {
                 let Some(request) = self.state.requests.get_mut(&uuid) else {
                     return ScheduleOutcome::Blocked;
                 };
-                let allocation_target = if request.status == RequestStatus::Running {
-                    desired_computed_after.min(request.sequence.num_input_tokens())
-                } else {
-                    desired_computed_after
-                };
+                let allocation_target = desired_computed_after;
                 let prev_allocated_tokens = request.sequence.num_allocated_tokens();
                 if allocation_target <= prev_allocated_tokens {
                     request.num_computed_tokens = actual_computed_after;
@@ -458,6 +468,9 @@ impl VllmCore {
             }
         }
 
+        if let Some(request) = self.state.requests.get(&uuid) {
+            debug_assert_vllm_request_invariants(uuid, request);
+        }
         let tokens_used = actual_computed_after.saturating_sub(effective_computed_before);
         if tokens_used == 0
             && actual_computed_after < request_sequence_len(&self.state.requests, uuid)
@@ -539,13 +552,19 @@ impl VllmCore {
         let mut output_signals = Vec::with_capacity(ready.len());
         for uuid in ready {
             let mut emitted = false;
+            let mut completed = false;
             loop {
+                debug_assert_vllm_ready_to_decode(&self.state.requests, uuid);
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
                 let signals = sequence.generate();
                 if process_signals(&mut self.kv_manager, &signals) {
+                    if sequence.generated_tokens() < sequence.max_output_tokens() {
+                        sequence.commit_allocation(sequence.len());
+                    }
                     emitted = true;
+                    completed = sequence.generated_tokens() >= sequence.max_output_tokens();
                     break;
                 }
                 sequence.pop();
@@ -564,14 +583,12 @@ impl VllmCore {
                 continue;
             }
 
-            let Some(request) = self.state.requests.get(&uuid) else {
-                continue;
-            };
             if let Some(collector) = collector.as_deref_mut() {
                 collector.on_token(uuid, decode_end_ms);
             }
-            let completed =
-                request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
+            if let Some(request) = self.state.requests.get(&uuid) {
+                debug_assert_vllm_request_progress(uuid, request);
+            }
             output_signals.push(OutputSignal { uuid, completed });
             if completed {
                 self.state.complete(&uuid);
@@ -591,6 +608,93 @@ fn request_sequence_len(requests: &HashMap<Uuid, VllmRequestState>, uuid: Uuid) 
         .get(&uuid)
         .map(|request| request.sequence.len())
         .unwrap_or_default()
+}
+
+fn debug_assert_vllm_request_invariants(uuid: Uuid, request: &VllmRequestState) {
+    #[cfg(debug_assertions)]
+    {
+        let seq_len = request.sequence.len();
+        let allocated = request.sequence.num_allocated_tokens();
+        debug_assert!(
+            request.num_computed_tokens <= seq_len,
+            "request {uuid} computed {} tokens but sequence length is {seq_len}",
+            request.num_computed_tokens
+        );
+        debug_assert!(
+            allocated <= seq_len,
+            "request {uuid} allocated {allocated} tokens but sequence length is {seq_len}"
+        );
+    }
+}
+
+fn debug_assert_vllm_request_progress(uuid: Uuid, request: &VllmRequestState) {
+    #[cfg(debug_assertions)]
+    {
+        debug_assert_vllm_request_invariants(uuid, request);
+        let allocated = request.sequence.num_allocated_tokens();
+        debug_assert!(
+            allocated >= request.num_computed_tokens,
+            "request {uuid} allocated {allocated} tokens but computed {}",
+            request.num_computed_tokens
+        );
+    }
+}
+
+fn debug_assert_vllm_ready_to_decode(requests: &HashMap<Uuid, VllmRequestState>, uuid: Uuid) {
+    #[cfg(debug_assertions)]
+    {
+        let Some(request) = requests.get(&uuid) else {
+            return;
+        };
+        let seq_len = request.sequence.len();
+        if request.num_computed_tokens < seq_len {
+            return;
+        }
+        let allocated = request.sequence.num_allocated_tokens();
+        debug_assert_eq!(
+            allocated, seq_len,
+            "request {uuid} is decode-ready but allocated {allocated} tokens for sequence length {seq_len}"
+        );
+    }
+}
+
+fn debug_assert_vllm_scheduler_state(state: &SchedulerState) {
+    #[cfg(debug_assertions)]
+    {
+        let mut seen = std::collections::HashSet::new();
+        for uuid in &state.waiting {
+            debug_assert!(
+                seen.insert(*uuid),
+                "request {uuid} appears multiple times across waiting/running queues"
+            );
+            let request = state
+                .requests
+                .get(uuid)
+                .expect("waiting request missing from state map");
+            debug_assert!(
+                request.status != RequestStatus::Running,
+                "request {uuid} is queued in waiting but marked Running"
+            );
+            debug_assert_vllm_request_invariants(*uuid, request);
+        }
+        for uuid in &state.running {
+            debug_assert!(
+                seen.insert(*uuid),
+                "request {uuid} appears multiple times across waiting/running queues"
+            );
+            let request = state
+                .requests
+                .get(uuid)
+                .expect("running request missing from state map");
+            debug_assert_eq!(
+                request.status,
+                RequestStatus::Running,
+                "request {uuid} is queued in running but marked {:?}",
+                request.status
+            );
+            debug_assert_vllm_request_invariants(*uuid, request);
+        }
+    }
 }
 
 fn predict_prefill_duration(

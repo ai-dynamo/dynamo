@@ -11,10 +11,11 @@ use tokio::time::interval;
 use uuid::Uuid;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal, PreemptionMode};
+use crate::common::sequence::ActiveSequence;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
 
-use super::core::{RequestStatus, VllmCore};
+use super::core::{RequestStatus, VllmCore, VllmRequestState};
 use super::live::{MockerMetrics, Scheduler};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 23;
@@ -227,6 +228,65 @@ fn test_preemption_requeues_newest_running_request() {
     assert_eq!(request.num_computed_tokens, 0);
     assert_eq!(request.num_preemptions, 1);
     assert_eq!(core.state.waiting.front().copied(), Some(r2));
+}
+
+#[test]
+fn test_running_request_catches_up_decode_tail_before_promote() {
+    let args = MockEngineArgs::builder()
+        .block_size(4)
+        .num_gpu_blocks(8)
+        .max_num_batched_tokens(Some(8))
+        .max_num_seqs(Some(1))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    let uuid = Uuid::from_u128(99);
+    let mut sequence = ActiveSequence::new((0..6).collect(), 16, Some(4), true, false);
+
+    let signal = sequence.take_creation_signal().unwrap();
+    assert_eq!(core.kv_manager.process(&signal), 2);
+    for _ in 0..6 {
+        let signals = sequence.generate();
+        for signal in &signals {
+            core.kv_manager.process(signal);
+        }
+        if sequence.generated_tokens() < sequence.max_output_tokens() {
+            sequence.commit_allocation(sequence.len());
+        }
+    }
+
+    let free = sequence.reset_with_signal();
+    for signal in &free {
+        core.kv_manager.process(signal);
+    }
+    let prompt_only = sequence
+        .prepare_allocation(sequence.num_input_tokens())
+        .unwrap();
+    assert_eq!(core.kv_manager.process(&prompt_only), 2);
+    sequence.commit_allocation(sequence.num_input_tokens());
+
+    core.state.running.push(uuid);
+    core.state.requests.insert(
+        uuid,
+        VllmRequestState {
+            sequence,
+            status: RequestStatus::Running,
+            num_computed_tokens: 9,
+            num_preemptions: 1,
+        },
+    );
+
+    let mut collector = crate::replay::TraceCollector::default();
+    let pass = core.execute_pass(&mut collector, 0.0);
+    let request = core.state.requests.get(&uuid).unwrap();
+
+    assert_eq!(pass.output_signals.len(), 1);
+    assert_eq!(request.num_computed_tokens, 12);
+    assert_eq!(request.sequence.num_allocated_tokens(), 13);
+    assert_eq!(core.kv_manager.num_active_blocks(), 4);
 }
 
 #[test]

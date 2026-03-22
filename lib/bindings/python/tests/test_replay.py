@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dynamo.replay import run_trace_replay
+from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -92,6 +92,13 @@ def _write_sglang_args(tmp_path):
     return args_path
 
 
+def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_tokens):
+    assert report["num_requests"] == num_requests
+    assert report["completed_requests"] == num_requests
+    assert report["total_input_tokens"] == num_requests * input_tokens
+    assert report["total_output_tokens"] == num_requests * output_tokens
+
+
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
@@ -112,9 +119,12 @@ def test_run_trace_replay_smoke_matrix(tmp_path, engine_type, replay_mode, route
         router_mode=router_mode,
     )
 
-    assert report["num_requests"] == 2
-    assert report["completed_requests"] == 2
-    assert report["total_output_tokens"] == 4
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -156,3 +166,115 @@ def test_run_trace_replay_invariant_counts_match(tmp_path, engine_type, replay_m
     ):
         assert single[field] == multi_round_robin[field]
         assert single[field] == multi_kv_router[field]
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+def test_run_synthetic_trace_replay_smoke_matrix(
+    tmp_path, engine_type, replay_mode, router_mode
+):
+    args_path = (
+        _write_vllm_args(tmp_path)
+        if engine_type == "vllm"
+        else _write_sglang_args(tmp_path)
+    )
+    num_workers = 1 if router_mode == "round_robin" else 2
+
+    report = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=args_path,
+        num_workers=num_workers,
+        replay_mode=replay_mode,
+        router_mode=router_mode,
+        arrival_interval_ms=5.0,
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_synthetic_trace_replay_invariant_counts_match(
+    tmp_path, engine_type, replay_mode
+):
+    args_path = (
+        _write_vllm_args(tmp_path)
+        if engine_type == "vllm"
+        else _write_sglang_args(tmp_path)
+    )
+
+    single = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=args_path,
+        num_workers=1,
+        replay_mode=replay_mode,
+        arrival_interval_ms=5.0,
+    )
+    multi_round_robin = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=args_path,
+        num_workers=4,
+        replay_mode=replay_mode,
+        router_mode="round_robin",
+        arrival_interval_ms=5.0,
+    )
+    multi_kv_router = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=args_path,
+        num_workers=4,
+        replay_mode=replay_mode,
+        router_mode="kv_router",
+        arrival_interval_ms=5.0,
+    )
+
+    for field in (
+        "num_requests",
+        "completed_requests",
+        "total_input_tokens",
+        "total_output_tokens",
+    ):
+        assert single[field] == multi_round_robin[field]
+        assert single[field] == multi_kv_router[field]
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_synthetic_concurrency_replay_counts_match(
+    tmp_path, engine_type, replay_mode
+):
+    args_path = (
+        _write_vllm_args(tmp_path)
+        if engine_type == "vllm"
+        else _write_sglang_args(tmp_path)
+    )
+
+    report = run_synthetic_trace_replay(
+        64,
+        2,
+        3,
+        extra_engine_args=args_path,
+        num_workers=2,
+        replay_mode=replay_mode,
+        replay_concurrency=2,
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=3,
+        input_tokens=64,
+        output_tokens=2,
+    )

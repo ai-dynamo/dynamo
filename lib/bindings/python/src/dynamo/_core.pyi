@@ -1270,6 +1270,21 @@ def run_mocker_trace_replay(
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...
 
+def run_mocker_synthetic_trace_replay(
+    input_tokens: int,
+    output_tokens: int,
+    request_count: int,
+    extra_engine_args: Optional[str | os.PathLike[str]] = None,
+    num_workers: int = 1,
+    replay_concurrency: Optional[int] = None,
+    replay_mode: Literal["offline", "online"] = "offline",
+    router_mode: Literal["round_robin", "kv_router"] = "round_robin",
+    arrival_speedup_ratio: float = 1.0,
+    arrival_interval_ms: float = 1.0,
+) -> Dict[str, Any]:
+    """Replay a synthetic mocker workload without requiring a trace file."""
+    ...
+
 class Layer:
     """
     A KV cache block layer
