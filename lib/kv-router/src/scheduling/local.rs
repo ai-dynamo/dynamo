@@ -55,10 +55,10 @@ where
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
+            let mut last_workers = monitor_rx.borrow().clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
-                let mut last_workers = monitor_rx.borrow().clone();
 
                 loop {
                     tokio::select! {
