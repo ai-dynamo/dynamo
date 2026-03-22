@@ -77,7 +77,7 @@ python -m dynamo.mocker \
 | `--output-file` | `TRACE_STEM.replay.json` | Write replay metrics JSON to this path |
 | `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
-| `--block-size` | 64 | Tokens per KV cache block |
+| `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
 | `--enable-prefix-caching` | True | Enable prefix caching |
@@ -94,7 +94,7 @@ python -m dynamo.mocker \
 | `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
 | `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
-| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens |
+| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens. Also becomes the effective block size when `--engine-type sglang` and `--block-size` is omitted |
 | `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
