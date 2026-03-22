@@ -18,6 +18,7 @@ from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
+from dynamo._core import MockEngineArgs as MockEngineArgs
 from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
@@ -25,8 +26,10 @@ from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
+from dynamo._core import ReasoningConfig as ReasoningConfig
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
+from dynamo._core import SglangArgs as SglangArgs
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
 from dynamo._core import fetch_model as fetch_model
@@ -49,9 +52,7 @@ unregister_llm = unregister_model
 def run_mocker_trace_replay(
     trace_file,
     extra_engine_args=None,
-    extra_engine_args_json=None,
     router_config=None,
-    router_config_json=None,
     num_workers=1,
     replay_concurrency=None,
     router_mode="round_robin",
@@ -60,9 +61,7 @@ def run_mocker_trace_replay(
     return _run_mocker_trace_replay(
         trace_file,
         extra_engine_args=extra_engine_args,
-        extra_engine_args_json=extra_engine_args_json,
         router_config=router_config,
-        router_config_json=router_config_json,
         num_workers=num_workers,
         replay_concurrency=replay_concurrency,
         replay_mode="offline",

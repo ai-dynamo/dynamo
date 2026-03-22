@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 pytestmark = [
@@ -73,6 +74,17 @@ def _write_vllm_args(tmp_path):
     return args_path
 
 
+def _vllm_args():
+    return MockEngineArgs.from_json(
+        json.dumps(
+            {
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+            }
+        )
+    )
+
+
 def _write_sglang_args(tmp_path):
     args_path = tmp_path / "sglang_args.json"
     args_path.write_text(
@@ -90,6 +102,22 @@ def _write_sglang_args(tmp_path):
         encoding="utf-8",
     )
     return args_path
+
+
+def _sglang_args():
+    return MockEngineArgs.from_json(
+        json.dumps(
+            {
+                "engine_type": "sglang",
+                "num_gpu_blocks": 512,
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+                "sglang": {
+                    "page_size": 64,
+                },
+            }
+        )
+    )
 
 
 def _write_router_config(tmp_path):
@@ -124,12 +152,41 @@ def _write_router_config(tmp_path):
     return config_path
 
 
+def _router_config():
+    return KvRouterConfig.from_json(
+        json.dumps(
+            {
+                "router_queue_threshold": 1.25,
+                "router_event_threads": 1,
+                "router_queue_policy": "wspt",
+                "router_temperature": 0.0,
+                "overlap_score_weight": 1.0,
+                "use_kv_events": True,
+                "durable_kv_events": False,
+                "router_replica_sync": False,
+                "router_track_active_blocks": True,
+                "router_track_output_blocks": False,
+                "router_assume_kv_reuse": True,
+                "router_snapshot_threshold": 1000000,
+                "router_reset_states": False,
+                "router_ttl_secs": 120.0,
+                "router_max_tree_size": 1048576,
+                "router_prune_target_ratio": 0.8,
+                "router_enable_cache_control": False,
+                "skip_initial_worker_wait": False,
+                "min_initial_workers": 1,
+                "remote_indexer_component": None,
+            }
+        )
+    )
+
+
 def _partial_router_config():
-    return {
-        "router_queue_threshold": 1.25,
-        "router_event_threads": 1,
-        "router_queue_policy": "wspt",
-    }
+    return KvRouterConfig(
+        router_queue_threshold=1.25,
+        router_event_threads=1,
+        router_queue_policy="wspt",
+    )
 
 
 def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_tokens):
@@ -144,11 +201,7 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
 def test_run_trace_replay_smoke_matrix(tmp_path, engine_type, replay_mode, router_mode):
     trace_path = _write_trace_and_args(tmp_path)
-    args_path = (
-        _write_vllm_args(tmp_path)
-        if engine_type == "vllm"
-        else _write_sglang_args(tmp_path)
-    )
+    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
     num_workers = 1 if router_mode == "round_robin" else 2
 
     report = run_trace_replay(
@@ -171,11 +224,7 @@ def test_run_trace_replay_smoke_matrix(tmp_path, engine_type, replay_mode, route
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_invariant_counts_match(tmp_path, engine_type, replay_mode):
     trace_path = _write_trace_and_args(tmp_path)
-    args_path = (
-        _write_vllm_args(tmp_path)
-        if engine_type == "vllm"
-        else _write_sglang_args(tmp_path)
-    )
+    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
 
     single = run_trace_replay(
         trace_path,
@@ -214,11 +263,7 @@ def test_run_trace_replay_invariant_counts_match(tmp_path, engine_type, replay_m
 def test_run_synthetic_trace_replay_smoke_matrix(
     tmp_path, engine_type, replay_mode, router_mode
 ):
-    args_path = (
-        _write_vllm_args(tmp_path)
-        if engine_type == "vllm"
-        else _write_sglang_args(tmp_path)
-    )
+    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
     num_workers = 1 if router_mode == "round_robin" else 2
 
     report = run_synthetic_trace_replay(
@@ -245,11 +290,7 @@ def test_run_synthetic_trace_replay_smoke_matrix(
 def test_run_synthetic_trace_replay_invariant_counts_match(
     tmp_path, engine_type, replay_mode
 ):
-    args_path = (
-        _write_vllm_args(tmp_path)
-        if engine_type == "vllm"
-        else _write_sglang_args(tmp_path)
-    )
+    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
 
     single = run_synthetic_trace_replay(
         64,
@@ -296,11 +337,7 @@ def test_run_synthetic_trace_replay_invariant_counts_match(
 def test_run_synthetic_concurrency_replay_counts_match(
     tmp_path, engine_type, replay_mode
 ):
-    args_path = (
-        _write_vllm_args(tmp_path)
-        if engine_type == "vllm"
-        else _write_sglang_args(tmp_path)
-    )
+    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
 
     report = run_synthetic_trace_replay(
         64,
@@ -323,8 +360,8 @@ def test_run_synthetic_concurrency_replay_counts_match(
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_accepts_router_config(tmp_path, replay_mode):
     trace_path = _write_trace_and_args(tmp_path)
-    args_path = _write_vllm_args(tmp_path)
-    router_config_path = _write_router_config(tmp_path)
+    args_path = _vllm_args()
+    router_config_path = _router_config()
 
     report = run_trace_replay(
         trace_path,
@@ -346,12 +383,12 @@ def test_run_trace_replay_accepts_router_config(tmp_path, replay_mode):
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_accepts_partial_router_config_json(tmp_path, replay_mode):
     trace_path = _write_trace_and_args(tmp_path)
-    args_path = _write_vllm_args(tmp_path)
+    args_path = _vllm_args()
 
     report = run_trace_replay(
         trace_path,
         extra_engine_args=args_path,
-        router_config_json=json.dumps(_partial_router_config()),
+        router_config=_partial_router_config(),
         num_workers=2,
         replay_mode=replay_mode,
         router_mode="kv_router",
@@ -371,7 +408,7 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
 
     report = run_trace_replay(
         trace_path,
-        extra_engine_args_json=json.dumps({"block_size": 64, "speedup_ratio": 1000.0}),
+        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         num_workers=1,
         replay_mode=replay_mode,
     )

@@ -1161,6 +1161,68 @@ class KvRouterConfig:
         """
         ...
 
+    @staticmethod
+    def from_json(config_json: str) -> "KvRouterConfig":
+        ...
+
+class ReasoningConfig:
+    def __init__(
+        self,
+        start_thinking_token_id: int,
+        end_thinking_token_id: int,
+        thinking_ratio: float,
+    ) -> None:
+        ...
+
+class SglangArgs:
+    def __init__(
+        self,
+        schedule_policy: Optional[str] = None,
+        page_size: Optional[int] = None,
+        max_prefill_tokens: Optional[int] = None,
+        chunked_prefill_size: Optional[int] = None,
+        clip_max_new_tokens: Optional[int] = None,
+        schedule_conservativeness: Optional[float] = None,
+    ) -> None:
+        ...
+
+class MockEngineArgs:
+    def __init__(
+        self,
+        engine_type: str = "vllm",
+        num_gpu_blocks: int = 16384,
+        block_size: int = 0,
+        max_num_seqs: Optional[int] = 256,
+        max_num_batched_tokens: Optional[int] = 8192,
+        enable_prefix_caching: bool = True,
+        enable_chunked_prefill: bool = True,
+        speedup_ratio: float = 1.0,
+        decode_speedup_ratio: float = 1.0,
+        dp_size: int = 1,
+        startup_time: Optional[float] = None,
+        worker_type: str = "aggregated",
+        aic_backend: Optional[str] = None,
+        aic_system: Optional[str] = None,
+        aic_backend_version: Optional[str] = None,
+        aic_tp_size: Optional[int] = None,
+        aic_model_path: Optional[str] = None,
+        enable_local_indexer: bool = False,
+        bootstrap_port: Optional[int] = None,
+        kv_bytes_per_token: Optional[int] = None,
+        kv_transfer_bandwidth: Optional[float] = None,
+        reasoning: Optional[ReasoningConfig] = None,
+        zmq_kv_events_port: Optional[int] = None,
+        zmq_replay_port: Optional[int] = None,
+        preemption_mode: str = "lifo",
+        router_queue_policy: Optional[str] = None,
+        sglang: Optional[SglangArgs] = None,
+    ) -> None:
+        ...
+
+    @staticmethod
+    def from_json(config_json: str) -> "MockEngineArgs":
+        ...
+
 async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -1264,10 +1326,8 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
 
 def run_mocker_trace_replay(
     trace_file: str | os.PathLike[str],
-    extra_engine_args: Optional[str | os.PathLike[str]] = None,
-    extra_engine_args_json: Optional[str] = None,
-    router_config: Optional[str | os.PathLike[str]] = None,
-    router_config_json: Optional[str] = None,
+    extra_engine_args: Optional[MockEngineArgs] = None,
+    router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
@@ -1281,10 +1341,8 @@ def run_mocker_synthetic_trace_replay(
     input_tokens: int,
     output_tokens: int,
     request_count: int,
-    extra_engine_args: Optional[str | os.PathLike[str]] = None,
-    extra_engine_args_json: Optional[str] = None,
-    router_config: Optional[str | os.PathLike[str]] = None,
-    router_config_json: Optional[str] = None,
+    extra_engine_args: Optional[MockEngineArgs] = None,
+    router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",

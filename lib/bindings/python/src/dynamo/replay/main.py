@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
+from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 
@@ -18,9 +19,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
     parser.add_argument("trace_file", nargs="?")
     parser.add_argument("--extra-engine-args")
-    parser.add_argument("--extra-engine-args-json")
     parser.add_argument("--router-config")
-    parser.add_argument("--router-config-json")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument("--request-count", type=int)
@@ -40,13 +39,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
-    if args.extra_engine_args and args.extra_engine_args_json:
-        parser.error(
-            "provide at most one of --extra-engine-args or --extra-engine-args-json"
-        )
-    if args.router_config and args.router_config_json:
-        parser.error("provide at most one of --router-config or --router-config-json")
-
     using_trace_file = args.trace_file is not None
     synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
     using_synthetic = any(value is not None for value in synthetic_args)
@@ -60,13 +52,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
 
+    extra_engine_args = (
+        MockEngineArgs.from_json(args.extra_engine_args)
+        if args.extra_engine_args is not None
+        else None
+    )
+    router_config = (
+        KvRouterConfig.from_json(args.router_config)
+        if args.router_config is not None
+        else None
+    )
+
     if using_trace_file:
         report = run_trace_replay(
             args.trace_file,
-            extra_engine_args=args.extra_engine_args,
-            extra_engine_args_json=args.extra_engine_args_json,
-            router_config=args.router_config,
-            router_config_json=args.router_config_json,
+            extra_engine_args=extra_engine_args,
+            router_config=router_config,
             num_workers=args.num_workers,
             replay_concurrency=args.replay_concurrency,
             replay_mode=args.replay_mode,
@@ -78,10 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.input_tokens,
             args.output_tokens,
             args.request_count,
-            extra_engine_args=args.extra_engine_args,
-            extra_engine_args_json=args.extra_engine_args_json,
-            router_config=args.router_config,
-            router_config_json=args.router_config_json,
+            extra_engine_args=extra_engine_args,
+            router_config=router_config,
             num_workers=args.num_workers,
             replay_concurrency=args.replay_concurrency,
             replay_mode=args.replay_mode,
