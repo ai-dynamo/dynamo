@@ -62,6 +62,11 @@ on:
         required: false
         type: number
         default: 10
+      make_efa:
+        description: 'Enable AWS EFA support in the build'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -119,6 +124,7 @@ jobs:
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image }}
+          make_efa: ${{ inputs.make_efa }}
       - name: Copy image to ACR
         if: inputs.copy_to_acr
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}
@@ -135,7 +141,7 @@ jobs:
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          override_arch: amd64
+          override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       - name: Calculate compliance image URI
         id: compliance-image
         if: inputs.run_compliance_scan
