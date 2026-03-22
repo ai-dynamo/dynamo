@@ -10,7 +10,8 @@ surface is available in two forms:
 
 - `python -m dynamo.mocker --trace-file ...`, which writes a report file and prints a replay summary
 - `python -m dynamo.replay ...`, which returns the replay report JSON on stdout and exposes
-  `offline|online`, `round_robin|kv_router`, and `arrival_speedup_ratio` directly
+  `offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, and synthetic replay inputs
+  directly
 
 Unlike normal `dynamo.mocker` usage, offline replay does not launch workers, register endpoints, or
 require NATS, etcd, or a frontend.
@@ -30,6 +31,20 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode round_robin \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+Run synthetic replay through the same CLI when you want fixed request shapes without a trace file:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 5000 \
+    --output-tokens 500 \
+    --request-count 1000 \
+    --arrival-interval-ms 1.0 \
+    --num-workers 1 \
+    --replay-mode offline \
+    --replay-concurrency 100 \
     --extra-engine-args /path/to/mocker_args.json
 ```
 
@@ -66,7 +81,9 @@ Example:
 ```
 
 The mocker synthesizes token blocks from `hash_ids` using the configured `--block-size`, so the
-replay block size should match the block size used when the trace was generated. For
+replay block size must match the block size used when the trace was generated. Public Mooncake
+traces are commonly block-level hashes at `512` tokens per hash ID, so replaying them with the
+default mocker `block_size=64` will fail once `input_length > len(hash_ids) * 64`. For
 `engine_type=sglang`, replay still uses canonical `block_size` internally; `sglang.page_size` is
 accepted as a compatibility alias and is normalized into `block_size` before replay starts.
 
@@ -76,11 +93,13 @@ accepted as a compatibility alias and is normalized into `block_size` before rep
 
 The dedicated replay CLI exposes:
 
+- either a positional `trace_file`, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
 - `--replay-mode offline|online`
 - `--router-mode round_robin|kv_router`
 - `--router-queue-policy fcfs|wspt|lcfs`
 - `--num-workers`
 - `--replay-concurrency`
+- `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
 - `--extra-engine-args`
 
@@ -114,6 +133,24 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 
 The mocker CLI still supports offline replay and remains useful when you want the historical
 `Replay Summary` output and report-file workflow.
+
+### Synthetic Replay
+
+Synthetic replay bypasses trace loading and generates in-memory requests with fixed input/output
+lengths and optional synthetic arrival spacing:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 5000 \
+    --output-tokens 500 \
+    --request-count 200 \
+    --arrival-interval-ms 0.5 \
+    --replay-mode offline \
+    --replay-concurrency 50 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+This is useful for parameter sweeps where Mooncake-style prefix structure is not required.
 
 ## Modes
 
@@ -233,7 +270,8 @@ The report contains:
 - TTFT, TTST, TPOT, ITL, and end-to-end latency summaries
 - output-token-throughput-per-user summaries
 
-The dedicated replay CLI returns the same report schema as the Python API `dynamo.replay.run_trace_replay(...)`.
+The dedicated replay CLI returns the same report schema as the Python APIs
+`dynamo.replay.run_trace_replay(...)` and `dynamo.replay.run_synthetic_trace_replay(...)`.
 
 ## Replay Constraints
 
@@ -257,9 +295,12 @@ If you violate those constraints, replay fails immediately with a validation err
 
 ## Practical Notes
 
-- `--replay-concurrency` requires `--trace-file`
+- `python -m dynamo.replay` requires exactly one of:
+  either a trace file, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
+- `--replay-concurrency` works with both trace replay and synthetic replay
 - `--speedup-ratio` still affects simulated timing
 - `--arrival-speedup-ratio` affects trace timestamps, not worker compute speed
+- `--arrival-interval-ms` only applies to synthetic replay
 - `--extra-engine-args` can be used to provide a full mocker config JSON instead of individual CLI flags
 - offline replay does not need planner runtime setup, router registration, or external event transport
 - the replay block size should match the trace block size, because token synthesis expands `hash_ids`

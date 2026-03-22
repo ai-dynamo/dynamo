@@ -11,7 +11,7 @@ The Mocker is a lightweight, high-fidelity simulation of an LLM inference engine
 The mocker simulates:
 
 - **Block-based KV cache management** with LRU eviction
-- **Continuous batching scheduler** with watermark-based admission control
+- **Engine-specific continuous batching schedulers** for vLLM and SGLang
 - **Prefix caching** with hash-based block deduplication
 - **Chunked prefill** for better batching efficiency
 - **Realistic timing models** for prefill and decode phases
@@ -85,7 +85,6 @@ python -m dynamo.mocker \
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
 | `--no-enable-chunked-prefill` | - | Disable chunked prefill |
 | `--preemption-mode` | `lifo` | Decode eviction policy under memory pressure: `lifo` (vLLM v1 style) or `fifo` |
-| `--watermark` | 0.01 | KV cache watermark (fraction reserved) |
 | `--speedup-ratio` | 1.0 | Timing speedup factor |
 | `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
 | `--data-parallel-size` | 1 | Number of DP replicas |
@@ -139,7 +138,7 @@ python -m dynamo.mocker \
 ```
 
 For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`,
-`arrival_speedup_ratio`, and `router_queue_policy` directly:
+`arrival_speedup_ratio`, `router_queue_policy`, and the synthetic replay path directly:
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
@@ -148,6 +147,20 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --router-queue-policy fcfs \
     --arrival-speedup-ratio 5 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+The same CLI also supports synthetic replay without a trace file:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 5000 \
+    --output-tokens 500 \
+    --request-count 1000 \
+    --arrival-interval-ms 1.0 \
+    --num-workers 1 \
+    --replay-mode offline \
+    --replay-concurrency 100 \
     --extra-engine-args /path/to/mocker_args.json
 ```
 
@@ -245,15 +258,21 @@ The mocker is organized into several cooperating components that mirror the inte
 
 ### Scheduler
 
-The scheduler implements continuous batching, maintaining three logical queues:
+The mocker now has two scheduler shapes rather than one generic queue model:
 
-1. **Waiting Queue** - Newly arrived requests awaiting scheduling
-2. **Prefill Queue** - Requests scheduled for prefill
-3. **Decode Queue** - Requests actively decoding (ordered by age for preemption)
+- **vLLM mocker** uses an upstream-style `waiting + running` scheduler. Each request tracks
+  computed tokens, the scheduler spends one token budget across the running set first, and decode
+  pressure triggers inline preemption of running requests.
+- **SGLang mocker** uses a cache-aware waiting/running scheduler around a radix-style prefix cache.
+  It batches prefill work with decode-state awareness and handles pressure primarily through decode
+  retraction while preserving cached prefixes.
 
-Each iteration, the scheduler receives incoming requests, moves eligible requests from waiting to prefill based on available memory and compute budgets, simulates the prefill phase for queued requests, runs one decode step for all active sequences, and publishes metrics about current resource utilization.
+Both schedulers simulate continuous batching, prefix reuse, chunked prefill, memory pressure, and
+decode token emission while publishing metrics about current resource utilization.
 
-When resources become constrained, the scheduler employs preemption: the oldest decoding request is evicted back to the waiting queue, its KV blocks are freed, and it will be rescheduled later. This mirrors how real engines handle memory pressure.
+When resources become constrained, the mocker simulates the engine's real recovery path:
+- vLLM-style decode preemption and recompute
+- SGLang-style decode retraction plus prefix-preserving cache updates
 
 ### KV Block Manager
 
