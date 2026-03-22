@@ -11,6 +11,10 @@ use validator::{Validate, ValidationError};
 
 use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
+const fn default_min_initial_workers() -> usize {
+    1
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -133,6 +137,13 @@ pub struct KvRouterConfig {
     /// When true, the router starts immediately without waiting for discovery-based
     /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
+
+    /// Minimum number of workers that must be discovered before router startup continues.
+    /// Default: 1. Ignored when skip_initial_worker_wait=true.
+    #[serde(default = "default_min_initial_workers")]
+    #[validate(range(min = 1))]
+    pub min_initial_workers: usize,
+
     /// Scheduling policy for the router queue.
     /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
     /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -166,6 +177,7 @@ impl Default for KvRouterConfig {
             router_event_threads: 4,
             router_enable_cache_control: false,
             skip_initial_worker_wait: false,
+            min_initial_workers: default_min_initial_workers(),
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
         }
@@ -260,5 +272,19 @@ mod tests {
         assert_eq!(serialized, "\"lcfs\"");
         let deserialized: RouterQueuePolicy = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, RouterQueuePolicy::Lcfs);
+    }
+
+    #[test]
+    fn kv_router_config_defaults_to_one_initial_worker() {
+        assert_eq!(KvRouterConfig::default().min_initial_workers, 1);
+    }
+
+    #[test]
+    fn kv_router_config_rejects_zero_initial_workers() {
+        let cfg = KvRouterConfig {
+            min_initial_workers: 0,
+            ..KvRouterConfig::default()
+        };
+        assert!(cfg.validate().is_err());
     }
 }

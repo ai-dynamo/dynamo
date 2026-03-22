@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import random
-import time
 from typing import TYPE_CHECKING, Any, Optional
 
 import aiohttp
@@ -164,18 +163,15 @@ def _test_router_two_routers(
         for i, port in enumerate(router_ports):
             logger.info(f"Starting KV router frontend on port {port}")
             kv_router = KVRouterProcess(
-                request, block_size, port, engine_workers.namespace, store_backend
+                request,
+                block_size,
+                port,
+                engine_workers.namespace,
+                store_backend,
+                min_initial_workers=engine_workers.num_workers,
             )
             kv_router.__enter__()
             kv_routers.append(kv_router)
-
-            # Add delay between routers for file backend to ensure first router's
-            # registration is visible before second router starts its cleanup
-            if i == 0 and store_backend == "file":
-                logger.info(
-                    "Waiting 0.5s for first router to fully register (file backend)"
-                )
-                time.sleep(0.5)
 
         # Wait for workers to be ready on both routers
         logger.info("Waiting for workers to register with both routers...")
@@ -331,7 +327,7 @@ def _test_python_router_bindings(
         AssertionError: If requests fail or router doesn't work correctly
     """
     # Create KvRouterConfig with default settings
-    kv_router_config = KvRouterConfig()
+    kv_router_config = KvRouterConfig(min_initial_workers=num_workers)
 
     # Create KvRouter Python object
     kv_router = KvRouter(
@@ -834,6 +830,7 @@ def _test_router_indexers_sync(
             router_snapshot_threshold=20,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            min_initial_workers=num_workers,
         )
 
         # If standalone indexer mode, launch mockers one-by-one and register.
@@ -1478,20 +1475,21 @@ def _test_router_decisions(
         if standalone_indexer_url:
             await engine_workers.launch_mockers_with_indexer(endpoint)
 
+        # Workers register one instance per process (not per dp_rank)
+        expected_num_instances = engine_workers.num_workers
+
         kv_router_config = KvRouterConfig(
             router_snapshot_threshold=20,
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            min_initial_workers=expected_num_instances,
         )
         kv_router = KvRouter(
             endpoint=endpoint,
             block_size=block_size,
             kv_router_config=kv_router_config,
         )
-
-        # Workers register one instance per process (not per dp_rank)
-        expected_num_instances = engine_workers.num_workers
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(

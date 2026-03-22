@@ -329,10 +329,13 @@ where
 
         if !kv_router_config.skip_initial_worker_wait {
             let _ = workers_with_configs
-                .wait_for(|m| !m.is_empty())
+                .wait_for(|m| m.len() >= kv_router_config.min_initial_workers)
                 .await
                 .map_err(|_| {
-                    anyhow::anyhow!("runtime config watch closed before any workers appeared")
+                    anyhow::anyhow!(
+                        "runtime config watch closed before {} workers appeared",
+                        kv_router_config.min_initial_workers
+                    )
                 })?;
         }
 
