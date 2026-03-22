@@ -1114,7 +1114,7 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
-        router_queue_threshold: Optional[float] = 2.0,
+        router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_enable_cache_control: bool = False,
         min_initial_workers: int = 1,
@@ -1143,7 +1143,7 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
-            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 2.0).
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 4.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
