@@ -97,9 +97,11 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
     """
     engine_args = {}
 
-    # Only include non-None values that differ from defaults
+    # Only include non-None values. Shared defaults are materialized here so the
+    # serialized MockEngineArgs match the user-visible CLI defaults, while
+    # engine-specific normalization remains in Rust.
     # Note: argparse converts hyphens to underscores in attribute names
-    # Extract all potential engine arguments, using None as default for missing attributes
+    # Extract all potential engine arguments. None means "let Rust normalize it".
     engine_args = {
         "num_gpu_blocks": getattr(args, "num_gpu_blocks", None),
         "block_size": getattr(args, "block_size", None),
@@ -267,7 +269,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--num-gpu-blocks-override",
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
-        default=None,
+        default=16384,
         help="Number of GPU blocks for KV cache (default: 16384)",
     )
     parser.add_argument(
@@ -279,20 +281,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-num-seqs",
         type=int,
-        default=None,
+        default=256,
         help="Maximum number of sequences per iteration (default: 256)",
     )
     parser.add_argument(
         "--max-num-batched-tokens",
         type=int,
-        default=None,
+        default=8192,
         help="Maximum number of batched tokens per iteration (default: 8192)",
     )
     parser.add_argument(
         "--enable-prefix-caching",
         action="store_true",
         dest="enable_prefix_caching",
-        default=None,
+        default=True,
         help="Enable automatic prefix caching (default: True)",
     )
     parser.add_argument(
@@ -306,7 +308,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--enable-chunked-prefill",
         action="store_true",
         dest="enable_chunked_prefill",
-        default=None,
+        default=True,
         help="Enable chunked prefill (default: True)",
     )
     parser.add_argument(
@@ -319,7 +321,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preemption-mode",
         type=str,
-        default=None,
+        default="lifo",
         choices=["lifo", "fifo"],
         help="Preemption mode for decode eviction under memory pressure. "
         "'lifo' (default) evicts the newest request (matches vLLM v1), "
@@ -328,13 +330,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--speedup-ratio",
         type=float,
-        default=None,
+        default=1.0,
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--decode-speedup-ratio",
         type=float,
-        default=None,
+        default=1.0,
         help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
         "Models speculative decoding (e.g. Eagle) where decode throughput improves "
         "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
@@ -343,7 +345,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-parallel-size",
         type=int,
         dest="dp_size",
-        default=None,
+        default=1,
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
@@ -408,7 +410,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--engine-type",
         type=str,
-        default=None,
+        default="vllm",
         choices=["vllm", "sglang"],
         help="Engine simulation type: 'vllm' (default) or 'sglang'.",
     )

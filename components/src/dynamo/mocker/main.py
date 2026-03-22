@@ -35,6 +35,12 @@ from .utils.kv_cache import compute_kv_bytes_per_token
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+_DEFAULT_NUM_GPU_BLOCKS = 16384
+_DEFAULT_MAX_NUM_SEQS = 256
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+_DEFAULT_VLLM_BLOCK_SIZE = 64
+_DEFAULT_SGLANG_PAGE_SIZE = 1
+
 
 async def graceful_shutdown(runtimes: list):
     """
@@ -154,13 +160,15 @@ def _build_runtime_config(
     """
     is_prefill = engine_args.get("is_prefill", False)
     is_decode = engine_args.get("is_decode", False)
+    engine_type = engine_args.get("engine_type", "vllm")
+    sglang_args = engine_args.get("sglang") or {}
 
     rc = ModelRuntimeConfig()
-    rc.total_kv_blocks = engine_args.get("num_gpu_blocks", 16384)
-    if (v := engine_args.get("max_num_seqs")) is not None:
-        rc.max_num_seqs = v
-    if (v := engine_args.get("max_num_batched_tokens")) is not None:
-        rc.max_num_batched_tokens = v
+    rc.total_kv_blocks = engine_args.get("num_gpu_blocks", _DEFAULT_NUM_GPU_BLOCKS)
+    rc.max_num_seqs = engine_args.get("max_num_seqs") or _DEFAULT_MAX_NUM_SEQS
+    rc.max_num_batched_tokens = (
+        engine_args.get("max_num_batched_tokens") or _DEFAULT_MAX_NUM_BATCHED_TOKENS
+    )
     rc.enable_local_indexer = (
         engine_args.get("enable_local_indexer", False) and not is_decode
     )
@@ -179,7 +187,13 @@ def _build_runtime_config(
             f"(bootstrap_port={bootstrap_port})"
         )
 
-    block_size = engine_args.get("block_size", 64)
+    block_size = engine_args.get("block_size")
+    if not block_size:
+        if engine_type == "sglang":
+            block_size = sglang_args.get("page_size", _DEFAULT_SGLANG_PAGE_SIZE)
+        else:
+            block_size = _DEFAULT_VLLM_BLOCK_SIZE
+
     return block_size, rc
 
 
