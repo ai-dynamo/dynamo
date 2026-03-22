@@ -177,7 +177,39 @@ def test_dynamo_replay_cli_help():
     assert result.returncode == 0
     assert "replay-mode" in result.stdout
     assert "router-mode" in result.stdout
+    assert "router-queue-policy" in result.stdout
     assert "arrival-speedup-ratio" in result.stdout
+
+
+def test_dynamo_replay_cli_accepts_router_queue_policy(tmp_path):
+    trace_path, args_path = _write_trace_and_args(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.replay",
+            str(trace_path),
+            "--extra-engine-args",
+            str(args_path),
+            "--num-workers",
+            "2",
+            "--replay-mode",
+            "offline",
+            "--router-mode",
+            "kv_router",
+            "--router-queue-policy",
+            "lcfs",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    report = json.loads(result.stdout)
+    assert report["num_requests"] == 2
+    assert report["completed_requests"] == 2
 
 
 def test_run_trace_replay_offline_mooncake20_invariant_counts_match(tmp_path):

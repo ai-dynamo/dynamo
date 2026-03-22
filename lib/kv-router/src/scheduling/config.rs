@@ -16,6 +16,7 @@ use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 pub enum RouterQueuePolicy {
     #[default]
     Fcfs,
+    Lcfs,
     Wspt,
 }
 
@@ -23,6 +24,7 @@ impl fmt::Display for RouterQueuePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fcfs => f.write_str("fcfs"),
+            Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
         }
     }
@@ -34,9 +36,10 @@ impl FromStr for RouterQueuePolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "fcfs" => Ok(Self::Fcfs),
+            "lcfs" => Ok(Self::Lcfs),
             "wspt" => Ok(Self::Wspt),
             _ => Err(format!(
-                "unknown queue policy: {s:?}, expected 'fcfs' or 'wspt'"
+                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
             )),
         }
     }
@@ -235,5 +238,27 @@ impl KvRouterConfig {
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_weight > 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn router_queue_policy_display_and_parse_support_lcfs() {
+        assert_eq!(RouterQueuePolicy::Lcfs.to_string(), "lcfs");
+        assert_eq!(
+            "lcfs".parse::<RouterQueuePolicy>().unwrap(),
+            RouterQueuePolicy::Lcfs
+        );
+    }
+
+    #[test]
+    fn router_queue_policy_serde_round_trip_supports_lcfs() {
+        let serialized = serde_json::to_string(&RouterQueuePolicy::Lcfs).unwrap();
+        assert_eq!(serialized, "\"lcfs\"");
+        let deserialized: RouterQueuePolicy = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, RouterQueuePolicy::Lcfs);
     }
 }

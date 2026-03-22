@@ -17,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::shared::{
-    ReplayScheduler, replay_policy, replay_selector, replay_slots, replay_workers_with_configs,
+    ReplayScheduler, replay_policy, replay_router_config, replay_selector, replay_slots,
+    replay_workers_with_configs,
 };
 use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
 use crate::replay::ReplayRouterMode;
@@ -119,7 +120,7 @@ pub(crate) struct KvReplayRouter {
 
 impl KvReplayRouter {
     fn new(args: &MockEngineArgs, num_workers: usize) -> Self {
-        let config = KvRouterConfig::default();
+        let config = replay_router_config(args);
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);

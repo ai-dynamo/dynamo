@@ -107,6 +107,14 @@ pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector 
     DefaultWorkerSelector::new(Some(config.clone()), "replay")
 }
 
+pub(super) fn replay_router_config(args: &MockEngineArgs) -> KvRouterConfig {
+    let mut config = KvRouterConfig::default();
+    if let Some(policy) = args.router_queue_policy {
+        config.router_queue_policy = policy;
+    }
+    config
+}
+
 pub(super) fn replay_policy(
     config: &KvRouterConfig,
     args: &MockEngineArgs,

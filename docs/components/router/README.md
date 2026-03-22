@@ -22,7 +22,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | `--router-kv-overlap-score-weight` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
 | `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
 | `--router-queue-threshold` | `2.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.priority` |
-| `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
+| `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 
 ### Standalone Router
 

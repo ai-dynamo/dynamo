@@ -138,14 +138,15 @@ python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B
 ```
 
-For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`, and
-`arrival_speedup_ratio` directly:
+For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`,
+`arrival_speedup_ratio`, and `router_queue_policy` directly:
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode kv_router \
+    --router-queue-policy fcfs \
     --arrival-speedup-ratio 5 \
     --extra-engine-args /path/to/mocker_args.json
 ```

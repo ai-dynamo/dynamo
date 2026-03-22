@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
+use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -310,6 +311,10 @@ pub struct MockEngineArgs {
     #[builder(default)]
     pub preemption_mode: PreemptionMode,
 
+    /// Optional replay-only override for the router queue policy.
+    #[builder(default = "None")]
+    pub router_queue_policy: Option<RouterQueuePolicy>,
+
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
     pub sglang: Option<SglangArgs>,
@@ -377,6 +382,7 @@ impl MockEngineArgs {
             "zmq_kv_events_port",
             "zmq_replay_port",
             "preemption_mode",
+            "router_queue_policy",
             "sglang",
         ]
         .iter()
@@ -531,6 +537,13 @@ impl MockEngineArgs {
                 }
             };
             builder = builder.preemption_mode(mode);
+        }
+
+        if let Some(value) = extra_args.get("router_queue_policy")
+            && let Some(policy_str) = value.as_str()
+        {
+            let policy = policy_str.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            builder = builder.router_queue_policy(Some(policy));
         }
 
         if let Some(value) = extra_args.get("sglang") {

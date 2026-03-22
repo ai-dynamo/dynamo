@@ -88,7 +88,7 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
 | `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
 | `--router-queue-threshold <float>` | `2.0` | Queue threshold fraction; enables priority scheduling via `priority` |
-| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
+| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -233,8 +233,9 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 2.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `priority` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
 
-- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Two policies are available:
+- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Three policies are available:
   - **`fcfs`** (first-come first-served): Orders by adjusted arrival time (`priority_jump - arrival_offset`). Optimizes **tail TTFT** — no request waits longer than necessary.
+  - **`lcfs`** (last-come first-served): Orders by adjusted reverse arrival time (`priority_jump + arrival_offset`). Intentionally favors newer arrivals under saturation and is mainly useful for controlled comparison experiments.
   - **`wspt`** (weighted shortest processing time, Smith's rule): Orders by `(1 + priority_jump) / isl_tokens`. Optimizes **average TTFT** — short or high-priority requests are scheduled before long low-priority ones, minimizing total weighted completion time.
 
 ### KV Event Transport and Persistence

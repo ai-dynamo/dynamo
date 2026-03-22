@@ -75,6 +75,7 @@ The dedicated replay CLI exposes:
 
 - `--replay-mode offline|online`
 - `--router-mode round_robin|kv_router`
+- `--router-queue-policy fcfs|wspt|lcfs`
 - `--num-workers`
 - `--replay-concurrency`
 - `--arrival-speedup-ratio`
@@ -86,6 +87,7 @@ Example:
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode online \
     --router-mode kv_router \
+    --router-queue-policy fcfs \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
     --extra-engine-args /path/to/mocker_args.json
@@ -164,8 +166,32 @@ Replay currently supports:
 `kv_router` uses the shared local scheduler and an in-process KV indexer. In offline replay:
 
 - `kv_router` is supported only when `num_workers > 1`
-- router queueing is disabled
+- router queueing is enabled and uses simulation time rather than wall-clock time
 - KV visibility is delayed slightly relative to request lifecycle events
+- queue admission is driven by router lifecycle edges (`add_request`, `mark_prefill_completed`, and `free`)
+- transient in-pass prefill occupancy is still approximated at the router level rather than modeled exactly
+
+To compare queue policies manually, keep the same trace and engine args fixed and swap only
+`--router-queue-policy`:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --router-queue-policy fcfs \
+    --num-workers 4 \
+    --extra-engine-args /path/to/mocker_args.json
+
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --router-queue-policy lcfs \
+    --num-workers 4 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+`lcfs` is intentionally a worse comparison policy under saturation; use it for experiments, not as
+an expected production default.
 
 ## Output
 
