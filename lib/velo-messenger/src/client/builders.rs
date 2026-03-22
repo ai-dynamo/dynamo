@@ -397,6 +397,54 @@ pub struct MessageBuilder {
     headers: Option<HashMap<String, String>>,
 }
 
+/// Shared async helper for fire-and-forget: ensure peer ready, then send.
+/// Errors are logged (fire-and-forget semantics — no outcome to complete).
+async fn fire_send_after_ready(
+    client: Arc<ActiveMessageClient>,
+    target: InstanceId,
+    handler: String,
+    payload: Option<Bytes>,
+    headers: Option<HashMap<String, String>>,
+) {
+    match client.ensure_peer_ready(target, &handler).await {
+        Ok(_) => match client.register_outcome() {
+            Ok(outcome) => {
+                let message = ActiveMessage {
+                    metadata: MessageMetadata::new_fire(
+                        outcome.response_id(),
+                        handler,
+                        headers,
+                    ),
+                    payload: payload.unwrap_or_default(),
+                };
+                if let Err(e) = client.send_message(target, message) {
+                    tracing::error!(
+                        target: "velo_messenger::client",
+                        error = %e,
+                        "Failed to send fire-and-forget message"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "velo_messenger::client",
+                    error = %e,
+                    "Failed to register outcome for fire-and-forget"
+                );
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                target: "velo_messenger::client",
+                error = %e,
+                handler = %handler,
+                target = %target,
+                "Failed to prepare peer for message"
+            );
+        }
+    }
+}
+
 impl MessageBuilder {
     pub fn new(client: Arc<ActiveMessageClient>, handler: &str) -> Result<Self> {
         validate_handler_name(handler)?;
@@ -586,69 +634,68 @@ impl MessageBuilder {
     }
 
     pub async fn fire(self) -> Result<()> {
-        let target = self.resolve_target()?;
+        let target_result = self.resolve_target();
+        let worker_id = self.target_worker;
 
-        // Fast path: if we can send directly, do so immediately
-        if self.client.can_send_directly(target, &self.handler) {
-            let outcome = self.client.register_outcome()?;
-            let message = ActiveMessage {
-                metadata: MessageMetadata::new_fire(
-                    outcome.response_id(),
-                    self.handler,
-                    self.headers,
-                ),
-                payload: self.payload.unwrap_or_default(),
-            };
-            return self.client.send_message(target, message);
-        }
+        match target_result {
+            Ok(target) if self.client.can_send_directly(target, &self.handler) => {
+                // Fast path: send immediately
+                let outcome = self.client.register_outcome()?;
+                let message = ActiveMessage {
+                    metadata: MessageMetadata::new_fire(
+                        outcome.response_id(),
+                        self.handler,
+                        self.headers,
+                    ),
+                    payload: self.payload.unwrap_or_default(),
+                };
+                self.client.send_message(target, message)
+            }
+            Ok(target) => {
+                // Slow path: spawn handshake + send
+                let client = self.client.clone();
+                let handler = self.handler.clone();
+                let payload = self.payload.clone();
+                let headers = self.headers.clone();
 
-        // Slow path: spawn task to handle discovery, then send
-        let client = self.client.clone();
-        let handler = self.handler.clone();
-        let payload = self.payload.clone();
-        let headers = self.headers.clone();
+                tokio::spawn(fire_send_after_ready(
+                    client, target, handler, payload, headers,
+                ));
+                Ok(())
+            }
+            Err(ResolveError::UnresolvedPeer) => {
+                let Some(worker_id) = worker_id else {
+                    return Err(anyhow!("UnresolvedPeer but no worker_id set"));
+                };
 
-        tokio::spawn(async move {
-            match client.ensure_peer_ready(target, &handler).await {
-                Ok(_) => match client.register_outcome() {
-                    Ok(outcome) => {
-                        let message = ActiveMessage {
-                            metadata: MessageMetadata::new_fire(
-                                outcome.response_id(),
-                                handler,
-                                headers,
-                            ),
-                            payload: payload.unwrap_or_default(),
-                        };
-                        if let Err(e) = client.send_message(target, message) {
+                // Discovery path: spawn discovery → handshake + send
+                let client = self.client.clone();
+                let handler = self.handler.clone();
+                let payload = self.payload.clone();
+                let headers = self.headers.clone();
+
+                tokio::spawn(async move {
+                    match client.resolve_peer_via_discovery(worker_id).await {
+                        Ok(target) => {
+                            fire_send_after_ready(
+                                client, target, handler, payload, headers,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
                             tracing::error!(
                                 target: "velo_messenger::client",
                                 error = %e,
-                                "Failed to send fire-and-forget message"
+                                worker_id = %worker_id,
+                                "Discovery failed for fire-and-forget"
                             );
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "velo_messenger::client",
-                            error = %e,
-                            "Failed to register outcome for fire-and-forget"
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::error!(
-                        target: "velo_messenger::client",
-                        error = %e,
-                        handler = %handler,
-                        target = %target,
-                        "Failed to prepare peer for message"
-                    );
-                }
+                });
+                Ok(())
             }
-        });
-
-        Ok(())
+            Err(ResolveError::Other(e)) => Err(e.into()),
+        }
     }
 
     pub fn sync(self) -> SyncResult {
