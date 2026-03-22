@@ -59,6 +59,11 @@ pub(crate) fn decode_event_header(header: Bytes) -> Option<EventType> {
     let mut header = header;
     let type_byte = header.get_u8();
 
+    // Reject unknown flag bits — only the low 2 bits are defined.
+    if (type_byte & !0b11) != 0 {
+        return None;
+    }
+
     // Decode bits:
     // - Bit 0 (LSB): 0 = Ack, 1 = Event
     // - Bit 1: 0 = Ok, 1 = Error
@@ -284,6 +289,20 @@ mod tests {
         bytes_array.copy_from_slice(&encoded[1..]);
         let decoded_value = u128::from_le_bytes(bytes_array);
         assert_eq!(decoded_value, handle);
+    }
+
+    #[test]
+    fn decode_rejects_unknown_flag_bits() {
+        // Any type_byte with bits above the low 2 set should be rejected.
+        for bad_byte in [0b100, 0b1000_0000, 0xFF, 0b0000_0100] {
+            let mut bytes = BytesMut::with_capacity(1 + size_of::<u128>());
+            bytes.put_u8(bad_byte);
+            bytes.extend_from_slice(&[0u8; 16]);
+            assert!(
+                decode_event_header(bytes.freeze()).is_none(),
+                "type_byte {bad_byte:#010b} should be rejected"
+            );
+        }
     }
 
     #[test]
