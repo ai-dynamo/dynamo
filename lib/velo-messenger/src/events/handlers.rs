@@ -23,11 +23,14 @@ pub(crate) fn register_event_handlers(
     // _event_subscribe: Remote node subscribes to a local event
     let events_clone = events.clone();
     handlers.register_internal_handler(
-        Handler::am_handler("_event_subscribe", move |ctx| {
-            if let Err(e) = events_clone.handle_subscribe(ctx.payload) {
-                tracing::warn!("_event_subscribe handler error: {}", e);
+        Handler::am_handler_async("_event_subscribe", move |ctx| {
+            let events = events_clone.clone();
+            async move {
+                if let Err(e) = events.handle_subscribe(ctx.payload).await {
+                    tracing::warn!("_event_subscribe handler error: {}", e);
+                }
+                Ok(())
             }
-            Ok(())
         })
         .spawn()
         .build(),
@@ -49,11 +52,14 @@ pub(crate) fn register_event_handlers(
     // _event_trigger_request: Remote trigger/poison request + ACK/NACK
     let events_clone = events.clone();
     handlers.register_internal_handler(
-        Handler::am_handler("_event_trigger_request", move |ctx| {
-            if let Err(e) = events_clone.handle_trigger_request(ctx.payload) {
-                tracing::warn!("_event_trigger_request handler error: {}", e);
+        Handler::am_handler_async("_event_trigger_request", move |ctx| {
+            let events = events_clone.clone();
+            async move {
+                if let Err(e) = events.handle_trigger_request(ctx.payload).await {
+                    tracing::warn!("_event_trigger_request handler error: {}", e);
+                }
+                Ok(())
             }
-            Ok(())
         })
         .spawn()
         .build(),

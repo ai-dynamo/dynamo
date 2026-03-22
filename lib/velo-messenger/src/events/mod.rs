@@ -277,7 +277,7 @@ impl VeloEvents {
 
     // ── Owner-side handlers ─────────────────────────────────────────
 
-    pub(crate) fn handle_subscribe(self: &Arc<Self>, payload: Bytes) -> Result<()> {
+    pub(crate) async fn handle_subscribe(self: &Arc<Self>, payload: Bytes) -> Result<()> {
         let message: EventSubscribeMessage = serde_json::from_slice(&payload)?;
         let handle = EventHandle::from_raw(message.handle);
         if handle.system_id() != self.system_id {
@@ -285,11 +285,14 @@ impl VeloEvents {
         }
 
         match self.local_manager.poll(handle)? {
-            EventStatus::Ready => self.send_completion(
-                handle,
-                message.subscriber_instance,
-                CompletionKind::Triggered,
-            ),
+            EventStatus::Ready => {
+                self.send_completion(
+                    handle,
+                    message.subscriber_instance,
+                    CompletionKind::Triggered,
+                )
+                .await
+            }
             EventStatus::Poisoned => {
                 let reason = "event was poisoned".to_string();
                 let poison = Arc::new(EventPoison::new(handle, reason));
@@ -298,6 +301,7 @@ impl VeloEvents {
                     message.subscriber_instance,
                     CompletionKind::Poisoned(poison),
                 )
+                .await
             }
             EventStatus::Pending => {
                 self.register_owner_subscription(handle, message.subscriber_instance)?;
@@ -329,7 +333,7 @@ impl VeloEvents {
         Ok(())
     }
 
-    pub(crate) fn handle_trigger_request(self: &Arc<Self>, payload: Bytes) -> Result<()> {
+    pub(crate) async fn handle_trigger_request(self: &Arc<Self>, payload: Bytes) -> Result<()> {
         let message: EventTriggerRequestMessage = serde_json::from_slice(&payload)?;
         let handle = EventHandle::from_raw(message.handle);
         if handle.system_id() != self.system_id {
@@ -348,7 +352,8 @@ impl VeloEvents {
                         }
                         _ => CompletionKind::Triggered,
                     };
-                    self.send_completion(handle, message.requester_instance, completion)?;
+                    self.send_completion(handle, message.requester_instance, completion)
+                        .await?;
 
                     let system = Arc::clone(self);
                     self.tasks.spawn(async move {
@@ -401,11 +406,14 @@ impl VeloEvents {
         } else {
             // Legacy path without response_id
             match self.local_manager.poll(handle)? {
-                EventStatus::Ready => self.send_completion(
-                    handle,
-                    message.requester_instance,
-                    CompletionKind::Triggered,
-                ),
+                EventStatus::Ready => {
+                    self.send_completion(
+                        handle,
+                        message.requester_instance,
+                        CompletionKind::Triggered,
+                    )
+                    .await
+                }
                 EventStatus::Poisoned => {
                     let reason = "event was poisoned".to_string();
                     let poison = Arc::new(EventPoison::new(handle, reason));
@@ -414,6 +422,7 @@ impl VeloEvents {
                         message.requester_instance,
                         CompletionKind::Poisoned(poison),
                     )
+                    .await
                 }
                 EventStatus::Pending => {
                     self.register_owner_subscription(handle, message.requester_instance)?;
@@ -710,7 +719,7 @@ impl VeloEvents {
                     },
                 };
 
-                match system.send_completion(handle, target, completion_kind) {
+                match system.send_completion(handle, target, completion_kind).await {
                     Ok(()) => system.cleanup_owner_subscription(handle, target),
                     Err(e) => warn!("Failed to send completion for {}: {}", handle, e),
                 }
@@ -732,9 +741,10 @@ impl VeloEvents {
         };
 
         self.send_system_message(target_instance, "_event_subscribe", message)
+            .await
     }
 
-    fn send_completion(
+    async fn send_completion(
         &self,
         handle: EventHandle,
         target: InstanceId,
@@ -749,6 +759,7 @@ impl VeloEvents {
             poisoned,
         };
         self.send_system_message(target, "_event_trigger", message)
+            .await
     }
 
     async fn send_completion_request(
@@ -768,9 +779,10 @@ impl VeloEvents {
             response_id: response_id.map(|r| r.as_u128()),
         };
         self.send_system_message(target_instance, "_event_trigger_request", message)
+            .await
     }
 
-    fn send_system_message<T: Serialize>(
+    async fn send_system_message<T: Serialize>(
         &self,
         target: InstanceId,
         handler: &str,
@@ -783,16 +795,12 @@ impl VeloEvents {
             .cloned()
             .ok_or_else(|| anyhow!("Event messenger not initialized"))?;
         let bytes = Bytes::from(serde_json::to_vec(&payload)?);
-        let builder = messenger
+        messenger
             .message_builder_unchecked(handler)
             .raw_payload(bytes)
-            .instance(target);
-        self.tasks.spawn(async move {
-            if let Err(e) = builder.fire().await {
-                warn!("Failed to send system message: {}", e);
-            }
-        });
-        Ok(())
+            .instance(target)
+            .fire()
+            .await
     }
 
     // ── LRU cache management ────────────────────────────────────────
