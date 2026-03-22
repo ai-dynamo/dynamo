@@ -17,7 +17,9 @@ use super::decode::{cache_materialized_prefix, simulate_decode_step};
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::{SglangRequest, direct_to_sglang};
-use crate::scheduler::{EnginePassResult, KvEventBuffer, capture_kv_event_sink};
+use crate::scheduler::{
+    CapturedRouterEventBuffer, EnginePassResult, RouterEventVisibility, capture_router_event_sink,
+};
 
 pub(crate) struct SglangCore {
     pub(super) config: SglangConfig,
@@ -25,7 +27,7 @@ pub(crate) struct SglangCore {
     pub(super) running: Vec<SglangRequest>,
     pub(super) new_token_ratio: f64,
     pub(super) kv_manager: SglangKvManager,
-    kv_event_buffer: Option<KvEventBuffer>,
+    kv_event_buffer: Option<CapturedRouterEventBuffer>,
 }
 
 impl SglangCore {
@@ -34,7 +36,7 @@ impl SglangCore {
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_kv_event_sink(worker_id);
+        let (buffer, sink) = capture_router_event_sink(worker_id);
         Self::new_internal(args, worker_id as u32, Some(buffer), Some(sink))
     }
 
@@ -49,7 +51,7 @@ impl SglangCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        kv_event_buffer: Option<KvEventBuffer>,
+        kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
@@ -174,10 +176,11 @@ impl SglangCore {
             output_signals: decode.output_signals,
             admissions: admit.admissions,
             active_decode_blocks: self.active_kv_blocks(),
+            router_event_visibility: RouterEventVisibility::PassEnd,
             kv_events: self
                 .kv_event_buffer
                 .as_ref()
-                .map(KvEventBuffer::drain)
+                .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
         }
     }

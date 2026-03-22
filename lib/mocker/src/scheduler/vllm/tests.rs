@@ -1,17 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dynamo_kv_router::indexer::{METRIC_EVENT_REMOVED, METRIC_EVENT_STORED};
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, WorkerId};
 use rstest::rstest;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal, PreemptionMode};
+use crate::common::protocols::{
+    DirectRequest, KvCacheEventSink, MockEngineArgs, OutputSignal, PreemptionMode,
+};
 use crate::common::sequence::ActiveSequence;
+use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
 
@@ -193,6 +197,26 @@ fn test_first_token_can_arrive_on_prompt_completion_pass() {
             .sequence
             .generated_tokens(),
         1
+    );
+}
+
+#[test]
+fn test_vllm_pass_visibility_is_pass_start() {
+    let mut core = VllmCore::new_with_kv_capture(router_args(), ROUTER_TEST_WORKER_ID);
+    core.receive(DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 2,
+        uuid: Some(Uuid::from_u128(71)),
+        dp_rank: 0,
+        arrival_timestamp_ms: None,
+    });
+
+    let mut collector = crate::replay::TraceCollector::default();
+    let pass = core.execute_pass(&mut collector, 0.0);
+
+    assert_eq!(
+        pass.router_event_visibility,
+        RouterEventVisibility::PassStart
     );
 }
 
@@ -531,6 +555,75 @@ async fn test_receiver_drop_cleans_up_resources() {
 
     let metrics = metrics_rx.borrow().clone();
     assert_scheduler_idle(&metrics);
+}
+
+#[derive(Default)]
+struct CapturingKvSink {
+    events: Mutex<Vec<(KvCacheEvent, Option<Vec<Vec<u32>>>)>>,
+}
+
+impl CapturingKvSink {
+    fn take(&self) -> Vec<(KvCacheEvent, Option<Vec<Vec<u32>>>)> {
+        std::mem::take(&mut *self.events.lock().unwrap())
+    }
+}
+
+impl KvCacheEventSink for CapturingKvSink {
+    fn publish(
+        &self,
+        event: KvCacheEvent,
+        block_token_ids: Option<&[Vec<u32>]>,
+    ) -> anyhow::Result<()> {
+        self.events
+            .lock()
+            .unwrap()
+            .push((event, block_token_ids.map(|token_ids| token_ids.to_vec())));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_live_scheduler_forwards_buffered_kv_token_ids() {
+    let sink = Arc::new(CapturingKvSink::default());
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+    let args = MockEngineArgs::builder()
+        .block_size(4)
+        .num_gpu_blocks(12)
+        .max_num_batched_tokens(Some(8))
+        .max_num_seqs(Some(1))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(1000.0)
+        .zmq_kv_events_port(Some(12345))
+        .build()
+        .unwrap();
+    let scheduler = Scheduler::new(args, 0, Some(output_tx), Some(sink.clone()), None);
+
+    scheduler.receive(DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 1,
+        uuid: Some(Uuid::from_u128(72)),
+        dp_rank: 0,
+        arrival_timestamp_ms: None,
+    });
+
+    let signal = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+        .await
+        .expect("scheduler should emit output")
+        .expect("output channel should stay open");
+    assert!(signal.completed);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let events = sink.take();
+    let stored = events
+        .into_iter()
+        .find_map(|(event, block_token_ids)| match event.data {
+            KvCacheEventData::Stored(_) => block_token_ids,
+            _ => None,
+        })
+        .expect("live scheduler should forward stored KV event token ids");
+    assert!(!stored.is_empty());
+    assert!(stored.iter().all(|block| !block.is_empty()));
 }
 
 #[tokio::test]

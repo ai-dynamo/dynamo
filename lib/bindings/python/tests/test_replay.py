@@ -92,6 +92,46 @@ def _write_sglang_args(tmp_path):
     return args_path
 
 
+def _write_router_config(tmp_path):
+    config_path = tmp_path / "router_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "router_queue_threshold": 1.25,
+                "router_event_threads": 1,
+                "router_queue_policy": "wspt",
+                "router_temperature": 0.0,
+                "overlap_score_weight": 1.0,
+                "use_kv_events": True,
+                "durable_kv_events": False,
+                "router_replica_sync": False,
+                "router_track_active_blocks": True,
+                "router_track_output_blocks": False,
+                "router_assume_kv_reuse": True,
+                "router_snapshot_threshold": 1000000,
+                "router_reset_states": False,
+                "router_ttl_secs": 120.0,
+                "router_max_tree_size": 1048576,
+                "router_prune_target_ratio": 0.8,
+                "router_enable_cache_control": False,
+                "skip_initial_worker_wait": False,
+                "min_initial_workers": 1,
+                "remote_indexer_component": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _partial_router_config():
+    return {
+        "router_queue_threshold": 1.25,
+        "router_event_threads": 1,
+        "router_queue_policy": "wspt",
+    }
+
+
 def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_tokens):
     assert report["num_requests"] == num_requests
     assert report["completed_requests"] == num_requests
@@ -275,6 +315,70 @@ def test_run_synthetic_concurrency_replay_counts_match(
     _assert_basic_report_counts(
         report,
         num_requests=3,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_accepts_router_config(tmp_path, replay_mode):
+    trace_path = _write_trace_and_args(tmp_path)
+    args_path = _write_vllm_args(tmp_path)
+    router_config_path = _write_router_config(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=args_path,
+        router_config=router_config_path,
+        num_workers=2,
+        replay_mode=replay_mode,
+        router_mode="kv_router",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_accepts_partial_router_config_json(tmp_path, replay_mode):
+    trace_path = _write_trace_and_args(tmp_path)
+    args_path = _write_vllm_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=args_path,
+        router_config_json=json.dumps(_partial_router_config()),
+        num_workers=2,
+        replay_mode=replay_mode,
+        router_mode="kv_router",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, replay_mode):
+    trace_path = _write_trace_and_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args_json=json.dumps({"block_size": 64, "speedup_ratio": 1000.0}),
+        num_workers=1,
+        replay_mode=replay_mode,
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
         input_tokens=64,
         output_tokens=2,
     )

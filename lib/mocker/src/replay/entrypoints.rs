@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
+use dynamo_kv_router::config::KvRouterConfig;
 
 use super::loader::load_trace_requests;
 use super::online;
@@ -23,6 +24,7 @@ pub fn simulate_trace_file(
 ) -> Result<TraceSimulationReport> {
     simulate_trace_file_with_router_mode(
         args,
+        None,
         trace_path,
         num_workers,
         arrival_speedup_ratio,
@@ -32,6 +34,7 @@ pub fn simulate_trace_file(
 
 pub fn simulate_trace_file_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     trace_path: &Path,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -43,6 +46,7 @@ pub fn simulate_trace_file_with_router_mode(
     let started_at = Instant::now();
     let report = crate::replay::offline::simulate_trace(
         args,
+        router_config,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -59,6 +63,7 @@ pub fn simulate_trace_live_file(
 ) -> Result<TraceSimulationReport> {
     simulate_trace_live_file_with_router_mode(
         args,
+        None,
         trace_path,
         num_workers,
         arrival_speedup_ratio,
@@ -68,6 +73,7 @@ pub fn simulate_trace_live_file(
 
 pub fn simulate_trace_live_file_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     trace_path: &Path,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -78,6 +84,7 @@ pub fn simulate_trace_live_file_with_router_mode(
     let requests = load_trace_requests(trace_path, args.block_size, true)?;
     online::simulate_trace_requests(
         args,
+        router_config,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -93,6 +100,7 @@ pub fn simulate_trace_requests(
 ) -> Result<TraceSimulationReport> {
     simulate_trace_requests_with_router_mode(
         args,
+        None,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -102,6 +110,7 @@ pub fn simulate_trace_requests(
 
 pub fn simulate_trace_requests_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -116,6 +125,7 @@ pub fn simulate_trace_requests_with_router_mode(
     let started_at = Instant::now();
     let report = crate::replay::offline::simulate_trace(
         args,
+        router_config,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -132,6 +142,7 @@ pub fn simulate_trace_live_requests(
 ) -> Result<TraceSimulationReport> {
     simulate_trace_live_requests_with_router_mode(
         args,
+        None,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -141,6 +152,7 @@ pub fn simulate_trace_live_requests(
 
 pub fn simulate_trace_live_requests_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -154,6 +166,7 @@ pub fn simulate_trace_live_requests_with_router_mode(
 
     online::simulate_trace_requests(
         args,
+        router_config,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -169,6 +182,7 @@ pub fn simulate_concurrency_file(
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_file_with_router_mode(
         args,
+        None,
         trace_path,
         max_in_flight,
         num_workers,
@@ -178,6 +192,7 @@ pub fn simulate_concurrency_file(
 
 pub fn simulate_concurrency_file_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     trace_path: &Path,
     max_in_flight: usize,
     num_workers: usize,
@@ -188,6 +203,7 @@ pub fn simulate_concurrency_file_with_router_mode(
     let started_at = Instant::now();
     let report = simulate_concurrency_requests_with_router_mode(
         args,
+        router_config,
         requests,
         max_in_flight,
         num_workers,
@@ -204,6 +220,7 @@ pub fn simulate_concurrency_live_file(
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_live_file_with_router_mode(
         args,
+        None,
         trace_path,
         max_in_flight,
         num_workers,
@@ -213,6 +230,7 @@ pub fn simulate_concurrency_live_file(
 
 pub fn simulate_concurrency_live_file_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     trace_path: &Path,
     max_in_flight: usize,
     num_workers: usize,
@@ -221,7 +239,14 @@ pub fn simulate_concurrency_live_file_with_router_mode(
     let args = args.normalized()?;
     validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
     let requests = load_trace_requests(trace_path, args.block_size, false)?;
-    online::simulate_concurrency_requests(args, requests, max_in_flight, num_workers, router_mode)
+    online::simulate_concurrency_requests(
+        args,
+        router_config,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+    )
 }
 
 pub fn simulate_concurrency_live_requests(
@@ -232,6 +257,7 @@ pub fn simulate_concurrency_live_requests(
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_live_requests_with_router_mode(
         args,
+        None,
         requests,
         max_in_flight,
         num_workers,
@@ -241,6 +267,7 @@ pub fn simulate_concurrency_live_requests(
 
 pub fn simulate_concurrency_live_requests_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -252,7 +279,14 @@ pub fn simulate_concurrency_live_requests_with_router_mode(
         bail!("concurrency replay requires at least one request");
     }
 
-    online::simulate_concurrency_requests(args, requests, max_in_flight, num_workers, router_mode)
+    online::simulate_concurrency_requests(
+        args,
+        router_config,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+    )
 }
 
 pub fn simulate_concurrency_requests(
@@ -263,6 +297,7 @@ pub fn simulate_concurrency_requests(
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_requests_with_router_mode(
         args,
+        None,
         requests,
         max_in_flight,
         num_workers,
@@ -272,6 +307,7 @@ pub fn simulate_concurrency_requests(
 
 pub fn simulate_concurrency_requests_with_router_mode(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -285,6 +321,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
 
     crate::replay::offline::simulate_concurrency(
         args,
+        router_config,
         requests,
         max_in_flight,
         num_workers,

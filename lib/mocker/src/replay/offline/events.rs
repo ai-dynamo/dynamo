@@ -4,7 +4,6 @@
 use std::cmp::Ordering;
 
 use crate::common::protocols::OutputSignal;
-use dynamo_kv_router::protocols::RouterEvent;
 
 #[derive(Debug)]
 pub(crate) enum SimulationEventKind {
@@ -12,10 +11,7 @@ pub(crate) enum SimulationEventKind {
         worker_idx: usize,
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,
-        kv_events: Vec<RouterEvent>,
-    },
-    KvApply {
-        event: RouterEvent,
+        kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
     },
 }
 
@@ -28,10 +24,7 @@ pub(crate) struct SimulationEvent {
 
 impl SimulationEvent {
     fn kind_priority(&self) -> u8 {
-        match self.kind {
-            SimulationEventKind::WorkerCompletion { .. } => 1,
-            SimulationEventKind::KvApply { .. } => 0,
-        }
+        0
     }
 }
 

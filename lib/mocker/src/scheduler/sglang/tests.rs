@@ -25,7 +25,7 @@ use crate::kv_manager::SglangKvManager;
 use crate::scheduler::test_utils::{
     RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
-use crate::scheduler::{SchedulerHandle, capture_kv_event_sink};
+use crate::scheduler::{RouterEventVisibility, SchedulerHandle, capture_router_event_sink};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 17;
 
@@ -514,6 +514,16 @@ fn test_active_decode_blocks_tracks_page_reserved_occupancy_in_blocks() {
     assert_eq!(pass.active_decode_blocks, 2);
 }
 
+#[test]
+fn test_sglang_pass_visibility_is_pass_end() {
+    let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 4), ROUTER_TEST_WORKER_ID);
+    core.receive(direct_request(vec![1, 2, 3, 4], 1));
+
+    let pass = core.execute_pass_internal(None, 0.0);
+
+    assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
+}
+
 async fn assert_sglang_scheduler_completes_all(
     scheduler: &SglangScheduler,
     output_rx: &mut mpsc::UnboundedReceiver<OutputSignal>,
@@ -652,7 +662,7 @@ async fn test_retract_frees_do_not_leave_stale_blocks() {
     let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
     let args = test_args(8, 4, 16);
     let config = SglangConfig::from_args(&args);
-    let (buffer, sink) = capture_kv_event_sink(ROUTER_TEST_WORKER_ID);
+    let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
     let mut kv_manager = SglangKvManager::new(10, 4, Some(sink), 0);
 
     let req1 = make_decoded_request(&mut kv_manager, &config, vec![1, 2, 3, 4], 4);
@@ -707,7 +717,7 @@ async fn test_mixed_chunk_decode_retract_reprefill_complete_events_apply_cleanly
     let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
     let args = test_args(8, 4, 4);
     let config = SglangConfig::from_args(&args);
-    let (buffer, sink) = capture_kv_event_sink(ROUTER_TEST_WORKER_ID);
+    let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
     let mut kv_manager = SglangKvManager::new(12, 4, Some(sink), 0);
 
     let mut waiting = VecDeque::from([SglangRequest {

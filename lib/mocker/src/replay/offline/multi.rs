@@ -7,12 +7,12 @@ use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::replay::router::OfflineReplayRouter;
 use crate::replay::{ReplayRouterMode, TraceCollector, TraceSimulationReport};
+use crate::scheduler::RouterEventVisibility;
 use anyhow::bail;
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use uuid::Uuid;
-
-const OFFLINE_KV_EVENT_DELAY_MS: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy)]
 enum ReplayMode {
@@ -54,6 +54,7 @@ struct OfflineRuntime {
 impl OfflineRuntime {
     fn new(
         args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
         pending: VecDeque<DirectRequest>,
         num_workers: usize,
         mode: ReplayMode,
@@ -62,7 +63,9 @@ impl OfflineRuntime {
         let args = args.clone().normalized()?;
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
-            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(&args, num_workers)?),
+            ReplayRouterMode::KvRouter => {
+                Some(OfflineReplayRouter::new(&args, router_config, num_workers)?)
+            }
         };
         let capture_kv_events = router.is_some();
 
@@ -229,17 +232,18 @@ impl OfflineRuntime {
         self.next_event_seq += 1;
     }
 
-    fn push_kv_apply_events(&mut self, kv_events: Vec<RouterEvent>, at_ms: f64) {
-        for event in kv_events {
-            self.push_event(
-                at_ms + OFFLINE_KV_EVENT_DELAY_MS,
-                SimulationEventKind::KvApply { event },
-            );
-        }
-    }
-
     fn apply_completed_requests(&mut self, worker_idx: usize, completed_requests: usize) {
         self.workers[worker_idx].mark_completed(completed_requests);
+    }
+
+    fn apply_router_events(&mut self, events: Vec<RouterEvent>) -> anyhow::Result<()> {
+        let Some(router) = self.router.as_mut() else {
+            return Ok(());
+        };
+        for event in events {
+            router.apply_event(event)?;
+        }
+        Ok(())
     }
 
     fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
@@ -281,13 +285,12 @@ impl OfflineRuntime {
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<RouterEvent>,
-        end_ms: f64,
     ) -> anyhow::Result<()> {
         self.apply_completed_requests(worker_idx, completed_requests);
+        self.apply_router_events(kv_events)?;
         for signal in output_signals {
             self.process_output_signal(signal)?;
         }
-        self.push_kv_apply_events(kv_events, end_ms);
         Ok(())
     }
 
@@ -310,45 +313,10 @@ impl OfflineRuntime {
                 completed_requests,
                 output_signals,
                 kv_events,
-            } = event.kind
-            else {
-                unreachable!("event kind already checked");
-            };
+            } = event.kind;
 
             self.workers[worker_idx].mark_idle();
-            self.process_completed_pass(
-                worker_idx,
-                completed_requests,
-                output_signals,
-                kv_events,
-                event.at_ms,
-            )?;
-            changed = true;
-        }
-
-        Ok(changed)
-    }
-
-    fn apply_kv_events(&mut self) -> anyhow::Result<bool> {
-        let mut changed = false;
-        loop {
-            let Some(event) = self.events.peek() else {
-                break;
-            };
-            if event.at_ms != self.now_ms {
-                break;
-            }
-            if !matches!(event.kind, SimulationEventKind::KvApply { .. }) {
-                break;
-            }
-
-            let event = self.events.pop().expect("event must exist after peek");
-            let SimulationEventKind::KvApply { event } = event.kind else {
-                unreachable!("event kind already checked");
-            };
-            if let Some(router) = self.router.as_mut() {
-                router.apply_event(event)?;
-            }
+            self.process_completed_pass(worker_idx, completed_requests, output_signals, kv_events)?;
             changed = true;
         }
 
@@ -404,13 +372,20 @@ impl OfflineRuntime {
                 };
                 changed = true;
 
+                let completion_kv_events =
+                    if executed.router_event_visibility == RouterEventVisibility::PassStart {
+                        self.apply_router_events(executed.kv_events)?;
+                        Vec::new()
+                    } else {
+                        executed.kv_events
+                    };
+
                 if executed.end_ms == self.now_ms {
                     self.process_completed_pass(
                         worker_idx,
                         executed.completed_requests,
                         executed.output_signals,
-                        executed.kv_events,
-                        executed.end_ms,
+                        completion_kv_events,
                     )?;
                     continue;
                 }
@@ -422,7 +397,7 @@ impl OfflineRuntime {
                         worker_idx,
                         completed_requests: executed.completed_requests,
                         output_signals: executed.output_signals,
-                        kv_events: executed.kv_events,
+                        kv_events: completion_kv_events,
                     },
                 );
                 break;
@@ -435,7 +410,6 @@ impl OfflineRuntime {
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
             let mut changed = self.apply_worker_completions()?;
-            changed |= self.apply_kv_events()?;
 
             changed |= match self.mode {
                 ReplayMode::Trace => self.release_trace_arrivals()?,
@@ -479,6 +453,7 @@ impl OfflineRuntime {
 
 pub(crate) fn simulate_trace_multi(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -486,13 +461,21 @@ pub(crate) fn simulate_trace_multi(
 ) -> anyhow::Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let (collector, _) =
-        OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace, router_mode)?.run()?;
+    let (collector, _) = OfflineRuntime::new(
+        &args,
+        router_config,
+        pending,
+        num_workers,
+        ReplayMode::Trace,
+        router_mode,
+    )?
+    .run()?;
     Ok(collector.finish())
 }
 
 pub(crate) fn simulate_concurrency_multi(
     args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -502,6 +485,7 @@ pub(crate) fn simulate_concurrency_multi(
     let pending = VecDeque::from(requests);
     let (collector, _) = OfflineRuntime::new(
         &args,
+        router_config,
         pending,
         num_workers,
         ReplayMode::Concurrency { max_in_flight },
@@ -519,10 +503,17 @@ fn run_trace_multi_collect_with_stats(
     router_mode: ReplayRouterMode,
 ) -> (TraceCollector, OfflineRuntimeStats) {
     let pending = normalize_trace_requests(requests, 1.0).unwrap();
-    OfflineRuntime::new(args, pending, num_workers, ReplayMode::Trace, router_mode)
-        .unwrap()
-        .run()
-        .unwrap()
+    OfflineRuntime::new(
+        args,
+        None,
+        pending,
+        num_workers,
+        ReplayMode::Trace,
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -535,6 +526,7 @@ fn run_concurrency_multi_collect_with_stats(
 ) -> (TraceCollector, OfflineRuntimeStats) {
     OfflineRuntime::new(
         args,
+        None,
         VecDeque::from(requests),
         num_workers,
         ReplayMode::Concurrency { max_in_flight },

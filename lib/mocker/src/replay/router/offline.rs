@@ -132,8 +132,12 @@ pub(crate) struct OfflineReplayRouter {
 }
 
 impl OfflineReplayRouter {
-    pub(crate) fn new(args: &MockEngineArgs, num_workers: usize) -> Result<Self> {
-        let config = replay_router_config(args);
+    pub(crate) fn new(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        num_workers: usize,
+    ) -> Result<Self> {
+        let config = replay_router_config(args, router_config);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);

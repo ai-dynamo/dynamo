@@ -507,19 +507,23 @@ pub fn run_input<'p>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, extra_engine_args_json=None, router_config=None, router_config_json=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
     trace_file: PathBuf,
     extra_engine_args: Option<PathBuf>,
+    extra_engine_args_json: Option<&str>,
+    router_config: Option<PathBuf>,
+    router_config_json: Option<&str>,
     num_workers: usize,
     replay_concurrency: Option<isize>,
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
 ) -> PyResult<PyObject> {
-    let args = load_replay_mocker_args(py, extra_engine_args)?;
+    let args = load_replay_mocker_args(py, extra_engine_args, extra_engine_args_json)?;
+    let router_config = load_replay_router_config(router_config, router_config_json)?;
     let replay_mode = replay_mode.to_owned();
     let router_mode = parse_replay_router_mode(router_mode)?;
     let report = py.allow_threads(move || {
@@ -529,6 +533,7 @@ pub fn run_mocker_trace_replay(
             ("offline", Some(max_in_flight)) => {
                 dynamo_mocker::replay::simulate_concurrency_file_with_router_mode(
                     args,
+                    router_config.clone(),
                     &trace_file,
                     max_in_flight,
                     num_workers,
@@ -537,6 +542,7 @@ pub fn run_mocker_trace_replay(
             }
             ("offline", None) => dynamo_mocker::replay::simulate_trace_file_with_router_mode(
                 args,
+                router_config.clone(),
                 &trace_file,
                 num_workers,
                 arrival_speedup_ratio,
@@ -545,6 +551,7 @@ pub fn run_mocker_trace_replay(
             ("online", Some(max_in_flight)) => {
                 dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode(
                     args,
+                    router_config.clone(),
                     &trace_file,
                     max_in_flight,
                     num_workers,
@@ -553,6 +560,7 @@ pub fn run_mocker_trace_replay(
             }
             ("online", None) => dynamo_mocker::replay::simulate_trace_live_file_with_router_mode(
                 args,
+                router_config.clone(),
                 &trace_file,
                 num_workers,
                 arrival_speedup_ratio,
@@ -571,7 +579,7 @@ pub fn run_mocker_trace_replay(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, extra_engine_args_json=None, router_config=None, router_config_json=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -579,6 +587,9 @@ pub fn run_mocker_synthetic_trace_replay(
     output_tokens: usize,
     request_count: usize,
     extra_engine_args: Option<PathBuf>,
+    extra_engine_args_json: Option<&str>,
+    router_config: Option<PathBuf>,
+    router_config_json: Option<&str>,
     num_workers: usize,
     replay_concurrency: Option<isize>,
     replay_mode: &str,
@@ -586,7 +597,8 @@ pub fn run_mocker_synthetic_trace_replay(
     arrival_speedup_ratio: f64,
     arrival_interval_ms: f64,
 ) -> PyResult<PyObject> {
-    let args = load_replay_mocker_args(py, extra_engine_args)?;
+    let args = load_replay_mocker_args(py, extra_engine_args, extra_engine_args_json)?;
+    let router_config = load_replay_router_config(router_config, router_config_json)?;
     let replay_mode = replay_mode.to_owned();
     let router_mode = parse_replay_router_mode(router_mode)?;
     let report = py.allow_threads(move || {
@@ -603,6 +615,7 @@ pub fn run_mocker_synthetic_trace_replay(
             ("offline", Some(max_in_flight)) => {
                 dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode(
                     args,
+                    router_config.clone(),
                     requests,
                     max_in_flight,
                     num_workers,
@@ -611,6 +624,7 @@ pub fn run_mocker_synthetic_trace_replay(
             }
             ("offline", None) => dynamo_mocker::replay::simulate_trace_requests_with_router_mode(
                 args,
+                router_config.clone(),
                 requests,
                 num_workers,
                 arrival_speedup_ratio,
@@ -619,6 +633,7 @@ pub fn run_mocker_synthetic_trace_replay(
             ("online", Some(max_in_flight)) => {
                 dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
                     args,
+                    router_config.clone(),
                     requests,
                     max_in_flight,
                     num_workers,
@@ -628,6 +643,7 @@ pub fn run_mocker_synthetic_trace_replay(
             ("online", None) => {
                 dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode(
                     args,
+                    router_config.clone(),
                     requests,
                     num_workers,
                     arrival_speedup_ratio,
@@ -649,17 +665,30 @@ pub fn run_mocker_synthetic_trace_replay(
 fn load_replay_mocker_args(
     py: Python<'_>,
     extra_engine_args: Option<PathBuf>,
+    extra_engine_args_json: Option<&str>,
 ) -> PyResult<MockEngineArgs> {
-    let mut args = if let Some(ref extra_args_path) = extra_engine_args {
-        MockEngineArgs::from_json_file(extra_args_path).map_err(|e| {
-            PyException::new_err(format!(
-                "Failed to load mocker args from {:?}: {}",
-                extra_args_path, e
-            ))
-        })?
-    } else {
-        MockEngineArgs::default()
-    };
+    if extra_engine_args.is_some() && extra_engine_args_json.is_some() {
+        return Err(PyException::new_err(
+            "extra_engine_args and extra_engine_args_json are mutually exclusive",
+        ));
+    }
+
+    let mut args =
+        match (extra_engine_args.as_ref(), extra_engine_args_json) {
+            (Some(extra_args_path), None) => MockEngineArgs::from_json_file(extra_args_path)
+                .map_err(|e| {
+                    PyException::new_err(format!(
+                        "Failed to load mocker args from {:?}: {}",
+                        extra_args_path, e
+                    ))
+                })?,
+            (None, Some(extra_args_json)) => MockEngineArgs::from_json_str(extra_args_json)
+                .map_err(|e| {
+                    PyException::new_err(format!("Failed to parse mocker args JSON: {}", e))
+                })?,
+            (None, None) => MockEngineArgs::default(),
+            (Some(_), Some(_)) => unreachable!(),
+        };
 
     if let Some(ref backend_name) = args.aic_backend.clone() {
         let backend = backend_name.clone();
@@ -695,6 +724,46 @@ fn load_replay_mocker_args(
     }
 
     Ok(args)
+}
+
+fn load_replay_router_config(
+    router_config: Option<PathBuf>,
+    router_config_json: Option<&str>,
+) -> PyResult<Option<RsKvRouterConfig>> {
+    if router_config.is_some() && router_config_json.is_some() {
+        return Err(PyException::new_err(
+            "router_config and router_config_json are mutually exclusive",
+        ));
+    }
+
+    match (router_config, router_config_json) {
+        (Some(path), None) => {
+            let file_content = std::fs::read_to_string(&path).map_err(|error| {
+                PyException::new_err(format!(
+                    "Failed to read replay router config from {:?}: {}",
+                    path, error
+                ))
+            })?;
+            serde_json::from_str(&file_content)
+                .map(Some)
+                .map_err(|error| {
+                    PyException::new_err(format!(
+                        "Failed to parse replay router config from {:?}: {}",
+                        path, error
+                    ))
+                })
+        }
+        (None, Some(config_json)) => serde_json::from_str(config_json)
+            .map(Some)
+            .map_err(|error| {
+                PyException::new_err(format!(
+                    "Failed to parse replay router config JSON: {}",
+                    error
+                ))
+            }),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => unreachable!(),
+    }
 }
 
 fn parse_replay_router_mode(

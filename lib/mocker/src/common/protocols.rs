@@ -402,11 +402,13 @@ impl MockEngineArgs {
 
     /// Create MockEngineArgs from a JSON file containing extra engine arguments
     pub fn from_json_file(path: &Path) -> anyhow::Result<Self> {
-        let mut builder = Self::builder();
-
-        // Load and parse the JSON file
         let file_content = std::fs::read_to_string(path)?;
-        let extra_args: HashMap<String, serde_json::Value> = serde_json::from_str(&file_content)?;
+        Self::from_json_str(&file_content)
+    }
+
+    pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
+        let mut builder = Self::builder();
+        let extra_args: HashMap<String, serde_json::Value> = serde_json::from_str(content)?;
 
         // Define valid field names
         let valid_fields: HashSet<&str> = [

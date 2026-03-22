@@ -102,6 +102,9 @@ The dedicated replay CLI exposes:
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
 - `--extra-engine-args`
+- `--extra-engine-args-json`
+- `--router-config`
+- `--router-config-json`
 
 Example:
 
@@ -109,10 +112,10 @@ Example:
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode online \
     --router-mode kv_router \
-    --router-queue-policy fcfs \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args /path/to/mocker_args.json
+    --extra-engine-args-json '{"block_size":64,"speedup_ratio":1000.0}' \
+    --router-config-json '{"router_queue_policy":"fcfs","router_temperature":0.0}'
 ```
 
 SGLang replay uses the same CLI surface. A minimal extra-engine-args file can use either
@@ -128,6 +131,10 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
   }
 }
 ```
+
+For both `--extra-engine-args-json` and `--router-config-json`, replay accepts partial JSON
+objects. Unspecified fields fall back to the same defaults used by `MockEngineArgs::default()`
+and `KvRouterConfig::default()`.
 
 ### `python -m dynamo.mocker --trace-file`
 

@@ -3,15 +3,18 @@
 
 //! Engine-specific scheduling implementations.
 
+mod kv_event_sink;
 #[path = "sglang/mod.rs"]
 pub mod sglang;
 pub mod vllm;
 
-use std::sync::{Arc, Mutex};
-
 use crate::common::protocols::{DirectRequest, KvCacheEventSink, OutputSignal};
-use anyhow::Result;
-use dynamo_kv_router::protocols::{RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::RouterEvent;
+pub(crate) use kv_event_sink::{
+    CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
+    publish_deferred_kv_events,
+};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -34,50 +37,19 @@ pub(crate) struct EnginePassResult {
     pub(crate) output_signals: Vec<OutputSignal>,
     pub(crate) admissions: Vec<AdmissionEvent>,
     pub(crate) active_decode_blocks: u64,
+    /// Controls when replay/live schedulers should expose this pass's buffered
+    /// KV events to the real router or publisher sink.
+    pub(crate) router_event_visibility: RouterEventVisibility,
+    /// Router-visible KV events emitted during this pass.
     pub(crate) kv_events: Vec<RouterEvent>,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct KvEventBuffer {
-    events: Arc<Mutex<Vec<RouterEvent>>>,
-}
-
-impl KvEventBuffer {
-    pub(crate) fn push(&self, event: RouterEvent) {
-        self.events.lock().unwrap().push(event);
-    }
-
-    pub(crate) fn drain(&self) -> Vec<RouterEvent> {
-        std::mem::take(&mut *self.events.lock().unwrap())
-    }
-}
-
-#[derive(Clone)]
-struct BufferedKvEventSink {
-    worker_id: WorkerId,
-    buffer: KvEventBuffer,
-}
-
-impl KvCacheEventSink for BufferedKvEventSink {
-    fn publish(
-        &self,
-        event: dynamo_kv_router::protocols::KvCacheEvent,
-        _block_token_ids: Option<&[Vec<u32>]>,
-    ) -> Result<()> {
-        self.buffer.push(RouterEvent::new(self.worker_id, event));
-        Ok(())
-    }
-}
-
-pub(crate) fn capture_kv_event_sink(
-    worker_id: WorkerId,
-) -> (KvEventBuffer, Arc<dyn KvCacheEventSink>) {
-    let buffer = KvEventBuffer::default();
-    let sink: Arc<dyn KvCacheEventSink> = Arc::new(BufferedKvEventSink {
-        worker_id,
-        buffer: buffer.clone(),
-    });
-    (buffer, sink)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouterEventVisibility {
+    /// Expose buffered KV events when the pass starts, before the modeled sleep.
+    PassStart,
+    /// Expose buffered KV events when the pass finishes, before output flush.
+    PassEnd,
 }
 
 #[allow(clippy::large_enum_variant)]

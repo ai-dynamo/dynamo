@@ -49,6 +49,9 @@ unregister_llm = unregister_model
 def run_mocker_trace_replay(
     trace_file,
     extra_engine_args=None,
+    extra_engine_args_json=None,
+    router_config=None,
+    router_config_json=None,
     num_workers=1,
     replay_concurrency=None,
     router_mode="round_robin",
@@ -57,6 +60,9 @@ def run_mocker_trace_replay(
     return _run_mocker_trace_replay(
         trace_file,
         extra_engine_args=extra_engine_args,
+        extra_engine_args_json=extra_engine_args_json,
+        router_config=router_config,
+        router_config_json=router_config_json,
         num_workers=num_workers,
         replay_concurrency=replay_concurrency,
         replay_mode="offline",

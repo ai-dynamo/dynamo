@@ -119,8 +119,12 @@ pub(crate) struct KvReplayRouter {
 }
 
 impl KvReplayRouter {
-    fn new(args: &MockEngineArgs, num_workers: usize) -> Self {
-        let config = replay_router_config(args);
+    fn new(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        num_workers: usize,
+    ) -> Self {
+        let config = replay_router_config(args, router_config);
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -245,10 +249,17 @@ pub(crate) enum ReplayRouter {
 }
 
 impl ReplayRouter {
-    pub(crate) fn new(mode: ReplayRouterMode, args: &MockEngineArgs, num_workers: usize) -> Self {
+    pub(crate) fn new(
+        mode: ReplayRouterMode,
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        num_workers: usize,
+    ) -> Self {
         match mode {
             ReplayRouterMode::RoundRobin => Self::RoundRobin(RoundRobinRouter::default()),
-            ReplayRouterMode::KvRouter => Self::Kv(KvReplayRouter::new(args, num_workers)),
+            ReplayRouterMode::KvRouter => {
+                Self::Kv(KvReplayRouter::new(args, router_config, num_workers))
+            }
         }
     }
 

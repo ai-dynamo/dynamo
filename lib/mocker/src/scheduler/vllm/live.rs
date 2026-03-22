@@ -9,7 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs, OutputSignal};
 use crate::common::utils::sleep_until_precise;
-use crate::scheduler::{AdmissionEvent, SchedulerHandle};
+use crate::scheduler::{
+    AdmissionEvent, RouterEventVisibility, SchedulerHandle, capture_deferred_kv_publish_sink,
+    publish_deferred_kv_events,
+};
 
 use super::core::VllmCore;
 
@@ -110,7 +113,8 @@ impl Scheduler {
         let cancel_guard = Arc::new(CancelGuard(cancel_token));
 
         tokio::spawn(async move {
-            let mut core = VllmCore::new_with_sink(args, dp_rank, kv_event_sink);
+            let (deferred_kv_events, buffering_sink) = capture_deferred_kv_publish_sink();
+            let mut core = VllmCore::new_with_sink(args, dp_rank, Some(buffering_sink));
 
             loop {
                 if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
@@ -123,10 +127,17 @@ impl Scheduler {
                 let iteration_start = Instant::now();
                 let pass = core.execute_pass_internal(None, 0.0, admission_tx.as_ref());
                 let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
+                if pass.router_event_visibility == RouterEventVisibility::PassStart {
+                    publish_deferred_kv_events(&kv_event_sink, deferred_kv_events.drain());
+                }
                 if total_time > std::time::Duration::ZERO {
                     sleep_until_precise(iteration_start + total_time).await;
                 }
+                if pass.router_event_visibility == RouterEventVisibility::PassEnd {
+                    publish_deferred_kv_events(&kv_event_sink, deferred_kv_events.drain());
+                }
                 flush_output_signals(&mut core, &output_tx, &pass.output_signals);
+                publish_deferred_kv_events(&kv_event_sink, deferred_kv_events.drain());
                 let _ = metrics_tx.send(MockerMetrics::new(
                     dp_rank,
                     core.kv_manager.num_active_blocks() as u64,

@@ -65,6 +65,7 @@ pub struct RouterConfigOverride {
 
 /// KV Router configuration parameters
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(default)]
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]

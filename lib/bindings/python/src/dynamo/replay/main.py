@@ -7,34 +7,20 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from collections.abc import Sequence
-from pathlib import Path
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 
-def _prepare_extra_engine_args(extra_engine_args, router_queue_policy):
-    if router_queue_policy is None:
-        return extra_engine_args, None
-
-    payload = {}
-    if extra_engine_args is not None:
-        payload = json.loads(Path(extra_engine_args).read_text(encoding="utf-8"))
-    payload["router_queue_policy"] = router_queue_policy
-
-    temp_dir = tempfile.TemporaryDirectory()
-    merged_path = Path(temp_dir.name) / "replay_extra_engine_args.json"
-    merged_path.write_text(json.dumps(payload), encoding="utf-8")
-    return str(merged_path), temp_dir
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
     parser.add_argument("trace_file", nargs="?")
     parser.add_argument("--extra-engine-args")
+    parser.add_argument("--extra-engine-args-json")
+    parser.add_argument("--router-config")
+    parser.add_argument("--router-config-json")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument("--request-count", type=int)
@@ -51,12 +37,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("round_robin", "kv_router"),
         default="round_robin",
     )
-    parser.add_argument(
-        "--router-queue-policy",
-        choices=("fcfs", "wspt", "lcfs"),
-    )
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    if args.extra_engine_args and args.extra_engine_args_json:
+        parser.error(
+            "provide at most one of --extra-engine-args or --extra-engine-args-json"
+        )
+    if args.router_config and args.router_config_json:
+        parser.error("provide at most one of --router-config or --router-config-json")
 
     using_trace_file = args.trace_file is not None
     synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
@@ -71,38 +60,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
 
-    merged_extra_engine_args, temp_dir = _prepare_extra_engine_args(
-        args.extra_engine_args,
-        args.router_queue_policy,
-    )
-
-    try:
-        if using_trace_file:
-            report = run_trace_replay(
-                args.trace_file,
-                extra_engine_args=merged_extra_engine_args,
-                num_workers=args.num_workers,
-                replay_concurrency=args.replay_concurrency,
-                replay_mode=args.replay_mode,
-                router_mode=args.router_mode,
-                arrival_speedup_ratio=args.arrival_speedup_ratio,
-            )
-        else:
-            report = run_synthetic_trace_replay(
-                args.input_tokens,
-                args.output_tokens,
-                args.request_count,
-                extra_engine_args=merged_extra_engine_args,
-                num_workers=args.num_workers,
-                replay_concurrency=args.replay_concurrency,
-                replay_mode=args.replay_mode,
-                router_mode=args.router_mode,
-                arrival_speedup_ratio=args.arrival_speedup_ratio,
-                arrival_interval_ms=args.arrival_interval_ms,
-            )
-    finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
+    if using_trace_file:
+        report = run_trace_replay(
+            args.trace_file,
+            extra_engine_args=args.extra_engine_args,
+            extra_engine_args_json=args.extra_engine_args_json,
+            router_config=args.router_config,
+            router_config_json=args.router_config_json,
+            num_workers=args.num_workers,
+            replay_concurrency=args.replay_concurrency,
+            replay_mode=args.replay_mode,
+            router_mode=args.router_mode,
+            arrival_speedup_ratio=args.arrival_speedup_ratio,
+        )
+    else:
+        report = run_synthetic_trace_replay(
+            args.input_tokens,
+            args.output_tokens,
+            args.request_count,
+            extra_engine_args=args.extra_engine_args,
+            extra_engine_args_json=args.extra_engine_args_json,
+            router_config=args.router_config,
+            router_config_json=args.router_config_json,
+            num_workers=args.num_workers,
+            replay_concurrency=args.replay_concurrency,
+            replay_mode=args.replay_mode,
+            router_mode=args.router_mode,
+            arrival_speedup_ratio=args.arrival_speedup_ratio,
+            arrival_interval_ms=args.arrival_interval_ms,
+        )
 
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

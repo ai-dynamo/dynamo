@@ -17,7 +17,10 @@ use crate::common::protocols::{
 use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::KvManager;
 use crate::replay::TraceCollector;
-use crate::scheduler::{AdmissionEvent, EnginePassResult, KvEventBuffer, capture_kv_event_sink};
+use crate::scheduler::{
+    AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, RouterEventVisibility,
+    capture_router_event_sink,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestStatus {
@@ -189,7 +192,7 @@ pub(crate) struct VllmCore {
     args: MockEngineArgs,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: KvManager,
-    kv_event_buffer: Option<KvEventBuffer>,
+    kv_event_buffer: Option<CapturedRouterEventBuffer>,
 }
 
 impl VllmCore {
@@ -198,7 +201,7 @@ impl VllmCore {
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_kv_event_sink(worker_id);
+        let (buffer, sink) = capture_router_event_sink(worker_id);
         Self::new_internal(args, 0, Some(buffer), Some(sink))
     }
 
@@ -213,7 +216,7 @@ impl VllmCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        kv_event_buffer: Option<KvEventBuffer>,
+        kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
@@ -374,10 +377,11 @@ impl VllmCore {
             output_signals,
             admissions,
             active_decode_blocks: self.kv_manager.num_active_blocks() as u64,
+            router_event_visibility: RouterEventVisibility::PassStart,
             kv_events: self
                 .kv_event_buffer
                 .as_ref()
-                .map(KvEventBuffer::drain)
+                .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
         }
     }
