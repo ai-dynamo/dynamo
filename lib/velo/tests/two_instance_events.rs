@@ -76,8 +76,10 @@ async fn local_event_trigger() {
     let awaiter = em.awaiter(handle).unwrap();
     em.trigger(handle).unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), awaiter).await;
-    assert!(result.is_ok(), "Local event trigger should resolve");
+    let result = tokio::time::timeout(Duration::from_secs(2), awaiter)
+        .await
+        .expect("Local event trigger timed out");
+    result.expect("Local event trigger should resolve with Ok");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -91,8 +93,10 @@ async fn local_event_poison() {
     let awaiter = em.awaiter(handle).unwrap();
     em.poison(handle, "test failure").unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), awaiter).await;
-    assert!(result.is_ok(), "Local event poison should resolve awaiter");
+    let result = tokio::time::timeout(Duration::from_secs(2), awaiter)
+        .await
+        .expect("Local event poison timed out");
+    assert!(result.is_err(), "Local event poison should resolve with Err");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -120,11 +124,10 @@ async fn remote_event_subscribe_and_trigger() {
     em_a.trigger(handle).unwrap();
 
     // Instance B's awaiter should resolve
-    let result = tokio::time::timeout(Duration::from_secs(5), awaiter).await;
-    assert!(
-        result.is_ok(),
-        "Remote event trigger should resolve subscriber's awaiter"
-    );
+    let result = tokio::time::timeout(Duration::from_secs(5), awaiter)
+        .await
+        .expect("Remote event trigger timed out");
+    result.expect("Remote event trigger should resolve subscriber's awaiter with Ok");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -152,9 +155,8 @@ async fn remote_event_poison() {
     em_a.poison(handle, "test error").unwrap();
 
     // B's awaiter should resolve (with poison)
-    let result = tokio::time::timeout(Duration::from_secs(5), awaiter).await;
-    assert!(
-        result.is_ok(),
-        "Remote event poison should resolve subscriber's awaiter"
-    );
+    let result = tokio::time::timeout(Duration::from_secs(5), awaiter)
+        .await
+        .expect("Remote event poison timed out");
+    assert!(result.is_err(), "Remote event poison should resolve subscriber's awaiter with Err");
 }
