@@ -74,7 +74,7 @@ python -m dynamo.mocker \
 | `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
 | `--trace-file` | None | Run offline trace replay from a Mooncake-style JSONL trace file |
-| `--output-file` | `<trace stem>.replay.json` | Write replay metrics JSON to this path |
+| `--output-file` | `TRACE_STEM.replay.json` | Write replay metrics JSON to this path |
 | `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 | Tokens per KV cache block |

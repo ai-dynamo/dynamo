@@ -178,7 +178,7 @@ python -m dynamo.mocker \
     --output-file /tmp/replay-report.json
 ```
 
-If `--output-file` is not set, the report path defaults to `<trace stem>.replay.json` in the same directory as the input trace.
+If `--output-file` is not set, the report path defaults to `TRACE_STEM.replay.json` in the same directory as the input trace.
 
 The report contains:
 
