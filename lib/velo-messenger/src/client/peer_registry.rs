@@ -77,9 +77,10 @@ impl PeerRegistry {
 
     /// Update the handler list for a peer.
     pub fn update_handlers(&self, instance_id: InstanceId, handlers: Vec<String>) {
-        if let Some(mut state) = self.peers.get_mut(&instance_id) {
-            state.set_handlers(handlers);
-        }
+        self.peers
+            .entry(instance_id)
+            .or_insert_with(PeerState::new)
+            .set_handlers(handlers);
     }
 
     /// Check if a specific handler exists on a peer.
