@@ -13,6 +13,18 @@ use velo::*;
 use velo_discovery::FilesystemPeerDiscovery;
 use velo_transports::tcp::TcpTransportBuilder;
 
+async fn poll_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let start = tokio::time::Instant::now();
+    let mut interval = Duration::from_millis(5);
+    while !condition() {
+        if start.elapsed() > timeout {
+            panic!("poll_until timed out after {:?}", timeout);
+        }
+        tokio::time::sleep(interval).await;
+        interval = (interval * 2).min(Duration::from_millis(100));
+    }
+}
+
 fn new_transport() -> Arc<velo_transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     Arc::new(
@@ -43,13 +55,12 @@ async fn make_pair() -> (Arc<Velo>, Arc<Velo>, tempfile::TempDir) {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Register peers directly (bypassing discovery for peer registration)
     a.register_peer(b.peer_info()).unwrap();
     b.register_peer(a.peer_info()).unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Verify bidirectional connectivity via handshake
+    a.available_handlers(b.instance_id()).await.unwrap();
+    b.available_handlers(a.instance_id()).await.unwrap();
 
     (a, b, tmp)
 }
@@ -97,8 +108,13 @@ async fn remote_event_subscribe_and_trigger() {
     let em_b = b.event_manager();
     let awaiter = em_b.awaiter(handle).unwrap();
 
-    // Give subscription time to propagate
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for subscription to propagate
+    let a_ref = a.clone();
+    let b_id = b.instance_id();
+    poll_until(Duration::from_secs(5), move || {
+        a_ref.has_event_subscriber(handle, b_id)
+    })
+    .await;
 
     // Trigger on instance A
     em_a.trigger(handle).unwrap();
@@ -124,7 +140,13 @@ async fn remote_event_poison() {
     let em_b = b.event_manager();
     let awaiter = em_b.awaiter(handle).unwrap();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for subscription to propagate
+    let a_ref = a.clone();
+    let b_id = b.instance_id();
+    poll_until(Duration::from_secs(5), move || {
+        a_ref.has_event_subscriber(handle, b_id)
+    })
+    .await;
 
     // Poison on A
     em_a.poison(handle, "test error").unwrap();

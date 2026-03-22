@@ -266,6 +266,15 @@ impl VeloEvents {
         }
     }
 
+    /// Check whether a specific instance is registered as a subscriber
+    /// for a locally-owned event.
+    pub fn has_subscriber(&self, handle: EventHandle, subscriber: InstanceId) -> bool {
+        let key = RemoteEventKey::from_handle(handle);
+        self.owner_subscribers
+            .get(&key)
+            .is_some_and(|entry| entry.contains_key(&subscriber))
+    }
+
     // ── Owner-side handlers ─────────────────────────────────────────
 
     pub(crate) fn handle_subscribe(self: &Arc<Self>, payload: Bytes) -> Result<()> {

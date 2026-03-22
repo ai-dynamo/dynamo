@@ -147,6 +147,11 @@ impl Velo {
         self.messenger.discover_and_register_peer(instance_id).await
     }
 
+    /// Check whether a specific instance has subscribed to a locally-owned event.
+    pub fn has_event_subscriber(&self, handle: EventHandle, subscriber: InstanceId) -> bool {
+        self.messenger.has_event_subscriber(handle, subscriber)
+    }
+
     /// Get the list of handlers available on a remote instance.
     pub async fn available_handlers(&self, instance_id: InstanceId) -> Result<Vec<String>> {
         self.messenger.available_handlers(instance_id).await
