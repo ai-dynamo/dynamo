@@ -125,9 +125,10 @@ python -m dynamo.mocker \
 
 > **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
 
-## Offline Trace Replay
+## Trace Replay
 
-The mocker also supports replaying Mooncake-style traces without launching a live runtime.
+The mocker also supports replaying Mooncake-style traces through both the original mocker CLI and
+the dedicated replay harness.
 
 For the original mocker CLI flow:
 
@@ -167,7 +168,7 @@ python -m dynamo.replay \
 The standalone replay CLI prints the replay report JSON directly to stdout. The `dynamo.mocker`
 trace-file flow still writes a report file and prints a `Replay Summary` table.
 
-For full usage, constraints, and benchmarking guidance, see [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md).
+For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
 
 Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay uses canonical
 `block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long

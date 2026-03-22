@@ -14,7 +14,7 @@ surface is available in two forms:
   directly
 
 Unlike normal `dynamo.mocker` usage, offline replay does not launch workers, register endpoints, or
-require NATS, etcd, or a frontend.
+require NATS, etcd, or a frontend. Online replay does exercise the live mock-worker runtime path.
 
 Use this when you want to:
 
@@ -131,7 +131,7 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 
 ### `python -m dynamo.mocker --trace-file`
 
-The mocker CLI still supports offline replay and remains useful when you want the historical
+The mocker CLI supports offline replay and remains useful when you want the historical
 `Replay Summary` output and report-file workflow.
 
 ### Synthetic Replay
@@ -289,7 +289,7 @@ Additional offline constraints:
 
 Additional online constraints:
 
-- the current live replay path is intended for aggregated workers only
+- the current live replay path is also limited to aggregated workers
 
 If you violate those constraints, replay fails immediately with a validation error.
 
