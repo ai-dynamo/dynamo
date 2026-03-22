@@ -223,7 +223,14 @@ This is a good example of harness compatibility being more than "the field exist
 
 The right tone for this section is checklist-driven rather than benchmark-driven. The artifact set already has the useful table: what Claude Code expects, what Dynamo returned, and which details turned out to matter in practice. The throughline is simple: Claude Code support stopped feeling hypothetical once Dynamo behaved like a backend the harness could reason about, not just one that could generate the next token.
 
-TODO: add one concrete curl snippet here, ideally the `GET /v1/models/{id}` miss or the `message_start` token-count example.
+One concrete example captures the flavor of these bugs better than a long checklist. Claude Code asks for the connected model directly. On the measured deployment, that lookup still failed:
+
+```text
+GET /v1/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+HTTP/1.1 404 Not Found
+```
+
+That is not a glamorous incompatibility, but it is exactly the kind that makes a backend feel brittle to a harness. The same section of captures shows a second class of issue: `message_start` reports `input_tokens: 0` even when the final response later contains the real count. Those details sit well below "generate the next token," but they are still part of whether the harness can reason correctly about the backend.
 
 ## Responses and Codex Fidelity
 
@@ -262,7 +269,17 @@ Codex surfaced a different failure mode than Claude Code. The issue was not whet
 
 This section should stay shorter than the Claude Code sections. One diagram and one concrete replay example are enough. The important point is that protocol fidelity on the Responses side is still part of the serving problem. A lossy conversion path quietly erases the structure the harness depends on.
 
-TODO: add one concrete Responses request/response pair from the artifacts so this section has a small worked example, not just the diagram.
+The simple text-generation capture is a useful example because it shows both preservation and the remaining gaps in one response. A request as small as:
+
+```json
+{
+  "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+  "input": "Say hello briefly.",
+  "max_output_tokens": 50
+}
+```
+
+comes back with the Responses-shaped structure intact: a reasoning item, a message item, the original `max_output_tokens`, and the usual top-level fields. At the same time, it shows the current edge of the implementation. `output_tokens_details.reasoning_tokens` is still `0` even though reasoning content is clearly present in the response. That is exactly the kind of detail a Codex-style client notices.
 
 ## Closing the Loop
 
