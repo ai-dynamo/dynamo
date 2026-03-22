@@ -62,11 +62,6 @@ on:
         required: false
         type: number
         default: 10
-      sanitized_ref_name:
-        description: 'Sanitized git ref name for branch-tagged images'
-        required: false
-        type: string
-        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -124,7 +119,6 @@ jobs:
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image }}
-          sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
       - name: Copy image to ACR
         if: inputs.copy_to_acr
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}
@@ -153,12 +147,21 @@ jobs:
           IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG}-cuda${CUDA_MAJOR}"
           echo "runtime_image=${IMAGE}" >> $GITHUB_OUTPUT
           echo "cuda_major=${CUDA_MAJOR}" >> $GITHUB_OUTPUT
-      - name: Compliance scan
-        if: inputs.run_compliance_scan
+      - name: Compliance scan (amd64)
+        if: inputs.run_compliance_scan && contains(inputs.platform, 'amd64')
         uses: ./.github/actions/compliance-scan
         with:
           image: ${{ steps.compliance-image.outputs.runtime_image }}
           artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}-cuda${{ steps.compliance-image.outputs.cuda_major }}-amd64
           arch: linux/amd64
+          framework: ${{ inputs.framework }}
+          cuda_version: ${{ matrix.cuda_version }}
+      - name: Compliance scan (arm64)
+        if: inputs.run_compliance_scan && contains(inputs.platform, 'arm64')
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ steps.compliance-image.outputs.runtime_image }}
+          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}-cuda${{ steps.compliance-image.outputs.cuda_major }}-arm64
+          arch: linux/arm64
           framework: ${{ inputs.framework }}
           cuda_version: ${{ matrix.cuda_version }}

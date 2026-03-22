@@ -118,16 +118,6 @@ on:
         required: false
         type: boolean
         default: false
-      build_only:
-        description: 'Build and push only — skip all tests, show summary'
-        required: false
-        type: boolean
-        default: false
-      sanitized_ref_name:
-        description: 'Sanitized git ref name for branch-tagged images (used with build_only)'
-        required: false
-        type: string
-        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -218,8 +208,6 @@ jobs:
           no_cache: ${{ inputs.no_cache }}
           make_efa: ${{ inputs.make_efa }}
           extra_tags: ${{ inputs.extra_tags }}
-          build_only: ${{ inputs.build_only }}
-          sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
 
 
@@ -228,7 +216,6 @@ jobs:
   # ============================================================================
   test:
     if: |
-        !inputs.build_only &&
         ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
         inputs.build_image
     needs: [build]
@@ -305,7 +292,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
-          enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
@@ -322,7 +308,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
-          enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
@@ -334,7 +319,6 @@ jobs:
   multi-gpu-test:
     # Multi-GPU support limited to AMD64 only
     if: |
-        !inputs.build_only &&
         inputs.run_multi_gpu_tests &&
         inputs.build_image
     needs: [build]
@@ -385,7 +369,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: amd64
-          enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
@@ -444,7 +427,6 @@ jobs:
     # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
     if: |
       always() &&
-      !inputs.build_only &&
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')

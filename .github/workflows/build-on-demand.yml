@@ -63,7 +63,6 @@ jobs:
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
-      sanitized_ref_name: ${{ needs.init.outputs.sanitized_ref_name }}
     secrets: inherit
 
   sglang-pipeline:
@@ -80,7 +79,6 @@ jobs:
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
-      sanitized_ref_name: ${{ needs.init.outputs.sanitized_ref_name }}
     secrets: inherit
 
   trtllm-pipeline:
@@ -97,7 +95,6 @@ jobs:
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
-      sanitized_ref_name: ${{ needs.init.outputs.sanitized_ref_name }}
     secrets: inherit
 
   # ============================================================================
