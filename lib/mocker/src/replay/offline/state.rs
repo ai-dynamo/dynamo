@@ -14,9 +14,15 @@ pub(crate) struct OfflineWorkerState {
 }
 
 impl OfflineWorkerState {
-    pub(crate) fn new(_worker_idx: usize, args: MockEngineArgs) -> Self {
+    pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
+        let core = if capture_kv_events {
+            ReplayWorkerCore::new_with_kv_capture(args, Some(worker_idx as u64))
+        } else {
+            ReplayWorkerCore::new(args)
+        };
+
         Self {
-            core: ReplayWorkerCore::new(args),
+            core,
             busy: false,
             in_flight: 0,
         }

@@ -1,72 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-use std::future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use dynamo_kv_router::ConcurrentRadixTree;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
-};
-use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, ConcurrentRadixTree, DefaultWorkerSelector, LocalScheduler,
-    RouterSchedulingPolicy, SequencePublisher,
-};
+use dynamo_kv_router::protocols::{OverlapScores, RouterEvent, WorkerId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::shared::{
+    ReplayScheduler, replay_policy, replay_selector, replay_slots, replay_workers_with_configs,
+};
 use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
 use crate::replay::ReplayRouterMode;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ReplayNoopPublisher;
-
-impl SequencePublisher for ReplayNoopPublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
-    }
-
-    fn publish_load(&self, _load: ActiveLoad) {}
-
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReplayWorkerConfig {
-    max_num_batched_tokens: u64,
-    total_kv_blocks: u64,
-}
-
-impl WorkerConfigLike for ReplayWorkerConfig {
-    fn data_parallel_start_rank(&self) -> u32 {
-        0
-    }
-
-    fn data_parallel_size(&self) -> u32 {
-        1
-    }
-
-    fn max_num_batched_tokens(&self) -> Option<u64> {
-        Some(self.max_num_batched_tokens)
-    }
-
-    fn total_kv_blocks(&self) -> Option<u64> {
-        Some(self.total_kv_blocks)
-    }
-}
 
 #[derive(Clone)]
 enum ReplayIndexer {
@@ -144,7 +98,7 @@ impl KvCacheEventSink for ReplayKvEventSink {
 }
 
 #[derive(Default)]
-pub(super) struct RoundRobinRouter {
+pub(crate) struct RoundRobinRouter {
     next_worker_idx: AtomicUsize,
 }
 
@@ -154,17 +108,10 @@ impl RoundRobinRouter {
     }
 }
 
-pub(super) struct KvReplayRouter {
+pub(crate) struct KvReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
-    scheduler: Arc<
-        LocalScheduler<
-            ReplayNoopPublisher,
-            ReplayWorkerConfig,
-            RouterSchedulingPolicy,
-            DefaultWorkerSelector,
-        >,
-    >,
+    scheduler: Arc<ReplayScheduler>,
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
@@ -175,34 +122,13 @@ impl KvReplayRouter {
         let config = KvRouterConfig::default();
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
-        let worker_config = ReplayWorkerConfig {
-            max_num_batched_tokens: args
-                .max_num_batched_tokens
-                .map(|tokens| tokens as u64)
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
-            total_kv_blocks: args.num_gpu_blocks as u64,
-        };
-        let workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig> = (0..num_workers)
-            .map(|worker_idx| (worker_idx as WorkerId, worker_config.clone()))
-            .collect();
-        let dp_range = workers_with_configs
-            .keys()
-            .copied()
-            .map(|worker_id| (worker_id, (0, 1)))
-            .collect();
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            ReplayNoopPublisher,
-            args.block_size,
-            dp_range,
-            false,
-            0,
-            "replay",
-        ));
+        let workers_with_configs = replay_workers_with_configs(args, num_workers);
+        let slots = replay_slots(args, &workers_with_configs);
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
-        let selector = DefaultWorkerSelector::new(Some(config.clone()), "replay");
-        let policy = RouterSchedulingPolicy::new(config.router_queue_policy, args.block_size);
-        let scheduler = Arc::new(LocalScheduler::new(
+        let selector = replay_selector(&config);
+        let policy = replay_policy(&config, args);
+        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
             worker_config_rx,
             config.router_queue_threshold,
@@ -312,27 +238,27 @@ impl KvReplayRouter {
     clippy::large_enum_variant,
     reason = "ReplayRouter is long-lived and the KV router variant is intentional"
 )]
-pub(super) enum ReplayRouter {
+pub(crate) enum ReplayRouter {
     RoundRobin(RoundRobinRouter),
     Kv(KvReplayRouter),
 }
 
 impl ReplayRouter {
-    pub(super) fn new(mode: ReplayRouterMode, args: &MockEngineArgs, num_workers: usize) -> Self {
+    pub(crate) fn new(mode: ReplayRouterMode, args: &MockEngineArgs, num_workers: usize) -> Self {
         match mode {
             ReplayRouterMode::RoundRobin => Self::RoundRobin(RoundRobinRouter::default()),
             ReplayRouterMode::KvRouter => Self::Kv(KvReplayRouter::new(args, num_workers)),
         }
     }
 
-    pub(super) fn sink(&self, worker_id: WorkerId) -> Option<Arc<dyn KvCacheEventSink>> {
+    pub(crate) fn sink(&self, worker_id: WorkerId) -> Option<Arc<dyn KvCacheEventSink>> {
         match self {
             Self::RoundRobin(_) => None,
             Self::Kv(router) => Some(router.sink(worker_id)),
         }
     }
 
-    pub(super) async fn select_worker(
+    pub(crate) async fn select_worker(
         &self,
         request: &DirectRequest,
         num_workers: usize,
@@ -343,7 +269,7 @@ impl ReplayRouter {
         }
     }
 
-    pub(super) async fn on_first_token(&self, uuid: Uuid) -> Result<bool> {
+    pub(crate) async fn on_first_token(&self, uuid: Uuid) -> Result<bool> {
         match self {
             Self::RoundRobin(_) => Ok(false),
             Self::Kv(router) => {
@@ -353,7 +279,7 @@ impl ReplayRouter {
         }
     }
 
-    pub(super) async fn on_complete(&self, uuid: Uuid) -> Result<bool> {
+    pub(crate) async fn on_complete(&self, uuid: Uuid) -> Result<bool> {
         match self {
             Self::RoundRobin(_) => Ok(false),
             Self::Kv(router) => {
@@ -363,7 +289,7 @@ impl ReplayRouter {
         }
     }
 
-    pub(super) async fn shutdown(&self) -> Result<()> {
+    pub(crate) async fn shutdown(&self) -> Result<()> {
         match self {
             Self::RoundRobin(_) => Ok(()),
             Self::Kv(router) => router.shutdown().await,

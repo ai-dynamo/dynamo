@@ -40,8 +40,13 @@ pub fn simulate_trace_file_with_router_mode(
     validate_offline_replay_args(&args, num_workers, router_mode)?;
     let requests = load_trace_requests(trace_path, args.block_size, true)?;
     let started_at = Instant::now();
-    let report =
-        crate::replay::offline::simulate_trace(args, requests, num_workers, arrival_speedup_ratio)?;
+    let report = crate::replay::offline::simulate_trace(
+        args,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+    )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -166,5 +171,11 @@ pub fn simulate_concurrency_requests_with_router_mode(
         bail!("concurrency replay requires at least one request");
     }
 
-    crate::replay::offline::simulate_concurrency(args, requests, max_in_flight, num_workers)
+    crate::replay::offline::simulate_concurrency(
+        args,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+    )
 }

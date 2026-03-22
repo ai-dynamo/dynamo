@@ -165,6 +165,33 @@ pub(crate) fn simulate_concurrency_single(
 }
 
 #[cfg(test)]
+pub(super) fn run_trace_single_collect(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
+) -> TraceCollector {
+    let pending = normalize_trace_requests(requests, arrival_speedup_ratio).unwrap();
+    SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+        .run()
+        .unwrap()
+}
+
+#[cfg(test)]
+pub(super) fn run_concurrency_single_collect(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+) -> TraceCollector {
+    SingleRuntime::new(
+        args,
+        VecDeque::from(requests),
+        SingleReplayMode::Concurrency { max_in_flight },
+    )
+    .run()
+    .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::running_mean::RunningMean;

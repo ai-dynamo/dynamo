@@ -32,11 +32,15 @@ fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -
     Ok(())
 }
 
-fn validate_router_mode(router_mode: ReplayRouterMode, mode: &str) -> Result<()> {
-    if router_mode == ReplayRouterMode::KvRouter {
-        bail!("{mode} only supports router_mode=round_robin");
+fn validate_offline_router_mode(router_mode: ReplayRouterMode, num_workers: usize) -> Result<()> {
+    if router_mode != ReplayRouterMode::KvRouter {
+        return Ok(());
     }
-    Ok(())
+    if num_workers > 1 {
+        return Ok(());
+    }
+
+    bail!("offline replay only supports router_mode=kv_router when num_workers > 1");
 }
 
 pub(super) fn validate_offline_replay_args(
@@ -44,7 +48,7 @@ pub(super) fn validate_offline_replay_args(
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<()> {
-    validate_router_mode(router_mode, "offline replay")?;
+    validate_offline_router_mode(router_mode, num_workers)?;
     validate_replay_args(args, num_workers, "trace replay")
 }
 
@@ -58,7 +62,7 @@ pub(super) fn validate_offline_concurrency_args(
         bail!("concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_router_mode(router_mode, "offline replay")?;
+    validate_offline_router_mode(router_mode, num_workers)?;
     validate_replay_args(args, num_workers, "concurrency replay")
 }
 

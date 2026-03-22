@@ -3,36 +3,61 @@
 
 use std::cmp::Ordering;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct WorkerCompletion {
-    pub(crate) at_ms: f64,
-    pub(crate) worker_idx: usize,
-    pub(crate) completed_requests: usize,
+use crate::common::protocols::OutputSignal;
+use dynamo_kv_router::protocols::RouterEvent;
+
+#[derive(Debug)]
+pub(crate) enum SimulationEventKind {
+    WorkerCompletion {
+        worker_idx: usize,
+        completed_requests: usize,
+        output_signals: Vec<OutputSignal>,
+        kv_events: Vec<RouterEvent>,
+    },
+    KvApply {
+        event: RouterEvent,
+    },
 }
 
-impl PartialEq for WorkerCompletion {
-    fn eq(&self, other: &Self) -> bool {
-        self.at_ms.to_bits() == other.at_ms.to_bits()
-            && self.worker_idx == other.worker_idx
-            && self.completed_requests == other.completed_requests
+#[derive(Debug)]
+pub(crate) struct SimulationEvent {
+    pub(crate) at_ms: f64,
+    pub(crate) seq_no: u64,
+    pub(crate) kind: SimulationEventKind,
+}
+
+impl SimulationEvent {
+    fn kind_priority(&self) -> u8 {
+        match self.kind {
+            SimulationEventKind::WorkerCompletion { .. } => 1,
+            SimulationEventKind::KvApply { .. } => 0,
+        }
     }
 }
 
-impl Eq for WorkerCompletion {}
+impl PartialEq for SimulationEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.at_ms.to_bits() == other.at_ms.to_bits()
+            && self.seq_no == other.seq_no
+            && self.kind_priority() == other.kind_priority()
+    }
+}
 
-impl PartialOrd for WorkerCompletion {
+impl Eq for SimulationEvent {}
+
+impl PartialOrd for SimulationEvent {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for WorkerCompletion {
+impl Ord for SimulationEvent {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .at_ms
             .partial_cmp(&self.at_ms)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| other.worker_idx.cmp(&self.worker_idx))
-            .then_with(|| other.completed_requests.cmp(&self.completed_requests))
+            .then_with(|| self.kind_priority().cmp(&other.kind_priority()))
+            .then_with(|| other.seq_no.cmp(&self.seq_no))
     }
 }

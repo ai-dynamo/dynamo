@@ -1,15 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::events::WorkerCompletion;
+use super::events::{SimulationEvent, SimulationEventKind};
 use super::normalize_trace_requests;
 use super::state::OfflineWorkerState;
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::replay::{TraceCollector, TraceSimulationReport};
+use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::replay::router::OfflineReplayRouter;
+use crate::replay::{ReplayRouterMode, TraceCollector, TraceSimulationReport};
 use anyhow::bail;
-use std::collections::{BinaryHeap, VecDeque};
+use dynamo_kv_router::protocols::RouterEvent;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 use validator::Validate;
+
+const OFFLINE_KV_EVENT_DELAY_MS: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy)]
 enum ReplayMode {
@@ -17,14 +21,28 @@ enum ReplayMode {
     Concurrency { max_in_flight: usize },
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct OfflineRuntimeStats {
+    dispatch_history: Vec<usize>,
+    assigned_worker_by_uuid: HashMap<Uuid, usize>,
+    max_in_flight_seen: usize,
+    prefill_marked_count: usize,
+    freed_count: usize,
+    max_router_pending: usize,
+}
+
 struct OfflineRuntime {
     now_ms: f64,
     next_worker_idx: usize,
+    next_event_seq: u64,
     pending: VecDeque<DirectRequest>,
     workers: Vec<OfflineWorkerState>,
     collector: TraceCollector,
-    completions: BinaryHeap<WorkerCompletion>,
+    events: BinaryHeap<SimulationEvent>,
     mode: ReplayMode,
+    router: Option<OfflineReplayRouter>,
+    prefill_completed: HashSet<Uuid>,
+    stats: OfflineRuntimeStats,
 }
 
 impl OfflineRuntime {
@@ -33,27 +51,70 @@ impl OfflineRuntime {
         pending: VecDeque<DirectRequest>,
         num_workers: usize,
         mode: ReplayMode,
-    ) -> Self {
-        Self {
+        router_mode: ReplayRouterMode,
+    ) -> anyhow::Result<Self> {
+        let router = match router_mode {
+            ReplayRouterMode::RoundRobin => None,
+            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(args, num_workers)?),
+        };
+        let capture_kv_events = router.is_some();
+
+        Ok(Self {
             now_ms: 0.0,
             next_worker_idx: 0,
+            next_event_seq: 0,
             pending,
             workers: (0..num_workers)
-                .map(|worker_idx| OfflineWorkerState::new(worker_idx, args.clone()))
+                .map(|worker_idx| {
+                    OfflineWorkerState::new(worker_idx, args.clone(), capture_kv_events)
+                })
                 .collect(),
             collector: TraceCollector::default(),
-            completions: BinaryHeap::new(),
+            events: BinaryHeap::new(),
             mode,
-        }
+            router,
+            prefill_completed: HashSet::new(),
+            stats: OfflineRuntimeStats::default(),
+        })
     }
 
     fn cluster_in_flight(&self) -> usize {
         self.workers.iter().map(OfflineWorkerState::in_flight).sum()
     }
 
-    // Record a request release on the selected worker, then enqueue it on the
-    // next worker selected by deterministic round robin.
-    fn assign_request(&mut self, mut request: DirectRequest, arrival_time_ms: f64) -> Uuid {
+    fn record_router_pending(&mut self) {
+        let Some(router) = self.router.as_ref() else {
+            return;
+        };
+        self.stats.max_router_pending = self.stats.max_router_pending.max(router.pending_count());
+    }
+
+    fn record_dispatch(&mut self, uuid: Uuid, worker_idx: usize) {
+        self.stats.dispatch_history.push(worker_idx);
+        self.stats.assigned_worker_by_uuid.insert(uuid, worker_idx);
+        self.stats.max_in_flight_seen = self.stats.max_in_flight_seen.max(self.cluster_in_flight());
+    }
+
+    fn select_worker(&mut self, request: &DirectRequest) -> anyhow::Result<usize> {
+        let Some(router) = self.router.as_mut() else {
+            let worker_idx = self.next_worker_idx;
+            self.next_worker_idx = (self.next_worker_idx + 1) % self.workers.len();
+            return Ok(worker_idx);
+        };
+
+        let worker_idx = router.select_worker(request)?;
+        if worker_idx >= self.workers.len() {
+            bail!("offline replay selected unknown worker index {worker_idx}");
+        }
+        self.record_router_pending();
+        Ok(worker_idx)
+    }
+
+    fn assign_request(
+        &mut self,
+        mut request: DirectRequest,
+        arrival_time_ms: f64,
+    ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
         if matches!(self.mode, ReplayMode::Concurrency { .. }) {
@@ -67,26 +128,21 @@ impl OfflineRuntime {
             request.max_output_tokens,
         );
 
-        let worker_idx = self.next_worker_idx;
-        self.next_worker_idx = (self.next_worker_idx + 1) % self.workers.len();
-
-        // TODO: If future cluster scheduling needs worker-local metrics beyond
-        // these runtime-approved counters, promote them into OfflineWorkerState
-        // or move to a finer event model.
+        let worker_idx = self.select_worker(&request)?;
         self.workers[worker_idx].receive_request(request);
-
-        uuid
+        self.record_dispatch(uuid, worker_idx);
+        Ok(uuid)
     }
 
     fn is_done(&self) -> bool {
         self.pending.is_empty()
-            && self.completions.is_empty()
+            && self.events.is_empty()
             && self.cluster_in_flight() == 0
             && self.workers.iter().all(OfflineWorkerState::is_drained)
     }
 
     fn next_timestamp(&self) -> Option<f64> {
-        let next_completion_ms = self.completions.peek().map(|completion| completion.at_ms);
+        let next_event_ms = self.events.peek().map(|event| event.at_ms);
         let next_arrival_ms = match self.mode {
             ReplayMode::Trace => self
                 .pending
@@ -95,11 +151,29 @@ impl OfflineRuntime {
             ReplayMode::Concurrency { .. } => None,
         };
 
-        match (next_arrival_ms, next_completion_ms) {
-            (Some(arrival_ms), Some(completion_ms)) => Some(arrival_ms.min(completion_ms)),
+        match (next_arrival_ms, next_event_ms) {
+            (Some(arrival_ms), Some(event_ms)) => Some(arrival_ms.min(event_ms)),
             (Some(arrival_ms), None) => Some(arrival_ms),
-            (None, Some(completion_ms)) => Some(completion_ms),
+            (None, Some(event_ms)) => Some(event_ms),
             (None, None) => None,
+        }
+    }
+
+    fn push_event(&mut self, at_ms: f64, kind: SimulationEventKind) {
+        self.events.push(SimulationEvent {
+            at_ms,
+            seq_no: self.next_event_seq,
+            kind,
+        });
+        self.next_event_seq += 1;
+    }
+
+    fn push_kv_apply_events(&mut self, kv_events: Vec<RouterEvent>, at_ms: f64) {
+        for event in kv_events {
+            self.push_event(
+                at_ms + OFFLINE_KV_EVENT_DELAY_MS,
+                SimulationEventKind::KvApply { event },
+            );
         }
     }
 
@@ -107,31 +181,111 @@ impl OfflineRuntime {
         self.workers[worker_idx].mark_completed(completed_requests);
     }
 
-    // Apply every worker completion at the current timestamp before releasing
-    // new arrivals or topping off replay-concurrency.
-    fn apply_worker_completions(&mut self) -> bool {
+    fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
+        if signal.completed {
+            if let Some(router) = self.router.as_mut() {
+                router.free(signal.uuid)?;
+                self.stats.freed_count += 1;
+                self.record_router_pending();
+            }
+            self.prefill_completed.remove(&signal.uuid);
+            return Ok(());
+        }
+
+        if !self.prefill_completed.insert(signal.uuid) {
+            return Ok(());
+        }
+
+        if let Some(router) = self.router.as_mut() {
+            router.mark_prefill_completed(signal.uuid)?;
+            self.stats.prefill_marked_count += 1;
+            self.record_router_pending();
+        }
+
+        Ok(())
+    }
+
+    fn process_completed_pass(
+        &mut self,
+        worker_idx: usize,
+        completed_requests: usize,
+        output_signals: Vec<OutputSignal>,
+        kv_events: Vec<RouterEvent>,
+        end_ms: f64,
+    ) -> anyhow::Result<()> {
+        self.apply_completed_requests(worker_idx, completed_requests);
+        for signal in output_signals {
+            self.process_output_signal(signal)?;
+        }
+        self.push_kv_apply_events(kv_events, end_ms);
+        Ok(())
+    }
+
+    fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
-        while self
-            .completions
-            .peek()
-            .is_some_and(|completion| completion.at_ms == self.now_ms)
-        {
-            let completion = self
-                .completions
-                .pop()
-                .expect("completion must exist after peek");
-            let worker = &mut self.workers[completion.worker_idx];
-            worker.mark_idle();
-            self.apply_completed_requests(completion.worker_idx, completion.completed_requests);
+        loop {
+            let Some(event) = self.events.peek() else {
+                break;
+            };
+            if event.at_ms != self.now_ms {
+                break;
+            }
+            if !matches!(event.kind, SimulationEventKind::WorkerCompletion { .. }) {
+                break;
+            }
+
+            let event = self.events.pop().expect("event must exist after peek");
+            let SimulationEventKind::WorkerCompletion {
+                worker_idx,
+                completed_requests,
+                output_signals,
+                kv_events,
+            } = event.kind
+            else {
+                unreachable!("event kind already checked");
+            };
+
+            self.workers[worker_idx].mark_idle();
+            self.process_completed_pass(
+                worker_idx,
+                completed_requests,
+                output_signals,
+                kv_events,
+                event.at_ms,
+            )?;
             changed = true;
         }
 
-        changed
+        Ok(changed)
     }
 
-    // Trace mode keeps arrivals in timestamp order and drains every request that
-    // is visible at the current simulated time.
-    fn release_trace_arrivals(&mut self) -> bool {
+    fn apply_kv_events(&mut self) -> anyhow::Result<bool> {
+        let mut changed = false;
+        loop {
+            let Some(event) = self.events.peek() else {
+                break;
+            };
+            if event.at_ms != self.now_ms {
+                break;
+            }
+            if !matches!(event.kind, SimulationEventKind::KvApply { .. }) {
+                break;
+            }
+
+            let event = self.events.pop().expect("event must exist after peek");
+            let SimulationEventKind::KvApply { event } = event.kind else {
+                unreachable!("event kind already checked");
+            };
+            if let Some(router) = self.router.as_mut() {
+                router.apply_event(event)?;
+            }
+            changed = true;
+        }
+
+        Ok(changed)
+    }
+
+    fn release_trace_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
         while self
             .pending
@@ -146,30 +300,26 @@ impl OfflineRuntime {
             let arrival_ms = request
                 .arrival_timestamp_ms
                 .expect("trace replay requests must have an arrival timestamp");
-            self.assign_request(request, arrival_ms);
+            self.assign_request(request, arrival_ms)?;
             released_any = true;
         }
 
-        released_any
+        Ok(released_any)
     }
 
-    // Replay-concurrency uses the runtime-approved worker in-flight counters as
-    // the sole source of truth for whether more requests may be released now.
-    fn top_off_concurrency(&mut self, max_in_flight: usize) -> bool {
+    fn top_off_concurrency(&mut self, max_in_flight: usize) -> anyhow::Result<bool> {
         let mut released_any = false;
         while self.cluster_in_flight() < max_in_flight {
             let Some(request) = self.pending.pop_front() else {
                 break;
             };
-            self.assign_request(request, self.now_ms);
+            self.assign_request(request, self.now_ms)?;
             released_any = true;
         }
 
-        released_any
+        Ok(released_any)
     }
 
-    // Run every idle worker until it either blocks on a future completion event
-    // or becomes empty. Zero-duration completions are applied inline.
     fn drive_ready_workers(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
         for worker_idx in 0..self.workers.len() {
@@ -185,16 +335,26 @@ impl OfflineRuntime {
                 changed = true;
 
                 if executed.end_ms == self.now_ms {
-                    self.apply_completed_requests(worker_idx, executed.completed_requests);
+                    self.process_completed_pass(
+                        worker_idx,
+                        executed.completed_requests,
+                        executed.output_signals,
+                        executed.kv_events,
+                        executed.end_ms,
+                    )?;
                     continue;
                 }
 
                 self.workers[worker_idx].mark_busy();
-                self.completions.push(WorkerCompletion {
-                    at_ms: executed.end_ms,
-                    worker_idx,
-                    completed_requests: executed.completed_requests,
-                });
+                self.push_event(
+                    executed.end_ms,
+                    SimulationEventKind::WorkerCompletion {
+                        worker_idx,
+                        completed_requests: executed.completed_requests,
+                        output_signals: executed.output_signals,
+                        kv_events: executed.kv_events,
+                    },
+                );
                 break;
             }
         }
@@ -204,12 +364,13 @@ impl OfflineRuntime {
 
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
-            let mut changed = self.apply_worker_completions();
+            let mut changed = self.apply_worker_completions()?;
+            changed |= self.apply_kv_events()?;
 
             changed |= match self.mode {
-                ReplayMode::Trace => self.release_trace_arrivals(),
+                ReplayMode::Trace => self.release_trace_arrivals()?,
                 ReplayMode::Concurrency { max_in_flight } => {
-                    self.top_off_concurrency(max_in_flight)
+                    self.top_off_concurrency(max_in_flight)?
                 }
             };
 
@@ -223,9 +384,7 @@ impl OfflineRuntime {
         Ok(())
     }
 
-    // Global event loop: apply completions at a timestamp, release any arrivals
-    // now visible at that same timestamp, then drive newly idle workers.
-    fn run(mut self) -> anyhow::Result<TraceCollector> {
+    fn run(mut self) -> anyhow::Result<(TraceCollector, OfflineRuntimeStats)> {
         self.drain_current_timestamp()?;
 
         while !self.is_done() {
@@ -240,7 +399,11 @@ impl OfflineRuntime {
             self.drain_current_timestamp()?;
         }
 
-        Ok(self.collector)
+        if let Some(router) = self.router.as_mut() {
+            router.shutdown();
+        }
+
+        Ok((self.collector, self.stats))
     }
 }
 
@@ -249,10 +412,12 @@ pub(crate) fn simulate_trace_multi(
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let collector = OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace).run()?;
+    let (collector, _) =
+        OfflineRuntime::new(&args, pending, num_workers, ReplayMode::Trace, router_mode)?.run()?;
     Ok(collector.finish())
 }
 
@@ -261,21 +426,58 @@ pub(crate) fn simulate_concurrency_multi(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
     args.validate()?;
     let pending = VecDeque::from(requests);
-    let collector = OfflineRuntime::new(
+    let (collector, _) = OfflineRuntime::new(
         &args,
         pending,
         num_workers,
         ReplayMode::Concurrency { max_in_flight },
-    )
+        router_mode,
+    )?
     .run()?;
     Ok(collector.finish())
 }
 
 #[cfg(test)]
+fn run_trace_multi_collect_with_stats(
+    args: &MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> (TraceCollector, OfflineRuntimeStats) {
+    let pending = normalize_trace_requests(requests, 1.0).unwrap();
+    OfflineRuntime::new(args, pending, num_workers, ReplayMode::Trace, router_mode)
+        .unwrap()
+        .run()
+        .unwrap()
+}
+
+#[cfg(test)]
+fn run_concurrency_multi_collect_with_stats(
+    args: &MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> (TraceCollector, OfflineRuntimeStats) {
+    OfflineRuntime::new(
+        args,
+        VecDeque::from(requests),
+        num_workers,
+        ReplayMode::Concurrency { max_in_flight },
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
+    use super::super::single::{run_concurrency_single_collect, run_trace_single_collect};
     use super::*;
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
@@ -291,37 +493,23 @@ mod tests {
             .unwrap()
     }
 
-    fn run_trace_multi_collect(
-        args: &MockEngineArgs,
-        requests: Vec<DirectRequest>,
-        num_workers: usize,
-    ) -> TraceCollector {
-        let pending = normalize_trace_requests(requests, 1.0).unwrap();
-        OfflineRuntime::new(args, pending, num_workers, ReplayMode::Trace)
-            .run()
+    fn fast_router_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(256)
+            .max_num_batched_tokens(Some(8192))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
             .unwrap()
-    }
-
-    fn run_concurrency_multi_collect(
-        args: &MockEngineArgs,
-        requests: Vec<DirectRequest>,
-        max_in_flight: usize,
-        num_workers: usize,
-    ) -> TraceCollector {
-        OfflineRuntime::new(
-            args,
-            VecDeque::from(requests),
-            num_workers,
-            ReplayMode::Concurrency { max_in_flight },
-        )
-        .run()
-        .unwrap()
     }
 
     #[test]
     fn test_multi_worker_trace_round_robin_assigns_same_timestamp_requests_deterministically() {
         let args = replay_args(false, true);
-        let collector = run_trace_multi_collect(
+        let (collector, _) = run_trace_multi_collect_with_stats(
             &args,
             vec![
                 DirectRequest {
@@ -354,6 +542,7 @@ mod tests {
                 },
             ],
             2,
+            ReplayRouterMode::RoundRobin,
         );
 
         let request_1 = collector.snapshot(Uuid::from_u128(11)).unwrap();
@@ -377,9 +566,58 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_worker_trace_round_robin_records_dispatch_history() {
+        let args = replay_args(false, true);
+        let (_, stats) = run_trace_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(1)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![2; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(2)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![3; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(3)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![4; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(4)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![5; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(5)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+            ],
+            4,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 1, 2, 3, 0]);
+    }
+
+    #[test]
     fn test_multi_worker_concurrency_uses_worker_in_flight_for_cap_checks() {
         let args = replay_args(false, false);
-        let collector = run_concurrency_multi_collect(
+        let (collector, _) = run_concurrency_multi_collect_with_stats(
             &args,
             vec![
                 DirectRequest {
@@ -406,6 +644,7 @@ mod tests {
             ],
             2,
             2,
+            ReplayRouterMode::RoundRobin,
         );
 
         let request_1 = collector.snapshot(Uuid::from_u128(11)).unwrap();
@@ -422,5 +661,297 @@ mod tests {
         assert_eq!(report.request_counts.completed_requests, 3);
         assert_eq!(report.request_counts.total_input_tokens, 24);
         assert_eq!(report.request_counts.total_output_tokens, 8);
+    }
+
+    #[test]
+    fn test_multi_worker_trace_kv_router_prefers_cached_workers_after_delay() {
+        let args = fast_router_args();
+        let (_, stats) = run_trace_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![11; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(11)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![22; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(22)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![11; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(33)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(2.0),
+                },
+                DirectRequest {
+                    tokens: vec![22; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(44)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(2.0),
+                },
+            ],
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+
+        let worker_a1 = stats.assigned_worker_by_uuid[&Uuid::from_u128(11)];
+        let worker_b1 = stats.assigned_worker_by_uuid[&Uuid::from_u128(22)];
+        let worker_a2 = stats.assigned_worker_by_uuid[&Uuid::from_u128(33)];
+        let worker_b2 = stats.assigned_worker_by_uuid[&Uuid::from_u128(44)];
+
+        assert_ne!(worker_a1, worker_b1);
+        assert_eq!(worker_a1, worker_a2);
+        assert_eq!(worker_b1, worker_b2);
+    }
+
+    #[test]
+    fn test_multi_worker_trace_kv_router_marks_prefill_and_free_correctly() {
+        let args = fast_router_args();
+        let (_, stats) = run_trace_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![9; 64],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(9)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+                DirectRequest {
+                    tokens: vec![8; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(8)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                },
+            ],
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+
+        assert_eq!(stats.prefill_marked_count, 1);
+        assert_eq!(stats.freed_count, 2);
+        assert_eq!(stats.max_router_pending, 0);
+    }
+
+    #[test]
+    fn test_multi_worker_concurrency_kv_router_respects_max_in_flight() {
+        let args = fast_router_args();
+        let (_, stats) = run_concurrency_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(1)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                },
+                DirectRequest {
+                    tokens: vec![2; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(2)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                },
+                DirectRequest {
+                    tokens: vec![1; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(3)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                },
+            ],
+            2,
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+
+        assert_eq!(stats.max_in_flight_seen, 2);
+        assert_eq!(stats.max_router_pending, 0);
+    }
+
+    #[test]
+    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime() {
+        let args = replay_args(true, true);
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(101.0),
+            },
+            DirectRequest {
+                tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+            },
+        ];
+
+        let single = run_trace_single_collect(args.clone(), requests.clone(), 1.0);
+        let (multi, stats) =
+            run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        for uuid in [11_u128, 22, 33] {
+            assert_eq!(
+                multi.snapshot(Uuid::from_u128(uuid)),
+                single.snapshot(Uuid::from_u128(uuid))
+            );
+        }
+        assert_eq!(multi.finish().request_counts.completed_requests, 3);
+        assert_eq!(single.finish().request_counts.completed_requests, 3);
+    }
+
+    #[test]
+    fn test_multi_worker_trace_single_worker_kv_router_matches_single_runtime() {
+        let args = replay_args(true, true);
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(101.0),
+            },
+            DirectRequest {
+                tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+            },
+        ];
+
+        let single = run_trace_single_collect(args.clone(), requests.clone(), 1.0);
+        let (multi, stats) =
+            run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::KvRouter);
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_eq!(stats.max_router_pending, 0);
+        for uuid in [11_u128, 22, 33] {
+            assert_eq!(
+                multi.snapshot(Uuid::from_u128(uuid)),
+                single.snapshot(Uuid::from_u128(uuid))
+            );
+        }
+        assert_eq!(multi.finish().request_counts.completed_requests, 3);
+        assert_eq!(single.finish().request_counts.completed_requests, 3);
+    }
+
+    #[test]
+    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime() {
+        let args = replay_args(true, true);
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(900.0),
+            },
+            DirectRequest {
+                tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
+                max_output_tokens: 4,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(1000.0),
+            },
+            DirectRequest {
+                tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+        ];
+
+        let single = run_concurrency_single_collect(args.clone(), requests.clone(), 2);
+        let (multi, stats) = run_concurrency_multi_collect_with_stats(
+            &args,
+            requests,
+            2,
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        for uuid in [11_u128, 22, 33] {
+            assert_eq!(
+                multi.snapshot(Uuid::from_u128(uuid)),
+                single.snapshot(Uuid::from_u128(uuid))
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_worker_concurrency_single_worker_kv_router_matches_single_runtime() {
+        let args = replay_args(true, true);
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(900.0),
+            },
+            DirectRequest {
+                tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
+                max_output_tokens: 4,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(1000.0),
+            },
+            DirectRequest {
+                tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+        ];
+
+        let single = run_concurrency_single_collect(args.clone(), requests.clone(), 2);
+        let (multi, stats) = run_concurrency_multi_collect_with_stats(
+            &args,
+            requests,
+            2,
+            1,
+            ReplayRouterMode::KvRouter,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_eq!(stats.max_router_pending, 0);
+        for uuid in [11_u128, 22, 33] {
+            assert_eq!(
+                multi.snapshot(Uuid::from_u128(uuid)),
+                single.snapshot(Uuid::from_u128(uuid))
+            );
+        }
     }
 }

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::replay::TraceSimulationReport;
 pub(crate) use crate::replay::normalize_trace_requests;
+use crate::replay::{ReplayRouterMode, TraceSimulationReport};
 
 pub(crate) mod core;
 pub(crate) mod events;
@@ -16,11 +16,18 @@ pub(crate) fn simulate_trace(
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
     if num_workers == 1 {
         single::simulate_trace_single(args, requests, arrival_speedup_ratio)
     } else {
-        multi::simulate_trace_multi(args, requests, num_workers, arrival_speedup_ratio)
+        multi::simulate_trace_multi(
+            args,
+            requests,
+            num_workers,
+            arrival_speedup_ratio,
+            router_mode,
+        )
     }
 }
 
@@ -29,10 +36,11 @@ pub(crate) fn simulate_concurrency(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
     if num_workers == 1 {
         single::simulate_concurrency_single(args, requests, max_in_flight)
     } else {
-        multi::simulate_concurrency_multi(args, requests, max_in_flight, num_workers)
+        multi::simulate_concurrency_multi(args, requests, max_in_flight, num_workers, router_mode)
     }
 }
