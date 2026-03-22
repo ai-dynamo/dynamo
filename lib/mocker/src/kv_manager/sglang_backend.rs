@@ -490,7 +490,7 @@ mod tests {
     fn test_chunked_prefill_parent_hash() {
         let sink = Arc::new(MockSink::new());
         let mut mgr = SglangKvManager::new(32, 1, Some(sink.clone()), 0);
-        let tokens = vec![11, 22, 33, 44, 55, 66];
+        let tokens = [11, 22, 33, 44, 55, 66];
         let chunk1_len = 3;
         let chunk2_len = 6;
 
