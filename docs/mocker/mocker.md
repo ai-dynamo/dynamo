@@ -128,7 +128,9 @@ python -m dynamo.mocker \
 
 ## Offline Trace Replay
 
-The mocker also supports an offline replay mode for Mooncake-style traces:
+The mocker also supports replaying Mooncake-style traces without launching a live runtime.
+
+For the original mocker CLI flow:
 
 ```bash
 python -m dynamo.mocker \
@@ -136,7 +138,20 @@ python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B
 ```
 
-This mode writes a replay report JSON and prints a `Replay Summary` table without launching a runtime or router.
+For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`, and
+`arrival_speedup_ratio` directly:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --num-workers 4 \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --arrival-speedup-ratio 5 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+The standalone replay CLI prints the replay report JSON directly to stdout. The `dynamo.mocker`
+trace-file flow still writes a report file and prints a `Replay Summary` table.
 
 For full usage, constraints, and benchmarking guidance, see [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md).
 

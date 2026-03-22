@@ -1,11 +1,19 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Mocker Offline Trace Replay
-subtitle: Replay Mooncake-style traces offline without launching a runtime or router
+title: Mocker Trace Replay
+subtitle: Replay Mooncake-style traces through the mocker in offline or online mode
 ---
 
-This guide covers the mocker's offline trace replay mode, which replays a Mooncake-style JSONL trace directly through the mock scheduler and writes a metrics report. Unlike normal `dynamo.mocker` usage, this mode does not launch workers, register endpoints, or require NATS, etcd, or a frontend.
+This guide covers the mocker's trace replay support for Mooncake-style JSONL traces. The replay
+surface is available in two forms:
+
+- `python -m dynamo.mocker --trace-file ...`, which writes a report file and prints a replay summary
+- `python -m dynamo.replay ...`, which returns the replay report JSON on stdout and exposes
+  `offline|online`, `round_robin|kv_router`, and `arrival_speedup_ratio` directly
+
+Unlike normal `dynamo.mocker` usage, offline replay does not launch workers, register endpoints, or
+require NATS, etcd, or a frontend.
 
 Use this when you want to:
 
@@ -15,7 +23,17 @@ Use this when you want to:
 
 ## Quick Start
 
-Run offline replay by passing `--trace-file`:
+Run offline replay through the dedicated replay CLI:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --num-workers 4 \
+    --replay-mode offline \
+    --router-mode round_robin \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+You can also run replay through the mocker CLI by passing `--trace-file`:
 
 ```bash
 python -m dynamo.mocker \
@@ -29,7 +47,8 @@ This writes a JSON report next to the trace file by default:
 /path/to/mooncake_trace.replay.json
 ```
 
-The CLI also prints a `Replay Summary` table to stdout with request counts, throughput, and latency statistics.
+`python -m dynamo.replay` prints the replay report JSON directly to stdout. The mocker CLI prints a
+`Replay Summary` table to stdout and writes the report JSON to disk.
 
 ## Input Format
 
@@ -48,34 +67,105 @@ Example:
 
 The mocker synthesizes token blocks from `hash_ids` using the configured `--block-size`, so the replay block size should match the block size used when the trace was generated.
 
+## Replay Surfaces
+
+### `python -m dynamo.replay`
+
+The dedicated replay CLI exposes:
+
+- `--replay-mode offline|online`
+- `--router-mode round_robin|kv_router`
+- `--num-workers`
+- `--replay-concurrency`
+- `--arrival-speedup-ratio`
+- `--extra-engine-args`
+
+Example:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode online \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --arrival-speedup-ratio 10 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+### `python -m dynamo.mocker --trace-file`
+
+The mocker CLI still supports offline replay and remains useful when you want the historical
+`Replay Summary` output and report-file workflow.
+
 ## Modes
 
 ### Fixed-Schedule Replay
 
-Default replay mode preserves the timestamps from the trace and simulates arrivals in virtual time:
+Default trace replay preserves the timestamps from the trace and simulates arrivals according to
+those timestamps:
 
 ```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B \
-    --block-size 512
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --num-workers 4 \
+    --extra-engine-args /path/to/mocker_args.json
 ```
 
 This is the right mode when you want deterministic replay of the original arrival pattern.
 
 ### Closed-Loop Concurrency Replay
 
-Use `--replay-concurrency` to ignore trace arrival timing and keep a fixed number of requests in flight:
+Use `--replay-concurrency` to ignore trace arrival timing and keep a fixed number of requests in
+flight:
 
 ```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B \
-    --block-size 512 \
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --num-workers 4 \
     --replay-concurrency 16
 ```
 
 This mode is useful when you want to compare scheduler behavior under a fixed offered concurrency rather than the original trace schedule.
+
+### Online Replay
+
+Online replay launches the mock workers and replays the trace against the live runtime path. This
+is useful when you want the replay to include live request dispatch, live output handling, and the
+same async KV-event propagation model used by the current router integration.
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode online \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --arrival-speedup-ratio 10 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+### Arrival Speedup
+
+Use `--arrival-speedup-ratio` to compress or stretch the trace arrival process without changing the
+mocker compute model. Larger values make arrivals happen sooner relative to the original trace.
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --num-workers 4 \
+    --arrival-speedup-ratio 5 \
+    --extra-engine-args /path/to/mocker_args.json
+```
+
+### Router Modes
+
+Replay currently supports:
+
+- `round_robin`
+- `kv_router`
+
+`kv_router` uses the shared local scheduler and an in-process KV indexer. In offline replay:
+
+- `kv_router` is supported only when `num_workers > 1`
+- router queueing is disabled
+- KV visibility is delayed slightly relative to request lifecycle events
 
 ## Output
 
@@ -100,14 +190,24 @@ The report contains:
 - TTFT, TTST, TPOT, ITL, and end-to-end latency summaries
 - output-token-throughput-per-user summaries
 
+The dedicated replay CLI returns the same report schema as the Python API `dynamo.replay.run_trace_replay(...)`.
+
 ## Replay Constraints
 
-Offline replay currently supports only this configuration:
+Shared replay constraints:
 
-- `--num-workers 1`
 - aggregated mode
 - `--engine-type vllm`
 - `--data-parallel-size 1`
+
+Additional offline constraints:
+
+- offline `kv_router` requires `num_workers > 1`
+- public single-worker offline replay still behaves as the single-worker runtime path
+
+Additional online constraints:
+
+- the current live replay path is intended for aggregated workers and the same vLLM-only setup
 
 If you violate those constraints, replay fails immediately with a validation error.
 
@@ -115,8 +215,11 @@ If you violate those constraints, replay fails immediately with a validation err
 
 - `--replay-concurrency` requires `--trace-file`
 - `--speedup-ratio` still affects simulated timing
+- `--arrival-speedup-ratio` affects trace timestamps, not worker compute speed
 - `--extra-engine-args` can be used to provide a full mocker config JSON instead of individual CLI flags
-- offline replay does not need planner runtime setup, router registration, or event transport
+- offline replay does not need planner runtime setup, router registration, or external event transport
+- the replay block size should match the trace block size, because token synthesis expands `hash_ids`
+  using the configured block size
 
 ## When To Use This vs AIPerf
 
