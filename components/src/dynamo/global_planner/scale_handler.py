@@ -58,7 +58,7 @@ class ScaleRequestHandler:
         self.k8s_namespace = k8s_namespace
         self.no_operation = no_operation
         self.max_total_gpus = max_total_gpus
-        self.connectors = {}  # Cache of KubernetesConnector per DGD
+        self.connectors: dict[str, KubernetesConnector] = {}  # Cache per DGD
         # Serializes budget-check + scale-execution so concurrent requests from
         # different pools cannot both pass against the same pre-scale state.
         self._scale_lock = asyncio.Lock()

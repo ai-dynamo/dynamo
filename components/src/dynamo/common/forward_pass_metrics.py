@@ -83,7 +83,7 @@ class WelfordAccumulator:
 
 class ScheduledRequestMetrics(
     msgspec.Struct,
-    frozen=True,
+    frozen=True,  # type: ignore[call-arg]
     gc=False,
 ):
     """Metrics for requests scheduled in this iteration"""
@@ -121,7 +121,7 @@ class ScheduledRequestMetrics(
 
 class QueuedRequestMetrics(
     msgspec.Struct,
-    frozen=True,
+    frozen=True,  # type: ignore[call-arg]
     gc=False,
 ):
     """Metrics for requests waiting in the queue (not scheduled this iteration).
@@ -152,7 +152,7 @@ class QueuedRequestMetrics(
 
 class ForwardPassMetrics(
     msgspec.Struct,
-    frozen=True,
+    frozen=True,  # type: ignore[call-arg]
     gc=False,
 ):
     """Per-iteration metrics emitted by InstrumentedScheduler.
