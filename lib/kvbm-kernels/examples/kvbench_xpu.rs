@@ -101,6 +101,16 @@
 //! # Just the SYCL kernel:
 //! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
 //!   --direction d2d --backend sycl
+//!
+//! # Direct-args vs indirect-args (L0 kernel only)
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! --direction d2d --backend vectorized,vec_indirect \
+//! --pattern lw_to_fc --num-blocks 32,64,128
+//!
+//! # All three backends
+//! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
+//! --direction d2d --backend vectorized,vec_indirect,sycl \
+//! --pattern lw_to_fc --num-blocks 32,64,128
 //! ```
 
 use std::ffi::c_void;
@@ -248,6 +258,7 @@ impl Pattern {
 #[derive(Clone, Copy, Debug)]
 enum Backend {
     Vectorized,
+    VectorizedIndirect,
     Memcpy,
     #[cfg(feature = "sycl-kernel")]
     VectorizedSycl,
@@ -257,6 +268,7 @@ impl Backend {
     fn label(&self) -> &'static str {
         match self {
             Backend::Vectorized => "vectorized",
+            Backend::VectorizedIndirect => "vec_indirect",
             Backend::Memcpy => "memcpy",
             #[cfg(feature = "sycl-kernel")]
             Backend::VectorizedSycl => "vectorized_sycl",
@@ -266,6 +278,7 @@ impl Backend {
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "vectorized" | "vec" => Some(Backend::Vectorized),
+            "vectorized_indirect" | "vec_indirect" | "indirect" => Some(Backend::VectorizedIndirect),
             "memcpy" | "append_memcpy" => Some(Backend::Memcpy),
             #[cfg(feature = "sycl-kernel")]
             "vectorized_sycl" | "vec_sycl" | "sycl" => Some(Backend::VectorizedSycl),
@@ -275,9 +288,9 @@ impl Backend {
 
     fn all_labels() -> &'static str {
         if cfg!(feature = "sycl-kernel") {
-            "vectorized (or vec), memcpy (or append_memcpy), vectorized_sycl (or sycl)"
+            "vectorized (or vec), vec_indirect (or indirect), memcpy (or append_memcpy), vectorized_sycl (or sycl)"
         } else {
-            "vectorized (or vec), memcpy (or append_memcpy)"
+            "vectorized (or vec), vec_indirect (or indirect), memcpy (or append_memcpy)"
         }
     }
 }
@@ -509,6 +522,75 @@ unsafe fn execute_vectorized(
     cmd_compute.host_synchronize(u64::MAX).expect("sync compute");
 }
 
+/// Indirect-args variant: uploads a 32-byte args buffer via BCS instead of
+/// calling set_arg per dispatch. Mirrors the production ze.rs path.
+unsafe fn execute_vectorized_indirect(
+    cmd_copy: &ZeImmediateCmdList,
+    cmd_compute: &ZeImmediateCmdList,
+    kernel_indirect: &ZeKernel,
+    src_addrs: &[u64],
+    dst_addrs: &[u64],
+    src_addrs_dev: &ZeSlice<u8>,
+    dst_addrs_dev: &ZeSlice<u8>,
+    args_dev: &ZeSlice<u8>,
+    ptr_array_bytes: usize,
+    copy_size: usize,
+    num_copies: usize,
+) {
+    // Build args buffer on stack.
+    let args_host: [u64; 4] = [
+        src_addrs_dev.as_ptr() as u64,
+        dst_addrs_dev.as_ptr() as u64,
+        copy_size as u64,
+        num_copies as u64,
+    ];
+
+    unsafe {
+        // Upload pointer arrays + args (single BCS batch).
+        cmd_copy
+            .append_memcpy(
+                src_addrs_dev.as_ptr() as *mut c_void,
+                src_addrs.as_ptr() as *const c_void,
+                ptr_array_bytes,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .expect("upload src_addrs");
+        cmd_copy
+            .append_memcpy(
+                dst_addrs_dev.as_ptr() as *mut c_void,
+                dst_addrs.as_ptr() as *const c_void,
+                ptr_array_bytes,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .expect("upload dst_addrs");
+        cmd_copy
+            .append_memcpy(
+                args_dev.as_ptr() as *mut c_void,
+                args_host.as_ptr() as *const c_void,
+                vc::INDIRECT_ARGS_BYTES,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .expect("upload indirect args");
+    }
+    cmd_copy.host_synchronize(u64::MAX).expect("sync copy");
+
+    let num_groups = std::cmp::min(num_copies as u32, vc::MAX_GROUPS);
+    let group_count = sys::ze_group_count_t {
+        groupCountX: num_groups,
+        groupCountY: 1,
+        groupCountZ: 1,
+    };
+    unsafe {
+        cmd_compute
+            .append_launch_kernel(kernel_indirect, &group_count, None, &mut [])
+            .expect("launch indirect kernel");
+    }
+    cmd_compute.host_synchronize(u64::MAX).expect("sync compute");
+}
+
 unsafe fn execute_memcpy(
     cmd_copy: &ZeImmediateCmdList,
     src_addrs: &[u64],
@@ -600,6 +682,7 @@ fn run_benchmark(
     cmd_copy: &ZeImmediateCmdList,
     cmd_compute: &ZeImmediateCmdList,
     kernel: &ZeKernel,
+    kernel_indirect: &ZeKernel,
     direction: Direction,
     pattern: Pattern,
     backend: Backend,
@@ -642,7 +725,7 @@ fn run_benchmark(
     let queue = dev.new_queue().expect("queue");
     let ptr_array_bytes = num_copies * std::mem::size_of::<u64>();
     let needs_ptr_arrays = match backend {
-        Backend::Vectorized => true,
+        Backend::Vectorized | Backend::VectorizedIndirect => true,
         #[cfg(feature = "sycl-kernel")]
         Backend::VectorizedSycl => true,
         _ => false,
@@ -672,6 +755,16 @@ fn run_benchmark(
         }
     }
 
+    // Indirect-args: allocate 32-byte args device buffer, set arg 0 once.
+    let args_dev: Option<ZeSlice<u8>> = if matches!(backend, Backend::VectorizedIndirect) {
+        let buf = unsafe { queue.alloc::<u8>(vc::INDIRECT_ARGS_BYTES).expect("alloc args_dev") };
+        let ptr = buf.as_ptr() as u64;
+        unsafe { kernel_indirect.set_arg(0, &ptr).expect("indirect arg0"); }
+        Some(buf)
+    } else {
+        None
+    };
+
     // Warmup.
     for _ in 0..warmup_iters {
         unsafe {
@@ -685,6 +778,19 @@ fn run_benchmark(
                     src_addrs_dev.as_ref().unwrap(),
                     dst_addrs_dev.as_ref().unwrap(),
                     ptr_array_bytes,
+                    num_copies,
+                ),
+                Backend::VectorizedIndirect => execute_vectorized_indirect(
+                    cmd_copy,
+                    cmd_compute,
+                    kernel_indirect,
+                    &src_addrs,
+                    &dst_addrs,
+                    src_addrs_dev.as_ref().unwrap(),
+                    dst_addrs_dev.as_ref().unwrap(),
+                    args_dev.as_ref().unwrap(),
+                    ptr_array_bytes,
+                    copy_size,
                     num_copies,
                 ),
                 Backend::Memcpy => {
@@ -721,6 +827,19 @@ fn run_benchmark(
                     src_addrs_dev.as_ref().unwrap(),
                     dst_addrs_dev.as_ref().unwrap(),
                     ptr_array_bytes,
+                    num_copies,
+                ),
+                Backend::VectorizedIndirect => execute_vectorized_indirect(
+                    cmd_copy,
+                    cmd_compute,
+                    kernel_indirect,
+                    &src_addrs,
+                    &dst_addrs,
+                    src_addrs_dev.as_ref().unwrap(),
+                    dst_addrs_dev.as_ref().unwrap(),
+                    args_dev.as_ref().unwrap(),
+                    ptr_array_bytes,
+                    copy_size,
                     num_copies,
                 ),
                 Backend::Memcpy => {
@@ -860,6 +979,11 @@ fn main() {
     kernel
         .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
         .expect("Failed to set group size");
+    let kernel_indirect = ZeKernel::new(&module, vc::KERNEL_NAME_INDIRECT)
+        .expect("Failed to create indirect kernel");
+    kernel_indirect
+        .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
+        .expect("Failed to set indirect group size");
 
     // Print config.
     eprintln!("KV Cache Transfer Benchmark (XPU / Level Zero)");
@@ -948,6 +1072,7 @@ fn main() {
                                 &cmd_copy,
                                 &cmd_compute,
                                 &kernel,
+                                &kernel_indirect,
                                 direction,
                                 pattern,
                                 backend,
