@@ -69,36 +69,193 @@ impl FpmEventRelay {
 
 /// Extract `(worker_id, dp_rank)` from a msgspec-encoded `ForwardPassMetrics`.
 ///
-/// msgspec.Struct with positional encoding produces a msgpack **array**:
-///   `[version: int, worker_id: str, dp_rank: int, counter_id: int, ...]`
+/// msgspec.Struct (without `array_like=True`) encodes as a msgpack **map**:
+///   `{"version": 1, "worker_id": "...", "dp_rank": 0, ...}`
 ///
-/// We skip the version field and decode worker_id (index 1) and dp_rank (index 2).
+/// We iterate through the map entries, read "worker_id" and "dp_rank",
+/// and skip all other values.  Breaks early once both keys are found.
 fn extract_fpm_key(data: &[u8]) -> Option<(String, i64)> {
-    use rmp::decode::{read_array_len, read_int, read_str_len};
+    use rmp::decode::{read_int, read_map_len, read_str_len};
 
     let mut cursor = std::io::Cursor::new(data);
 
-    let arr_len = read_array_len(&mut cursor).ok()?;
-    if arr_len < 3 {
-        return None;
+    let map_len = read_map_len(&mut cursor).ok()?;
+
+    let mut worker_id: Option<String> = None;
+    let mut dp_rank: Option<i64> = None;
+
+    for _ in 0..map_len {
+        // Read key (always a string in msgspec map encoding)
+        let key_len = read_str_len(&mut cursor).ok()? as usize;
+        let pos = cursor.position() as usize;
+        if pos + key_len > data.len() {
+            return None;
+        }
+        let key = std::str::from_utf8(&data[pos..pos + key_len]).ok()?;
+        cursor.set_position((pos + key_len) as u64);
+
+        match key {
+            "worker_id" => {
+                let str_len = read_str_len(&mut cursor).ok()? as usize;
+                let pos = cursor.position() as usize;
+                if pos + str_len > data.len() {
+                    return None;
+                }
+                worker_id =
+                    Some(std::str::from_utf8(&data[pos..pos + str_len]).ok()?.to_owned());
+                cursor.set_position((pos + str_len) as u64);
+            }
+            "dp_rank" => {
+                dp_rank = Some(read_int(&mut cursor).ok()?);
+            }
+            _ => {
+                skip_msgpack_value(&mut cursor)?;
+            }
+        }
+
+        if worker_id.is_some() && dp_rank.is_some() {
+            break;
+        }
     }
 
-    // Index 0: version (int) -- skip
-    let _version: i64 = read_int(&mut cursor).ok()?;
+    Some((worker_id?, dp_rank?))
+}
 
-    // Index 1: worker_id (str)
-    let str_len = read_str_len(&mut cursor).ok()? as usize;
-    let pos = cursor.position() as usize;
-    if pos + str_len > data.len() {
+/// Advance the cursor past one msgpack value of any type.
+///
+/// Handles all msgpack formats needed for `ForwardPassMetrics` fields:
+/// positive/negative fixint, uint/int 8-64, float 32/64, fixstr/str 8-32,
+/// bool, nil, fixarray/array 16-32, fixmap/map 16-32, bin 8-32.
+fn skip_msgpack_value(cursor: &mut std::io::Cursor<&[u8]>) -> Option<()> {
+    use rmp::Marker;
+
+    let marker = rmp::decode::read_marker(cursor).ok()?;
+    match marker {
+        // Integers
+        Marker::FixPos(_) | Marker::FixNeg(_) => {}
+        Marker::U8 | Marker::I8 => skip_bytes(cursor, 1)?,
+        Marker::U16 | Marker::I16 => skip_bytes(cursor, 2)?,
+        Marker::U32 | Marker::I32 | Marker::F32 => skip_bytes(cursor, 4)?,
+        Marker::U64 | Marker::I64 | Marker::F64 => skip_bytes(cursor, 8)?,
+        // Nil / Bool
+        Marker::Null | Marker::True | Marker::False => {}
+        // Strings
+        Marker::FixStr(len) => skip_bytes(cursor, len as u64)?,
+        Marker::Str8 => {
+            let len = read_u8(cursor)? as u64;
+            skip_bytes(cursor, len)?;
+        }
+        Marker::Str16 => {
+            let len = read_u16(cursor)? as u64;
+            skip_bytes(cursor, len)?;
+        }
+        Marker::Str32 => {
+            let len = read_u32(cursor)? as u64;
+            skip_bytes(cursor, len)?;
+        }
+        // Binary
+        Marker::Bin8 => {
+            let len = read_u8(cursor)? as u64;
+            skip_bytes(cursor, len)?;
+        }
+        Marker::Bin16 => {
+            let len = read_u16(cursor)? as u64;
+            skip_bytes(cursor, len)?;
+        }
+        Marker::Bin32 => {
+            let len = read_u32(cursor)? as u64;
+            skip_bytes(cursor, len)?;
+        }
+        // Arrays (recurse to skip each element)
+        Marker::FixArray(len) => {
+            for _ in 0..len {
+                skip_msgpack_value(cursor)?;
+            }
+        }
+        Marker::Array16 => {
+            let len = read_u16(cursor)?;
+            for _ in 0..len {
+                skip_msgpack_value(cursor)?;
+            }
+        }
+        Marker::Array32 => {
+            let len = read_u32(cursor)?;
+            for _ in 0..len {
+                skip_msgpack_value(cursor)?;
+            }
+        }
+        // Maps (recurse to skip each key-value pair)
+        Marker::FixMap(len) => {
+            for _ in 0..len {
+                skip_msgpack_value(cursor)?;
+                skip_msgpack_value(cursor)?;
+            }
+        }
+        Marker::Map16 => {
+            let len = read_u16(cursor)?;
+            for _ in 0..len {
+                skip_msgpack_value(cursor)?;
+                skip_msgpack_value(cursor)?;
+            }
+        }
+        Marker::Map32 => {
+            let len = read_u32(cursor)?;
+            for _ in 0..len {
+                skip_msgpack_value(cursor)?;
+                skip_msgpack_value(cursor)?;
+            }
+        }
+        // Ext types
+        Marker::FixExt1 => skip_bytes(cursor, 2)?,
+        Marker::FixExt2 => skip_bytes(cursor, 3)?,
+        Marker::FixExt4 => skip_bytes(cursor, 5)?,
+        Marker::FixExt8 => skip_bytes(cursor, 9)?,
+        Marker::FixExt16 => skip_bytes(cursor, 17)?,
+        Marker::Ext8 => {
+            let len = read_u8(cursor)? as u64;
+            skip_bytes(cursor, 1 + len)?;
+        }
+        Marker::Ext16 => {
+            let len = read_u16(cursor)? as u64;
+            skip_bytes(cursor, 1 + len)?;
+        }
+        Marker::Ext32 => {
+            let len = read_u32(cursor)? as u64;
+            skip_bytes(cursor, 1 + len)?;
+        }
+        Marker::Reserved => return None,
+    }
+    Some(())
+}
+
+fn skip_bytes(cursor: &mut std::io::Cursor<&[u8]>, n: u64) -> Option<()> {
+    let new_pos = cursor.position().checked_add(n)?;
+    if new_pos > cursor.get_ref().len() as u64 {
         return None;
     }
-    let worker_id = std::str::from_utf8(&data[pos..pos + str_len]).ok()?.to_owned();
-    cursor.set_position((pos + str_len) as u64);
+    cursor.set_position(new_pos);
+    Some(())
+}
 
-    // Index 2: dp_rank (int)
-    let dp_rank: i64 = read_int(&mut cursor).ok()?;
+fn read_u8(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u8> {
+    use std::io::Read;
+    let mut buf = [0u8; 1];
+    cursor.read_exact(&mut buf).ok()?;
+    Some(buf[0])
+}
 
-    Some((worker_id, dp_rank))
+fn read_u16(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u16> {
+    use std::io::Read;
+    let mut buf = [0u8; 2];
+    cursor.read_exact(&mut buf).ok()?;
+    Some(u16::from_be_bytes(buf))
+}
+
+fn read_u32(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u32> {
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    cursor.read_exact(&mut buf).ok()?;
+    Some(u32::from_be_bytes(buf))
 }
 
 // ---------------------------------------------------------------------------
