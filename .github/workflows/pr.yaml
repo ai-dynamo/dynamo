@@ -7,9 +7,6 @@ on:
   push:
     branches:
       - debug/rrubin
-      - main
-      - "pull-request/[0-9]+"
-      # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
     inputs:
       run_deploy_operator:
@@ -18,100 +15,25 @@ on:
         type: boolean
         default: false
 
-concurrency:
-    # The group name is a ternary operation. If the ref_name is 'main',
-    # then the group name uses the run_id to ensure a unique group for
-    # 'main' pushes. Otherwise, the group name is the ref_name, so that
-    # workflows on the same PR/branch have the same group name for cancelling.
-    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
 
-  # ============================================================================
-  # SETUP & DETECTION JOBS
-  # ============================================================================
 
-
-  changed-files:
-    runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
-    outputs:
-      core: ${{ steps.changes.outputs.core }}
-      operator: ${{ steps.changes.outputs.operator }}
-      deploy: ${{ steps.changes.outputs.deploy }}
-      vllm: ${{ steps.changes.outputs.vllm }}
-      sglang: ${{ steps.changes.outputs.sglang }}
-      trtllm: ${{ steps.changes.outputs.trtllm }}
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+  build:
+    name: test
+    runs-on: stg-builder-v3
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
         with:
-          fetch-depth: 0
-      - name: Check for changes
-        id: changes
-        uses: ./.github/actions/changed-files
-        with:
-          gh_token: ${{ github.token }}
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-
-
-  vllm-debug-pipeline:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      test_gpu_timeout_minutes: 35
-      push_image: false
-      run_tests: false
-      copy_to_acr: false
-      run_multi_gpu_tests: false
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-    secrets: inherit
-
-
-  sglang-debug-pipeline:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: sglang
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      test_gpu_timeout_minutes: 35
-      push_image: false
-      run_tests: false
-      copy_to_acr: false
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      run_multi_gpu_tests: false
-    secrets: inherit
-
-  trtllm-debug-pipeline:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["13.1"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      test_gpu_timeout_minutes: 35
-      push_image: false
-      run_tests: false
-      copy_to_acr: false
-      run_multi_gpu_tests: false
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-    secrets: inherit
-
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
