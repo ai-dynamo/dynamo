@@ -462,7 +462,7 @@ mod tests {
         let overlaps = OverlapScores::default();
 
         let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), 128, overlaps.clone());
+            slots.potential_blocks_and_tokens(Some(&token_seq), 128, &overlaps);
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
