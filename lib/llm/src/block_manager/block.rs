@@ -1468,7 +1468,7 @@ mod tests {
         // --- Partial State --- //
         let invalid_block = create_full_token_block();
         assert!(
-            block.apply_token_block(invalid_block.clone()).is_err(),
+            block.apply_token_block(invalid_block).is_err(),
             "Apply block on Partial should fail"
         );
 
@@ -1536,7 +1536,7 @@ mod tests {
         );
         let invalid_block = create_full_token_block();
         assert!(
-            block.apply_token_block(invalid_block.clone()).is_err(),
+            block.apply_token_block(invalid_block).is_err(),
             "Apply block on Complete should fail"
         );
 
