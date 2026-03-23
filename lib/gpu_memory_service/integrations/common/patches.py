@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 import torch
-from gpu_memory_service.client.torch.allocator import get_gms_client_memory_managers
+from gpu_memory_service.client.torch.allocator import _active_tag
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +32,10 @@ def patch_empty_cache() -> None:
     _original_empty_cache = torch.cuda.empty_cache
 
     def safe_empty_cache() -> None:
-        mapping_count = sum(
-            sum(1 for m in manager.mappings.values() if m.handle != 0)
-            for manager in get_gms_client_memory_managers()
-        )
-        if mapping_count > 0:
+        if _active_tag.get() is not None:
             logger.debug(
-                "[GMS] Skipping torch.cuda.empty_cache() - %d VMM allocations active",
-                mapping_count,
+                "[GMS] Skipping torch.cuda.empty_cache() - GMS allocator is active (tag=%s)",
+                _active_tag.get(),
             )
             return
         _original_empty_cache()

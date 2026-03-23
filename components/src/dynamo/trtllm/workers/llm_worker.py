@@ -282,12 +282,22 @@ async def init_llm_worker(
         engine_load_format,
         warn_if_unsupported=(config.load_format != "auto"),
     )
-    _set_optional_arg(
-        arg_map,
-        "enable_sleep",
-        config.enable_sleep,
-        warn_if_unsupported=config.enable_sleep,
-    )
+    if config.enable_sleep:
+        if _llm_arg_supported("enable_sleep"):
+            arg_map["enable_sleep"] = True
+        elif _llm_arg_supported("sleep_config"):
+            # TRT-LLM rc8+
+            from tensorrt_llm.llmapi.llm_args import SleepConfig
+
+            arg_map["sleep_config"] = SleepConfig()
+            logging.info(
+                "TRT-LLM rc8+ detected: using sleep_config instead of enable_sleep"
+            )
+        else:
+            logging.warning(
+                "Installed TensorRT-LLM does not support sleep/wake "
+                "(neither enable_sleep nor sleep_config); skipping."
+            )
     if model_loader_extra_config:
         _set_optional_arg(
             arg_map,
