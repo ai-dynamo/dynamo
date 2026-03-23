@@ -39,8 +39,7 @@ NUM_REQUESTS = 10
 
 
 def _detect_target_device() -> str:
-    """Detect runtime device from torch backends.
-    """
+    """Detect runtime device from torch backends."""
     try:
         import torch
 
