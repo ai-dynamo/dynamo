@@ -172,7 +172,6 @@ class FastVideoHandler:
         return pipeline_config
 
     def _build_generator_kwargs(self) -> dict[str, Any]:
-
         generator_kwargs: dict[str, Any] = {
             "enable_torch_compile": self.config.enable_torch_compile,
             "dit_cpu_offload": self.config.dit_cpu_offload,
