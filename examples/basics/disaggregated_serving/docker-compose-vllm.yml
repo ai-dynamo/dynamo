@@ -2,18 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # This is the image that will be used for the Dynamo Frontend, Prefill, and Decode services
-x-dynamo-image: &DYNAMO_IMAGE nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+x-dynamo-image: &DYNAMO_IMAGE nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
 
 # The environment variables lifted to this top section are either ones that you may want to change or shared between multiple services
 #   Service-specific environment variables are included under their specific "environment:" sections
 x-shared-environ: &shared-environ
-  # (May want to change) Specify the model
+  # (May want to change) Specify the model and inference server settings
   MODEL_NAME: "Qwen/Qwen3-0.6B"
-
-  # (May want to change) If you have more than 2 gpus available, you can assign them to your prefill and decode workers below
-  PREFILL_CUDA_VISIBLE_DEVICES: 0
-  DECODE_CUDA_VISIBLE_DEVICES: 1
-
+  MAX_MODEL_LEN: 16384
+  MAX_NUM_SEQS: 16
+  TENSOR_PARALLEL_SIZE: 1
   # (Shared between services) The ETCD/NATS variables below are set so that the other containers on the shared network can find them
   ETCD_ENDPOINTS: "etcd-server:2379"
   NATS_SERVER: "nats://nats-server:4222"
@@ -29,17 +27,30 @@ services:
       - 8000:8000
     environment:
       <<: *shared-environ
+    volumes:
+      - frontend-cache:/home/dynamo/.cache/
+    restart: always
     depends_on:
       - nats-server
       - etcd-server
 
   dynamo-prefill:
     image: *DYNAMO_IMAGE
-    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME --is-prefill-worker"
+    command: > 
+      /bin/bash -c "python -m dynamo.vllm 
+      --model $$MODEL_NAME 
+      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' 
+      --kv-events-config '{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20081\",\"enable_kv_cache_events\":true}' 
+      --max-model-len $$MAX_MODEL_LEN 
+      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE 
+      --max-num-seqs $$MAX_NUM_SEQS 
+      --enable-prefix-caching 
+      --prefix-caching-hash-algo sha256 
+      --disaggregation-mode prefill"
     environment:
       <<: *shared-environ
-      CUDA_VISIBLE_DEVICES: ${PREFILL_CUDA_VISIBLE_DEVICES:-0}
       DYN_VLLM_KV_EVENT_PORT: 20081
+      DYN_SYSTEM_PORT: 8081
       VLLM_NIXL_SIDE_CHANNEL_PORT: 20097
     deploy:
       resources:
@@ -47,32 +58,47 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-              count: all
+              device_ids: ['0']
     ulimits:
       memlock: -1
       stack: 67108864
     ipc: host
+    volumes:
+      - prefill-cache:/home/dynamo/.cache/
+    restart: always
     depends_on:
       - nats-server
       - etcd-server
 
   dynamo-decode:
     image: *DYNAMO_IMAGE
-    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME"
+    command: >
+      /bin/bash -c "python -m dynamo.vllm 
+      --model $$MODEL_NAME 
+      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' 
+      --max-model-len $$MAX_MODEL_LEN 
+      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE 
+      --max-num-seqs $$MAX_NUM_SEQS 
+      --enable-prefix-caching
+      --prefix-caching-hash-algo sha256
+      --disaggregation-mode decode"
     environment:
       <<: *shared-environ
-      CUDA_VISIBLE_DEVICES: ${DECODE_CUDA_VISIBLE_DEVICES:-1}
+      DYN_SYSTEM_PORT: 8082
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-              count: all
+              device_ids: ['1']
     ulimits:
       memlock: -1
       stack: 67108864
     ipc: host
+    volumes:
+      - decode-cache:/home/dynamo/.cache/
+    restart: always
     depends_on:
       - nats-server
       - etcd-server
@@ -99,3 +125,8 @@ services:
     ports:
       - 2379:2379  # this port exposes the http /metrics endpoint
       - 2380:2380
+
+volumes:
+  frontend-cache:
+  prefill-cache:
+  decode-cache:
