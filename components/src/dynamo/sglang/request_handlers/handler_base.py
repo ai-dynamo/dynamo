@@ -132,21 +132,6 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
         """Cleanup resources. Override in subclasses as needed."""
         pass
 
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to generation functions.
-
-        Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
-
 
 class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
