@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -16,7 +16,7 @@ use crate::block_manager::{
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
-    offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
+    offload::{max_concurrent_transfers, max_transfer_batch_size},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
@@ -115,17 +115,29 @@ async fn perform_allocation_and_build_handler(
     let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
     let pool_config = PoolConfig {
         enable_pool: true,
-        max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-        max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+        max_concurrent_transfers: max_concurrent_transfers(),
+        max_transfer_batch_size: max_transfer_batch_size(),
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
-    let transfer_context = Arc::new(TransferContext::new(
-        Arc::new(Some(agent)),
-        DeviceAllocator::new(device_id)?.ctx().new_stream()?,
-        Handle::current(),
-        Some(pool_config),
-    ));
+    let transfer_context = Arc::new(
+        TransferContext::new(
+            Arc::new(Some(agent)),
+            DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+            Handle::current(),
+            Some(pool_config),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create transfer context for worker {} with CUDA memory pool: {}. \
+                 This is a critical error - the worker cannot start without CUDA memory pools. \
+                 Please ensure sufficient GPU memory is available on device {}.",
+                worker_id,
+                e,
+                device_id
+            )
+        })?,
+    );
 
     // device
     let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
@@ -136,7 +148,8 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id)?);
+
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?
@@ -323,7 +336,10 @@ struct GatedPing {
 impl Handler for GatedPing {
     async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
         if !self.state.is_ready() {
-            tracing::info!("Ping received but worker not ready; deferring ACK");
+            tracing::info!(
+                "KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait..."
+            );
+            tracing::debug!("Ping received but worker not ready; deferring ACK");
             // Prevent Drop panic; leader won't get an ACK for this round and will retry.
             message.mark_handled();
             return Ok(());

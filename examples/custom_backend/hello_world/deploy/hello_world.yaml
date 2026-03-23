@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -29,7 +29,6 @@ spec:
         periodSeconds: 10
         timeoutSeconds: 2
         failureThreshold: 3
-      dynamoNamespace: hello-world
       componentType: frontend
       replicas: 1
       resources:
@@ -68,7 +67,6 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: hello-world
       componentType: worker
       replicas: 1
       resources:

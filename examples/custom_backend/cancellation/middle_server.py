@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -21,9 +21,7 @@ class MiddleServer:
     async def initialize(self):
         """Initialize connection to backend servers"""
         # Connect to backend servers
-        endpoint = (
-            self.runtime.namespace("demo").component("server").endpoint("generate")
-        )
+        endpoint = self.runtime.endpoint("demo.server.generate")
         self.backend_client = await endpoint.client()
         await self.backend_client.wait_for_instances()
         print("Middle server: Connected to backend servers")
@@ -50,17 +48,14 @@ class MiddleServer:
 async def main():
     """Start the middle server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "mem", True)
+    runtime = DistributedRuntime(loop, "file", "nats")
 
     # Create middle server handler
     handler = MiddleServer(runtime)
     await handler.initialize()
 
-    # Create middle server component
-    component = runtime.namespace("demo").component("middle")
-    await component.create_service()
-
-    endpoint = component.endpoint("generate")
+    # Create middle server endpoint
+    endpoint = runtime.endpoint("demo.middle.generate")
 
     print("Middle server started")
     print("Forwarding requests to backend servers...")

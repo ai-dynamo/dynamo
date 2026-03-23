@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -9,8 +9,6 @@ use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 pub(crate) struct ModelDeploymentCard {
     pub(crate) inner: RsModelDeploymentCard,
 }
-
-impl ModelDeploymentCard {}
 
 #[pymethods]
 impl ModelDeploymentCard {
@@ -31,5 +29,24 @@ impl ModelDeploymentCard {
     fn to_json_str(&self) -> PyResult<String> {
         let json = self.inner.to_json().map_err(to_pyerr)?;
         Ok(json)
+    }
+
+    fn source_path(&self) -> &str {
+        self.inner.source_path()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn model_type(&self) -> ModelType {
+        ModelType {
+            inner: self.inner.model_type,
+        }
+    }
+
+    fn runtime_config(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let rc = pythonize::pythonize(py, &self.inner.runtime_config).map_err(to_pyerr)?;
+        Ok(rc.unbind())
     }
 }

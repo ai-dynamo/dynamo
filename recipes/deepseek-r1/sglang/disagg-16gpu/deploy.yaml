@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -6,27 +6,25 @@ kind: DynamoGraphDeployment
 metadata:
   name: sgl-dsr1-16gpu
 spec:
+  envs:
+    - name: HF_HOME
+      value: /opt/model
   pvcs:
-    - name: model-cache-pvc
+    - name: model-cache
       create: false
   services:
     Frontend:
-      dynamoNamespace: sgl-dsr1-16gpu
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
     decode:
-      dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
+      subComponentType: decode
       replicas: 1
       multinode:
         nodeCount: 2
@@ -34,20 +32,13 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache-pvc
-          mountPoint: /model-cache
+        - name: model-cache
+          mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
           workingDir: /sgl-workspace/dynamo
           command:
             - python3
@@ -55,7 +46,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /model-cache/deepseek-r1
+            - deepseek-ai/DeepSeek-R1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
@@ -76,9 +67,11 @@ spec:
             - --host
             - 0.0.0.0
             - --prefill-round-robin-balance
+            - --watchdog-timeout
+            - "3600"
     prefill:
-      dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       multinode:
         nodeCount: 2
@@ -86,20 +79,13 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache-pvc
-          mountPoint: /model-cache
+        - name: model-cache
+          mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
           workingDir: /sgl-workspace/dynamo
           command:
             - python3
@@ -107,7 +93,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /model-cache/deepseek-r1
+            - deepseek-ai/DeepSeek-R1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
@@ -126,3 +112,5 @@ spec:
             - 0.0.0.0
             - --load-balance-method
             - round_robin
+            - --watchdog-timeout
+            - "3600"

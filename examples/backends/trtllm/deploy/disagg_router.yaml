@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,17 +8,15 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-v1-disagg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
     TRTLLMPrefillWorker:
-      dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
@@ -27,7 +25,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
           - python3
@@ -39,12 +37,11 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - ./recipes/qwen3/trtllm/prefill.yaml
+            - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
             - --disaggregation-mode
             - prefill
             - --publish-events-and-metrics
     TRTLLMDecodeWorker:
-      dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
@@ -53,7 +50,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
           - python3
@@ -65,6 +62,6 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - ./recipes/qwen3/trtllm/decode.yaml
+            - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
             - --disaggregation-mode
             - decode

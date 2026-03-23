@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Offload Manager
@@ -54,6 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 use std::any::Any;
+use std::env;
 
 use std::collections::BTreeSet;
 
@@ -69,8 +70,50 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
-pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
-pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+const DEFAULT_MAX_CONCURRENT_TRANSFERS: usize = 4;
+const DEFAULT_MAX_TRANSFER_BATCH_SIZE: usize = 16;
+
+pub fn max_concurrent_transfers() -> usize {
+    read_usize_env(
+        "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+        DEFAULT_MAX_CONCURRENT_TRANSFERS,
+    )
+}
+
+pub fn max_transfer_batch_size() -> usize {
+    read_usize_env(
+        "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+        DEFAULT_MAX_TRANSFER_BATCH_SIZE,
+    )
+}
+
+fn read_usize_env(name: &str, default: usize) -> usize {
+    match env::var(name) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            Ok(_) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %value,
+                    default,
+                    "Environment variable must be > 0; using default"
+                );
+                default
+            }
+            Err(err) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %value,
+                    default,
+                    error = %err,
+                    "Failed to parse environment variable as usize; using default"
+                );
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
 
 /// Configuration for creating an OffloadManager
 pub struct OffloadManagerConfig {
@@ -145,21 +188,40 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let cuda_ctx = Cuda::device_or_create(0)?;
 
+        let max_concurrent_transfers = max_concurrent_transfers();
+        let max_transfer_batch_size = max_transfer_batch_size();
+
+        tracing::info!(
+            max_concurrent_transfers,
+            max_transfer_batch_size,
+            "Configured offload transfer settings"
+        );
+
         let pool_config = PoolConfig {
             enable_pool: true,
-            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_concurrent_transfers,
+            max_transfer_batch_size,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
         };
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
-        let device_offload_transfer_ctx = Arc::new(TransferContext::new(
-            config.nixl_agent.clone(),
-            cuda_ctx.new_stream()?,
-            config.async_rt_handle.clone(),
-            Some(pool_config),
-        ));
+        let device_offload_transfer_ctx = Arc::new(
+            TransferContext::new(
+                config.nixl_agent.clone(),
+                cuda_ctx.new_stream()?,
+                config.async_rt_handle.clone(),
+                Some(pool_config.clone()),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create device offload transfer context with CUDA memory pool: {}. \
+                     This is a critical error - the system cannot operate without CUDA memory pools. \
+                     Please ensure sufficient GPU memory is available.",
+                    e
+                )
+            })?,
+        );
 
         // Device -> Host offload
         let device_to_host_task = OffloadManager::offload_worker(
@@ -169,11 +231,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     device_offload_transfer_ctx,
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -192,12 +254,20 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         )?
         .detach();
 
-        let transfer_ctx = Arc::new(TransferContext::new(
-            config.nixl_agent.clone(),
-            cuda_ctx.new_stream()?,
-            config.async_rt_handle.clone(),
-            None,
-        ));
+        let transfer_ctx = Arc::new(
+            TransferContext::new(
+                config.nixl_agent.clone(),
+                cuda_ctx.new_stream()?,
+                config.async_rt_handle.clone(),
+                Some(pool_config),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create transfer context for host onboard operations: {}",
+                    e
+                )
+            })?,
+        );
 
         // Host -> Disk offload
         let host_to_disk_task = OffloadManager::offload_worker(
@@ -207,11 +277,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -238,11 +308,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -264,11 +334,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -295,11 +365,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 Arc::new(TransferBatcher::new(
                     LocalTransferManager::new(
                         transfer_ctx.clone(),
-                        MAX_CONCURRENT_TRANSFERS,
+                        max_concurrent_transfers,
                         &config.async_rt_handle,
                         config.cancellation_token.clone(),
                     )?,
-                    MAX_TRANSFER_BATCH_SIZE,
+                    max_transfer_batch_size,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )),
@@ -1581,9 +1651,9 @@ mod tests {
     #[tokio::test]
     async fn test_transfer_batcher() -> Result<()> {
         let (offload_manager, device_pool, _, disk_pool) = build_pools(
-            2 * MAX_TRANSFER_BATCH_SIZE + 1,
+            2 * max_transfer_batch_size() + 1,
             None,
-            Some(2 * MAX_TRANSFER_BATCH_SIZE + 1),
+            Some(2 * max_transfer_batch_size() + 1),
             None,
         )?;
 
@@ -1592,7 +1662,7 @@ mod tests {
 
         let mut disk_blocks = Vec::new();
 
-        for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
+        for i in 0..2 * max_transfer_batch_size() + 1 {
             let disk_block = completed_block(disk_pool, [i as u32; 4]).await?;
             populate_block(&disk_block, i as u8)?;
             disk_blocks.push(disk_block);
@@ -1603,7 +1673,7 @@ mod tests {
         let device_blocks = offload_manager
             .onboard(immutable_disk_blocks.clone(), None)
             .await??;
-        assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
+        assert_eq!(device_blocks.len(), 2 * max_transfer_batch_size() + 1);
 
         for (i, device_block) in device_blocks.iter().enumerate() {
             let blocks = device_pool
@@ -2249,6 +2319,163 @@ mod tests {
         Ok(())
     }
 
+    /// Test that metadata (priority) transfers correctly through the full G1→G2→G3 chain.
+    #[tokio::test]
+    async fn test_offload_transfer_metadata_to_disk() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, disk_pool) =
+            build_pools(4, Some(4), Some(4), None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+
+        // Create device block with non-default priority
+        let mut device_block = completed_block(device_pool, [0; 4]).await?;
+        populate_block(&device_block, 42)?;
+
+        let new_metadata = device_block.metadata().update_priority(42);
+        device_block.update_metadata(new_metadata);
+
+        let immutable_device_block = device_pool
+            .register_blocks(vec![device_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Step 1: Offload G1→G2 (device to host)
+        offload_manager.offload(&immutable_device_block, 0).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let host_blocks = host_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+        assert_eq!(host_blocks.len(), 1);
+        assert_eq!(
+            host_blocks[0].metadata().priority(),
+            42,
+            "G1→G2: Priority should transfer to host block"
+        );
+
+        // Step 2: Offload G2→G3 (host to disk)
+        offload_manager.offload(&host_blocks[0], 0).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let disk_blocks = disk_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+        assert_eq!(disk_blocks.len(), 1);
+        assert_eq!(
+            disk_blocks[0].metadata().priority(),
+            42,
+            "G2→G3: Priority should transfer to disk block"
+        );
+
+        Ok(())
+    }
+
+    /// Test that metadata (priority) transfers correctly when onboarding from G2→G1.
+    #[tokio::test]
+    async fn test_onboard_transfer_metadata_from_host() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+
+        let _device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+
+        // Create host block with non-default priority
+        let mut host_block = completed_block(host_pool, [0; 4]).await?;
+        populate_block(&host_block, 42)?;
+
+        let new_metadata = host_block.metadata().update_priority(42);
+        host_block.update_metadata(new_metadata);
+
+        let immutable_host_block = host_pool
+            .register_blocks(vec![host_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            immutable_host_block.metadata().priority(),
+            42,
+            "Host block should have priority=42 before onboard"
+        );
+
+        // Onboard G2→G1 (host to device)
+        let onboarded_blocks = offload_manager
+            .onboard(vec![immutable_host_block.clone()], None)
+            .await??;
+
+        assert_eq!(onboarded_blocks.len(), 1);
+        assert_eq!(
+            onboarded_blocks[0].metadata().priority(),
+            42,
+            "G2→G1: Priority should transfer to device block after onboard"
+        );
+
+        Ok(())
+    }
+
+    /// Test that metadata is preserved through a full G1→G2→G1 cycle.
+    #[tokio::test]
+    async fn test_offload_onboard_preserves_metadata() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+
+        // Create device block with non-default priority
+        let mut device_block = completed_block(device_pool, [0; 4]).await?;
+        populate_block(&device_block, 42)?;
+
+        let new_metadata = device_block.metadata().update_priority(42);
+        device_block.update_metadata(new_metadata);
+
+        let immutable_device_block = device_pool
+            .register_blocks(vec![device_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Step 1: Offload G1→G2
+        offload_manager.offload(&immutable_device_block, 0).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let host_blocks = host_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+        assert_eq!(host_blocks.len(), 1);
+        assert_eq!(
+            host_blocks[0].metadata().priority(),
+            42,
+            "G1→G2: Priority should transfer to host block"
+        );
+
+        // Drop device block and allocate new ones to evict it from device pool
+        drop(immutable_device_block);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let temp_blocks = device_pool.allocate_blocks(4).await?;
+        drop(temp_blocks);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Step 2: Onboard G2→G1
+        let onboarded_blocks = offload_manager
+            .onboard(vec![host_blocks[0].clone()], None)
+            .await??;
+
+        assert_eq!(onboarded_blocks.len(), 1);
+        assert_eq!(
+            onboarded_blocks[0].metadata().priority(),
+            42,
+            "G2→G1: Priority should be preserved through full cycle"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_onboard_duplicate() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
@@ -2458,5 +2685,51 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // ============================================================================
+    // ENVIRONMENT CONFIGURATION TESTS
+    // ============================================================================
+    #[test]
+    fn test_config_defaults() {
+        temp_env::with_vars(
+            vec![
+                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", None::<&str>),
+                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", None::<&str>),
+            ],
+            || {
+                assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
+                assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+            },
+        );
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        temp_env::with_vars(
+            vec![
+                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", Some("64")),
+                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", Some("128")),
+            ],
+            || {
+                assert_eq!(max_concurrent_transfers(), 64);
+                assert_eq!(max_transfer_batch_size(), 128);
+            },
+        );
+    }
+
+    #[test]
+    fn test_config_invalid_values_fallback() {
+        temp_env::with_vars(
+            vec![
+                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", Some("not_a_number")),
+                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", Some("0")),
+            ],
+            || {
+                // Should log a tracing::warn and return defaults
+                assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
+                assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
+            },
+        );
     }
 }

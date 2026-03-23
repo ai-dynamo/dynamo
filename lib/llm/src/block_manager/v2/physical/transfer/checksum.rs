@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Block checksum computation for verification.
@@ -154,7 +154,7 @@ fn compute_single_block_checksum(
     Ok(hasher.finalize().to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::super::tests::*;
     use super::*;

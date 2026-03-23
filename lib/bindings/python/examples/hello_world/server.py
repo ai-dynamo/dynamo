@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -21,7 +21,7 @@ class RequestHandler:
             yield char
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Set up signal handler for graceful shutdown
     loop = asyncio.get_running_loop()
@@ -45,13 +45,10 @@ async def graceful_shutdown(runtime: DistributedRuntime):
 
 async def init(runtime: DistributedRuntime, ns: str):
     """
-    Instantiate a `backend` component and serve the `generate` endpoint
-    A `Component` can serve multiple endpoints
+    Create and serve the `generate` endpoint using the distributed runtime.
+    Multiple endpoints can be served from a single worker.
     """
-    component = runtime.namespace(ns).component("backend")
-    await component.create_service()
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint(f"{ns}.backend.generate")
     print("Started server instance")
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)

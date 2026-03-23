@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,8 +15,12 @@
 
 import networkx as nx
 import numpy as np
-from prefix_data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
 from prefix_data_generator.sampler import get_cdf
+
+# Protocol-level constants for synthetic data graph structure
+SUPER_ROOT = -1  # Dummy node preceding all real nodes; not an actual data root
+CACHE_END = -2  # Special node indicating end of a path
+END_NODE = -3  # Special node indicating to skip leaf sampling
 
 
 def _verify_tree(G: nx.DiGraph) -> None:

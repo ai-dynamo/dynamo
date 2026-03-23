@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -78,7 +78,10 @@ class ImageLoader:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
             # PIL is sync, so offload to a thread to avoid blocking the event loop
-            image = await asyncio.to_thread(Image.open, image_data)
+            # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
+            image = await asyncio.to_thread(
+                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+            )
 
             # Validate image format and convert to RGB
             if image.format not in ("JPEG", "PNG", "WEBP"):

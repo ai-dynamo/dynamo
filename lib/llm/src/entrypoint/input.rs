@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! This module contains tools to gather a prompt from a user, forward it to an engine and return
@@ -117,7 +117,7 @@ pub async fn run_input(
             .and_then(|v| v.parse().ok())
             .unwrap_or(1024);
         crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env(&drt);
+        crate::audit::sink::spawn_workers_from_env().await?;
         tracing::info!(cap, "Audit initialized");
     }
 

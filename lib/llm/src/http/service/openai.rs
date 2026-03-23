@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    fmt::Display,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,10 +17,13 @@ use axum::{
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
-        sse::{KeepAlive, Sse},
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
 };
+use base64::Engine as _;
+use bytes::Bytes;
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -32,18 +36,24 @@ use super::{
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{
-        Endpoint, EventConverter, process_response_and_observe_metrics,
+        Endpoint, ErrorType, EventConverter, process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
     service_v2,
 };
 use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
-    chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
+    chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+        NvCreateChatCompletionStreamResponse,
+    },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-    responses::{NvCreateResponse, NvResponse},
+    images::{NvCreateImageRequest, NvImagesResponse},
+    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
@@ -55,11 +65,13 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
+const VALIDATION_PREFIX: &str = "Validation: ";
+
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
-fn get_body_limit() -> usize {
-    std::env::var("DYN_HTTP_BODY_LIMIT_MB")
+/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
+pub(super) fn get_body_limit() -> usize {
+    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .map(|mb| mb * 1024 * 1024)
@@ -81,6 +93,32 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
         Some(reason) => reason.to_string(),
         None => "UnknownError".to_string(),
     }
+}
+
+/// Classify error for metrics based on status code and message
+fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
+    match code {
+        StatusCode::BAD_REQUEST => {
+            // 400
+            if message.starts_with("Validation:") {
+                ErrorType::Validation
+            } else {
+                ErrorType::Internal
+            }
+        }
+        StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
+        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
+        StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.is_client_error() => ErrorType::Validation, // other 4xx
+        _ => ErrorType::Internal,                     // everything else
+    }
+}
+
+/// Extract ErrorType from ErrorResponse for metrics
+fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
+    classify_error_for_metrics(response.0, &response.1.message)
 }
 
 impl ErrorMessage {
@@ -134,7 +172,7 @@ impl ErrorMessage {
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
-    pub fn not_implemented_error(msg: &str) -> ErrorResponse {
+    pub fn not_implemented_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
         let code = StatusCode::NOT_IMPLEMENTED;
         let error_type = map_error_code_to_error_type(code);
@@ -171,10 +209,24 @@ impl ErrorMessage {
             );
         }
 
+        // Check for DynamoError with InvalidArgument → HTTP 400
+        if let Some(dynamo_err) = err.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && dynamo_err.error_type() == dynamo_runtime::error::ErrorType::InvalidArgument
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    message: dynamo_err.message().to_string(),
+                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                    code: StatusCode::BAD_REQUEST.as_u16(),
+                }),
+            );
+        }
+
         // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
-            Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
+            Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err:#}")),
         }
     }
 
@@ -217,7 +269,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
         let (_parts, body) = response.into_parts();
-        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
@@ -238,7 +290,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 // TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
-fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+pub(super) fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
@@ -280,10 +332,12 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
+    Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -323,6 +377,9 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Validate stream_options is only used when streaming (NVBug 5662680)
+    validate_completion_stream_options(&request)?;
+
     validate_completion_fields_generic(&request)?;
 
     // Detect batch prompts
@@ -353,33 +410,37 @@ async fn completions_single(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = request.inner.model.clone();
+
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
 
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
-
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -407,14 +468,20 @@ async fn completions_single(
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream.map(move |response| {
-            // Calls observe_response() on each token
-            process_response_using_event_converter_and_observe_metrics(
-                EventConverter::from(response),
-                &mut response_collector,
-                &mut http_queue_guard,
-            )
-        });
+        let stream = stream
+            .map(move |response| {
+                // Calls observe_response() on each token
+                process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                )
+            })
+            .filter_map(|result| {
+                use futures::future;
+                // Transpose Result<Option<T>> -> Option<Result<T>>
+                future::ready(result.transpose())
+            });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
@@ -444,13 +511,20 @@ async fn completions_single(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error(&format!(
+                let err_response = ErrorMessage::internal_server_error(&format!(
                     "Failed to fold completions stream for {}: {:?}",
                     request_id, e
-                ))
+                ));
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -471,26 +545,28 @@ async fn completions_batch(
     let streaming = request.inner.stream.unwrap_or(false);
     let model = request.inner.model.clone();
 
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
-
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
 
     // Generate streams for each prompt in the batch
     let mut all_streams = Vec::new();
@@ -509,10 +585,11 @@ async fn completions_batch(
         let single_request_context = Context::with_id(single_request, unique_request_id);
 
         // Generate stream for this prompt
-        let stream = engine
-            .generate(single_request_context)
-            .await
-            .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+        let stream = engine.generate(single_request_context).await.map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
         // Capture context from first stream
         if first_ctx.is_none() {
@@ -563,14 +640,20 @@ async fn completions_batch(
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = merged_stream.map(move |response| {
-            // Calls observe_response() on each token
-            process_response_using_event_converter_and_observe_metrics(
-                EventConverter::from(response),
-                &mut response_collector,
-                &mut http_queue_guard,
-            )
-        });
+        let stream = merged_stream
+            .map(move |response| {
+                // Calls observe_response() on each token
+                process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                )
+            })
+            .filter_map(|result| {
+                use futures::future;
+                // Transpose Result<Option<T>> -> Option<Result<T>>
+                future::ready(result.transpose())
+            });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
@@ -600,13 +683,20 @@ async fn completions_batch(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error(&format!(
+                let err_response = ErrorMessage::internal_server_error(&format!(
                     "Failed to fold completions stream for {}: {:?}",
                     request_id, e
-                ))
+                ));
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -631,28 +721,30 @@ async fn embeddings(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
-    // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
-
-    // todo - error handling should be more robust
-    let engine = state
-        .manager()
-        .get_embeddings_engine(model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    // this will increment the inflight gauge for the model
+    // Create inflight_guard early to ensure all errors are counted
     let mut inflight =
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
 
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+
+    // todo - error handling should be more robust
+    let engine = state.manager().get_embeddings_engine(model).map_err(|_| {
+        let err_response = ErrorMessage::model_not_found();
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -675,7 +767,10 @@ async fn embeddings(
                 request_id,
                 e
             );
-            ErrorMessage::internal_server_error("Failed to fold embeddings stream")
+            let err_response =
+                ErrorMessage::internal_server_error("Failed to fold embeddings stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     inflight.mark_ok();
@@ -685,10 +780,12 @@ async fn embeddings(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateChatCompletionRequest>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -716,6 +813,231 @@ async fn handler_chat_completions(
     response
 }
 
+/// Checks if an Annotated event represents a backend error and extracts error information.
+/// Returns Some((message, status_code)) if it's an error, None otherwise.
+fn extract_backend_error_if_present<T: serde::Serialize>(
+    event: &Annotated<T>,
+) -> Option<(String, StatusCode)> {
+    #[derive(serde::Deserialize)]
+    struct ErrorPayload {
+        message: Option<String>,
+        code: Option<u16>,
+    }
+
+    // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
+    if let Some(event_type) = &event.event
+        && event_type == "error"
+    {
+        // Extract error string: prefer DynamoError field, fallback to legacy comment.
+        // Use message() instead of to_string() for DynamoError to avoid prefixing
+        // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
+        let error_str = if let Some(ref dynamo_err) = event.error {
+            let mut parts = Vec::new();
+            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
+            while let Some(e) = current {
+                if let Some(de) = e.downcast_ref::<dynamo_runtime::error::DynamoError>() {
+                    parts.push(de.message().to_string());
+                } else {
+                    parts.push(e.to_string());
+                }
+                current = e.source();
+            }
+            parts.join(", ")
+        } else {
+            event
+                .comment
+                .as_ref()
+                .map(|c| c.join(", "))
+                .unwrap_or_else(|| "Unknown error".to_string())
+        };
+
+        // Try to parse as error JSON to extract status code
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
+            let code = error_payload
+                .code
+                .and_then(|c| StatusCode::from_u16(c).ok())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let message = error_payload.message.unwrap_or(error_str);
+            return Some((message, code));
+        }
+
+        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    // Check if the data payload itself contains an error structure with code >= 400
+    if let Some(data) = &event.data
+        && let Ok(json_value) = serde_json::to_value(data)
+        && let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone())
+        && let Some(code_num) = error_payload.code
+        && code_num >= 400
+    {
+        let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let message = error_payload
+            .message
+            .unwrap_or_else(|| json_value.to_string());
+        return Some((message, code));
+    }
+
+    // Check if comment contains error information (without event: error)
+    if let Some(comments) = &event.comment
+        && !comments.is_empty()
+    {
+        let comment_str = comments.join(", ");
+
+        // Try to parse comment as error JSON with code >= 400
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str)
+            && let Some(code_num) = error_payload.code
+            && code_num >= 400
+        {
+            let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let message = error_payload.message.unwrap_or(comment_str);
+            return Some((message, code));
+        }
+
+        // Comments present with no data AND no event type indicates error
+        // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
+        if event.data.is_none() && event.event.is_none() {
+            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+        }
+    }
+
+    None
+}
+
+/// Checks if the first event in the stream is a backend error.
+/// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise.
+pub(super) async fn check_for_backend_error(
+    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
+    + Send
+    + Unpin
+    + 'static,
+) -> Result<
+    impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
+    ErrorResponse,
+> {
+    use futures::stream::StreamExt;
+
+    // Peek at the first event
+    if let Some(first_event) = stream.next().await {
+        // Check if it's an error event
+        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&first_event) {
+            return Err((
+                status_code,
+                Json(ErrorMessage {
+                    message: error_msg,
+                    error_type: map_error_code_to_error_type(status_code),
+                    code: status_code.as_u16(),
+                }),
+            ));
+        }
+
+        // Not an error - reconstruct stream with first event
+        let reconstructed_stream = futures::stream::iter(vec![first_event]).chain(stream);
+        Ok(reconstructed_stream)
+    } else {
+        // Empty stream - this shouldn't happen but handle gracefully
+        Ok(futures::stream::iter(vec![]).chain(stream))
+    }
+}
+
+/// Serialize `payload` and wrap it as an SSE event with the given name.
+fn make_dispatch_event(
+    event_name: &str,
+    payload: &impl serde::Serialize,
+) -> Option<Result<Event, axum::Error>> {
+    match serde_json::to_string(payload) {
+        Ok(json) => Some(Ok(Event::default().event(event_name).data(json))),
+        Err(e) => {
+            tracing::warn!("streaming_{event_name}: failed to serialize: {e}");
+            None
+        }
+    }
+}
+
+/// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
+/// streaming response chunk, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
+///
+/// Dynamo backends emit each tool call as a single complete chunk (id + name + arguments
+/// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
+/// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
+/// for correct disambiguation when `n > 1`.
+fn streaming_tool_dispatch_events(
+    response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    dispatched_ids: &mut HashSet<String>,
+) -> Vec<Result<Event, axum::Error>> {
+    let Some(data) = &response.data else {
+        return vec![];
+    };
+
+    let mut events = vec![];
+    for choice in &data.choices {
+        let Some(tool_calls) = &choice.delta.tool_calls else {
+            continue;
+        };
+        for chunk in tool_calls {
+            // Only dispatch when the tool call is fully formed (id + name + arguments)
+            let has_name_and_args = chunk
+                .function
+                .as_ref()
+                .is_some_and(|f| f.name.is_some() && f.arguments.is_some());
+
+            if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
+                // Skip already-dispatched tool calls (dedup guard, matches
+                // the stopped/done flags in Anthropic/Responses converters).
+                if !dispatched_ids.insert(id.clone()) {
+                    continue;
+                }
+                let payload = serde_json::json!({
+                    "choice_index": choice.index,
+                    "tool_call": chunk,
+                });
+                events.extend(make_dispatch_event("tool_call_dispatch", &payload));
+            }
+        }
+    }
+    events
+}
+
+/// Accumulates reasoning tokens and emits a single `event: reasoning_dispatch` SSE event
+/// when the complete reasoning block has been decoded (i.e. when `reasoning_content`
+/// transitions from `Some(token)` to `None`), matching the UX of `tool_call_dispatch`.
+///
+/// The buffer is maintained across chunks by the caller (captured in the flat_map closure).
+/// Flushing also occurs when `finish_reason` is set, to handle max_tokens during reasoning.
+fn accumulate_reasoning_dispatch(
+    response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    buffers: &mut HashMap<u32, String>,
+) -> Vec<Result<Event, axum::Error>> {
+    let Some(data) = &response.data else {
+        return vec![];
+    };
+
+    let mut events = vec![];
+    for choice in &data.choices {
+        let buffer = buffers.entry(choice.index).or_default();
+        let has_reasoning = choice
+            .delta
+            .reasoning_content
+            .as_ref()
+            .is_some_and(|r| !r.is_empty());
+
+        if has_reasoning {
+            buffer.push_str(choice.delta.reasoning_content.as_ref().unwrap());
+        }
+
+        // Emit when reasoning transitions to None OR when the stream ends (finish_reason).
+        if !buffer.is_empty() && (!has_reasoning || choice.finish_reason.is_some()) {
+            let payload = serde_json::json!({
+                "index": choice.index,
+                "reasoning_content": buffer.as_str(),
+            });
+            events.extend(make_dispatch_event("reasoning_dispatch", &payload));
+            buffer.clear();
+        }
+    }
+    events
+}
+
 /// OpenAI Chat Completions Request Handler
 ///
 /// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
@@ -735,19 +1057,11 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
-    // Handle unsupported fields - if Some(resp) is returned by
-    // validate_chat_completion_unsupported_fields,
-    // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
-    validate_chat_completion_unsupported_fields(&request)?;
+    // Determine streaming mode early
+    // todo - decide on default
+    let streaming = request.inner.stream.unwrap_or(false);
 
-    // Handle required fields like messages shouldn't be empty.
-    validate_chat_completion_required_fields(&request)?;
-
-    // Handle Rest of Validation Errors
-    validate_chat_completion_fields_generic(&request)?;
-
-    // Apply template values if present
+    // Apply template values first to resolve the model before creating metrics guards
     if let Some(template) = template {
         if request.inner.model.is_empty() {
             request.inner.model = template.model.clone();
@@ -759,43 +1073,72 @@ async fn chat_completions(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-    tracing::trace!("Received chat completions request: {:?}", request.content());
 
-    // todo - decide on default
-    let streaming = request.inner.stream.unwrap_or(false);
-
+    // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
     let model = request.inner.model.clone();
+
+    tracing::trace!("Received chat completions request: {:?}", request.content());
+
+    // Create inflight_guard early to ensure all errors (including validation) are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
+
+    // Handle unsupported fields - if Some(resp) is returned by
+    // validate_chat_completion_unsupported_fields,
+    // then a field was used that is unsupported. We will log an error message
+    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    if let Err(err_response) = validate_chat_completion_unsupported_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    // Handle required fields like messages shouldn't be empty.
+    if let Err(err_response) = validate_chat_completion_required_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    // Validate stream_options is only used when streaming (NVBug 5662680)
+    if let Err(err_response) = validate_chat_completion_stream_options(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    // Handle Rest of Validation Errors
+    if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let annotations = request.annotations();
 
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
-
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -821,16 +1164,53 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
+        // For streaming responses, we return HTTP 200 immediately without checking for errors.
+        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
+        // must be delivered as SSE events with `event: error` in the stream (handled by
+        // EventConverter and monitor_for_disconnects). This is standard SSE behavior.
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream.map(move |response| {
-            // Calls observe_response() on each token
-            process_response_using_event_converter_and_observe_metrics(
+        let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
+        let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
+        let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
+        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+
+        // flat_map lets us optionally prepend extra SSE events before each regular chunk:
+        //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
+        //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
+        // When both flags are off the flat_map is equivalent to the original map + filter_map.
+        let stream = stream.flat_map(move |response| {
+            // Extract side-channel events before the response is consumed by EventConverter.
+            let mut events: Vec<Result<Event, axum::Error>> = vec![];
+            if tool_dispatch_enabled {
+                events.extend(streaming_tool_dispatch_events(
+                    &response,
+                    &mut dispatched_tool_ids,
+                ));
+            }
+            if reasoning_dispatch_enabled {
+                events.extend(accumulate_reasoning_dispatch(
+                    &response,
+                    &mut reasoning_buffer,
+                ));
+            }
+
+            // Convert to SSE event (this consumes the response).
+            // EventConverter will detect `event: "error"` and convert to SSE error events.
+            let sse_result = process_response_using_event_converter_and_observe_metrics(
                 EventConverter::from(response),
                 &mut response_collector,
                 &mut http_queue_guard,
-            )
+            );
+
+            // Side-channel events come first, then the regular data event.
+            match sse_result {
+                Ok(Some(ev)) => events.push(Ok(ev)),
+                Ok(None) => {}
+                Err(e) => events.push(Err(e)),
+            }
+            stream::iter(events)
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -842,8 +1222,18 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream_with_check =
+            check_for_backend_error(stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                    error_response
+                })?;
+
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream.inspect(move |response| {
+        let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
             process_response_and_observe_metrics(
                 response,
@@ -858,16 +1248,23 @@ async fn chat_completions(
                 .map_err(|e| {
                     tracing::error!(
                         request_id,
-                        "Failed to fold chat completions stream for: {:?}",
+                        "Failed to parse chat completion response: {:?}",
                         e
                     );
-                    ErrorMessage::internal_server_error(&format!(
-                        "Failed to fold chat completions stream: {}",
+                    let err_response = ErrorMessage::internal_server_error(&format!(
+                        "Failed to parse chat completion response: {}",
                         e
-                    ))
+                    ));
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
                 })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -882,13 +1279,15 @@ pub fn validate_chat_completion_unsupported_fields(
 
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
-            "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
+            VALIDATION_PREFIX.to_string()
+                + "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
         ));
     }
 
     if inner.functions.is_some() {
         return Err(ErrorMessage::not_implemented_error(
-            "`functions` is deprecated. Please migrate to use `tools` instead.",
+            VALIDATION_PREFIX.to_string()
+                + "`functions` is deprecated. Please migrate to use `tools` instead.",
         ));
     }
 
@@ -904,11 +1303,27 @@ pub fn validate_chat_completion_required_fields(
     if inner.messages.is_empty() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: "The 'messages' field cannot be empty. At least one message is required."
-                .to_string(),
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'messages' field cannot be empty. At least one message is required.",
         }));
     }
 
+    Ok(())
+}
+
+/// Validates that stream_options is only used when stream=true for chat completions (NVBug 5662680)
+pub fn validate_chat_completion_stream_options(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let inner = &request.inner;
+    let streaming = inner.stream.unwrap_or(false);
+    if !streaming && inner.stream_options.is_some() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
+        }));
+    }
     Ok(())
 }
 
@@ -922,9 +1337,25 @@ pub fn validate_chat_completion_fields_generic(
     request.validate().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: e.to_string(),
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
+}
+
+/// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
+pub fn validate_completion_stream_options(
+    request: &NvCreateCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let inner = &request.inner;
+    let streaming = inner.stream.unwrap_or(false);
+    if !streaming && inner.stream_options.is_some() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
+        }));
+    }
+    Ok(())
 }
 
 /// Validates a completion request and returns an error response if validation fails.
@@ -937,7 +1368,7 @@ pub fn validate_completion_fields_generic(
     request.validate().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: e.to_string(),
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
 }
@@ -948,28 +1379,31 @@ pub fn validate_completion_fields_generic(
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateResponse>,
+    Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+
     // create the context for the request
-    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(None, &headers);
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, _stream_handle) =
+    let (mut connection_handle, stream_handle) =
         create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
-    let response = tokio::spawn(responses(state, template, request).in_current_span())
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
-                e,
-            ))
-        })?;
+    let response =
+        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await responses task: {:?}",
+                    e,
+                ))
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -983,138 +1417,263 @@ async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
+    mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Create http_queue_guard early - tracks time waiting to be processed
-    let model = request.inner.model.clone();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    // Apply template values if present, with sensible defaults for the Responses API.
+    // Unlike chat completions where backends may have their own defaults, the Responses API
+    // should provide a generous default to avoid truncated responses (especially with
+    // reasoning models that emit <think> tokens).
+    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 
-    // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
-    // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
-    if let Some(resp) = validate_response_unsupported_fields(&request) {
-        return Ok(resp.into_response());
-    }
-
-    // Handle non-text (image, audio, file) inputs - if Some(resp) is returned by
-    // validate_input_is_text_only, then we are handling something other than Input::Text(_).
-    // We will log an error message and early return a 501 NOT_IMPLEMENTED status code.
-    // Otherwise, proceeed.
-    if let Some(resp) = validate_response_input_is_text_only(&request) {
-        return Ok(resp.into_response());
-    }
-
-    // Apply template values if present
     if let Some(template) = template {
-        if request.inner.model.is_empty() {
-            request.inner.model = template.model.clone();
+        if request.inner.model.as_deref().unwrap_or("").is_empty() {
+            request.inner.model = Some(template.model.clone());
         }
-        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+        if request.inner.temperature.is_none() {
             request.inner.temperature = Some(template.temperature);
         }
-        if request.inner.max_output_tokens.unwrap_or(0) == 0 {
+        if request.inner.max_output_tokens.is_none() {
             request.inner.max_output_tokens = Some(template.max_completion_tokens);
         }
+    } else if request.inner.max_output_tokens.is_none() {
+        request.inner.max_output_tokens = Some(DEFAULT_MAX_OUTPUT_TOKENS);
     }
-    tracing::trace!("Received chat completions request: {:?}", request.inner);
+    tracing::trace!("Received responses request: {:?}", request.inner);
 
-    let request_id = request.id().to_string();
-    let (request, context) = request.into_parts();
+    let model = request.inner.model.clone().unwrap_or_default();
+    let streaming = request.inner.stream.unwrap_or(false);
 
-    let mut request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
-        tracing::error!(
-            request_id,
-            "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest: {:?}",
-            e
-        );
-        ErrorMessage::not_implemented_error(&format!(
-            "Only Input::Text(_) is currently supported: {}",
-            e
-        ))
-    })?;
-
-    let request = context.map(|mut _req| {
-        request.inner.stream = Some(false);
-        request
-    });
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let engine = state
-        .manager()
-        .get_chat_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
-
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
-
-    tracing::trace!("Issuing generate call for chat completions");
-
-    // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
-
-    // Create inflight_guard now that actual processing has begun
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
     let mut inflight_guard =
         state
             .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Responses, false);
+            .create_inflight_guard(&model, Endpoint::Responses, streaming);
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
-    let mut http_queue_guard = Some(http_queue_guard);
-    let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_response_and_observe_metrics(
-            response,
-            &mut response_collector,
-            &mut http_queue_guard,
-        );
-    });
+    // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
+    // then a field was used that is unsupported. We will log an error message
+    // and early return a 501 NOT_IMPLEMENTED status code.
+    if let Some(resp) = validate_response_unsupported_fields(&request) {
+        inflight_guard.mark_error(ErrorType::NotImplemented);
+        return Ok(resp.into_response());
+    }
 
-    // TODO: handle streaming, currently just unary
-    let response =
-        NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
-            .await
+    // Extract request parameters before into_parts() consumes the request.
+    // These are echoed back in the Response object per the OpenAI spec.
+    let response_params = ResponseParams {
+        model: request.inner.model.clone(),
+        temperature: request.inner.temperature,
+        top_p: request.inner.top_p,
+        max_output_tokens: request.inner.max_output_tokens,
+        store: request.inner.store,
+        tools: request.inner.tools.clone(),
+        tool_choice: request.inner.tool_choice.clone(),
+        instructions: request.inner.instructions.clone(),
+        reasoning: request.inner.reasoning.clone(),
+        text: request.inner.text.clone(),
+        service_tier: request.inner.service_tier,
+        include: request.inner.include.clone(),
+        truncation: request.inner.truncation,
+    };
+    let request_id = request.id().to_string();
+    let (orig_request, context) = request.into_parts();
+
+    let mut chat_request: NvCreateChatCompletionRequest =
+        orig_request.try_into().map_err(|e: anyhow::Error| {
+            tracing::error!(
+                request_id,
+                error = %e,
+                "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest",
+            );
+            let err_response = ErrorMessage::not_implemented_error(
+                VALIDATION_PREFIX.to_string()
+                    + "Failed to convert responses request: "
+                    + &e.to_string(),
+            );
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    // Always use internal streaming for aggregation.
+    // Set stream_options.include_usage so the backend sends token counts in the final chunk.
+    chat_request.inner.stream = Some(true);
+    chat_request.inner.stream_options =
+        Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+            include_usage: true,
+            continuous_usage_stats: false,
+        });
+
+    let request = context.map(|mut _req| chat_request);
+
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
+    let (engine, parsing_options) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    tracing::trace!("Issuing generate call for responses");
+
+    // issue the generate call on the engine
+    let engine_stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Capture the context to cancel the stream if the client disconnects
+    let ctx = engine_stream.context();
+
+    if streaming {
+        // For streaming responses, we return HTTP 200 immediately without checking for errors.
+        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
+        // must be delivered as SSE events in the stream. This is standard SSE behavior.
+        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+
+        // Streaming path: convert chat completion stream chunks to Responses API SSE events.
+        // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
+        // inner stream response data and convert it to Responses API events.
+        use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut converter = ResponseStreamConverter::new(model.clone(), response_params);
+        let start_events = converter.emit_start_events();
+
+        // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
+        // synchronous -- no .await while lock is held. Avoids async lock overhead per token.
+        let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
+        let converter_end = converter.clone();
+
+        // Track whether the backend sent an error event during the stream.
+        // Shared between event_stream (writer) and done_stream (reader).
+        let saw_error = std::sync::Arc::new(AtomicBool::new(false));
+        let saw_error_end = saw_error.clone();
+
+        let mut http_queue_guard = Some(http_queue_guard);
+
+        // Process each annotated chunk: extract the stream response data, convert to events
+        let event_stream = engine_stream
+            .inspect(move |response| {
+                process_response_and_observe_metrics(
+                    response,
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                );
+            })
+            .filter_map(move |annotated_chunk| {
+                let converter = converter.clone();
+                let saw_error = saw_error.clone();
+                async move {
+                    // Check for backend error before extracting data.
+                    // Error events have data: None and event: Some("error").
+                    if annotated_chunk.data.is_none() {
+                        if annotated_chunk.event.as_deref() == Some("error") {
+                            saw_error.store(true, Ordering::Release);
+                        }
+                        return None;
+                    }
+                    let stream_resp = annotated_chunk.data?;
+                    let mut conv = converter.lock().expect("converter lock poisoned");
+                    let events = conv.process_chunk(&stream_resp);
+                    Some(stream::iter(events))
+                }
+            })
+            .flatten();
+
+        // Chain: start_events -> chunk_events -> end_events
+        let start_stream = stream::iter(start_events);
+
+        let done_stream = stream::once(async move {
+            let mut conv = converter_end.lock().expect("converter lock poisoned");
+            let end_events = if saw_error_end.load(Ordering::Acquire) {
+                conv.emit_error_events()
+            } else {
+                conv.emit_end_events()
+            };
+            stream::iter(end_events)
+        })
+        .flatten();
+
+        let full_stream = start_stream.chain(event_stream).chain(done_stream);
+
+        let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
+
+        // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
+        // and defers inflight_guard.mark_ok() until the stream completes.
+        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
+    } else {
+        // Non-streaming path: aggregate stream into single response
+
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream_with_check =
+            check_for_backend_error(engine_stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                    error_response
+                })?;
+
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = stream_with_check.inspect(move |response| {
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response =
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(request_id, "Failed to fold responses stream: {:?}", e);
+                    let err_response = ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold responses stream: {}",
+                        e
+                    ));
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
+                })?;
+
+        // Convert NvCreateChatCompletionResponse --> NvResponse
+        let response: NvResponse = chat_completion_to_response(response, &response_params)
             .map_err(|e| {
                 tracing::error!(
                     request_id,
-                    "Failed to fold chat completions stream for: {:?}",
+                    "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
                     e
                 );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to convert internal response");
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
             })?;
 
-    // Convert NvCreateChatCompletionResponse --> NvResponse
-    let response: NvResponse = response.try_into().map_err(|e| {
-        tracing::error!(
-            request_id,
-            "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
-            e
-        );
-        ErrorMessage::internal_server_error("Failed to convert internal response")
-    })?;
+        inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
 
-    inflight_guard.mark_ok();
-
-    Ok(Json(response).into_response())
-}
-
-pub fn validate_response_input_is_text_only(
-    request: &NvCreateResponse,
-) -> Option<impl IntoResponse> {
-    match &request.inner.input {
-        dynamo_async_openai::types::responses::Input::Text(_) => None,
-        _ => Some(ErrorMessage::not_implemented_error(
-            "Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.",
-        )),
+        Ok(Json(response).into_response())
     }
 }
 
@@ -1127,80 +1686,24 @@ pub fn validate_response_unsupported_fields(
 
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
-            "`background: true` is not supported.",
-        ));
-    }
-    if inner.include.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`include` is not supported.",
-        ));
-    }
-    if inner.instructions.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`instructions` is not supported.",
-        ));
-    }
-    if inner.max_tool_calls.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`max_tool_calls` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
         ));
     }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`previous_response_id` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`prompt` is not supported.",
-        ));
-    }
-    if inner.reasoning.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`reasoning` is not supported.",
-        ));
-    }
-    if inner.service_tier.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`service_tier` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
     if inner.store == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
-            "`store: true` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
         ));
     }
-    if inner.stream == Some(true) {
-        return Some(ErrorMessage::not_implemented_error(
-            "`stream: true` is not supported.",
-        ));
-    }
-    if inner.text.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`text` is not supported.",
-        ));
-    }
-    if inner.tool_choice.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`tool_choice` is not supported.",
-        ));
-    }
-    if inner.tools.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`tools` is not supported.",
-        ));
-    }
-    if inner.truncation.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`truncation` is not supported.",
-        ));
-    }
-    if inner.user.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`user` is not supported.",
-        ));
-    }
-
     None
 }
 
@@ -1241,9 +1744,9 @@ async fn list_models_openai(
     for model_name in models {
         data.push(ModelListing {
             id: model_name.clone(),
-            object: "object",
-            created,                        // Where would this come from?
-            owned_by: "nvidia".to_string(), // Get organization from config
+            object: "model", // Per OpenAI spec, this should be "model"
+            created,
+            owned_by: "nvidia".to_string(),
         });
     }
 
@@ -1263,8 +1766,8 @@ struct ListModelOpenAI {
 #[derive(Serialize)]
 struct ModelListing {
     id: String,
-    object: &'static str, // always "object"
-    created: u64,         //  Seconds since epoch
+    object: &'static str, // always "model" per OpenAI spec
+    created: u64,         // Seconds since epoch
     owned_by: String,
 }
 
@@ -1345,8 +1848,318 @@ pub fn responses_router(
     let router = Router::new()
         .route(&path, post(handler_responses))
         .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
+}
+
+async fn images(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateImageRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+
+    // Images are typically not streamed, so we default to non-streaming
+    let streaming = false;
+
+    // Get the model name from the request (diffusion model)
+    let model = request
+        .inner
+        .model
+        .as_ref()
+        .map(|m| match m {
+            dynamo_async_openai::types::ImageModel::DallE2 => "dall-e-2".to_string(),
+            dynamo_async_openai::types::ImageModel::DallE3 => "dall-e-3".to_string(),
+            dynamo_async_openai::types::ImageModel::Other(s) => s.clone(),
+        })
+        .unwrap_or_else(|| "diffusion".to_string());
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    // Get the image generation engine
+    let engine = state
+        .manager()
+        .get_images_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Images, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // Issue the generate call on the engine
+    // Note: This uses ServerStreamingEngine for internal routing/distribution,
+    // NOT for client-facing SSE streaming. The stream is immediately folded into
+    // a single response below.
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate images"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first response
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each item - drops http_queue_guard on first item
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Images are returned as a single response (non-streaming to client)
+    // Fold the internal stream into a single response
+    let response = NvImagesResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to fold images stream")
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Images endpoint
+/// If not path is provided, the default path is `/v1/images/generations`
+pub fn images_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/images/generations".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(images))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+async fn videos(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+
+    // Videos are typically not streamed, so we default to non-streaming
+    let streaming = false;
+
+    // Get the model name from the request (video generation model)
+    let model = request.model.clone();
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    // Get the video generation engine
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate videos"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Videos are typically returned as a single response (non-streaming)
+    // so we fold the stream into a single response
+    let response = NvVideosResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to fold videos stream")
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+/// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
+///
+/// The backend is expected to yield one [`NvVideosResponse`] per frame, carrying a
+/// JPEG-encoded frame as `data[0].b64_json`. This handler decodes each frame and
+/// writes it as an MJPEG multipart boundary so the client receives a live
+/// `multipart/x-mixed-replace` stream viewable directly in a browser `<img>` tag
+/// or via `ffplay http://.../v1/videos/stream`.
+async fn video_stream(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let model = request.model.clone();
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    let mut inflight = state
+        .metrics_clone()
+        .create_inflight_guard(&model, Endpoint::Videos, true);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to start video stream"))?;
+
+    // Capture the context to cancel the stream if the client disconnects.
+    let ctx = stream.context();
+
+    // Create connection monitor. The connection_handle is disarmed immediately because
+    // video_stream returns the streaming body directly (graceful handler exit).
+    // The stream_handle is armed below and lives inside the monitored stream so that
+    // a client disconnect (body drop) signals the engine context to cancel.
+    let (mut connection_handle, mut stream_handle) =
+        create_connection_monitor(ctx.clone(), Some(state.metrics_clone())).await;
+    connection_handle.disarm();
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Map each annotated NvVideosResponse to an MJPEG boundary chunk.
+    // The backend yields one response per frame with the JPEG in data[0].b64_json.
+    let mjpeg_stream = stream.filter_map(|annotated| async move {
+        let ann = match annotated.ok() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Video stream error: {e}");
+                return None;
+            }
+        };
+        let response = ann.data?;
+        let frame = response.data.into_iter().next()?;
+        let b64 = frame.b64_json?;
+        let jpeg_bytes = match base64::prelude::BASE64_STANDARD.decode(&b64) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to decode frame base64: {e}");
+                return None;
+            }
+        };
+        let header = format!(
+            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+            jpeg_bytes.len()
+        );
+        let mut chunk = Vec::with_capacity(header.len() + jpeg_bytes.len() + 2);
+        chunk.extend_from_slice(header.as_bytes());
+        chunk.extend_from_slice(&jpeg_bytes);
+        chunk.extend_from_slice(b"\r\n");
+        Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)))
+    });
+
+    // Arm the stream handle and monitor for client disconnects or context cancellation.
+    // inflight.mark_ok() is deferred until the stream ends naturally. If the stream is
+    // dropped early (client disconnect), the armed stream_handle signals the connection
+    // monitor, which cancels the engine context.
+    stream_handle.arm();
+    let monitored_stream = async_stream::stream! {
+        tokio::pin!(mjpeg_stream);
+        loop {
+            tokio::select! {
+                frame = mjpeg_stream.next() => {
+                    match frame {
+                        Some(item) => yield item,
+                        None => {
+                            // Stream ended naturally: mark inflight OK and disarm the handle.
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        }
+                    }
+                }
+                _ = ctx.stopped() => {
+                    tracing::trace!("Context stopped; breaking MJPEG stream");
+                    break;
+                }
+            }
+        }
+    };
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "multipart/x-mixed-replace; boundary=frame",
+        )
+        .body(Body::from_stream(monitored_stream))
+        .map(|r| r.into_response())
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!("Failed to build MJPEG response: {e}"))
+        })
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Videos endpoint
+/// If no path is provided, the default path is `/v1/videos`
+///
+/// Two routes are registered:
+/// - `POST /v1/videos`        — non-streaming, returns a single JSON response
+/// - `POST /v1/videos/stream` — MJPEG streaming via `multipart/x-mixed-replace`
+pub fn videos_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/videos".to_string());
+    let stream_path = format!("{}/stream", path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let stream_doc = RouteDoc::new(axum::http::Method::POST, &stream_path);
+    let router = Router::new()
+        .route(&path, post(videos))
+        .route(&stream_path, post(video_stream))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc, stream_doc], router)
 }
 
 #[cfg(test)]
@@ -1358,11 +2171,7 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_async_openai::types::responses::{
-        CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
-        Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
-        ToolChoiceMode, Truncation,
-    };
+    use dynamo_async_openai::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -1386,28 +2195,8 @@ mod tests {
         NvCreateResponse {
             inner: CreateResponse {
                 input: Input::Text("hello".into()),
-                model: "test-model".into(),
-                background: None,
-                include: None,
-                instructions: None,
-                max_output_tokens: None,
-                max_tool_calls: None,
-                metadata: None,
-                parallel_tool_calls: None,
-                previous_response_id: None,
-                prompt: None,
-                reasoning: None,
-                service_tier: None,
-                store: None,
-                stream: None,
-                text: None,
-                tool_choice: None,
-                tools: None,
-                truncation: None,
-                user: None,
-                temperature: None,
-                top_logprobs: None,
-                top_p: None,
+                model: Some("test-model".into()),
+                ..Default::default()
             },
             nvext: None,
         }
@@ -1471,25 +2260,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_input_is_text_only_accepts_text() {
-        let request = make_base_request();
-        let result = validate_response_input_is_text_only(&request);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_validate_input_is_text_only_rejects_items() {
-        let mut request = make_base_request();
-        request.inner.input = Input::Items(vec![InputItem::Message(InputMessage {
-            kind: Default::default(),
-            role: ResponseRole::User,
-            content: InputContent::TextInput("structured".into()),
-        })]);
-        let result = validate_response_input_is_text_only(&request);
-        assert!(result.is_some());
-    }
-
-    #[test]
     fn test_validate_unsupported_fields_accepts_clean_request() {
         let request = make_base_request();
         let result = validate_response_unsupported_fields(&request);
@@ -1510,15 +2280,6 @@ mod tests {
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
             (
-                "include",
-                Box::new(|r| r.include = Some(vec!["file_search_call.results".into()])),
-            ),
-            (
-                "instructions",
-                Box::new(|r| r.instructions = Some("System prompt".into())),
-            ),
-            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
-            (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
             ),
@@ -1532,34 +2293,7 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "reasoning",
-                Box::new(|r| r.reasoning = Some(Default::default())),
-            ),
-            (
-                "service_tier",
-                Box::new(|r| r.service_tier = Some(ServiceTier::Auto)),
-            ),
             ("store", Box::new(|r| r.store = Some(true))),
-            ("stream", Box::new(|r| r.stream = Some(true))),
-            (
-                "text",
-                Box::new(|r| {
-                    r.text = Some(TextConfig {
-                        format: TextResponseFormat::Text,
-                    })
-                }),
-            ),
-            (
-                "tool_choice",
-                Box::new(|r| r.tool_choice = Some(ToolChoice::Mode(ToolChoiceMode::Required))),
-            ),
-            ("tools", Box::new(|r| r.tools = Some(vec![]))),
-            (
-                "truncation",
-                Box::new(|r| r.truncation = Some(Truncation::Auto)),
-            ),
-            ("user", Box::new(|r| r.user = Some("user-id".into()))),
         ];
 
         for (field, set_field) in unsupported_cases {
@@ -1581,6 +2315,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1589,7 +2324,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "The 'messages' field cannot be empty. At least one message is required."
+                format!(
+                    "{VALIDATION_PREFIX}The 'messages' field cannot be empty. At least one message is required."
+                )
             );
         }
     }
@@ -1610,6 +2347,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1656,7 +2394,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Frequency penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1679,7 +2417,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Presence penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1702,7 +2440,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Temperature must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
 
@@ -1725,7 +2463,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_p must be between 0 and 1, got -3"
+                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
 
@@ -1750,7 +2488,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Repetition penalty must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
 
@@ -1773,7 +2511,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Logprobs must be between 0 and 5, got 6"
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
             );
         }
     }
@@ -1825,6 +2563,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
 
@@ -1834,7 +2573,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Frequency penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1854,6 +2593,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1862,7 +2602,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Presence penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1882,6 +2622,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1890,7 +2631,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Temperature must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
 
@@ -1910,6 +2651,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1918,7 +2660,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_p must be between 0 and 1, got -3"
+                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
 
@@ -1940,6 +2682,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1948,7 +2691,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Repetition penalty must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
 
@@ -1968,6 +2711,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1976,7 +2720,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_logprobs must be between 0 and 20, got 25"
+                format!("{VALIDATION_PREFIX}Top_logprobs must be between 0 and 20, got 25")
             );
         }
     }
@@ -1989,8 +2733,7 @@ mod tests {
             "model": "test-model",
             "add_special_tokens": true,
             "documents": ["doc1"],
-            "chat_template": "custom",
-            "chat_template_kwargs": {"key": "val"}
+            "chat_template": "custom"
         }"#;
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
@@ -2003,11 +2746,6 @@ mod tests {
         );
         assert!(request.unsupported_fields.contains_key("documents"));
         assert!(request.unsupported_fields.contains_key("chat_template"));
-        assert!(
-            request
-                .unsupported_fields
-                .contains_key("chat_template_kwargs")
-        );
 
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -2019,7 +2757,6 @@ mod tests {
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("documents"));
             assert!(msg.contains("chat_template"));
-            assert!(msg.contains("chat_template_kwargs"));
         }
     }
 
@@ -2053,5 +2790,927 @@ mod tests {
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("response_format"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_error_event() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // Create an error event
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["Backend service unavailable".to_string()]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        // Should return an error
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error_response.1.message, "Backend service unavailable");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_json_error_and_code() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // Create an error event with JSON payload containing error code in comment
+        let error_json =
+            r#"{"message":"prompt > max_seq_len","type":"Internal Server Error","code":500}"#;
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error_json.to_string()]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        // Should return an error with correct status code extracted from JSON
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error_response.1.message, "prompt > max_seq_len");
+            assert_eq!(error_response.1.code, 500);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_normal_event() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+        use futures::stream::{self, StreamExt};
+
+        // Create a normal data event
+        let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: Some(CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices: vec![],
+                created: 0,
+                model: "test-model".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                service_tier: None,
+                usage: None,
+                nvext: None,
+            }),
+            id: Some("msg-1".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![normal_event.clone()]);
+        let result = check_for_backend_error(test_stream).await;
+
+        // Should return Ok with the stream
+        assert!(result.is_ok());
+        let mut returned_stream = result.unwrap();
+
+        // Verify we can read the event back from the stream
+        let first = returned_stream.next().await;
+        assert!(first.is_some());
+        let first_event = first.unwrap();
+        assert_eq!(first_event.id, Some("msg-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_empty_stream() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream::{self, StreamExt};
+
+        // Create an empty stream
+        let test_stream =
+            stream::iter::<Vec<Annotated<NvCreateChatCompletionStreamResponse>>>(vec![]);
+        let result = check_for_backend_error(test_stream).await;
+
+        // Should return Ok with an empty stream
+        assert!(result.is_ok());
+        let mut returned_stream = result.unwrap();
+
+        // Verify stream is empty
+        let first = returned_stream.next().await;
+        assert!(first.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_comment_but_no_event_type() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // Create an event with comment but no event type and no data (error indicator)
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: None,
+            comment: Some(vec!["Connection timeout".to_string()]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        // Should return an error based on is_backend_error_event logic
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error_response.1.message, "Connection timeout");
+        }
+    }
+
+    #[test]
+    fn test_classify_error_for_metrics_validation() {
+        // 400 with "Validation:" prefix to validation
+        let error_type =
+            classify_error_for_metrics(StatusCode::BAD_REQUEST, "Validation: Invalid parameter");
+        assert_eq!(error_type, ErrorType::Validation);
+
+        // 400 WITHOUT "Validation:" to internal (fallback)
+        let error_type = classify_error_for_metrics(StatusCode::BAD_REQUEST, "Some other error");
+        assert_eq!(error_type, ErrorType::Internal);
+    }
+
+    #[test]
+    fn test_classify_error_for_metrics_status_codes() {
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::NOT_FOUND, "Model not found"),
+            ErrorType::NotFound
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::NOT_IMPLEMENTED, "Feature not supported"),
+            ErrorType::NotImplemented
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
+            ErrorType::Overload
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
+            ErrorType::Overload
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::INTERNAL_SERVER_ERROR, "Panic"),
+            ErrorType::Internal
+        );
+    }
+
+    #[test]
+    fn test_classify_error_for_metrics_client_errors() {
+        // Other 4xx errors should be classified as validation
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::UNAUTHORIZED, "Unauthorized"),
+            ErrorType::Validation
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::FORBIDDEN, "Forbidden"),
+            ErrorType::Validation
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_validation() {
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Validation: bad input".to_string(),
+        });
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_not_found() {
+        let response = ErrorMessage::model_not_found();
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotFound
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_internal() {
+        let response = ErrorMessage::internal_server_error("Something went wrong");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Internal
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_not_implemented() {
+        let response = ErrorMessage::not_implemented_error("Feature not available");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotImplemented
+        );
+    }
+
+    // ── streaming dispatch tests ──────────────────────────────────────
+
+    use std::collections::{HashMap, HashSet};
+
+    use dynamo_async_openai::types::{
+        ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
+        FunctionCallStream,
+    };
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    /// Extract the JSON data payload from an SSE Event's Debug output.
+    ///
+    /// `axum::response::sse::Event` doesn't expose its fields publicly and doesn't
+    /// implement `Display` (the wire format is only produced during response
+    /// serialization). The `Debug` representation includes the event name and data
+    /// string, so we parse it here.
+    ///
+    /// WARNING: Coupled to axum's internal Debug format for `Event`. If an axum
+    /// upgrade changes the Debug output, these tests will break. Preferred over
+    /// spinning up an actual SSE stream for unit test simplicity.
+    fn extract_sse_data_json(event: &axum::response::sse::Event) -> serde_json::Value {
+        // The Event Debug format is:
+        //   Event { buffer: b"event: <name>\ndata: <json>\n", flags: ... }
+        // We extract the JSON after "data: " and unescape the byte-string encoding.
+        let debug = format!("{:?}", event);
+
+        let data_marker = "data: ";
+        let after_data = debug
+            .find(data_marker)
+            .map(|p| p + data_marker.len())
+            .expect("no 'data: ' in Event debug output");
+
+        let rest = &debug[after_data..];
+        let json_start = rest.find('{').expect("no JSON object after data:");
+
+        let mut depth = 0i32;
+        let mut json_end = 0;
+        for (i, b) in rest[json_start..].bytes().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        json_end = json_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let raw = &rest[json_start..json_end];
+
+        // Unescape byte-string Debug format:
+        // \\\\\" -> PLACEHOLDER (nested escaped quotes in JSON string values)
+        // \\\"   -> "           (structural quotes)
+        // Then restore: PLACEHOLDER -> \"
+        let s = raw
+            .replace("\\\\\\\"", "\x00NESTED\x00")
+            .replace("\\\"", "\"")
+            .replace("\x00NESTED\x00", "\\\"");
+
+        // Handle \\xHH byte sequences (non-ASCII in Debug byte-string format)
+        let mut result = Vec::new();
+        let sbytes = s.as_bytes();
+        let mut idx = 0;
+        while idx < sbytes.len() {
+            if idx + 3 < sbytes.len()
+                && sbytes[idx] == b'\\'
+                && sbytes[idx + 1] == b'x'
+                && let Ok(v) = u8::from_str_radix(
+                    std::str::from_utf8(&sbytes[idx + 2..idx + 4]).unwrap_or(""),
+                    16,
+                )
+            {
+                result.push(v);
+                idx += 4;
+                continue;
+            }
+            result.push(sbytes[idx]);
+            idx += 1;
+        }
+
+        let final_str = String::from_utf8_lossy(&result);
+        serde_json::from_str(&final_str).unwrap_or_else(|e| {
+            panic!(
+                "failed to parse JSON from Event: {e}\nraw: {raw}\nunescaped: {s}\nfinal: {final_str}"
+            )
+        })
+    }
+
+    /// Assert that an SSE Event has the expected event type name.
+    /// Uses "event: <name>\n" pattern to avoid substring false-matches.
+    fn assert_event_type(event: &axum::response::sse::Event, expected: &str) {
+        let debug = format!("{:?}", event);
+        let pattern = format!("event: {expected}\\n");
+        assert!(
+            debug.contains(&pattern),
+            "expected event type '{expected}' not found in: {debug}"
+        );
+    }
+
+    /// Build a minimal Annotated<Response> with the given choices.
+    fn make_stream_response(
+        choices: Vec<ChatChoiceStream>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let response = CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+            nvext: None,
+        };
+        Annotated {
+            id: Some("test-id".to_string()),
+            data: Some(response),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    fn make_choice_with_reasoning(
+        index: u32,
+        reasoning: Option<&str>,
+        finish: Option<FinishReason>,
+    ) -> ChatChoiceStream {
+        #[allow(deprecated)]
+        ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: None,
+                role: None,
+                refusal: None,
+                reasoning_content: reasoning.map(|s| s.to_string()),
+            },
+            finish_reason: finish,
+            stop_reason: None,
+            logprobs: None,
+        }
+    }
+
+    fn make_choice_with_tool_call(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ChatChoiceStream {
+        let tool_call = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: id.map(|s| s.to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: name.map(|s| s.to_string()),
+                arguments: arguments.map(|s| s.to_string()),
+            }),
+        };
+        #[allow(deprecated)]
+        ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![tool_call]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        }
+    }
+
+    // ── streaming_tool_dispatch_events tests ──
+
+    #[test]
+    fn test_tool_dispatch_emits_event_for_complete_tool_call() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_123"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 1);
+
+        let event = events[0].as_ref().unwrap();
+        assert_event_type(event, "tool_call_dispatch");
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["choice_index"], 0);
+        assert_eq!(json["tool_call"]["id"], "call_123");
+        assert_eq!(json["tool_call"]["function"]["name"], "get_weather");
+        assert_eq!(
+            json["tool_call"]["function"]["arguments"],
+            r#"{"city":"Paris"}"#
+        );
+    }
+
+    #[test]
+    fn test_tool_dispatch_skips_incomplete_tool_call_no_id() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            None, // no id
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "should not dispatch without id");
+    }
+
+    #[test]
+    fn test_tool_dispatch_skips_incomplete_tool_call_no_name() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_123"),
+            None, // no name
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "should not dispatch without name");
+    }
+
+    #[test]
+    fn test_tool_dispatch_skips_incomplete_tool_call_no_arguments() {
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_123"),
+            Some("get_weather"),
+            None, // no arguments
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "should not dispatch without arguments");
+    }
+
+    #[test]
+    fn test_tool_dispatch_multiple_tool_calls() {
+        let tc1 = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_1".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+            }),
+        };
+        let tc2 = ChatCompletionMessageToolCallChunk {
+            index: 1,
+            id: Some("call_2".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_time".to_string()),
+                arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
+            }),
+        };
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![tc1, tc2]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 2, "should dispatch both tool calls");
+
+        // Verify each dispatched event has the correct tool call data
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["tool_call"]["id"], "call_1");
+        assert_eq!(json0["tool_call"]["function"]["name"], "get_weather");
+
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["tool_call"]["id"], "call_2");
+        assert_eq!(json1["tool_call"]["function"]["name"], "get_time");
+    }
+
+    #[test]
+    fn test_tool_dispatch_no_data() {
+        let response: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            id: Some("test".to_string()),
+            data: None,
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_tool_dispatch_empty_choices() {
+        let response = make_stream_response(vec![]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_tool_dispatch_mixed_complete_and_incomplete() {
+        // One complete tool call and one incomplete (missing arguments = streaming delta).
+        // Only the complete one should dispatch.
+        let complete = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_complete".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+            }),
+        };
+        let incomplete = ChatCompletionMessageToolCallChunk {
+            index: 1,
+            id: Some("call_partial".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("search".to_string()),
+                arguments: None, // still streaming
+            }),
+        };
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![complete, incomplete]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(
+            events.len(),
+            1,
+            "only the complete tool call should dispatch"
+        );
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["tool_call"]["id"], "call_complete");
+    }
+
+    #[test]
+    fn test_tool_dispatch_function_none() {
+        // Tool call chunk with function: None — should not dispatch and should not panic.
+        let tool_call = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_999".to_string()),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: None,
+        };
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![tool_call]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert!(events.is_empty(), "function: None should not dispatch");
+    }
+
+    #[test]
+    fn test_tool_dispatch_empty_arguments_still_dispatches() {
+        // arguments: Some("") is considered complete — intentional.
+        // Some backends emit empty-string arguments for parameterless tools.
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_empty"),
+            Some("no_params_tool"),
+            Some(""),
+        )]);
+
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 1, "empty arguments should still dispatch");
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["tool_call"]["id"], "call_empty");
+        assert_eq!(json["tool_call"]["function"]["name"], "no_params_tool");
+        assert_eq!(json["tool_call"]["function"]["arguments"], "");
+    }
+
+    #[test]
+    fn test_tool_dispatch_n_greater_than_1_includes_choice_index() {
+        // Regression test: with n > 1, each choice should carry its own choice_index
+        // so clients can disambiguate which choice the tool call belongs to.
+        let choice_0 = make_choice_with_tool_call(
+            0,
+            Some("call_a"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        );
+        let choice_1 = make_choice_with_tool_call(
+            1,
+            Some("call_b"),
+            Some("get_time"),
+            Some(r#"{"tz":"UTC"}"#),
+        );
+
+        let response = make_stream_response(vec![choice_0, choice_1]);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(events.len(), 2, "should dispatch from both choices");
+
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["choice_index"], 0);
+        assert_eq!(json0["tool_call"]["id"], "call_a");
+
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["choice_index"], 1);
+        assert_eq!(json1["tool_call"]["id"], "call_b");
+    }
+
+    #[test]
+    fn test_tool_dispatch_dedup_skips_already_dispatched_id() {
+        // Simulate a backend that sends the same complete tool call in two consecutive chunks.
+        // The HashSet should prevent the second dispatch.
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_dup"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let mut dispatched = HashSet::new();
+
+        // First call — should dispatch
+        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        assert_eq!(events.len(), 1);
+
+        // Second call with same response — should be deduped
+        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        assert!(events.is_empty(), "duplicate id should not dispatch twice");
+    }
+
+    // ── accumulate_reasoning_dispatch tests ──
+
+    #[test]
+    fn test_reasoning_dispatch_accumulates_and_emits_once() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk 1: reasoning token "Let me"
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(0, Some("Let me"), None)]);
+        let events = accumulate_reasoning_dispatch(&r1, &mut buffers);
+        assert!(
+            events.is_empty(),
+            "should not emit yet — still accumulating"
+        );
+        assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Let me"));
+
+        // Chunk 2: reasoning token " think"
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(0, Some(" think"), None)]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert!(
+            events.is_empty(),
+            "should not emit yet — still accumulating"
+        );
+        assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Let me think"));
+
+        // Chunk 3: reasoning ends (None), meaning normal content follows
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        assert_eq!(events.len(), 1, "should emit single reasoning_dispatch");
+
+        let event = events[0].as_ref().unwrap();
+        assert_event_type(event, "reasoning_dispatch");
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["reasoning_content"], "Let me think");
+        assert_eq!(json["index"], 0);
+
+        // Buffer for choice 0 should be cleared (removed or empty)
+        assert!(
+            buffers.get(&0).is_none_or(|s| s.is_empty()),
+            "buffer should be cleared after emit"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_flushes_on_finish_reason() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk 1: reasoning token
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("Thinking..."),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        // Chunk 2: finish_reason=length while still in reasoning (max_tokens hit)
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some(" more"),
+            Some(FinishReason::Length),
+        )]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1, "should flush on finish_reason");
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Thinking... more");
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_flushes_on_stop() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk 1: reasoning token
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("Analysis complete"),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        // Chunk 2: finish_reason=stop while still in reasoning
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("."),
+            Some(FinishReason::Stop),
+        )]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1, "should flush on FinishReason::Stop");
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Analysis complete.");
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_no_reasoning_no_event() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk with no reasoning content at all
+        let r = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r, &mut buffers);
+        assert!(events.is_empty(), "no reasoning content = no event");
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_empty_string_not_accumulated() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Chunk with empty string reasoning (treated as no-reasoning)
+        let r = make_stream_response(vec![make_choice_with_reasoning(0, Some(""), None)]);
+        let events = accumulate_reasoning_dispatch(&r, &mut buffers);
+        assert!(events.is_empty());
+        assert!(
+            buffers.get(&0).is_none_or(|s| s.is_empty()),
+            "empty string should not accumulate"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_no_data() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+        let response: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            id: Some("test".to_string()),
+            data: None,
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let events = accumulate_reasoning_dispatch(&response, &mut buffers);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_empty_choices() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+        let response = make_stream_response(vec![]);
+        let events = accumulate_reasoning_dispatch(&response, &mut buffers);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_multi_choice_independent_buffers() {
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // Both choices emit reasoning in same chunk
+        let r1 = make_stream_response(vec![
+            make_choice_with_reasoning(0, Some("Thinking A"), None),
+            make_choice_with_reasoning(1, Some("Thinking B"), None),
+        ]);
+        let events = accumulate_reasoning_dispatch(&r1, &mut buffers);
+        assert!(events.is_empty(), "both still accumulating");
+        assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Thinking A"));
+        assert_eq!(buffers.get(&1).map(|s| s.as_str()), Some("Thinking B"));
+
+        // Choice 0 stops reasoning, choice 1 continues
+        let r2 = make_stream_response(vec![
+            make_choice_with_reasoning(0, None, None),
+            make_choice_with_reasoning(1, Some(" more"), None),
+        ]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1, "only choice 0 should emit");
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Thinking A");
+        assert_eq!(json["index"], 0);
+
+        // Choice 1 stops reasoning
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(1, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        assert_eq!(events.len(), 1, "choice 1 should emit");
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "Thinking B more");
+        assert_eq!(json["index"], 1);
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_multiple_blocks() {
+        // Reasoning -> emit -> more reasoning -> emit again.
+        // Verifies that after the buffer is cleared, a new reasoning block
+        // accumulates independently.
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        // First reasoning block
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(0, Some("First"), None)]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        assert_eq!(events.len(), 1);
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "First");
+
+        // Second reasoning block — buffer was cleared, should accumulate fresh
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(0, Some("Second"), None)]);
+        accumulate_reasoning_dispatch(&r3, &mut buffers);
+
+        let r4 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r4, &mut buffers);
+        assert_eq!(events.len(), 1);
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(
+            json["reasoning_content"], "Second",
+            "second emit should only contain second block's content"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_unicode() {
+        // Verify that CJK characters and emoji survive the JSON roundtrip.
+        let mut buffers: HashMap<u32, String> = HashMap::new();
+
+        let r1 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some("让我想想 🤔"),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r1, &mut buffers);
+
+        let r2 = make_stream_response(vec![make_choice_with_reasoning(
+            0,
+            Some(" 分析完成 ✅"),
+            None,
+        )]);
+        accumulate_reasoning_dispatch(&r2, &mut buffers);
+
+        let r3 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
+        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        assert_eq!(events.len(), 1);
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["reasoning_content"], "让我想想 🤔 分析完成 ✅");
     }
 }

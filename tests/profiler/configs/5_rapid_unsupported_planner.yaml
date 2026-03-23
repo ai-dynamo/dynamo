@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 5: AIC unsupported model, rapid, with planner
+# Should raise error if throughput scaling is enabled (AIC unsupported).
+# This config uses load-based scaling only to test the non-error path.
+model: "Qwen/Qwen3-32B"
+backend: vllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: l40s
+  totalGpus: 4
+  numGpusPerNode: 4
+sla:
+  itl: 50.0
+features:
+  planner:
+    pre_deployment_sweeping_mode: rapid
+    enable_throughput_scaling: false
+    enable_load_scaling: true
+    mode: disagg
+    backend: vllm

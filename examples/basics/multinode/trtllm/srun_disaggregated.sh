@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # This is one of the only variables that must be set currently, most of the rest may
@@ -17,11 +17,11 @@ NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
 NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-4}
 NUM_PREFILL_WORKERS=${NUM_PREFILL_WORKERS:-1}
-PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_prefill.yaml}"
+PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_prefill.yaml}"
 
 NUM_DECODE_NODES=${NUM_DECODE_NODES:-4}
 NUM_DECODE_WORKERS=${NUM_DECODE_WORKERS:-1}
-DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_decode.yaml}"
+DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_decode.yaml}"
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
@@ -44,6 +44,7 @@ fi
 # the stdout/stderr to files.
 echo "Launching frontend services in background."
 srun \
+  --mpi pmix \
   --overlap \
   --container-image "${IMAGE}" \
   --container-mounts "${MOUNTS}" \

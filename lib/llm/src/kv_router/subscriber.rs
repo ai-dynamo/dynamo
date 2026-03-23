@@ -1,510 +1,160 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Background processes for the KV Router including event consumption and snapshot uploads.
-
-use std::{collections::HashSet, time::Duration};
-
+use crate::kv_router::{Indexer, worker_query::WorkerQueryClient};
 use anyhow::Result;
+use dynamo_kv_router::{
+    config::KvRouterConfig,
+    protocols::{KV_EVENT_SUBJECT, RouterEvent},
+};
 use dynamo_runtime::{
-    component::Component,
-    discovery::DiscoveryQuery,
-    prelude::*,
-    traits::events::EventPublisher,
-    transports::{
-        etcd::{Client as EtcdClient, WatchEvent},
-        nats::{NatsQueue, Slug},
-    },
-};
-use futures::StreamExt;
-use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-
-use crate::{
-    discovery::KV_ROUTERS_ROOT_PATH,
-    kv_router::{
-        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-        indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
-        protocols::WorkerId,
-    },
+    component::Component, discovery::EventTransportKind, prelude::*,
+    transports::event_plane::EventSubscriber,
 };
 
-/// Delay between snapshot reads to verify stability
-const SNAPSHOT_STABILITY_DELAY: Duration = Duration::from_millis(100);
-const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
-
-const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
-const CHECK_INTERVAL_JITTER_MS: i64 = 100;
-
-/// Download a stable snapshot from object store and send events to the indexer.
-/// Retries until two consecutive reads match or max attempts is reached.
-async fn download_stable_snapshot(
-    nats_client: &dynamo_runtime::transports::nats::Client,
-    bucket_name: &str,
-    kv_events_tx: &mpsc::Sender<RouterEvent>,
-) -> Result<()> {
-    let url = url::Url::parse(&format!(
-        "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
-        nats_client.addr()
-    ))?;
-
-    // Try to get initial snapshot
-    let Ok(mut prev_events) = nats_client
-        .object_store_download_data::<Vec<RouterEvent>>(&url)
-        .await
-    else {
-        tracing::debug!(
-            "Failed to download snapshots. This is normal for freshly started Router replicas."
-        );
-        return Ok(());
-    };
-
-    // Keep trying until we get two consecutive stable reads
-    for attempt in 1..=MAX_SNAPSHOT_STABILITY_ATTEMPTS {
-        tokio::time::sleep(SNAPSHOT_STABILITY_DELAY).await;
-
-        let curr_events = match nats_client
-            .object_store_download_data::<Vec<RouterEvent>>(&url)
-            .await
-        {
-            Ok(events) => events,
-            Err(e) => {
-                tracing::warn!(
-                    "Snapshot read failed on attempt {attempt}, using previous snapshot with {} events: {e:?}",
-                    prev_events.len()
-                );
-                break;
-            }
-        };
-
-        // Check if snapshot is stable (two consecutive reads match)
-        if prev_events == curr_events {
-            tracing::info!(
-                "Successfully downloaded stable snapshot with {} events from object store (stable after {attempt} attempts)",
-                curr_events.len()
-            );
-            prev_events = curr_events;
-            break;
-        }
-
-        tracing::debug!(
-            "Snapshot changed between reads on attempt {attempt} ({} -> {} events), retrying",
-            prev_events.len(),
-            curr_events.len()
-        );
-        prev_events = curr_events;
-
-        if attempt == MAX_SNAPSHOT_STABILITY_ATTEMPTS {
-            tracing::warn!(
-                "Max stability attempts reached, using latest snapshot with {} events",
-                prev_events.len()
-            );
-        }
-    }
-
-    // Send all events to the indexer
-    for event in prev_events {
-        if let Err(e) = kv_events_tx.send(event).await {
-            tracing::warn!("Failed to send initial event to indexer: {e:?}");
-        }
-    }
-    tracing::info!("Successfully sent all initial events to indexer");
-
-    Ok(())
-}
-
-/// Resources required for snapshot operations
-#[derive(Clone)]
-struct SnapshotResources {
-    nats_client: dynamo_runtime::transports::nats::Client,
-    bucket_name: String,
-    instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
-    get_workers_tx: mpsc::Sender<GetWorkersRequest>,
-    snapshot_tx: mpsc::Sender<DumpRequest>,
-}
-
-impl SnapshotResources {
-    /// Perform snapshot upload and purge operations
-    async fn purge_then_snapshot(
-        &self,
-        nats_queue: &mut NatsQueue,
-        remove_worker_tx: &mpsc::Sender<WorkerId>,
-    ) -> anyhow::Result<()> {
-        // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
-        // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
-        // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
-        tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
-        let start_time = std::time::Instant::now();
-
-        // Clean up stale workers before snapshot
-        // Get current worker IDs from instances_rx
-        let current_instances = self.instances_rx.borrow().clone();
-        let current_worker_ids: std::collections::HashSet<u64> = current_instances
-            .iter()
-            .map(|instance| instance.instance_id)
-            .collect();
-
-        // Get worker IDs from the indexer
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let get_workers_req = GetWorkersRequest { resp: resp_tx };
-
-        if let Err(e) = self.get_workers_tx.send(get_workers_req).await {
-            tracing::warn!("Failed to send get_workers request during snapshot: {e:?}");
-        } else {
-            match resp_rx.await {
-                Ok(indexer_worker_ids) => {
-                    // Find workers in indexer but not in current instances
-                    for worker_id in indexer_worker_ids {
-                        if !current_worker_ids.contains(&worker_id) {
-                            tracing::info!(
-                                "Removing stale worker {worker_id} from indexer during snapshot"
-                            );
-                            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                                tracing::warn!(
-                                    "Failed to send remove_worker for stale worker {worker_id}: {e:?}"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to receive worker IDs from indexer: {e:?}");
-                }
-            }
-        }
-
-        // First, purge acknowledged messages from the stream
-        nats_queue.purge_acknowledged().await?;
-
-        // Now request a snapshot from the indexer (which reflects the post-purge state)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let dump_req = DumpRequest { resp: resp_tx };
-
-        self.snapshot_tx
-            .send(dump_req)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send dump request: {e:?}"))?;
-
-        // Wait for the dump response
-        let events = resp_rx
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to receive dump response: {e:?}"))?;
-
-        // Upload the snapshot to NATS object store
-        let url = url::Url::parse(&format!(
-            "nats://{}/{}/{RADIX_STATE_FILE}",
-            self.nats_client.addr(),
-            self.bucket_name
-        ))?;
-
-        self.nats_client
-            .object_store_upload_data(&events, &url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
-
-        tracing::info!(
-            "Successfully performed snapshot of radix tree with {} events to bucket {} in {}ms",
-            events.len(),
-            self.bucket_name,
-            start_time.elapsed().as_millis()
-        );
-
-        Ok(())
-    }
-}
-
-/// Start a unified background task for event consumption and optional snapshot management
-#[allow(clippy::too_many_arguments)]
-pub async fn start_kv_router_background(
+/// Start a simplified background task for event consumption using the event plane.
+///
+/// This is used when local indexer mode is enabled. Unlike `start_kv_router_background`,
+/// this function:
+/// - Uses the event plane (NATS Core or ZMQ) instead of JetStream
+/// - Does not support snapshots, purging, or durable consumers
+/// - On worker Added: dumps worker's local indexer into router
+/// - On worker Removed: removes worker from router indexer
+///
+/// This is appropriate when workers have local indexers enabled.
+async fn start_kv_router_background_event_plane(
     component: Component,
-    consumer_uuid: String,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    remove_worker_tx: mpsc::Sender<WorkerId>,
-    maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
-    maybe_snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
-    cancellation_token: CancellationToken,
-    router_snapshot_threshold: Option<u32>,
-    router_reset_states: bool,
+    indexer: Indexer,
+    transport_kind: EventTransportKind,
 ) -> Result<()> {
-    // Set up NATS connections
-    let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
-        .to_string()
-        .replace("_", "-");
-    let nats_server =
-        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let cancellation_token = component.drt().primary_token();
 
-    // Create NatsQueue for event consumption
-    let mut nats_queue = NatsQueue::new_with_consumer(
-        stream_name.clone(),
-        nats_server.clone(),
-        std::time::Duration::from_secs(60), // 1 minute timeout
-        consumer_uuid.clone(),
+    // Subscribe to KV events BEFORE spawning the discovery/recovery loop.
+    // This ensures no events are lost between the initial dump fetch and the
+    // subscription becoming active — the tree state at fetch time is guaranteed
+    // to be a subset of what the subscription will deliver.
+    let mut subscriber =
+        EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
+            .await?
+            .typed::<RouterEvent>();
+
+    // Brief delay to let the subscription fully establish with the NATS server
+    // before recovery fetches the initial dump from workers.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
+    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
+    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
+    let kv_event_subject = format!(
+        "namespace.{}.component.{}.{}",
+        component.namespace().name(),
+        component.name(),
+        KV_EVENT_SUBJECT
     );
-    nats_queue.connect_with_reset(router_reset_states).await?;
 
-    // Always create NATS client (needed for both reset and snapshots)
-    let client_options = dynamo_runtime::transports::nats::Client::builder()
-        .server(&nats_server)
-        .build()?;
-    let nats_client = client_options.connect().await?;
-
-    // Get etcd client (needed for both snapshots and router watching)
-    let etcd_client = component
-        .drt()
-        .etcd_client()
-        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
-
-    // Create bucket name for snapshots/state
-    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
-        .to_string()
-        .replace("_", "-");
-
-    // Handle initial state based on router_reset_states flag
-    if !router_reset_states {
-        // Try to download initial state from object store with stability check
-        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
-    } else {
-        // Delete the bucket to reset state
-        tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
-        if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
-            tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
+    match transport_kind {
+        EventTransportKind::Nats => {
+            tracing::info!(
+                subject = %kv_event_subject,
+                "KV Router using NATS Core subscription (local_indexer mode)"
+            );
+        }
+        EventTransportKind::Zmq => {
+            tracing::info!(
+                subject = %kv_event_subject,
+                "KV Router using ZMQ event plane subscription (local_indexer mode)"
+            );
         }
     }
-
-    // Cleanup orphaned consumers on startup
-    cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
-
-    // Watch for router deletions to clean up orphaned consumers
-    let (_prefix_str, mut router_replicas_rx) = etcd_client
-        .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
-        .await?
-        .dissolve();
-
-    // Get the generate endpoint and watch for instance deletions
-    let generate_endpoint = component.endpoint("generate");
-    let discovery_client = component.drt().discovery();
-    let discovery_key = DiscoveryQuery::Endpoint {
-        namespace: component.namespace().name().to_string(),
-        component: component.name().to_string(),
-        endpoint: "generate".to_string(),
-    };
-    let mut instance_event_stream = discovery_client
-        .list_and_watch(discovery_key, Some(cancellation_token.clone()))
-        .await?;
-
-    // Get instances_rx for tracking current workers
-    let client = generate_endpoint.client().await?;
-    let instances_rx = match client.instance_source.as_ref() {
-        dynamo_runtime::component::InstanceSource::Dynamic(rx) => rx.clone(),
-        dynamo_runtime::component::InstanceSource::Static => {
-            anyhow::bail!("Expected dynamic instance source for KV routing");
-        }
-    };
-
-    // Only set up snapshot-related resources if snapshot_tx, get_workers_tx, and threshold are provided
-    let snapshot_resources = if let (Some(get_workers_tx), Some(snapshot_tx), Some(_)) = (
-        maybe_get_workers_tx,
-        maybe_snapshot_tx,
-        router_snapshot_threshold,
-    ) {
-        Some(SnapshotResources {
-            nats_client,
-            bucket_name,
-            instances_rx,
-            get_workers_tx,
-            snapshot_tx,
-        })
-    } else {
-        None
-    };
 
     tokio::spawn(async move {
-        // Create interval with jitter
-        let jitter_ms =
-            rand::rng().random_range(-CHECK_INTERVAL_JITTER_MS..=CHECK_INTERVAL_JITTER_MS);
-        let interval_duration = Duration::from_millis(
-            (CHECK_INTERVAL_BASE.as_millis() as i64 + jitter_ms).max(1) as u64,
-        );
-        let mut check_interval = tokio::time::interval(interval_duration);
-        check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
         loop {
             tokio::select! {
                 biased;
 
                 _ = cancellation_token.cancelled() => {
-                    tracing::debug!("KV Router background task received cancellation signal");
-                    // Clean up the queue and remove the durable consumer
-                    // TODO: durable consumer cannot cleanup if ungraceful shutdown (crash)
-                    if let Err(e) = nats_queue.shutdown(None).await {
-                        tracing::warn!("Failed to shutdown NatsQueue: {e}");
-                    }
+                    tracing::debug!("KV Router event plane background task received cancellation signal");
                     break;
                 }
 
-                // Handle generate endpoint instance deletion events
-                Some(discovery_event_result) = instance_event_stream.next() => {
-                    let Ok(discovery_event) = discovery_event_result else {
-                        continue;
+                // Handle event consumption from event plane subscription
+                Some(result) = subscriber.next() => {
+                    let (envelope, event) = match result {
+                        Ok((envelope, event)) => (envelope, event),
+                        Err(e) => {
+                            tracing::warn!("Failed to receive RouterEvent from event plane: {e:?}");
+                            continue;
+                        }
                     };
 
-                    let dynamo_runtime::discovery::DiscoveryEvent::Removed(worker_id) = discovery_event else {
-                        continue;
-                    };
-
-                    tracing::warn!(
-                        worker_id = worker_id,
-                        "DISCOVERY: Generate endpoint instance removed, removing worker"
+                    tracing::trace!(
+                        "Received event from publisher {} (seq {})",
+                        envelope.publisher_id,
+                        envelope.sequence
                     );
 
-                    if let Err(e) = remove_worker_tx.send(worker_id).await {
-                        tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
-                    }
-                }
-
-                // Handle event consumption
-                result = nats_queue.dequeue_task(None) => {
-                    match result {
-                        Ok(Some(bytes)) => {
-                            let event: RouterEvent = match serde_json::from_slice(&bytes) {
-                                Ok(event) => event,
-                                Err(e) => {
-                                    tracing::warn!("Failed to deserialize RouterEvent: {e:?}");
-                                    continue;
-                                }
-                            };
-
-                            // Forward the RouterEvent to the indexer
-                            if let Err(e) = kv_events_tx.send(event).await {
-                                tracing::warn!(
-                                    "failed to send kv event to indexer; shutting down: {e:?}"
-                                );
-                                break;
-                            }
-                        },
-                        Ok(None) => {
-                            tracing::trace!("Dequeue timeout, continuing");
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to dequeue task: {e:?}");
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-
-                // Handle periodic stream checking and purging (only if snapshot_resources is provided)
-                _ = check_interval.tick() => {
-                    let Some(resources) = snapshot_resources.as_ref() else {
-                        continue;
-                    };
-
-                    // Check total messages in the stream
-                    let Ok(message_count) = nats_queue.get_stream_messages().await else {
-                        tracing::warn!("Failed to get stream message count");
-                        continue;
-                    };
-
-                    let threshold = router_snapshot_threshold.unwrap_or(u32::MAX) as u64;
-
-                    if message_count <= threshold {
-                        continue;
-                    }
-
-                    tracing::info!("Stream has {message_count} messages (threshold: {threshold}), performing purge and snapshot");
-
-                    match resources.purge_then_snapshot(
-                        &mut nats_queue,
-                        &remove_worker_tx,
-                    ).await {
-                        Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
-                        Err(e) => tracing::debug!("Could not perform purge and snapshot: {e:?}"),
-                    }
-                }
-
-                // Handle router deletion events
-                Some(event) = router_replicas_rx.recv() => {
-                    let WatchEvent::Delete(kv) = event else {
-                        // We only care about deletions for cleaning up consumers
-                        continue;
-                    };
-
-                    let key = String::from_utf8_lossy(kv.key());
-                    tracing::info!("Detected router replica deletion: {key}");
-
-                    // Only process deletions for routers on the same component
-                    if !key.contains(component.path().as_str()) {
-                        tracing::trace!(
-                            "Skipping router deletion from different component (key: {key}, subscriber component: {})",
-                            component.path()
-                        );
-                        continue;
-                    }
-
-                    // Extract the router UUID from the key
-                    let Some(router_uuid) = key.split('/').next_back() else {
-                        tracing::warn!("Could not extract UUID from router key: {key}");
-                        continue;
-                    };
-
-                    // The consumer UUID is the router UUID
-                    let consumer_to_delete = router_uuid.to_string();
-
-                    tracing::info!("Attempting to delete orphaned consumer: {consumer_to_delete}");
-
-                    // Delete the consumer (allow race condition if multiple routers try to delete)
-                    if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
-                        tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
-                    } else {
-                        tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
-                    }
+                    tracing::trace!(
+                        "Forwarding live event to recovery coordinator for worker {} dp_rank {} event_id {}",
+                        event.worker_id,
+                        event.event.dp_rank,
+                        event.event.event_id
+                    );
+                    worker_query_client.handle_live_event(event).await;
                 }
             }
         }
 
-        // Clean up the queue and remove the durable consumer
-        if let Err(e) = nats_queue.shutdown(None).await {
-            tracing::warn!("Failed to shutdown NatsQueue: {e}");
-        }
+        tracing::debug!("KV Router event plane background task exiting");
     });
 
     Ok(())
 }
 
-/// Cleanup orphaned NATS consumers that no longer have corresponding etcd router entries
-async fn cleanup_orphaned_consumers(
-    nats_queue: &mut NatsQueue,
-    etcd_client: &EtcdClient,
-    component: &Component,
-    consumer_uuid: &str,
-) {
-    let Ok(consumers) = nats_queue.list_consumers().await else {
-        return;
-    };
+/// Helper to decide which subscriber (JetStream or Event Plane) to start based on config
+pub async fn start_subscriber(
+    component: Component,
+    kv_router_config: &KvRouterConfig,
+    indexer: Indexer,
+) -> Result<()> {
+    let transport_kind = EventTransportKind::from_env_or_default();
 
-    let router_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
-    let Ok(router_entries) = etcd_client.kv_get_prefix(&router_prefix).await else {
-        return;
-    };
-
-    let active_uuids: HashSet<String> = router_entries
-        .iter()
-        .filter_map(|kv| {
-            String::from_utf8_lossy(kv.key())
-                .split('/')
-                .next_back()
-                .map(str::to_string)
-        })
-        .collect();
-
-    for consumer in consumers {
-        if consumer == consumer_uuid {
-            // Never delete myself (extra/redundant safeguard)
-            continue;
+    // Start subscriber - durable_kv_events flag determines the mode:
+    // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
+    // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
+    if kv_router_config.durable_kv_events {
+        tracing::warn!(
+            "--durable-kv-events is deprecated and will be removed in a future release. \
+             The event-plane subscriber (local_indexer mode) is now the recommended path."
+        );
+        if transport_kind == EventTransportKind::Zmq {
+            tracing::warn!(
+                "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
+            );
         }
-        if !active_uuids.contains(&consumer) {
-            tracing::info!("Cleaning up orphaned consumer: {consumer}");
-            let _ = nats_queue.shutdown(Some(consumer)).await;
+        tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
+
+        let consumer_id = component.drt().discovery().instance_id().to_string();
+        super::jetstream::start_kv_router_background(
+            component,
+            consumer_id,
+            indexer,
+            kv_router_config,
+        )
+        .await
+    } else {
+        if transport_kind == EventTransportKind::Zmq {
+            if kv_router_config.router_snapshot_threshold.is_some()
+                || kv_router_config.router_reset_states
+            {
+                tracing::warn!(
+                    "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                );
+            }
+            tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
+        } else {
+            tracing::info!("Using NATS Core subscription (local_indexer mode)");
         }
+
+        start_kv_router_background_event_plane(component, indexer, transport_kind).await
     }
 }

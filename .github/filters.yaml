@@ -1,54 +1,173 @@
-docs: &docs
+# CI Filter Patterns - See FILTERS.md for documentation
+#
+# Filters that trigger CI jobs:
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
+#   operator -> operator build and test
+#   deploy   -> deploy tests
+#   planner  -> dynamo build-test
+#   vllm     -> vllm build and test
+#   sglang   -> sglang build and test
+#   trtllm   -> trtllm build and test
+#   frontend -> frontend EPP image build, dynamo build-test
+#   docs     -> fern docs lint, sync, and version release (docs/ directory)
+#
+# Filters for coverage only (no CI triggered):
+#   examples, ignore
+
+all:
+  - '**'
+
+docs:
   - 'docs/**'
+  - 'fern/**'
+  - '.github/workflows/fern-docs.yml'
   - '**/*.md'
-  - '**/*.rst'
+  - '**/*.txt'
+  - '**/.gitignore'
+  - '**/.helmignore'
+  - '**/.gitattributes'
+  - 'LICENSE'
+  - 'CODEOWNERS'
+
+examples:
+  - 'recipes/**'
+  - 'examples/**'
+  - 'benchmarks/**'
+  - '.devcontainer/**'
+  - 'deploy/discovery/**'
+  - 'deploy/inference-gateway/**'
+  - 'deploy/observability/**'
+  - 'deploy/pre-deployment/**'
+
+ignore:
+  - '.lycheeignore'
+  - '.pre-commit-config.yaml'
+  - '.coderabbit.yaml'
+  - '.clang-format'
+  - 'dynamo.code-workspace'
+  - 'deploy/*'
+  - '.github/scripts/**'
+  - '.github/ISSUE_TEMPLATE/**'
+  - '.github/pull_request_template.md'
+  - '.github/labeler.yml'
+  - '.github/release.yml'
+  - '.github/copy-pr-bot.yaml'
+  - '.github/dco.yml'
+  - 'container/Dockerfile.docs'
+  - 'container/run.sh'
+  - 'container/use-sccache.sh'
+  - 'container/dev/**'
+  - 'container/templates/aws.Dockerfile'
+  - 'container/templates/local_dev.Dockerfile'
+  - 'container/templates/dev.Dockerfile'
 
 ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
+  - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/route_buildkit.sh'
+  - 'container/Dockerfile.test'
 
-has_code_changes:
+core:
+  # Exclude documentation files first, then include patterns override for specific paths
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
   - *ci
-  - 'benchmarks/**'
-  - 'components/**'
-  - 'container/**'
-  - 'deploy/**'
-  - 'examples/**'
-  - 'launch/**'
+  - 'container/render.py'
+  - 'container/Dockerfile.template'
+  - 'container/context.yaml'
+  - 'container/templates/args.Dockerfile'
+  - 'container/templates/dynamo_*'
+  - 'container/templates/wheel_builder.Dockerfile'
+  - '.dockerignore'
+  - 'container/deps/*'
+  - 'container/compliance/**'
+  - '.cargo/config.toml'
   - 'lib/**'
-  - 'recipes/**'
   - 'tests/**'
+  - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/gpu_memory_service/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
   - '*.rs'
+  - 'scripts/report_pytest_markers.py'
 
-vllm: &vllm
-  - 'container/Dockerfile.vllm'
+operator:
+  - *ci
+  - 'deploy/operator/**'
+  - 'deploy/operator/.*'
+  - 'docs/kubernetes/api-reference.md'
+  - 'deploy/helm/charts/platform/**'
+  - 'components/src/dynamo/profiler/utils/dgdr_*'
+
+deploy:
+  - '!**/*.md'
+  - '!**/*.rst'
+  - *ci
+  - 'deploy/helm/**'
+  - 'deploy/utils/**'
+  - 'deploy/snapshot/**'
+  - 'tests/deploy/**'
+
+planner:
+  - 'components/src/dynamo/planner/**'
+  - 'components/src/dynamo/global_planner/**'
+  - 'tests/planner/**'
+  - 'tests/global_planner/**'
+  - 'components/src/dynamo/profiler/**'
+  - 'components/src/dynamo/global_router/**'
+
+vllm:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
-  - 'container/build.sh'
-  - 'tests/serve/test_vllm.py'
+  - 'container/templates/vllm_*'
 
-sglang: &sglang
-  - 'container/Dockerfile.sglang'
-  - 'container/Dockerfile.sglang-wideep'
+sglang:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
-  - 'container/build.sh'
-  - 'tests/serve/test_sglang.py'
+  - 'container/templates/sglang_*'
 
-trtllm: &trtllm
-  - 'container/Dockerfile.trtllm'
+trtllm:
+  - '!**/*.md'
+  - '!**/*.rst'
+  - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  - 'container/build.sh'
   - 'container/build_trtllm_wheel.sh'
-  - 'container/deps/**'
-  - 'tests/serve/test_trtllm.py'
+  - 'container/templates/trtllm_*'
 
-sdk:
-  - 'deploy/**'
+frontend:
+  - '!**/*.md'
+  - '!**/*.rst'
+  - *ci
+  - '.cargo/config.toml'
+  - 'lib/**'
+  - '*.toml'
+  - '*.lock'
+  - 'container/deps/*'
+  - 'container/compliance/**'
+  - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/common/**'
+  - 'deploy/inference-gateway/**'
+  - 'container/templates/frontend.Dockerfile'
+
+rust:
+  - '.github/workflows/pre-merge.yml'
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'deny.toml'

@@ -1,15 +1,14 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Metrics Visualization with Prometheus and Grafana
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Prometheus + Grafana Setup
+---
 
 ## Overview
 
 This guide shows how to set up Prometheus and Grafana for visualizing Dynamo metrics on a single machine for demo purposes.
 
-![Grafana Dynamo Dashboard](./grafana-dynamo-composite.png)
+![Grafana Dynamo Dashboard](../assets/img/grafana-dynamo-composite.png)
 
 **Components:**
 - **Prometheus Server** - Collects and stores metrics from Dynamo services
@@ -36,8 +35,8 @@ Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Obse
 Start frontend and worker (a simple single GPU example):
 
 ```bash
-# Start frontend in one process
-python -m dynamo.frontend --http-port 8000 &
+# Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
+python -m dynamo.frontend &
 
 # Start vLLM worker with metrics enabled on port 8081
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager
@@ -79,7 +78,7 @@ Other interfaces:
 
 ### Prometheus
 
-The Prometheus configuration is specified in [prometheus.yml](../../deploy/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is specified in [prometheus.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
 Please be aware that you might need to modify the target settings to align with your specific host configuration and network environment.
 

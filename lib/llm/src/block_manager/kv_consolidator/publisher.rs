@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! ZMQ Publisher for KV Events Consolidator
+//! Publishers for KV Events Consolidator
 //!
-//! Publishes consolidated KV cache events to the router using the same format as vLLM.
+//! Publishes consolidated KV cache events to ZMQ (in vLLM format).
+//! Worker-side publishers subscribe to this ZMQ stream and add worker_id before publishing to NATS.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -30,7 +31,6 @@ struct EventBatch(
 );
 
 /// Event types matching vLLM's format
-/// Note: block_hashes are u64 to match vLLM's ExternalBlockHash type
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum Event {
@@ -40,16 +40,23 @@ enum Event {
         parent_block_hash: Option<u64>,
         token_ids: Vec<i32>,
         block_size: i32,
-        lora_id: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     #[serde(rename = "BlockRemoved")]
-    BlockRemoved { block_hashes: Vec<u64> },
+    BlockRemoved {
+        block_hashes: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
+    },
     #[serde(rename = "AllBlocksCleared")]
     AllBlocksCleared {},
 }
 
 impl Event {
-    /// Convert from ConsolidatedEvent to vLLM Event format
+    /// Convert from ConsolidatedEvent to router Event format
     /// Parses string block hashes back to u64 for router compatibility
     /// Note: source field is kept in ConsolidatedEvent for internal logging but not sent to router
     ///
@@ -61,15 +68,13 @@ impl Event {
                 parent_hash,
                 token_ids,
                 block_size,
-                lora_id,
-                source: _, // Source used for logging only, not sent to router
+                lora_name,
+                source: _,
             } => {
-                // Parse block hash - fail if invalid to prevent corruption
                 let parsed_hash = block_hash
                     .parse::<u64>()
                     .with_context(|| format!("Failed to parse block_hash: {}", block_hash))?;
 
-                // Parse parent hash if present - fail if invalid
                 let parsed_parent = parent_hash
                     .map(|h| {
                         h.parse::<u64>()
@@ -77,8 +82,6 @@ impl Event {
                     })
                     .transpose()?;
 
-                // Convert u32 token_ids to i32 for vLLM compatibility
-                // Token IDs should never exceed i32::MAX in practice, but we handle it gracefully
                 let token_ids_i32: Vec<i32> = token_ids
                     .into_iter()
                     .map(|t| {
@@ -89,7 +92,6 @@ impl Event {
                     })
                     .collect();
 
-                // Convert usize block_size to i32 for vLLM compatibility
                 let block_size_i32 = i32::try_from(block_size).unwrap_or_else(|_| {
                     tracing::warn!(
                         "Block size {} exceeds i32::MAX, clamping to i32::MAX",
@@ -103,7 +105,8 @@ impl Event {
                     parent_block_hash: parsed_parent,
                     token_ids: token_ids_i32,
                     block_size: block_size_i32,
-                    lora_id,
+                    lora_name,
+                    medium: None,
                 })
             }
             ConsolidatedEvent::Remove {
@@ -117,6 +120,7 @@ impl Event {
 
                 Ok(Event::BlockRemoved {
                     block_hashes: vec![parsed_hash],
+                    medium: None, // Not provided by ConsolidatedEvent
                 })
             }
             ConsolidatedEvent::ClearAll => Ok(Event::AllBlocksCleared {}),
@@ -267,7 +271,7 @@ impl KvEventConsolidatorPublisher {
                 tracing::error!("Failed to send consolidated events: {}", e);
             } else {
                 tracing::debug!(
-                    "Published batch with {} event(s) to router (seq={})",
+                    "Consolidator: Published batch with {} event(s) to ZMQ (seq={})",
                     num_events,
                     seq
                 );

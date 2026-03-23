@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
@@ -9,8 +9,7 @@ reviews:
   profile: "chill"
   request_changes_workflow: false
   high_level_summary: true
-  # John likes the poems, no messing
-  poem: true
+  poem: false
   review_status: false
   collapse_walkthrough: false
   auto_review:
@@ -27,5 +26,14 @@ reviews:
       enabled: false
     unit_tests:
       enabled: false
+  path_instructions:
+    - path: "**/*.py"
+      instructions: "Review against .ai/python-guidelines.md"
+    - path: "**/tests/**/*.py"
+      instructions: "Review against .ai/pytest-guidelines.md"
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - ".ai/**/*.md"
 chat:
   auto_reply: true

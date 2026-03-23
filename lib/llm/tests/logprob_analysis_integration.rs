@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests for logprob analysis functionality
@@ -11,8 +11,8 @@ use dynamo_llm::perf::{RecordedStream, TimestampedResponse};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
 use dynamo_async_openai::types::{
-    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
-    ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
+    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+    ChatCompletionStreamResponseDelta, ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
 };
 
 // Type aliases to simplify complex test data structures
@@ -380,7 +380,7 @@ fn create_response_with_linear_probs(
     let choice = ChatChoiceStream {
         index: 0,
         delta: ChatCompletionStreamResponseDelta {
-            content: Some(_content.to_string()),
+            content: Some(ChatCompletionMessageContent::Text(_content.to_string())),
             #[expect(deprecated)]
             function_call: None,
             tool_calls: None,
@@ -389,6 +389,7 @@ fn create_response_with_linear_probs(
             reasoning_content: None,
         },
         finish_reason: Some(FinishReason::Stop),
+        stop_reason: None,
         logprobs: Some(ChatChoiceLogprobs {
             content: Some(token_logprobs),
             refusal: None,
@@ -404,6 +405,7 @@ fn create_response_with_linear_probs(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
+        nvext: None,
     }
 }
 
@@ -458,7 +460,7 @@ fn create_multi_choice_response(
             ChatChoiceStream {
                 index: choice_idx as u32,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(ChatCompletionMessageContent::Text("test".to_string())),
                     #[expect(deprecated)]
                     function_call: None,
                     tool_calls: None,
@@ -467,6 +469,7 @@ fn create_multi_choice_response(
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -484,5 +487,6 @@ fn create_multi_choice_response(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
+        nvext: None,
     }
 }

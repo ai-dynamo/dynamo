@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,18 +24,8 @@ uvloop.install()
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    foo = (
-        await runtime.namespace("examples/bls")
-        .component("foo")
-        .endpoint("generate")
-        .client()
-    )
-    bar = (
-        await runtime.namespace("examples/bls")
-        .component("bar")
-        .endpoint("generate")
-        .client()
-    )
+    foo = await runtime.endpoint("examples/bls.foo.generate").client()
+    bar = await runtime.endpoint("examples/bls.bar.generate").client()
 
     # hello world showed us the client has a .generate, which uses the default load balancer
     # however, you can explicitly opt-in to client side load balancing by using the `round_robin`

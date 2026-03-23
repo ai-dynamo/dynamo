@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,17 +20,30 @@ from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_check
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    RequestResponseMetadata,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import RequestPrompt
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
+from vllm.renderers.registry import renderer_from_config
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike as AnyTokenizer
+
+
+class StubEngineClient:
+    """
+    Stub EngineClient for preprocessing-only use of OpenAIServingChat/Completion.
+    Provides the minimal attributes required by OpenAIServingModels.
+    """
+
+    def __init__(self, model_config: ModelConfig):
+        self.model_config = model_config
+        self.renderer = renderer_from_config(model_config)
+        self.input_processor = None
+        self.io_processor = None
 
 
 @runtime_checkable
@@ -87,7 +100,6 @@ class ProcessMixIn(ProcessMixInRequired):
         return (
             request,
             preprocess_result.conversation,
-            preprocess_result.request_prompt,
             preprocess_result.engine_prompt,
             sampling_params,
         )
@@ -108,11 +120,9 @@ class PreprocessResult:
     def __init__(
         self,
         conversation: Optional[ConversationMessage],
-        request_prompt: RequestPrompt,
         engine_prompt: TokensPrompt,
     ):
         self.conversation = conversation
-        self.request_prompt = request_prompt
         self.engine_prompt = engine_prompt
 
 
@@ -120,12 +130,19 @@ class ChatProcessor:
     def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig):
         self.tokenizer = tokenizer
         self.model_config = model_config
+        # Create stub engine client and models for preprocessing-only usage
+        stub_engine = StubEngineClient(model_config)
+        serving_models = OpenAIServingModels(
+            engine_client=stub_engine,
+            base_model_paths=[
+                BaseModelPath(name=model_config.model, model_path=model_config.model)
+            ],
+        )
         self.openai_serving = OpenAIServingChat(
-            engine_client=None,
-            model_config=model_config,
-            models=None,
-            request_logger=None,
+            engine_client=stub_engine,
+            models=serving_models,
             response_role="assistant",
+            request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
         )
@@ -138,9 +155,6 @@ class ChatProcessor:
     async def preprocess(self, raw_request: ChatCompletionRequest) -> PreprocessResult:
         request = self.parse_raw_request(raw_request)
 
-        # TODO: Revisit this later when adding multi-modal support for the frontend.
-        # If no chat template is provided and tokenizer doesn't have one,
-        # use a simple format that just concatenates messages
         if not request.chat_template and not self.tokenizer.chat_template:
             chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}User: {{ message['content'] }}\n{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}\n{% endif %}{% endfor %}Assistant:"
         else:
@@ -148,24 +162,22 @@ class ChatProcessor:
 
         (
             conversation,
-            request_prompts,
             engine_prompts,
         ) = await self.openai_serving._preprocess_chat(
             request,
-            self.tokenizer,
             request.messages,
-            chat_template=chat_template,
-            chat_template_content_format=self.openai_serving.chat_template_content_format,
-            add_generation_prompt=request.add_generation_prompt,
-            continue_final_message=request.continue_final_message,
+            default_template=chat_template,
+            default_template_content_format=self.openai_serving.chat_template_content_format,
+            default_template_kwargs=None,
             tool_dicts=None,
-            documents=request.documents,
-            chat_template_kwargs=request.chat_template_kwargs,
-            tool_parser=self.openai_serving.tool_parser,
-            add_special_tokens=request.add_special_tokens,
+            tool_parser=None,
         )
 
-        return PreprocessResult(conversation[0], request_prompts[0], engine_prompts[0])
+        if not conversation or not engine_prompts:
+            raise ValueError(
+                "Preprocessing returned empty conversation or engine_prompts"
+            )
+        return PreprocessResult(conversation[0], engine_prompts[0])
 
     async def stream_response(
         self,
@@ -186,7 +198,6 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
-                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     yield raw_response
@@ -220,7 +231,6 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
-                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     break
@@ -267,10 +277,17 @@ class CompletionsProcessor:
     def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig):
         self.tokenizer = tokenizer
         self.model_config = model_config
+        # Create stub engine client and models for preprocessing-only usage
+        stub_engine = StubEngineClient(model_config)
+        serving_models = OpenAIServingModels(
+            engine_client=stub_engine,
+            base_model_paths=[
+                BaseModelPath(name=model_config.model, model_path=model_config.model)
+            ],
+        )
         self.openai_serving = OpenAIServingCompletion(
-            engine_client=None,
-            model_config=model_config,
-            models=None,
+            engine_client=stub_engine,
+            models=serving_models,
             request_logger=None,
         )
 
@@ -280,17 +297,15 @@ class CompletionsProcessor:
     async def preprocess(self, raw_request: CompletionRequest) -> PreprocessResult:
         request = self.parse_raw_request(raw_request)
 
-        (
-            request_prompts,
-            engine_prompts,
-        ) = await self.openai_serving._preprocess_completion(
+        engine_prompts = await self.openai_serving._preprocess_completion(
             request,
-            self.tokenizer,
-            input_or_inputs=request.prompt,
-            add_special_tokens=request.add_special_tokens,
+            prompt_input=request.prompt,
+            prompt_embeds=getattr(request, "prompt_embeds", None),
         )
 
-        return PreprocessResult(None, request_prompts[0], engine_prompts[0])
+        if not engine_prompts:
+            raise ValueError("Preprocessing returned empty engine_prompts")
+        return PreprocessResult(None, engine_prompts[0])
 
     async def stream_response(
         self,
@@ -304,6 +319,7 @@ class CompletionsProcessor:
             raise ValueError("Only streaming responses are supported")
         async for raw_response in self.openai_serving.completion_stream_generator(
             request,
+            [],  # engine_prompts (not needed for streaming output)
             result_generator,
             request_id,
             int(time.time()),  # created_time

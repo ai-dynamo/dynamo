@@ -1,13 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Cache Status Tracker
 //!
-//! Maintains the state of KV cache blocks across different event sources (vLLM and KVBM)
+//! Maintains the state of KV cache blocks across different event sources (vLLM, TensorRT-LLM, and KVBM)
 //! and determines when to emit STORE/REMOVE events.
 //!
-//! - Tracks by EVENT SOURCE (vLLM vs KVBM) instead of storage tier
-//! - vLLM source: G1 (GPU) events from vLLM worker
+//! - Tracks by EVENT SOURCE (vLLM/TensorRT-LLM vs KVBM) instead of storage tier
+//! - vLLM/TensorRT-LLM source: G1 (GPU) events from vLLM or TensorRT-LLM worker
 //! - KVBM source: G2/G3 (host pinned/disk) events from KVBM
 //! - Deduplication: Uses SequenceHash as the key
 //!   - Always computes sequence hash using KVBM's xxHash3 method, regardless of source
@@ -17,14 +17,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use dynamo_kv_router::protocols::{StorageTier as RouterStorageTier, XXH3_SEED};
+
 /// LocalBlockHash type (content hash from tokens only)
 type LocalBlockHash = u64;
 
 /// SequenceHash type (position-aware hash, includes parent context)
 type SequenceHash = u64;
-
-/// Seed for xxHash3 computation (must match the indexer's seed)
-const XXH3_SEED: u64 = 1337;
 
 /// Compute a LocalBlockHash from token IDs (content only)
 fn compute_local_block_hash(token_ids: &[u32]) -> LocalBlockHash {
@@ -59,10 +58,12 @@ fn compute_sequence_hash(
 }
 
 /// Event source for KV cache events
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EventSource {
     /// Events from vLLM worker (G1/GPU)
     Vllm,
+    /// Events from TensorRT-LLM worker (G1/GPU)
+    Trtllm,
     /// Events from KVBM
     Kvbm,
 }
@@ -73,6 +74,7 @@ impl std::str::FromStr for EventSource {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "vllm" | "VLLM" | "GPU" => Ok(EventSource::Vllm),
+            "trtllm" | "TRTLLM" | "TensorRT-LLM" => Ok(EventSource::Trtllm),
             "kvbm" | "KVBM" => Ok(EventSource::Kvbm),
             _ => Err(format!("Unknown event source: {}", s)),
         }
@@ -84,6 +86,7 @@ impl EventSource {
     pub fn to_str(&self) -> &'static str {
         match self {
             EventSource::Vllm => "vllm",
+            EventSource::Trtllm => "trtllm",
             EventSource::Kvbm => "kvbm",
         }
     }
@@ -105,12 +108,7 @@ pub enum StorageTier {
 impl StorageTier {
     /// Parse from vLLM's medium string (e.g., "GPU", "CPU_TIER1", "CPU_TIER2")
     pub fn from_vllm_medium(s: &str) -> Option<Self> {
-        match s {
-            "GPU" => Some(StorageTier::Device),
-            "CPU_TIER1" => Some(StorageTier::HostPinned),
-            "CPU_TIER2" => Some(StorageTier::Disk),
-            _ => None,
-        }
+        RouterStorageTier::from_kv_medium(s).map(Into::into)
     }
 
     /// Convert to vLLM's medium string
@@ -128,6 +126,16 @@ impl StorageTier {
             StorageTier::Device => "device",
             StorageTier::HostPinned => "host_pinned",
             StorageTier::Disk => "disk",
+        }
+    }
+}
+
+impl From<RouterStorageTier> for StorageTier {
+    fn from(value: RouterStorageTier) -> Self {
+        match value {
+            RouterStorageTier::Device => Self::Device,
+            RouterStorageTier::HostPinned => Self::HostPinned,
+            RouterStorageTier::Disk | RouterStorageTier::External => Self::Disk,
         }
     }
 }
@@ -185,8 +193,8 @@ pub enum ConsolidatedEvent {
         parent_hash: Option<String>,
         token_ids: Vec<u32>,
         block_size: usize,
-        lora_id: Option<i32>,
-        source: String, // The source where it was first stored (vllm or kvbm)
+        lora_name: Option<String>,
+        source: String,
     },
     /// Block removed (removed from all sources)
     Remove {
@@ -254,7 +262,7 @@ impl CacheStatusTracker {
         token_ids: Vec<u32>,
         parent_hash: Option<String>,
         block_size: usize,
-        lora_id: Option<i32>,
+        lora_name: Option<String>,
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) -> bool {
@@ -324,7 +332,7 @@ impl CacheStatusTracker {
                     .as_ref()
                     .map(|p| &p[..16.min(p.len())])
                     .unwrap_or("none"),
-                lora_id,
+                lora_name,
                 data_parallel_rank,
                 &token_ids
             );
@@ -334,13 +342,36 @@ impl CacheStatusTracker {
             // Add to hash mapping so remove events can find the block by external hash
             self.hash_mapping.insert(block_hash.clone(), sequence_hash);
 
+            // Resolve parent_hash to first_block_hash if parent was deduplicated
+            //
+            // Problem: When the same block is stored from multiple sources (deduplication),
+            // each source may use a different external hash for the same logical block.
+            // Example:
+            //   - Source A (TRTLLM) stores parent with hash "hash_A"
+            //   - Source B (KVBM) stores same parent with hash "hash_B" (different format/algorithm)
+            //   - Router only received STORE event with "hash_A" (first source)
+            //   - When Source B stores child with parent_hash="hash_B", router won't recognize it
+            //
+            // Resolve the parent's external hash to its first_block_hash (the hash
+            // that was sent to the router in the first STORE event) so the router can find it.
+            let resolved_parent_hash = parent_hash.and_then(|ph| {
+                // Look up parent's sequence hash from its external hash
+                self.hash_mapping.get(&ph).and_then(|&parent_seq_hash| {
+                    // Get parent's metadata to find first_block_hash
+                    self.blocks
+                        .get(&parent_seq_hash)
+                        .map(|parent_metadata| parent_metadata.first_block_hash.clone())
+                })
+            });
+
             // Queue a STORE event with full metadata
+            // Use resolved_parent_hash (first_block_hash) so router can find the parent
             self.event_queue.push(ConsolidatedEvent::Store {
                 block_hash: block_hash.clone(),
-                parent_hash,
+                parent_hash: resolved_parent_hash,
                 token_ids,
                 block_size,
-                lora_id,
+                lora_name,
                 source: source.to_str().to_string(),
             });
 
@@ -861,6 +892,62 @@ mod tests {
         assert_eq!(hash1, hash2);
         // Different tokens should produce different hash
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_lora_name_round_trip_through_tracker() {
+        let mut tracker = CacheStatusTracker::new();
+
+        let should_publish = tracker.handle_store(
+            "hash_lora".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            Some("my-adapter".to_string()),
+            Some(StorageTier::Device),
+            None,
+        );
+
+        assert!(should_publish);
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store {
+                lora_name,
+                token_ids,
+                ..
+            } => {
+                assert_eq!(lora_name.as_deref(), Some("my-adapter"));
+                assert_eq!(token_ids, &[1, 2, 3, 4]);
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lora_name_none_for_base_model() {
+        let mut tracker = CacheStatusTracker::new();
+
+        tracker.handle_store(
+            "hash_base".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store { lora_name, .. } => {
+                assert!(lora_name.is_none());
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
     }
 
     #[test]

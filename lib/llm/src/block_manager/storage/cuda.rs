@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # CUDA Storage Support
@@ -28,7 +28,7 @@
 //! ## Usage
 //!
 //! ### Using Allocators
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, StorageAllocator};
 //!
 //! // Create a pinned memory allocator
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! ### Memory Operations
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{
 //!     PinnedAllocator, StorageAllocator, Storage, StorageMemset
 //! };
@@ -74,9 +74,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use cudarc::driver::{CudaContext, sys};
-
-use crate::block_manager::numa_allocator;
+use cudarc::driver::CudaContext;
+use dynamo_memory::MemoryDescriptor as _;
 
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}
@@ -159,13 +158,12 @@ impl Cuda {
     }
 }
 
-/// Pinned host memory storage using CUDA page-locked memory
+/// Pinned host memory storage using CUDA page-locked memory.
+/// Wraps [`dynamo_memory::PinnedStorage`] and adds registration handle support.
 #[derive(Debug)]
 pub struct PinnedStorage {
-    ptr: u64,
-    size: usize,
+    inner: dynamo_memory::PinnedStorage,
     handles: RegistrationHandles,
-    ctx: Arc<CudaContext>,
 }
 
 impl Local for PinnedStorage {}
@@ -173,51 +171,51 @@ impl SystemAccessible for PinnedStorage {}
 impl CudaAccessible for PinnedStorage {}
 
 impl PinnedStorage {
-    /// Create a new pinned storage with the given size
+    /// Create a new pinned storage with the given size.
+    ///
+    /// Uses write-combined allocation with NUMA-awareness when enabled.
+    /// Prefer [`new_for_device`](Self::new_for_device) for new code.
+    ///
+    /// TODO(KVBM-336): remove PinnedStorage::new in the future
+    #[deprecated(since = "1.0.0", note = "Use PinnedStorage::new_for_device instead")]
     pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        unsafe {
-            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
+        let inner =
+            dynamo_memory::PinnedStorage::new_for_device(size, Some(ctx.cu_device() as u32))?;
+        Ok(Self {
+            inner,
+            handles: RegistrationHandles::new(),
+        })
+    }
 
-            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
-            let ptr = if numa_allocator::is_numa_enabled() {
-                let device_id = ctx.cu_device() as u32;
-                match numa_allocator::worker_pool::NumaWorkerPool::global()
-                    .allocate_pinned_for_gpu(size, device_id)
-                {
-                    Ok(ptr) => ptr,
-                    Err(e) => {
-                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                        cudarc::driver::result::malloc_host(
-                            size,
-                            sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-                        )
-                        .map_err(StorageError::Cuda)? as *mut u8
-                    }
-                }
-            } else {
-                cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                    .map_err(StorageError::Cuda)? as *mut u8
-            };
-
-            assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-            assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-            assert!(size < isize::MAX as usize);
-
-            let ptr = ptr as u64;
-            Ok(Self {
-                ptr,
-                size,
-                handles: RegistrationHandles::new(),
-                ctx: ctx.clone(),
-            })
+    /// Create a new pinned storage, optionally NUMA-aware for a specific GPU.
+    ///
+    /// Delegates NUMA-aware allocation and write-combined selection to
+    /// [`dynamo_memory::PinnedStorage::new_for_device`].
+    ///
+    /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
+    pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
+        // Warn once if the legacy opt-in env var is still set.
+        static DEPRECATION_WARN: std::sync::Once = std::sync::Once::new();
+        if std::env::var("DYN_KVBM_ENABLE_NUMA").is_ok() {
+            DEPRECATION_WARN.call_once(|| {
+                tracing::warn!(
+                    "DYN_KVBM_ENABLE_NUMA is deprecated for PinnedStorage::new_for_device; \
+                     NUMA is now enabled by default. Use DYN_MEMORY_DISABLE_NUMA=1 to disable."
+                );
+            });
         }
+        let inner = dynamo_memory::PinnedStorage::new_for_device(size, device_id)?;
+        Ok(Self {
+            inner,
+            handles: RegistrationHandles::new(),
+        })
     }
 }
 
 impl Drop for PinnedStorage {
     fn drop(&mut self) {
         self.handles.release();
-        unsafe { cudarc::driver::result::free_host(self.ptr as _) }.unwrap();
+        // inner Drop handles free_host
     }
 }
 
@@ -227,25 +225,25 @@ impl Storage for PinnedStorage {
     }
 
     fn addr(&self) -> u64 {
-        self.ptr
+        self.inner.addr() as u64
     }
 
     fn size(&self) -> usize {
-        self.size
+        self.inner.size()
     }
 
     unsafe fn as_ptr(&self) -> *const u8 {
-        self.ptr as *const u8
+        unsafe { self.inner.as_ptr() }
     }
 
     unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr as *mut u8
+        unsafe { self.inner.as_mut_ptr() }
     }
 }
 
 impl CudaContextProivder for PinnedStorage {
     fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.ctx
+        self.inner.ctx()
     }
 }
 
@@ -269,13 +267,13 @@ impl RegisterableStorage for PinnedStorage {
 
 impl StorageMemset for PinnedStorage {
     fn memset(&mut self, value: u8, offset: usize, size: usize) -> Result<(), StorageError> {
-        if offset + size > self.size {
+        if offset + size > self.inner.size() {
             return Err(StorageError::OperationFailed(
                 "memset: offset + size > storage size".into(),
             ));
         }
         unsafe {
-            let ptr = (self.ptr as *mut u8).add(offset);
+            let ptr = self.inner.as_mut_ptr().add(offset);
             std::ptr::write_bytes(ptr, value, size);
         }
         Ok(())
@@ -296,17 +294,20 @@ impl Default for PinnedAllocator {
 }
 
 impl PinnedAllocator {
-    /// Create a new pinned allocator
-    pub fn new() -> Result<Self, StorageError> {
+    /// Create a new pinned allocator for the specified device.
+    ///
+    /// The device_id determines which NUMA node pinned memory will be allocated
+    /// on when NUMA-aware allocation is enabled.
+    pub fn new(device_id: usize) -> Result<Self, StorageError> {
         Ok(Self {
-            ctx: Cuda::device_or_create(0)?,
+            ctx: Cuda::device_or_create(device_id)?,
         })
     }
 }
 
 impl StorageAllocator<PinnedStorage> for PinnedAllocator {
     fn allocate(&self, size: usize) -> Result<PinnedStorage, StorageError> {
-        PinnedStorage::new(&self.ctx, size)
+        PinnedStorage::new_for_device(size, Some(self.ctx.cu_device() as u32))
     }
 }
 
@@ -569,5 +570,43 @@ mod tests {
 
         let result = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor));
         assert!(result.is_err());
+    }
+
+    /// Test PinnedStorage::new (deprecated) allocates usable pinned memory.
+    #[allow(deprecated)]
+    #[test]
+    fn test_pinned_storage_new_without_numa() {
+        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let size = 8192;
+
+        let mut storage =
+            PinnedStorage::new(&ctx, size).expect("PinnedStorage::new should succeed");
+
+        // Verify storage properties
+        assert_eq!(storage.size(), size);
+        assert_eq!(storage.storage_type(), StorageType::Pinned);
+        assert_ne!(storage.addr(), 0, "Address should be non-zero");
+
+        // Verify memory is accessible
+        unsafe {
+            let ptr = storage.as_mut_ptr();
+            assert!(!ptr.is_null(), "Pointer should not be null");
+
+            // Write a pattern to verify memory is usable
+            for i in 0..size {
+                std::ptr::write_volatile(ptr.add(i), (i & 0xFF) as u8);
+            }
+
+            // Read back and verify
+            for i in 0..size {
+                let val = std::ptr::read_volatile(ptr.add(i));
+                assert_eq!(
+                    val,
+                    (i & 0xFF) as u8,
+                    "Memory content mismatch at offset {}",
+                    i
+                );
+            }
+        }
     }
 }

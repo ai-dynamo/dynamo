@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The [Worker] class is a convenience wrapper around the construction of the [Runtime]
@@ -32,13 +32,12 @@ static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 static RTHANDLE: OnceCell<tokio::runtime::Handle> = OnceCell::new();
 static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>> = OnceCell::new();
 
+use crate::config::environment_names::worker as env_worker;
+
 const SHUTDOWN_MESSAGE: &str =
     "Application received shutdown signal; attempting to gracefully shutdown";
 const SHUTDOWN_TIMEOUT_MESSAGE: &str =
     "Use DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to control the graceful shutdown timeout";
-
-/// Environment variable to control the graceful shutdown timeout
-pub const DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
 
 /// Default graceful shutdown timeout in seconds in debug mode
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG: u64 = 5;
@@ -130,7 +129,7 @@ impl Worker {
         let primary = runtime.primary();
         let secondary = runtime.secondary();
 
-        let timeout = std::env::var(DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
+        let timeout = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or({
@@ -156,7 +155,7 @@ impl Worker {
 
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    tracing::debug!("{}", SHUTDOWN_MESSAGE);
+                    tracing::debug!("{SHUTDOWN_MESSAGE}");
                     tracing::debug!("{} {} seconds", SHUTDOWN_TIMEOUT_MESSAGE, timeout);
                 }
 

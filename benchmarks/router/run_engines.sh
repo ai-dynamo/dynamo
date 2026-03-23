@@ -1,19 +1,20 @@
 #!/bin/bash
 
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Parse command-line arguments
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 NUM_WORKERS=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-RECIPE_PATH="$DYNAMO_HOME/recipes/deepseek-r1-distill-llama-8b/trtllm"
+ENGINE_CONFIG_PATH="$DYNAMO_HOME/examples/backends/trtllm/engine_configs/deepseek-r1-distill-llama-8b"
 TENSOR_PARALLEL_SIZE=1
 DATA_PARALLEL_SIZE=1
 USE_MOCKERS=false
 USE_TRTLLM=false
 MODE="agg"  # Options: agg (default), decode, prefill
 BASE_GPU_OFFSET=0
+REASONING=""
 EXTRA_ARGS=()
 
 # Parse arguments
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             BASE_GPU_OFFSET="$2"
             shift 2
             ;;
+        --reasoning)
+            REASONING="$2"
+            shift 2
+            ;;
         --)
             shift
             EXTRA_ARGS+=("$@")
@@ -86,13 +91,13 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         )
     elif [ "$USE_TRTLLM" = true ]; then
         # Default args for TensorRT-LLM engine using predefined YAML configs
-        # Config files located at: $RECIPE_PATH/{agg,decode,prefill}.yaml
+        # Config files located at: $ENGINE_CONFIG_PATH/{agg,decode,prefill}.yaml
         if [ "$MODE" = "prefill" ]; then
-            ENGINE_CONFIG="$RECIPE_PATH/prefill.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/prefill.yaml"
         elif [ "$MODE" = "decode" ]; then
-            ENGINE_CONFIG="$RECIPE_PATH/decode.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/decode.yaml"
         else
-            ENGINE_CONFIG="$RECIPE_PATH/agg.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/agg.yaml"
         fi
 
         EXTRA_ARGS=(
@@ -181,16 +186,19 @@ if [ "$USE_MOCKERS" = true ]; then
     # Set endpoint based on worker mode
     if [ "$MODE" = "prefill" ]; then
         MOCKER_ARGS+=("--endpoint" "dyn://test.prefill.generate")
-        MOCKER_ARGS+=("--is-prefill-worker")
+        MOCKER_ARGS+=("--disaggregation-mode" "prefill")
     elif [ "$MODE" = "decode" ]; then
         MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
-        MOCKER_ARGS+=("--is-decode-worker")
+        MOCKER_ARGS+=("--disaggregation-mode" "decode")
     else
         MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
     fi
 
     if [ "$DATA_PARALLEL_SIZE" -gt 1 ]; then
         MOCKER_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
+    fi
+    if [ -n "$REASONING" ]; then
+        MOCKER_ARGS+=("--reasoning" "$REASONING")
     fi
     MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 
@@ -246,13 +254,14 @@ else
                     VLLM_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
                 fi
                 if [ "$MODE" = "prefill" ]; then
-                    VLLM_ARGS+=("--is-prefill-worker")
+                    VLLM_ARGS+=("--disaggregation-mode" "prefill")
                 elif [ "$MODE" = "decode" ]; then
-                    VLLM_ARGS+=("--is-decode-worker")
+                    VLLM_ARGS+=("--disaggregation-mode" "decode")
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python3 -m dynamo.vllm \
+                VLLM_ARGS+=("--kv-events-config" "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}")
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &
