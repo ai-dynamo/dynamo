@@ -194,7 +194,7 @@ impl<
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
             request.token_seq.as_deref(),
             request.isl_tokens,
-            request.overlaps.clone(),
+            &request.overlaps,
         );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;

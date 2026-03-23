@@ -89,7 +89,7 @@ impl KeyValue {
     }
 
     pub fn key(&self) -> String {
-        self.key.clone().to_string()
+        self.key.to_string()
     }
 
     pub fn key_str(&self) -> &str {

@@ -220,18 +220,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             overlap,
                             expected_output_tokens,
                         } => {
+                            let request_id = event.request_id;
                             self.request_to_worker
-                                .insert(event.request_id.clone(), event.worker);
+                                .insert(request_id.clone(), event.worker);
 
                             if let Some(ref lora_name) = event.lora_name {
                                 self.request_to_lora
-                                    .insert(event.request_id.clone(), lora_name.clone());
+                                    .insert(request_id.clone(), lora_name.clone());
                             }
 
                             let table = self.workers.read();
                             if let Some(&idx) = table.index.get(&event.worker) {
                                 table.slots[idx].1.write().add_request(
-                                    event.request_id.clone(),
+                                    request_id,
                                     token_sequence.clone(),
                                     *isl,
                                     *overlap,
@@ -630,7 +631,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlaps: OverlapScores,
+        overlaps: &OverlapScores,
     ) -> (
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
