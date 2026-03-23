@@ -97,6 +97,12 @@ class KvConnectorWorker:
                 event.record(torch.xpu.current_stream(self.device_id))
             # Pass raw SYCL event handles for Rust-side XPU waiting.
             raw_event_handles = [event.sycl_event for event in events]
+        elif self.device_type == "hpu":
+            events = [torch.hpu.Event(enable_timing=False) for _ in range(len(ordered_kv_caches))]
+            for event in events:
+                event.record(torch.hpu.current_stream(self.device_id))
+            # Pass raw Synapse event handles for Rust-side HPU waiting.
+            raw_event_handles = [event.hpu_event for event in events]
         else:
             raise NotImplementedError(f"Unsupported KV cache device type: {self.device_type}")
 
@@ -198,6 +204,10 @@ class KvConnectorWorker:
             self.events[layer_name].record(torch.xpu.current_stream(self.device_id))
             # Host wait for XPU path until Rust-side XPU event wait is available.
             print('buke before sync in save_kv_layer, device_id:', self.device_id)
+            self.events[layer_name].synchronize()
+        elif self.device_type == "hpu":
+            self.events[layer_name].record(torch.hpu.current_stream(self.device_id))
+            # Host wait for HPU path until Rust-side HPU event wait is available.
             self.events[layer_name].synchronize()
         else:
             raise NotImplementedError(f"Unsupported KV cache device type: {self.device_type}")

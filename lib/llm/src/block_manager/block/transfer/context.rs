@@ -217,7 +217,7 @@ impl TransferContext {
             DeviceStream::Ze(ze_queue) => {
                 BackendState::Ze(TransferBackendZe::new(ze_queue.clone(), config.as_ref()))
             }
-                        DeviceStream::Synapse(synapse_stream) => {
+            DeviceStream::Synapse(synapse_stream) => {
                 BackendState::Synapse(TransferBackendSynapse::new(synapse_stream.clone(), config.as_ref()))
             }
         };
@@ -229,7 +229,7 @@ impl TransferContext {
             BackendState::Ze(ze) => ze
                 .ze_mem_pool()
                 .map(|pool| DeviceMemPool::Ze(pool.clone())),
-                        BackendState::Synapse(synapse) => synapse
+            BackendState::Synapse(synapse) => synapse
                 .synapse_mem_pool()
                 .map(|pool| DeviceMemPool::Synapse(pool.clone())),
         }.map(Arc::new);
@@ -263,7 +263,7 @@ impl TransferContext {
         match &self.backend {
             BackendState::Cuda(cuda) => cuda.cuda_event(tx),
             BackendState::Ze(ze) => ze.ze_event(tx),
-                        BackendState::Synapse(synapse) => synapse.synapse_event(tx),
+            BackendState::Synapse(synapse) => synapse.synapse_event(tx),
         }
     }
 
@@ -271,7 +271,7 @@ impl TransferContext {
         match &self.backend {
             BackendState::Cuda(cuda) => cuda.cuda_event(tx),
             BackendState::Ze(ze) => ze.ze_event(tx),
-                        BackendState::Synapse(synapse) => synapse.synapse_event(tx),
+            BackendState::Synapse(synapse) => synapse.synapse_event(tx),
         }
     }
 
@@ -639,7 +639,7 @@ impl Drop for TransferContext {
                     tracing::error!("Error joining ZE event worker: {:?}", e);
                 }
             }
-                        BackendState::Synapse(_synapse) => {}
+            BackendState::Synapse(_synapse) => {}
         }
     }
 }
