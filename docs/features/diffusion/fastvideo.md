@@ -15,12 +15,13 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 - **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
 - **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
-- **Optimized inference:** The supported optimization surface is `--optimization-profile`. `latency` enables the existing compile/refine path and uses FP4 quantization automatically on Blackwell GPUs when available.
+- **Optimized inference:** The built-in backend exposes explicit runtime flags such as `--torch-compile`, `--fp4-quantization`, `--attention-backend`, and CPU offload controls instead of bundling them into a single profile.
 - **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request as `data[0].b64_json` by default. Requests may also set `"response_format": "url"` to store output via Dynamo media storage.
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
+- **Deployment mode:** FastVideo currently supports aggregated deployment only. Disaggregated serving is not supported yet.
 
 > [!IMPORTANT]
-> `dynamo.fastvideo` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, use `--optimization-profile latency` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
+> `dynamo.fastvideo` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. On Blackwell GPUs, the optimized path is typically `--torch-compile --fp4-quantization`; if desired, you can also opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
 
 ## Direct Launch
 
@@ -69,7 +70,7 @@ TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up 
 
 ## Warmup Time
 
-On first start, workers download model weights. When `--optimization-profile latency` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
+On first start, workers download model weights. When `--torch-compile` is enabled, compile and warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
 > [!TIP]
 > When using Kubernetes, mount a shared Hugging Face cache PVC (see [Kubernetes Deployment](#kubernetes-deployment)) so model weights are downloaded once and reused across pod restarts.
@@ -115,7 +116,7 @@ Environment variables:
 | `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `dynamo.fastvideo` (for example, `--optimization-profile latency --attention-backend FLASH_ATTN`) |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `dynamo.fastvideo` (for example, `--torch-compile --fp4-quantization --attention-backend FLASH_ATTN`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
@@ -124,12 +125,12 @@ Example:
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
 NUM_GPUS=1 \
 HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--optimization-profile latency --attention-backend FLASH_ATTN" \
+WORKER_EXTRA_ARGS="--torch-compile --fp4-quantization --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
 > [!NOTE]
-> `--optimization-profile` and `--attention-backend` are `dynamo.fastvideo` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default backend configuration.
+> `--torch-compile`, `--fp4-quantization`, and `--attention-backend` are `dynamo.fastvideo` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default backend configuration.
 
 Use the built-in entrypoint directly if you prefer not to use the wrapper script:
 
@@ -155,6 +156,9 @@ The script writes logs to:
 | `agg_user_workload.yaml` | Same deployment with `user-workload` tolerations and `imagePullSecrets` |
 | `huggingface-cache-pvc.yaml` | Shared HF cache PVC for model weights |
 | `dynamo-platform-values-user-workload.yaml` | Optional Helm values for clusters with tainted `user-workload` nodes |
+
+> [!NOTE]
+> FastVideo currently has only an aggregated deployment path in Dynamo. The example manifests in this directory do not include a disaggregated FastVideo setup.
 
 ### Prerequisites
 
@@ -257,8 +261,17 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `--model-path` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `--served-model-name` | `--model-path` | Model name registered with Dynamo discovery |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
-| `--optimization-profile` | `none` | `latency` enables FastVideo's compile/refine path and uses FP4 automatically on Blackwell GPUs when available |
 | `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
+| `--dit-cpu-offload` / `--no-dit-cpu-offload` | `enabled` | Enable or disable DiT CPU offload |
+| `--vae-cpu-offload` / `--no-vae-cpu-offload` | `enabled` | Enable or disable VAE CPU offload |
+| `--text-encoder-cpu-offload` / `--no-text-encoder-cpu-offload` | `enabled` | Enable or disable text encoder CPU offload |
+| `--ltx2-vae-tiling` / `--no-ltx2-vae-tiling` | unset | Override FastVideo's LTX-2 VAE tiling setting |
+| `--torch-compile` / `--no-torch-compile` | `disabled` | Enable or disable `torch.compile` for FastVideo |
+| `--torch-compile-mode` | `max-autotune-no-cudagraphs` | `torch.compile` mode to use when compilation is enabled |
+| `--torch-compile-fullgraph` / `--no-torch-compile-fullgraph` | `enabled` | Enable or disable fullgraph mode for `torch.compile` |
+| `--fp4-quantization` / `--no-fp4-quantization` | `disabled` | Enable FP4 quantization for DiT weights on Blackwell GPUs and newer |
+| `--extra-generator-args-file` | — | YAML or JSON file with extra FastVideo generator keyword arguments |
+| `--override-generator-args-json` | — | JSON object string applied on top of the generator args file and built-in defaults |
 
 ### Request Parameters (`nvext`)
 
@@ -288,10 +301,10 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
 | `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
-| 10–20 min wait on first start with latency optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
+| 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Lower throughput than expected on B200/B300 | Latency optimizations and flash-attention are configured separately | Pass `--optimization-profile latency` and, if desired, `--attention-backend FLASH_ATTN` |
-| Startup or import failure after enabling latency optimizations or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `python -m dynamo.fastvideo` without `--optimization-profile latency`, or use `--attention-backend TORCH_SDPA` |
+| Lower throughput than expected on B200/B300 | `torch.compile`, FP4, and flash-attention are configured separately | Try `--torch-compile --fp4-quantization` and, if desired, `--attention-backend FLASH_ATTN` |
+| Startup or import failure after enabling FP4 or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `python -m dynamo.fastvideo` without `--fp4-quantization`, or use `--attention-backend TORCH_SDPA` |
 
 ## Source Code
 
