@@ -27,9 +27,7 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         ErrorType::ConnectionTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
     ];
-    const NON_MIGRATABLE: &[ErrorType] = &[
-        // Future: ErrorType::Cancelled, ErrorType::ValidationError, etc.
-    ];
+    const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::ResourceExhausted];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
 }
 

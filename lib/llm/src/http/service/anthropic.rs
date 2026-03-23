@@ -238,6 +238,11 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, "anthropic_messages");
+        }
         anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
