@@ -497,7 +497,10 @@ class WorkerFactory:
         # Register sleep/wake_up engine routes
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
-        logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        logger.info(
+            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+        )
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -680,7 +683,10 @@ class WorkerFactory:
         # Register sleep/wake_up engine routes
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
-        logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        logger.info(
+            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+        )
 
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
