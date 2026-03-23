@@ -142,6 +142,11 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
         )
+        # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
+        # Both definitions are needed: this one controls the Rust-native chat
+        # template path (oai.rs), while the frontend copy controls the Python
+        # processors (vllm_processor / sglang_processor) which parse arguments
+        # independently via FrontendConfig.
         add_negatable_bool_argument(
             g,
             flag_name="--exclude-tools-when-tool-choice-none",
