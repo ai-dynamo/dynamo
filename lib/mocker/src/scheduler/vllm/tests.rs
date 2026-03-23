@@ -557,13 +557,15 @@ async fn test_receiver_drop_cleans_up_resources() {
     assert_scheduler_idle(&metrics);
 }
 
+type CapturedKvEvent = (KvCacheEvent, Option<Vec<Vec<u32>>>);
+
 #[derive(Default)]
 struct CapturingKvSink {
-    events: Mutex<Vec<(KvCacheEvent, Option<Vec<Vec<u32>>>)>>,
+    events: Mutex<Vec<CapturedKvEvent>>,
 }
 
 impl CapturingKvSink {
-    fn take(&self) -> Vec<(KvCacheEvent, Option<Vec<Vec<u32>>>)> {
+    fn take(&self) -> Vec<CapturedKvEvent> {
         std::mem::take(&mut *self.events.lock().unwrap())
     }
 }
