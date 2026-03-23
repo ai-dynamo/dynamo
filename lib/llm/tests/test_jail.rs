@@ -3080,4 +3080,85 @@ mod parallel_jail_tests {
             "Should have no tool calls for empty array"
         );
     }
+
+    /// Regression test for #6821: tool_choice=required with qwen3_coder parser.
+    ///
+    /// When tool_choice=required AND a tool_call_parser (e.g. qwen3_coder) is
+    /// configured, the jail must use marker-based mode so the parser handles the
+    /// XML output.  Previously this fell through to Immediate JSON mode which
+    /// could not parse qwen3_coder XML, causing raw XML to leak as content.
+    #[tokio::test]
+    async fn test_tool_choice_required_with_qwen3_coder_parser() {
+        // Simulate qwen3_coder XML output for a single tool call
+        let xml_output = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"#;
+
+        // Build jail the same way apply_tool_calling_jail would when a
+        // parser is configured together with tool_choice=required.
+        // After the fix, this uses marker-based mode (not Immediate).
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder".to_string())
+            .build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            xml_output.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        // Should have parsed a tool call, not leaked raw XML as content
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.choices
+                        .iter()
+                        .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert!(
+            tool_call_count >= 1,
+            "tool_choice=required with qwen3_coder should produce at least one tool call, got {}",
+            tool_call_count
+        );
+
+        // Verify the tool call was parsed correctly
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.choices {
+                    if let Some(tool_calls) = &choice.delta.tool_calls {
+                        for tc in tool_calls {
+                            assert_eq!(
+                                tc.function.as_ref().unwrap().name.as_deref(),
+                                Some("get_weather"),
+                                "Tool call name should be 'get_weather'"
+                            );
+                        }
+                    }
+                    // Content should be empty, not raw XML
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
