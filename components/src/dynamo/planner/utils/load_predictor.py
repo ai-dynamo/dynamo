@@ -302,8 +302,14 @@ class ProphetPredictor(BasePredictor):
         # Fit the model
         model.fit(df)
 
-        # Create future dataframe for next timestamp
-        next_timestamp = self.start_date + timedelta(seconds=self.curr_step)
+        # Create future dataframe for next timestamp.
+        # Use the same time scale as add_data_point() which stores each sample
+        # at start_date + curr_step * step_size.  curr_step was already
+        # incremented by the last add_data_point() call, so this points exactly
+        # one step ahead of the most recent training observation.
+        next_timestamp = self.start_date + timedelta(
+            seconds=self.curr_step * self.step_size
+        )
         future_df = pd.DataFrame({"ds": [next_timestamp]})
 
         # Make prediction
