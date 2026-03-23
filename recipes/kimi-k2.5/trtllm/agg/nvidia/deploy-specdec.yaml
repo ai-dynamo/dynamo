@@ -111,8 +111,6 @@ spec:
               value: "1"
             - name: TLLM_LOG_LEVEL
               value: INFO
-            - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
-              value: "2"
           volumeMounts:
             - name: llm-config-specdec
               mountPath: /opt/dynamo/configs
