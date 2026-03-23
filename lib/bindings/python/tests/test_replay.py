@@ -65,6 +65,25 @@ def _write_trace_and_args(tmp_path):
     return trace_path
 
 
+def _write_cli_smoke_trace(tmp_path):
+    trace_path = tmp_path / "cli_smoke_trace.jsonl"
+    records = []
+    for index in range(10):
+        records.append(
+            {
+                "timestamp": 1000.0 + index,
+                "input_length": 250,
+                "output_length": 25,
+                "hash_ids": [index, index + 1, index + 2, index + 3],
+            }
+        )
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return trace_path
+
+
 def _write_vllm_args(tmp_path):
     args_path = tmp_path / "args.json"
     args_path.write_text(
@@ -549,11 +568,15 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
             "-m",
             "dynamo.replay",
             "--input-tokens",
-            "16",
+            "250",
             "--output-tokens",
-            "8",
+            "25",
             "--request-count",
-            "3",
+            "10",
+            "--num-workers",
+            "4",
+            "--replay-concurrency",
+            "4",
             "--report-json",
             str(report_path),
             "--extra-engine-args",
@@ -573,14 +596,14 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     _assert_basic_report_counts(
         report,
-        num_requests=3,
-        input_tokens=16,
-        output_tokens=8,
+        num_requests=10,
+        input_tokens=250,
+        output_tokens=25,
     )
 
 
 def test_replay_cli_subprocess_trace_smoke(tmp_path):
-    trace_path = _write_trace_and_args(tmp_path)
+    trace_path = _write_cli_smoke_trace(tmp_path)
     report_path = tmp_path / "trace_report.json"
 
     completed = subprocess.run(
@@ -594,7 +617,7 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
             "--router-mode",
             "kv_router",
             "--num-workers",
-            "2",
+            "4",
             "--report-json",
             str(report_path),
             "--extra-engine-args",
@@ -614,7 +637,7 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     _assert_basic_report_counts(
         report,
-        num_requests=2,
-        input_tokens=64,
-        output_tokens=2,
+        num_requests=10,
+        input_tokens=250,
+        output_tokens=25,
     )
