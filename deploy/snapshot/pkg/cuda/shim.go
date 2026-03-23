@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 )
 
 const (
@@ -55,15 +57,36 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, cudaCheckpointBinary, args...)
+	details := common.ProcessDetails{
+		ObservedPID:   pid,
+		OutermostPID:  pid,
+		InnermostPID:  pid,
+		NamespacePIDs: []int{pid},
+	}
+	if process, err := common.ReadProcessDetails("/proc", pid); err == nil {
+		details = process
+	}
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	duration := time.Since(start)
 	out := strings.TrimSpace(string(output))
 	if err != nil {
+		log.Error(err, "cuda-checkpoint command failed",
+			"pid", pid,
+			"outermost_pid", details.OutermostPID,
+			"innermost_pid", details.InnermostPID,
+			"cmdline", details.Cmdline,
+			"action", action,
+			"duration", duration,
+			"output", out,
+		)
 		return fmt.Errorf("cuda-checkpoint %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
 	}
 	log.Info("cuda-checkpoint command succeeded",
 		"pid", pid,
+		"outermost_pid", details.OutermostPID,
+		"innermost_pid", details.InnermostPID,
+		"cmdline", details.Cmdline,
 		"action", action,
 		"duration", duration,
 		"output", out,

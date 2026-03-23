@@ -37,7 +37,6 @@ runs:
         NAMESPACE: ${{ inputs.vcluster_namespace }}
       run: |
         echo "::group::Port-forward and generate vCluster kubeconfig"
-        set -x
         kubectl port-forward -n ${NAMESPACE} svc/${VCLUSTER_NAME} 8443:443 &
         sleep 5
 
