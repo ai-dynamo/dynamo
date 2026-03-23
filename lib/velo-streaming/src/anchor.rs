@@ -74,10 +74,15 @@ pub(crate) struct AnchorEntry {
     /// Non-generic so `DashMap<u64, AnchorEntry>` requires no type parameters.
     pub frame_tx: flume::Sender<Vec<u8>>,
 
-    /// Created at anchor creation; cancelled by whichever cleanup path fires first.
-    ///
-    /// `cancel()` is idempotent -- a second caller is a no-op.
+    /// Anchor-lifetime parent token. Created at anchor creation; cancelled only
+    /// by finalize/remove/cancel. Child tokens are derived for transient tasks
+    /// (reader pump, timeout) so that stopping a child never poisons the parent.
     pub cancel_token: CancellationToken,
+
+    /// Child token for the currently active reader pump (`None` when no sender
+    /// is attached). Created via `cancel_token.child_token()` on each attach.
+    /// Cancelling this stops the pump without affecting the parent.
+    pub active_pump_token: Option<CancellationToken>,
 
     /// `true` iff a sender is currently attached. The reader pump owns the
     /// transport receiver separately (not stored here).
@@ -331,6 +336,7 @@ impl<T> StreamAnchor<T> {
                         self.registry.clone(),
                         self.local_id,
                         duration,
+                        &entry.cancel_token,
                     );
                     entry.timeout_cancel = Some(tc);
                 } else {
@@ -529,14 +535,16 @@ impl AnchorManager {
         let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
         let cancel_token = CancellationToken::new();
 
-        // Spawn timeout task if default_timeout is configured
+        // Spawn timeout task if configured — derive child from the anchor's parent token
+        // so that finalize/remove auto-cancels it.
         let timeout_cancel = self.default_timeout.map(|timeout| {
-            Self::spawn_timeout_task(self.registry.clone(), local_id, timeout)
+            Self::spawn_timeout_task(self.registry.clone(), local_id, timeout, &cancel_token)
         });
 
         let entry = AnchorEntry {
             frame_tx,
             cancel_token,
+            active_pump_token: None,
             attachment: false,
             timeout_cancel,
             timeout_duration: self.default_timeout,
@@ -564,8 +572,9 @@ impl AnchorManager {
         registry: Arc<DashMap<u64, AnchorEntry>>,
         local_id: u64,
         timeout: Duration,
+        parent_cancel: &CancellationToken,
     ) -> CancellationToken {
-        let tc = CancellationToken::new();
+        let tc = parent_cancel.child_token();
         let tc_clone = tc.clone();
         tokio::spawn(async move {
             tokio::select! {
@@ -700,20 +709,21 @@ impl AnchorManager {
     /// Returns `true` if the anchor was found and was previously attached.
     #[allow(dead_code)]
     pub(crate) fn detach(&self, local_id: u64) -> bool {
-        // Phase 1: Clear attachment and read timeout_duration (drop DashMap ref)
-        let (was_attached, maybe_timeout) = self
+        // Phase 1: Clear attachment and read timeout_duration + cancel_token (drop DashMap ref)
+        let (was_attached, maybe_timeout, maybe_parent) = self
             .registry
             .get_mut(&local_id)
             .map(|mut entry| {
                 let was = entry.attachment;
                 entry.attachment = false;
-                (was, entry.timeout_duration)
+                (was, entry.timeout_duration, Some(entry.cancel_token.clone()))
             })
-            .unwrap_or((false, None));
+            .unwrap_or((false, None, None));
 
         // Phase 2: Respawn timeout task outside the DashMap borrow
         if let Some(timeout) = maybe_timeout {
-            let tc = Self::spawn_timeout_task(self.registry.clone(), local_id, timeout);
+            let parent = maybe_parent.as_ref().expect("cancel_token present when timeout_duration is");
+            let tc = Self::spawn_timeout_task(self.registry.clone(), local_id, timeout, parent);
             // Store the new cancellation token back in the entry
             if let Some(mut entry) = self.registry.get_mut(&local_id) {
                 entry.timeout_cancel = Some(tc);

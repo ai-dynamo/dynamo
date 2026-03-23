@@ -325,9 +325,11 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                                 reason: format!("anchor {} already attached", req.handle),
                             })
                         } else {
-                            // Clone frame_tx and cancel_token for reader pump
+                            // Derive a child token for this pump so detach can cancel it
+                            // without poisoning the parent (which lives for the anchor's lifetime).
+                            let pump_cancel = entry.cancel_token.child_token();
+                            entry.active_pump_token = Some(pump_cancel.clone());
                             let pump_frame_tx = entry.frame_tx.clone();
-                            let pump_cancel = entry.cancel_token.clone();
 
                             // Mark as attached and store cancel handle for upstream cancel routing
                             entry.attachment = true;
@@ -386,13 +388,16 @@ pub fn create_anchor_detach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                         let entry = occ.get_mut();
                         // Clear the attachment flag
                         entry.attachment = false;
-                        Some((entry.cancel_token.clone(), entry.frame_tx.clone()))
+                        // Take the child token (leaves None) so the next attach creates a fresh one
+                        Some((entry.active_pump_token.take(), entry.frame_tx.clone()))
                     }
                 };
                 // shard lock is now dropped
 
-                if let Some((cancel_token, frame_tx)) = maybe_entry_info {
-                    cancel_token.cancel();
+                if let Some((maybe_pump_token, frame_tx)) = maybe_entry_info {
+                    if let Some(pump_token) = maybe_pump_token {
+                        pump_token.cancel();
+                    }
                     let sentinel_bytes = crate::sender::cached_detached().clone();
                     let _ = frame_tx.try_send(sentinel_bytes);
                 }
@@ -704,19 +709,21 @@ mod tests {
             }
         }
 
-        // Simulate detach handler logic
+        // Simulate detach handler logic (cancels child token, not parent)
         use dashmap::mapref::entry::Entry;
         let maybe_entry_info = match manager.registry.entry(local_id) {
             Entry::Vacant(_) => None,
             Entry::Occupied(mut occ) => {
                 let entry = occ.get_mut();
                 entry.attachment = false;
-                Some((entry.cancel_token.clone(), entry.frame_tx.clone()))
+                Some((entry.active_pump_token.take(), entry.frame_tx.clone()))
             }
         };
 
-        if let Some((cancel_token, frame_tx)) = maybe_entry_info {
-            cancel_token.cancel();
+        if let Some((maybe_pump_token, frame_tx)) = maybe_entry_info {
+            if let Some(pump_token) = maybe_pump_token {
+                pump_token.cancel();
+            }
             let sentinel_bytes = rmp_serde::to_vec(
                 &crate::frame::StreamFrame::<Vec<u8>>::Detached,
             )
@@ -853,6 +860,7 @@ mod tests {
         registry.insert(local_id, crate::anchor::AnchorEntry {
             frame_tx: frame_tx.clone(),
             cancel_token: cancel_token.clone(),
+            active_pump_token: None,
             attachment: true,
             timeout_cancel: None,
             timeout_duration: None,
@@ -1015,6 +1023,71 @@ mod tests {
             cancel_token.is_cancelled(),
             "cancel_token must be cancelled after pump exits due to transport close"
         );
+    }
+
+    #[tokio::test]
+    async fn test_child_token_reattach_pump_survives() {
+        let parent = tokio_util::sync::CancellationToken::new();
+        let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
+        let registry = std::sync::Arc::new(dashmap::DashMap::new());
+        let local_id = 1u64;
+
+        // --- First attach: spawn pump with child token ---
+        let (tx1, rx1) = flume::bounded::<Vec<u8>>(256);
+        let child1 = parent.child_token();
+
+        registry.insert(local_id, crate::anchor::AnchorEntry {
+            frame_tx: frame_tx.clone(),
+            cancel_token: parent.clone(),
+            active_pump_token: Some(child1.clone()),
+            attachment: true,
+            timeout_cancel: None,
+            timeout_duration: None,
+            stream_cancel_handle: None,
+        });
+
+        tokio::spawn(reader_pump(rx1, frame_tx.clone(), child1.clone(), registry.clone(), local_id));
+
+        // Send a frame -- pump should forward it
+        let data1 = rmp_serde::to_vec(&crate::frame::StreamFrame::Item(1u32)).unwrap();
+        tx1.send_async(data1.clone()).await.unwrap();
+        let received = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            frame_rx.recv_async(),
+        ).await.expect("timeout").expect("closed");
+        assert_eq!(received, data1, "first pump must forward data");
+
+        // --- Detach: cancel child, NOT parent ---
+        child1.cancel();
+        assert!(!parent.is_cancelled(), "parent must NOT be cancelled by child cancel");
+
+        // Give pump time to exit
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // --- Reattach: new child from the same parent ---
+        let (tx2, rx2) = flume::bounded::<Vec<u8>>(256);
+        let child2 = parent.child_token();
+
+        // Update the entry (simulates what _anchor_attach does)
+        if let Some(mut entry) = registry.get_mut(&local_id) {
+            entry.active_pump_token = Some(child2.clone());
+            entry.attachment = true;
+        }
+
+        tokio::spawn(reader_pump(rx2, frame_tx.clone(), child2.clone(), registry.clone(), local_id));
+
+        // Send a frame through the new transport -- pump should forward it
+        let data2 = rmp_serde::to_vec(&crate::frame::StreamFrame::Item(2u32)).unwrap();
+        tx2.send_async(data2.clone()).await.unwrap();
+        let received2 = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            frame_rx.recv_async(),
+        ).await.expect("timeout on reattach").expect("closed on reattach");
+        assert_eq!(received2, data2, "second pump must forward data after reattach");
+
+        // --- Finalize: cancel parent cascades to child ---
+        parent.cancel();
+        assert!(child2.is_cancelled(), "child must be cancelled when parent is cancelled");
     }
 
     // -----------------------------------------------------------------------
