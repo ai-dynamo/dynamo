@@ -15,7 +15,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     match_error_chain(err, INHIBITED, &[])
 }
 use crate::{
-    component::{Client, Endpoint},
+    component::{Client, Endpoint, LeastLoadedState, get_or_create_least_loaded_state},
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
@@ -35,7 +35,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     task::Poll,
@@ -106,8 +106,8 @@ where
     /// where transient failures are expected.
     fault_detection_enabled: bool,
 
-    /// Lock for least-loaded routing, ensures atomic selection + increment of connection count.
-    least_loaded_lock: Arc<Mutex<()>>,
+    /// Shared least-loaded routing state (None when not using least-loaded mode).
+    least_loaded_state: Option<Arc<LeastLoadedState>>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -203,15 +203,21 @@ where
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
+        let least_loaded_state = if router_mode == RouterMode::LeastLoaded {
+            Some(get_or_create_least_loaded_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
         Ok(PushRouter {
-            client: client.clone(),
+            client,
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             in_flight_counts: Arc::new(DashMap::new()),
             busy_threshold: None,
             fault_detection_enabled: false,
-            least_loaded_lock: Arc::new(Mutex::new(())),
+            least_loaded_state,
             _phantom: PhantomData,
         })
     }
@@ -230,15 +236,21 @@ where
             monitor.start_monitoring().await?;
         }
 
+        let least_loaded_state = if router_mode == RouterMode::LeastLoaded {
+            Some(get_or_create_least_loaded_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
         let router = PushRouter {
-            client: client.clone(),
+            client,
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             in_flight_counts: Arc::new(DashMap::new()),
             busy_threshold,
             fault_detection_enabled: true,
-            least_loaded_lock: Arc::new(Mutex::new(())),
+            least_loaded_state,
             _phantom: PhantomData,
         };
 
@@ -349,20 +361,22 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let instance_id = {
-            let _guard = self.least_loaded_lock.lock().unwrap();
-            let id = self.client.least_loaded_instance().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                )
-            })?;
-            self.client.increment_connections(id);
-            id
-        };
+        let state = self.least_loaded_state.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "least-loaded state not initialized for endpoint {}",
+                self.client.endpoint.id()
+            )
+        })?;
+        let instance_ids = self.client.instance_ids_avail();
+        let instance_id = state.select_and_increment(&instance_ids).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no instances found for endpoint {}",
+                self.client.endpoint.id()
+            )
+        })?;
         tracing::trace!(
             "least loaded router selected {instance_id} (connections: {})",
-            self.client.connection_count(instance_id)
+            state.connection_count(instance_id)
         );
 
         match self
@@ -373,13 +387,13 @@ where
                 let engine_ctx = stream.context();
                 let counted = ConnectionCountedStream {
                     inner: stream,
-                    client: self.client.clone(),
+                    state: state.clone(),
                     instance_id,
                 };
                 Ok(ResponseStream::new(Box::pin(counted), engine_ctx))
             }
             Err(e) => {
-                self.client.decrement_connections(instance_id);
+                state.decrement(instance_id);
                 Err(e)
             }
         }
@@ -609,13 +623,13 @@ where
 /// the stream completes or is dropped. Used by least-loaded routing.
 struct ConnectionCountedStream<U: Data> {
     inner: ManyOut<U>,
-    client: Client,
+    state: Arc<LeastLoadedState>,
     instance_id: u64,
 }
 
 impl<U: Data> Drop for ConnectionCountedStream<U> {
     fn drop(&mut self) {
-        self.client.decrement_connections(self.instance_id);
+        self.state.decrement(self.instance_id);
     }
 }
 

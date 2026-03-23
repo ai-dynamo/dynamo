@@ -23,6 +23,73 @@ use crate::{
     transports::etcd::Client as EtcdClient,
 };
 
+/// Shared state for least-loaded routing
+#[derive(Debug, Default)]
+pub(crate) struct LeastLoadedState {
+    /// Active connection count per instance: instance_id -> count
+    connections: DashMap<u64, AtomicU64>,
+    lock: std::sync::Mutex<()>,
+}
+
+impl LeastLoadedState {
+    /// Acquire the selection lock, pick the least-loaded instance, and increment its count.
+    /// Returns the selected instance ID, or None if no instances are available.
+    pub(crate) fn select_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
+        let _guard = self.lock.lock().unwrap();
+        let id = *instance_ids
+            .iter()
+            .min_by_key(|&&id| self.connection_count(id))?;
+        self.increment(id);
+        Some(id)
+    }
+
+    fn increment(&self, instance_id: u64) {
+        self.connections
+            .entry(instance_id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn decrement(&self, instance_id: u64) {
+        if let Some(count) = self.connections.get(&instance_id) {
+            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1))
+            });
+        }
+    }
+
+    pub(crate) fn connection_count(&self, instance_id: u64) -> u64 {
+        self.connections
+            .get(&instance_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Remove counters for instances that no longer exist.
+    pub(crate) fn retain(&self, instance_ids: &[u64]) {
+        self.connections.retain(|id, _| instance_ids.contains(id));
+    }
+}
+
+/// Get or create the shared least-loaded state for an endpoint.
+pub(crate) async fn get_or_create_least_loaded_state(endpoint: &Endpoint) -> Arc<LeastLoadedState> {
+    let drt = endpoint.drt();
+    let registry = drt.least_loaded_states();
+    let mut registry = registry.lock().await;
+
+    if let Some(weak) = registry.get(endpoint) {
+        if let Some(state) = weak.upgrade() {
+            return state;
+        } else {
+            registry.remove(endpoint);
+        }
+    }
+
+    let state = Arc::new(LeastLoadedState::default());
+    registry.insert(endpoint.clone(), Arc::downgrade(&state));
+    state
+}
+
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -43,8 +110,6 @@ pub struct Client {
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     reconcile_interval: Duration,
-    /// Active connection count per instance for least-loaded routing: instance_id -> count
-    instance_connections: Arc<DashMap<u64, AtomicU64>>,
 }
 
 impl Client {
@@ -84,7 +149,6 @@ impl Client {
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
-            instance_connections: Arc::new(DashMap::new()),
         };
         client.monitor_instance_source();
         Ok(client)
@@ -162,41 +226,6 @@ impl Client {
         self.instance_free.store(Arc::new(free_ids));
     }
 
-    /// Increment the active connection count for an instance (for least-loaded routing).
-    pub fn increment_connections(&self, instance_id: u64) {
-        self.instance_connections
-            .entry(instance_id)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement the active connection count for an instance (for least-loaded routing).
-    pub fn decrement_connections(&self, instance_id: u64) {
-        if let Some(count) = self.instance_connections.get(&instance_id) {
-            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(1))
-            });
-        }
-    }
-
-    /// Get the active connection count for an instance.
-    pub fn connection_count(&self, instance_id: u64) -> u64 {
-        self.instance_connections
-            .get(&instance_id)
-            .map(|c| c.load(Ordering::Relaxed))
-            .unwrap_or(0)
-    }
-
-    /// Get the available instance with the lowest active connection count.
-    /// Returns None if no instances are available.
-    pub fn least_loaded_instance(&self) -> Option<u64> {
-        let instance_ids = self.instance_ids_avail();
-        instance_ids
-            .iter()
-            .min_by_key(|&&id| self.connection_count(id))
-            .copied()
-    }
-
     /// Monitor the key-value instance source and update instance_avail.
     ///
     /// This function also performs periodic reconciliation: if `instance_source` hasn't
@@ -221,10 +250,14 @@ impl Client {
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
 
-                // Clean up stale connection counters for instances that no longer exist
-                client
-                    .instance_connections
-                    .retain(|id, _| instance_ids.contains(id));
+                // Clean up stale connection counters for instances that no longer exist.
+                let registry = client.endpoint.drt().least_loaded_states();
+                if let Ok(registry) = registry.try_lock()
+                    && let Some(weak) = registry.get(&client.endpoint)
+                    && let Some(state) = weak.upgrade()
+                {
+                    state.retain(&instance_ids);
+                }
 
                 // Send update to watch channel subscribers
                 let _ = client.instance_avail_tx.send(instance_ids);
@@ -440,5 +473,84 @@ mod tests {
         assert_eq!(current, vec![1, 3]);
 
         rt.shutdown();
+    }
+
+    /// Test that concurrent select_and_increment distributes load correctly.
+    #[tokio::test]
+    async fn test_concurrent_select_and_increment() {
+        let state = Arc::new(LeastLoadedState::default());
+        let instance_ids: Vec<u64> = vec![100, 200, 300];
+        let num_requests = 90;
+
+        let mut handles = Vec::new();
+        for _ in 0..num_requests {
+            let state = state.clone();
+            let ids = instance_ids.clone();
+            handles.push(tokio::spawn(
+                async move { state.select_and_increment(&ids) },
+            ));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(state.connection_count(100), 30);
+        assert_eq!(state.connection_count(200), 30);
+        assert_eq!(state.connection_count(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_connection_counts() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_ll_counts".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let state1 = get_or_create_least_loaded_state(&endpoint).await;
+        let state2 = get_or_create_least_loaded_state(&endpoint).await;
+
+        let picked1 = state1.select_and_increment(&[10, 20, 30]).unwrap();
+        assert_eq!(state1.connection_count(picked1), 1);
+
+        let picked2 = state1.select_and_increment(&[10, 20, 30]).unwrap();
+        assert_ne!(picked1, picked2);
+
+        // state2 should see the same counts (same underlying Arc)
+        assert_eq!(state2.connection_count(10), state1.connection_count(10));
+        assert_eq!(state2.connection_count(20), state1.connection_count(20));
+        assert_eq!(state2.connection_count(30), state1.connection_count(30));
+
+        state2.decrement(picked1);
+        assert_eq!(
+            state1.connection_count(picked1),
+            if picked1 == picked2 { 1 } else { 0 }
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_state_retain() {
+        let state = LeastLoadedState::default();
+
+        // Add some connections
+        state.select_and_increment(&[1, 2, 3]);
+        state.select_and_increment(&[1, 2, 3]);
+        state.select_and_increment(&[1, 2, 3]);
+        // Each instance should have 1 connection
+        assert_eq!(state.connection_count(1), 1);
+        assert_eq!(state.connection_count(2), 1);
+        assert_eq!(state.connection_count(3), 1);
+
+        // Retain only instances 1 and 3 (instance 2 was removed)
+        state.retain(&[1, 3]);
+
+        assert_eq!(state.connection_count(1), 1);
+        assert_eq!(state.connection_count(2), 0); // cleaned up
+        assert_eq!(state.connection_count(3), 1);
     }
 }
