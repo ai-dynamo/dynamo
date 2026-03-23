@@ -139,16 +139,17 @@ python -m dynamo.mocker \
 ```
 
 For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`,
-`arrival_speedup_ratio`, `router_queue_policy`, and the synthetic replay path directly:
+`arrival_speedup_ratio`, and the synthetic replay path directly:
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode kv_router \
-    --router-queue-policy fcfs \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args /path/to/mocker_args.json
+    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --router-config '{"router_queue_policy":"fcfs"}' \
+    --report-json /tmp/replay-report.json
 ```
 
 The same CLI also supports synthetic replay without a trace file:
@@ -162,11 +163,13 @@ python -m dynamo.replay \
     --num-workers 1 \
     --replay-mode offline \
     --replay-concurrency 100 \
-    --extra-engine-args /path/to/mocker_args.json
+    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --report-json /tmp/replay-report.json
 ```
 
-The standalone replay CLI prints the replay report JSON directly to stdout. The `dynamo.mocker`
-trace-file flow still writes a report file and prints a `Replay Summary` table.
+The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
+report JSON to disk. The `dynamo.mocker` trace-file flow still writes a report file and prints a
+`Replay Summary` table.
 
 For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
 
