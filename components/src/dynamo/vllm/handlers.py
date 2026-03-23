@@ -40,6 +40,7 @@ from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
+    ModelRuntimeConfig,
     ModelType,
     lora_name_to_id,
     register_model,
@@ -776,6 +777,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 "lora_id": lora_id,
                             }
 
+                            runtime_config = ModelRuntimeConfig()
+                            runtime_config.tool_call_parser = (
+                                self.config.dyn_tool_call_parser
+                            )
+                            runtime_config.reasoning_parser = (
+                                self.config.dyn_reasoning_parser
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
@@ -783,6 +792,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
+                                runtime_config=runtime_config,
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
@@ -1528,7 +1538,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 
@@ -1575,7 +1585,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1742,7 +1752,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 

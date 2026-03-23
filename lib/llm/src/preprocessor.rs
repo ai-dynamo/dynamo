@@ -297,13 +297,18 @@ impl OpenAIPreprocessor {
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
+            builder.request_timestamp_ms(nvext.request_timestamp_ms);
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
                 expected_output_tokens: hints.and_then(|h| h.osl),
-                priority_jump: hints.and_then(|h| h.latency_sensitivity),
+                priority_jump: hints.and_then(|h| {
+                    h.priority
+                        .map(|priority| priority.max(0) as f64)
+                        .or(h.latency_sensitivity)
+                }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
                 cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),

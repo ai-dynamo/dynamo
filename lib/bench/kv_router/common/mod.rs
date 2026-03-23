@@ -373,6 +373,7 @@ pub async fn generate_kv_events(
                     max_output_tokens: worker_trace[i].output_length as usize,
                     uuid: Some(worker_trace[i].uuid),
                     dp_rank: 0,
+                    arrival_timestamp_ms: None,
                 });
                 i += 1;
 
@@ -384,6 +385,7 @@ pub async fn generate_kv_events(
                         max_output_tokens: worker_trace[i].output_length as usize,
                         uuid: Some(worker_trace[i].uuid),
                         dp_rank: 0,
+                        arrival_timestamp_ms: None,
                     });
                     i += 1;
                 }

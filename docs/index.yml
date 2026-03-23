@@ -69,6 +69,8 @@ navigation:
             path: kubernetes/autoscaling.md
           - page: Rolling Update
             path: kubernetes/rolling-update.md
+          - page: Developing with Tilt
+            path: kubernetes/tilt-dev-setup.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - page: Snapshot
@@ -87,6 +89,8 @@ navigation:
             path: kubernetes/deployment/multinode-deployment.md
           - page: Grove
             path: kubernetes/grove.md
+          - page: Topology Aware Scheduling
+            path: kubernetes/topology-aware-scheduling.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -99,6 +103,8 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - page: Mocker Offline Trace Replay
+        path: benchmarks/mocker-trace-replay.md
       - section: Testing
         contents:
           - page: Mocker

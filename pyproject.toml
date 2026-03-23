@@ -65,6 +65,10 @@ sglang = [
     "cupy-cuda12x>=13.0.0",
 ]
 
+mocker = [
+    "aiconfigurator>=0.7.0",
+]
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
