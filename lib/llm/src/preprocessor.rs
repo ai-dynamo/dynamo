@@ -651,7 +651,9 @@ impl OpenAIPreprocessor {
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = self.tokenizer.clone();
                     move || {
-                        tokenizer.encode_batch(&input_strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                        tokenizer.encode_batch(
+                            &input_strs.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        )
                     }
                 })
                 .await??;

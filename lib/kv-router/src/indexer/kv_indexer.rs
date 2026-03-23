@@ -49,7 +49,9 @@ fn apply_event_with_prune_tracking(
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
     // Extract block entries before apply_event consumes the event
-    let block_entries_for_prune = prune_manager.as_ref().and_then(|_| stored_block_entries(&event));
+    let block_entries_for_prune = prune_manager
+        .as_ref()
+        .and_then(|_| stored_block_entries(&event));
     let result = trie.apply_event(event);
     let result_is_ok = result.is_ok();
     let tree_size = trie.current_size();

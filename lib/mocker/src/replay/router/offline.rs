@@ -253,7 +253,7 @@ impl OfflineReplayRouter {
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
             request.token_seq.as_deref(),
             request.isl_tokens,
-            request.overlaps.clone(),
+            &request.overlaps,
         );
         let scheduling_request = request.scheduling_request(decode_blocks, prefill_tokens);
         let selection = self.selector.select_worker(

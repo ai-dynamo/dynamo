@@ -539,8 +539,8 @@ mod live_scheduler {
             tokio::select! {
                 biased;
                 _ = debug_interval.tick() => {
-                    let _metrics = metrics_rx.borrow().clone();
-                    tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
+                    let metrics = metrics_rx.borrow();
+                    tracing::debug!("Forward Pass Metrics: {metrics:#?}");
                 }
                 Some(_signal) = output_rx.recv() => {
                     received_tokens += 1;

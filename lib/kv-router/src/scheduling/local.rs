@@ -227,7 +227,7 @@ where
     ) -> Vec<PotentialLoad> {
         let (decode_blocks, prefill_tokens) =
             self.slots
-                .potential_blocks_and_tokens(token_seq.as_deref(), isl_tokens, overlaps);
+                .potential_blocks_and_tokens(token_seq.as_deref(), isl_tokens, &overlaps);
 
         let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
         workers.extend(decode_blocks.keys().copied());
