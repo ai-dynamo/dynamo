@@ -15,16 +15,10 @@ The public replay entrypoints live one level up in [entrypoints.rs](/Users/peabr
 
 Offline replay starts in [mod.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/mod.rs).
 
-```mermaid
-flowchart TD
-    A["entrypoints.rs"] --> B{"offline or online?"}
-    B -->|offline| C["offline/mod.rs"]
-    B -->|online| D["online/"]
+`offline/mod.rs` chooses between two implementations:
 
-    C --> E{"1 worker and vLLM?"}
-    E -->|yes| F["single.rs"]
-    E -->|no| G["multi.rs"]
-```
+- [`single.rs`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/single.rs) for the special case `num_workers == 1` with the vLLM engine
+- [`multi.rs`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/multi.rs) for everything else, including multi-worker replay and `kv_router` replay
 
 ## File Map
 
@@ -83,20 +77,16 @@ The general harness lives in [`multi.rs`](/Users/peabrane/Documents/codes/dynamo
 
 ### Main Loop
 
-```mermaid
-flowchart TD
-    A["OfflineRuntime::run"] --> B["pick next timestamp"]
-    B --> C["advance now_ms"]
-    C --> D["apply worker completions scheduled at now_ms"]
-    D --> E["admit new arrivals or concurrency backfill"]
-    E --> F["start passes on ready workers"]
-    F --> G["push WorkerCompletion events into BinaryHeap"]
-    G --> H{"done?"}
-    H -->|no| B
-    H -->|yes| I["TraceCollector::finish"]
-```
+The harness is event-driven. It does not sleep. Instead, `OfflineRuntime` repeatedly:
 
-The harness is event-driven. It does not sleep. It only advances `now_ms` to the next meaningful timestamp:
+1. picks the next meaningful timestamp
+2. advances `now_ms`
+3. applies any worker completion events scheduled for that time
+4. admits newly available requests, either from trace arrivals or concurrency backfill
+5. starts passes on workers that are ready to run
+6. pushes new `WorkerCompletion` events back into the binary heap
+
+It only advances `now_ms` to the next meaningful timestamp:
 
 - next request arrival
 - next worker completion event
