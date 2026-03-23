@@ -51,6 +51,9 @@ pub struct Runtime {
 
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
+        // Initialise NVTX toggle once from environment (no-op when feature is off)
+        crate::nvtx::init();
+
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 
@@ -93,9 +96,6 @@ impl Runtime {
         secondary: Option<RuntimeType>,
         config: &RuntimeConfig,
     ) -> anyhow::Result<Runtime> {
-        // Initialise NVTX toggle once from environment (no-op when feature is off)
-        crate::nvtx::init();
-
         let mut rt = Self::new(runtime, secondary)?;
 
         // Create compute pool from configuration

@@ -62,6 +62,33 @@ struct RequestControlMessage {
     frontend_send_ts_ns: Option<u64>,
 }
 
+/// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
+/// Protects against gauge leaks when `?` operators cause early returns between
+/// the increment and `InflightDecStream` construction.
+struct InflightGuard {
+    armed: bool,
+}
+
+impl InflightGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    /// Consume the guard without decrementing. Call this when `InflightDecStream`
+    /// takes over responsibility for the decrement.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            REQUEST_PLANE_INFLIGHT.dec();
+        }
+    }
+}
+
 /// Wrapper that decrements request-plane inflight gauge when the stream is dropped.
 struct InflightDecStream<S> {
     inner: S,
@@ -132,6 +159,7 @@ where
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
         let queue_start = Instant::now();
         REQUEST_PLANE_INFLIGHT.inc();
+        let inflight_guard = InflightGuard::new();
 
         let request_id = request.context().id().to_string();
         let (addressed_request, context) = request.transfer(());
@@ -300,6 +328,7 @@ where
             }
         });
 
+        inflight_guard.disarm();
         let stream = InflightDecStream { inner: stream };
         Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
     }

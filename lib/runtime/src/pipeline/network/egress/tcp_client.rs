@@ -508,10 +508,10 @@ impl RequestPlaneClient for TcpRequestClient {
     ) -> Result<Bytes> {
         tracing::debug!("TCP client sending request to address: {address}");
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
+        let payload_len = payload.len();
         self.stats
             .bytes_sent
-            .fetch_add(payload.len() as u64, Ordering::Relaxed);
-        TCP_BYTES_SENT_TOTAL.inc_by(payload.len() as f64);
+            .fetch_add(payload_len as u64, Ordering::Relaxed);
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
@@ -540,6 +540,7 @@ impl RequestPlaneClient for TcpRequestClient {
                     .bytes_received
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
                 TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
+                TCP_BYTES_SENT_TOTAL.inc_by(payload_len as f64);
 
                 // Return connection to pool (health check happens inside)
                 self.pool.return_connection(conn).await;

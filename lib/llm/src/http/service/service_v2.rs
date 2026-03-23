@@ -279,7 +279,7 @@ impl HttpService {
         tracing::info!(protocol, address, "Starting HTTP(S) service");
 
         // Spawn tokio runtime metrics collector and event-loop canary on this runtime
-        tokio::spawn(tokio_metrics_and_canary_loop());
+        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
