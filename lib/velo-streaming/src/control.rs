@@ -242,7 +242,7 @@ pub(crate) async fn reader_pump(
                         if missed_heartbeats >= 3 {
                             // Inject Dropped sentinel -- sender is dead
                             let dropped_bytes = crate::sender::cached_dropped().clone();
-                            let _ = frame_tx.try_send(dropped_bytes);
+                            let _ = frame_tx.send_async(dropped_bytes).await;
                             // LIVE-02: Full anchor cleanup -- remove from registry
                             // so no stale entry remains (ANCR-04)
                             if let Some((_, entry)) = registry.remove(&local_id) {

@@ -259,7 +259,7 @@ impl FrameTransport for TcpFrameTransport {
 
                 // If no terminal sentinel was the last frame, inject Dropped
                 if !last_was_terminal {
-                    let _ = frame_tx.try_send(crate::sender::cached_dropped().clone());
+                    let _ = frame_tx.send_async(crate::sender::cached_dropped().clone()).await;
                 }
             });
 

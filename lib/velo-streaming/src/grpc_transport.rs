@@ -171,7 +171,7 @@ impl VeloStreaming for GrpcStreamingService {
 
             // Stream ended -- inject Dropped if no terminal sentinel was last
             if !last_was_terminal {
-                let _ = frame_tx.try_send(crate::sender::cached_dropped().clone());
+                let _ = frame_tx.send_async(crate::sender::cached_dropped().clone()).await;
             }
 
             active_ref.remove(&anchor_id);
