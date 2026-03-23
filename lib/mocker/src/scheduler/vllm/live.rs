@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, OutputSignal};
 use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
     AdmissionEvent, RouterEventVisibility, SchedulerHandle, capture_deferred_kv_publish_sink,
@@ -64,14 +64,14 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
         Self::new_internal(
             args,
             dp_rank,
             output_tx,
-            kv_event_sink,
+            kv_event_publishers,
             cancellation_token,
             None,
         )
@@ -81,7 +81,7 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> Self {
@@ -89,7 +89,7 @@ impl Scheduler {
             args,
             dp_rank,
             output_tx,
-            kv_event_sink,
+            kv_event_publishers,
             cancellation_token,
             admission_tx,
         )
@@ -99,7 +99,7 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> Self {
@@ -113,8 +113,9 @@ impl Scheduler {
         let cancel_guard = Arc::new(CancelGuard(cancel_token));
 
         tokio::spawn(async move {
-            let (deferred_kv_events, buffering_sink) = capture_deferred_kv_publish_sink();
-            let mut core = VllmCore::new_with_sink(args, dp_rank, Some(buffering_sink));
+            let (deferred_kv_events, buffering_publishers) =
+                capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
+            let mut core = VllmCore::new_with_sink(args, dp_rank, buffering_publishers);
 
             loop {
                 if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
@@ -128,16 +129,16 @@ impl Scheduler {
                 let pass = core.execute_pass_internal(None, 0.0, admission_tx.as_ref());
                 let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
                 if pass.router_event_visibility == RouterEventVisibility::PassStart {
-                    publish_deferred_kv_events(&kv_event_sink, deferred_kv_events.drain());
+                    publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 }
                 if total_time > std::time::Duration::ZERO {
                     sleep_until_precise(iteration_start + total_time).await;
                 }
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
-                    publish_deferred_kv_events(&kv_event_sink, deferred_kv_events.drain());
+                    publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 }
                 flush_output_signals(&mut core, &output_tx, &pass.output_signals);
-                publish_deferred_kv_events(&kv_event_sink, deferred_kv_events.drain());
+                publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 let _ = metrics_tx.send(MockerMetrics::new(
                     dp_rank,
                     core.kv_manager.num_active_blocks() as u64,

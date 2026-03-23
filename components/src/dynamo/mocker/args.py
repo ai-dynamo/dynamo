@@ -2,7 +2,6 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import logging
 import os
 import tempfile
@@ -88,94 +87,6 @@ def resolve_planner_profile_data(
         f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
         f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
     )
-
-
-def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
-    """
-    Create a temporary JSON file with MockEngineArgs from CLI arguments.
-    Returns the path to the temporary file.
-    """
-    engine_args = {}
-
-    # Only include non-None values. Shared defaults are materialized here so the
-    # serialized MockEngineArgs match the user-visible CLI defaults, while
-    # engine-specific normalization remains in Rust.
-    # Note: argparse converts hyphens to underscores in attribute names
-    # Extract all potential engine arguments. None means "let Rust normalize it".
-    engine_args = {
-        "num_gpu_blocks": getattr(args, "num_gpu_blocks", None),
-        "block_size": getattr(args, "block_size", None),
-        "max_num_seqs": getattr(args, "max_num_seqs", None),
-        "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
-        "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
-        "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "preemption_mode": getattr(args, "preemption_mode", None),
-        "speedup_ratio": getattr(args, "speedup_ratio", None),
-        "decode_speedup_ratio": getattr(args, "decode_speedup_ratio", None),
-        "dp_size": getattr(args, "dp_size", None),
-        "startup_time": getattr(args, "startup_time", None),
-        "planner_profile_data": (
-            str(getattr(args, "planner_profile_data", None))
-            if getattr(args, "planner_profile_data", None)
-            else None
-        ),
-        "is_prefill": getattr(args, "is_prefill_worker", None),
-        "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
-        # Note: bootstrap_port and zmq_kv_events_port are NOT included here
-        # - they are per-worker and set in launch_workers()
-        # Note: kv_bytes_per_token and kv_cache_dtype are NOT included here
-        # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
-        # - kv_cache_dtype is only used Python-side for the auto-computation.
-        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
-        "engine_type": getattr(args, "engine_type", None),
-    }
-
-    # If --aic-perf-model is set, add AIC fields
-    if getattr(args, "aic_perf_model", False):
-        engine_type = getattr(args, "engine_type", None) or "vllm"
-        engine_args["aic_backend"] = engine_type
-        if getattr(args, "aic_system", None):
-            engine_args["aic_system"] = args.aic_system
-        if getattr(args, "aic_backend_version", None):
-            engine_args["aic_backend_version"] = args.aic_backend_version
-        if getattr(args, "aic_tp_size", None):
-            engine_args["aic_tp_size"] = args.aic_tp_size
-        if getattr(args, "model_path", None):
-            engine_args["aic_model_path"] = args.model_path
-
-    # Parse --reasoning JSON string into a nested object
-    reasoning_str = getattr(args, "reasoning", None)
-    if reasoning_str:
-        engine_args["reasoning"] = json.loads(reasoning_str)
-
-    # Build nested sglang config from individual CLI flags
-    sglang_args = {
-        "schedule_policy": getattr(args, "sglang_schedule_policy", None),
-        "page_size": getattr(args, "sglang_page_size", None),
-        "max_prefill_tokens": getattr(args, "sglang_max_prefill_tokens", None),
-        "chunked_prefill_size": getattr(args, "sglang_chunked_prefill_size", None),
-        "clip_max_new_tokens": getattr(args, "sglang_clip_max_new_tokens", None),
-        "schedule_conservativeness": getattr(
-            args, "sglang_schedule_conservativeness", None
-        ),
-    }
-    sglang_args = {k: v for k, v in sglang_args.items() if v is not None}
-    if sglang_args:
-        engine_args["sglang"] = sglang_args
-
-    # Remove None values to only include explicitly set arguments
-    engine_args = {k: v for k, v in engine_args.items() if v is not None}
-
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(engine_args, f, indent=2)
-        temp_path = Path(f.name)
-
-    logger.debug(f"Created temporary MockEngineArgs file at {temp_path}")
-    logger.debug(f"MockEngineArgs: {engine_args}")
-
-    return temp_path
 
 
 def validate_worker_type_args(args: argparse.Namespace) -> None:

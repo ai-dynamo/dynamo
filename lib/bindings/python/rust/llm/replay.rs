@@ -214,6 +214,75 @@ impl MockEngineArgs {
             .map(|inner| Self { inner })
             .map_err(|e| PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}")))
     }
+
+    #[getter]
+    fn block_size(&self) -> usize {
+        self.inner.block_size
+    }
+
+    #[getter]
+    fn num_gpu_blocks(&self) -> usize {
+        self.inner.num_gpu_blocks
+    }
+
+    #[getter]
+    fn max_num_seqs(&self) -> Option<usize> {
+        self.inner.max_num_seqs
+    }
+
+    #[getter]
+    fn max_num_batched_tokens(&self) -> Option<usize> {
+        self.inner.max_num_batched_tokens
+    }
+
+    #[getter]
+    fn enable_local_indexer(&self) -> bool {
+        self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn dp_size(&self) -> u32 {
+        self.inner.dp_size
+    }
+
+    #[getter]
+    fn bootstrap_port(&self) -> Option<u16> {
+        self.inner.bootstrap_port
+    }
+
+    fn is_prefill(&self) -> bool {
+        self.inner.is_prefill()
+    }
+
+    fn is_decode(&self) -> bool {
+        self.inner.is_decode()
+    }
+
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None))]
+    fn with_overrides(
+        &self,
+        bootstrap_port: Option<u16>,
+        zmq_kv_events_port: Option<u16>,
+        zmq_replay_port: Option<u16>,
+        kv_bytes_per_token: Option<usize>,
+    ) -> PyResult<Self> {
+        let mut inner = self.inner.clone();
+        if let Some(port) = bootstrap_port {
+            inner.bootstrap_port = Some(port);
+        }
+        if let Some(port) = zmq_kv_events_port {
+            inner.zmq_kv_events_port = Some(port);
+        }
+        if let Some(port) = zmq_replay_port {
+            inner.zmq_replay_port = Some(port);
+        }
+        if let Some(bytes_per_token) = kv_bytes_per_token {
+            inner.kv_bytes_per_token = Some(bytes_per_token);
+        }
+        inner.normalized().map(|inner| Self { inner }).map_err(|e| {
+            PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
+        })
+    }
 }
 
 #[pyfunction]

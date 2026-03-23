@@ -8,13 +8,12 @@ mod kv_event_sink;
 pub mod sglang;
 pub mod vllm;
 
-use crate::common::protocols::{DirectRequest, KvCacheEventSink, OutputSignal};
+use crate::common::protocols::{DirectRequest, KvEventPublishers, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{
     CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
     publish_deferred_kv_events,
 };
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -103,7 +102,7 @@ impl EngineScheduler {
         args: crate::common::protocols::MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> Self {
@@ -113,7 +112,7 @@ impl EngineScheduler {
                     args,
                     dp_rank,
                     output_tx,
-                    kv_event_sink,
+                    kv_event_publishers,
                     cancellation_token,
                     admission_tx,
                 ))
@@ -123,7 +122,7 @@ impl EngineScheduler {
                     args,
                     dp_rank,
                     output_tx,
-                    kv_event_sink,
+                    kv_event_publishers,
                     cancellation_token,
                     admission_tx,
                 ))

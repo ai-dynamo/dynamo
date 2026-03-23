@@ -18,11 +18,66 @@ use dynamo_tokens::{BlockHash, SequenceHash, Token};
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
-    fn publish(
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
+}
+
+/// Raw KV event payload used by transport-specific publishers such as the
+/// vLLM-native ZMQ event stream.
+#[derive(Debug, Clone)]
+pub struct RawKvEvent {
+    pub event: KvCacheEvent,
+    pub block_token_ids: Option<Vec<Vec<u32>>>,
+}
+
+/// Trait for publishing transport-specific raw KV event payloads.
+pub trait RawKvEventSink: Send + Sync {
+    fn publish(&self, event: RawKvEvent) -> anyhow::Result<()>;
+}
+
+/// Shared KV event publisher bundle used by schedulers and KV managers.
+#[derive(Clone, Default)]
+pub struct KvEventPublishers {
+    event_sink: Option<Arc<dyn KvCacheEventSink>>,
+    raw_sink: Option<Arc<dyn RawKvEventSink>>,
+}
+
+impl KvEventPublishers {
+    pub fn new(
+        event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        raw_sink: Option<Arc<dyn RawKvEventSink>>,
+    ) -> Self {
+        Self {
+            event_sink,
+            raw_sink,
+        }
+    }
+
+    pub fn raw_enabled(&self) -> bool {
+        self.raw_sink.is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.event_sink.is_none() && self.raw_sink.is_none()
+    }
+
+    pub fn publish(
         &self,
         event: KvCacheEvent,
         block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<()> {
+        if let Some(sink) = self.event_sink.as_ref() {
+            sink.publish(event.clone())?;
+        }
+
+        if let Some(sink) = self.raw_sink.as_ref() {
+            sink.publish(RawKvEvent {
+                event,
+                block_token_ids: block_token_ids.map(|token_ids| token_ids.to_vec()),
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 pub type NumBlocks = usize;

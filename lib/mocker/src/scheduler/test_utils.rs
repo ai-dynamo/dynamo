@@ -17,7 +17,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use super::{DirectRequest, KvCacheEventSink, OutputSignal, SchedulerHandle};
+use super::{DirectRequest, OutputSignal, SchedulerHandle};
+use crate::common::protocols::KvCacheEventSink;
 
 pub(crate) struct RouterIndexerHarness {
     indexer: Arc<LocalKvIndexer>,
@@ -146,11 +147,7 @@ pub(crate) struct TestKvEventSink {
 }
 
 impl KvCacheEventSink for TestKvEventSink {
-    fn publish(
-        &self,
-        event: KvCacheEvent,
-        _block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()> {
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
             .map_err(|_| anyhow!("router test event channel closed"))

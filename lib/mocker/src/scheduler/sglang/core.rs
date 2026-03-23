@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
-use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs, WorkerType};
+use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::kv_manager::SglangKvManager;
 use crate::replay::TraceCollector;
 
@@ -32,27 +31,32 @@ pub(crate) struct SglangCore {
 
 impl SglangCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        Self::new_internal(args, 0, None, None)
+        Self::new_internal(args, 0, None, KvEventPublishers::default())
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
         let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(args, worker_id as u32, Some(buffer), Some(sink))
+        Self::new_internal(
+            args,
+            worker_id as u32,
+            Some(buffer),
+            KvEventPublishers::new(Some(sink), None),
+        )
     }
 
     pub(super) fn new_with_sink(
         args: MockEngineArgs,
         dp_rank: u32,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
     ) -> Self {
-        Self::new_internal(args, dp_rank, None, kv_event_sink)
+        Self::new_internal(args, dp_rank, None, kv_event_publishers)
     }
 
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
         let config = SglangConfig::from_args(&args);
@@ -63,7 +67,12 @@ impl SglangCore {
             waiting: VecDeque::new(),
             running: Vec::new(),
             new_token_ratio: SglangConfig::from_args(&args).init_new_token_ratio,
-            kv_manager: SglangKvManager::new(total_tokens, args.block_size, kv_event_sink, dp_rank),
+            kv_manager: SglangKvManager::new(
+                total_tokens,
+                args.block_size,
+                kv_event_publishers,
+                dp_rank,
+            ),
             kv_event_buffer,
         }
     }

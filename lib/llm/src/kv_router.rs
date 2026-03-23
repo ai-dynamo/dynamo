@@ -38,8 +38,6 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
-pub mod queue;
-pub mod recorder;
 pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;

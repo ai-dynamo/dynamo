@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
@@ -11,7 +10,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::protocols::{
-    DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
+    DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
@@ -197,34 +196,39 @@ pub(crate) struct VllmCore {
 
 impl VllmCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        Self::new_internal(args, 0, None, None)
+        Self::new_internal(args, 0, None, KvEventPublishers::default())
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
         let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(args, 0, Some(buffer), Some(sink))
+        Self::new_internal(
+            args,
+            0,
+            Some(buffer),
+            KvEventPublishers::new(Some(sink), None),
+        )
     }
 
     pub(super) fn new_with_sink(
         args: MockEngineArgs,
         dp_rank: u32,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
     ) -> Self {
-        Self::new_internal(args, dp_rank, None, kv_event_sink)
+        Self::new_internal(args, dp_rank, None, kv_event_publishers)
     }
 
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
         Self {
             kv_manager: KvManager::new_with_event_sink(
                 args.num_gpu_blocks,
                 args.block_size,
-                kv_event_sink,
+                kv_event_publishers,
                 dp_rank,
             ),
             args,

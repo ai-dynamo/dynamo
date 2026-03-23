@@ -20,7 +20,9 @@ use super::shared::{
     ReplayScheduler, replay_policy, replay_router_config, replay_selector, replay_slots,
     replay_workers_with_configs,
 };
-use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use crate::common::protocols::{
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+};
 use crate::replay::ReplayRouterMode;
 
 #[derive(Clone)]
@@ -87,11 +89,7 @@ struct ReplayKvEventSink {
 }
 
 impl KvCacheEventSink for ReplayKvEventSink {
-    fn publish(
-        &self,
-        event: dynamo_kv_router::protocols::KvCacheEvent,
-        _block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()> {
+    fn publish(&self, event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
             .map_err(|_| anyhow!("replay router event channel closed"))
@@ -263,10 +261,10 @@ impl ReplayRouter {
         }
     }
 
-    pub(crate) fn sink(&self, worker_id: WorkerId) -> Option<Arc<dyn KvCacheEventSink>> {
+    pub(crate) fn sink(&self, worker_id: WorkerId) -> KvEventPublishers {
         match self {
-            Self::RoundRobin(_) => None,
-            Self::Kv(router) => Some(router.sink(worker_id)),
+            Self::RoundRobin(_) => KvEventPublishers::default(),
+            Self::Kv(router) => KvEventPublishers::new(Some(router.sink(worker_id)), None),
         }
     }
 

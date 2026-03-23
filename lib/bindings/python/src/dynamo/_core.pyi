@@ -1223,6 +1223,39 @@ class MockEngineArgs:
     def from_json(config_json: str) -> "MockEngineArgs":
         ...
 
+    @property
+    def block_size(self) -> int: ...
+
+    @property
+    def num_gpu_blocks(self) -> int: ...
+
+    @property
+    def max_num_seqs(self) -> Optional[int]: ...
+
+    @property
+    def max_num_batched_tokens(self) -> Optional[int]: ...
+
+    @property
+    def enable_local_indexer(self) -> bool: ...
+
+    @property
+    def dp_size(self) -> int: ...
+
+    @property
+    def bootstrap_port(self) -> Optional[int]: ...
+
+    def is_prefill(self) -> bool: ...
+
+    def is_decode(self) -> bool: ...
+
+    def with_overrides(
+        self,
+        bootstrap_port: Optional[int] = None,
+        zmq_kv_events_port: Optional[int] = None,
+        zmq_replay_port: Optional[int] = None,
+        kv_bytes_per_token: Optional[int] = None,
+    ) -> "MockEngineArgs": ...
+
 async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -1784,6 +1817,7 @@ class EntrypointArgs:
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
+        mocker_engine_args: Optional[MockEngineArgs] = None,
         runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
@@ -1808,7 +1842,8 @@ class EntrypointArgs:
             http_metrics_port: HTTP metrics port (for gRPC service)
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
-            extra_engine_args: Path to extra engine arguments file
+            extra_engine_args: Optional path to mocker engine arguments JSON
+            mocker_engine_args: Typed mocker engine arguments
             runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix

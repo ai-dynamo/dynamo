@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, WorkerId};
 
-use crate::common::protocols::KvCacheEventSink;
+use crate::common::protocols::{KvCacheEventSink, KvEventPublishers, RawKvEvent, RawKvEventSink};
 
 /// Captures router-ready events for offline replay and scheduler tests.
 ///
@@ -37,7 +37,7 @@ struct RouterEventCaptureSink {
 }
 
 impl KvCacheEventSink for RouterEventCaptureSink {
-    fn publish(&self, event: KvCacheEvent, _block_token_ids: Option<&[Vec<u32>]>) -> Result<()> {
+    fn publish(&self, event: KvCacheEvent) -> Result<()> {
         self.buffer.push(RouterEvent::new(self.worker_id, event));
         Ok(())
     }
@@ -91,14 +91,37 @@ impl DeferredKvPublishBuffer {
 /// Sink implementation that records raw KV publishes into
 /// `DeferredKvPublishBuffer` instead of forwarding them immediately.
 #[derive(Clone, Default)]
-struct DeferredKvPublishSink {
+struct DeferredKvEventSink {
     buffer: DeferredKvPublishBuffer,
 }
 
-impl KvCacheEventSink for DeferredKvPublishSink {
-    fn publish(&self, event: KvCacheEvent, block_token_ids: Option<&[Vec<u32>]>) -> Result<()> {
-        self.buffer
-            .push(event, block_token_ids.map(|token_ids| token_ids.to_vec()));
+impl KvCacheEventSink for DeferredKvEventSink {
+    fn publish(&self, event: KvCacheEvent) -> Result<()> {
+        self.buffer.push(event, None);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct DeferredRawKvEventSink {
+    buffer: DeferredKvPublishBuffer,
+}
+
+impl RawKvEventSink for DeferredRawKvEventSink {
+    fn publish(&self, event: RawKvEvent) -> Result<()> {
+        let mut events = self.buffer.events.lock().unwrap();
+        if let Some(last) = events.last_mut()
+            && last.event.event_id == event.event.event_id
+            && last.event.dp_rank == event.event.dp_rank
+        {
+            last.block_token_ids = event.block_token_ids;
+            return Ok(());
+        }
+
+        events.push(DeferredKvPublish {
+            event: event.event,
+            block_token_ids: event.block_token_ids,
+        });
         Ok(())
     }
 }
@@ -106,27 +129,29 @@ impl KvCacheEventSink for DeferredKvPublishSink {
 /// Returns the deferred-publish buffer plus a sink handle that can be passed
 /// into the live scheduler core while `live.rs` retains control over when the
 /// buffered events are forwarded to the real sink.
-pub(crate) fn capture_deferred_kv_publish_sink()
--> (DeferredKvPublishBuffer, Arc<dyn KvCacheEventSink>) {
+pub(crate) fn capture_deferred_kv_publish_sink(
+    capture_raw: bool,
+) -> (DeferredKvPublishBuffer, KvEventPublishers) {
     let buffer = DeferredKvPublishBuffer::default();
-    let sink: Arc<dyn KvCacheEventSink> = Arc::new(DeferredKvPublishSink {
+    let event_sink: Arc<dyn KvCacheEventSink> = Arc::new(DeferredKvEventSink {
         buffer: buffer.clone(),
     });
-    (buffer, sink)
+    let raw_sink = capture_raw.then(|| {
+        Arc::new(DeferredRawKvEventSink {
+            buffer: buffer.clone(),
+        }) as Arc<dyn RawKvEventSink>
+    });
+    (buffer, KvEventPublishers::new(Some(event_sink), raw_sink))
 }
 
 /// Forwards buffered live-scheduler KV events to the real sink once the pass
 /// reaches the configured visibility point.
 pub(crate) fn publish_deferred_kv_events(
-    sink: &Option<Arc<dyn KvCacheEventSink>>,
+    sinks: &KvEventPublishers,
     events: Vec<DeferredKvPublish>,
 ) {
-    let Some(sink) = sink.as_ref() else {
-        return;
-    };
-
     for event in events {
-        if let Err(error) = sink.publish(event.event, event.block_token_ids.as_deref()) {
+        if let Err(error) = sinks.publish(event.event, event.block_token_ids.as_deref()) {
             tracing::warn!("Failed to forward buffered KV event: {error}");
         }
     }

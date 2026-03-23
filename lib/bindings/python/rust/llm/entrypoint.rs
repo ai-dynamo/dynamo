@@ -24,6 +24,7 @@ use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingE
 use dynamo_mocker::common::perf_model::PerfModel;
 
 use super::aic_callback::create_aic_callback;
+use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
@@ -204,6 +205,7 @@ pub(crate) struct EntrypointArgs {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
+    mocker_engine_args: Option<PyMockEngineArgs>,
     runtime_config: Option<ModelRuntimeConfig>,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
@@ -216,7 +218,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -233,6 +235,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
+        mocker_engine_args: Option<PyMockEngineArgs>,
         runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
@@ -280,6 +283,7 @@ impl EntrypointArgs {
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
+            mocker_engine_args,
             runtime_config,
             namespace,
             namespace_prefix,
@@ -427,7 +431,9 @@ async fn select_engine(
             }
         }
         EngineType::Mocker => {
-            let mut mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
+            let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
+                mocker_engine_args.inner()
+            } else if let Some(extra_args_path) = args.extra_engine_args {
                 RsMockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to load mocker args from {:?}: {}",
