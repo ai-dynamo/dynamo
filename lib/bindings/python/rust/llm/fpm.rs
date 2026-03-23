@@ -70,20 +70,23 @@ impl FpmEventRelay {
 /// Extract `(worker_id, dp_rank)` from a msgspec-encoded `ForwardPassMetrics`.
 ///
 /// msgspec.Struct with positional encoding produces a msgpack **array**:
-///   `[worker_id: str, dp_rank: int, wall_time: float, ...]`
+///   `[version: int, worker_id: str, dp_rank: int, counter_id: int, ...]`
 ///
-/// We only decode the first two elements to build the tracking key.
+/// We skip the version field and decode worker_id (index 1) and dp_rank (index 2).
 fn extract_fpm_key(data: &[u8]) -> Option<(String, i64)> {
     use rmp::decode::{read_array_len, read_int, read_str_len};
 
     let mut cursor = std::io::Cursor::new(data);
 
     let arr_len = read_array_len(&mut cursor).ok()?;
-    if arr_len < 2 {
+    if arr_len < 3 {
         return None;
     }
 
-    // Index 0: worker_id (str)
+    // Index 0: version (int) -- skip
+    let _version: i64 = read_int(&mut cursor).ok()?;
+
+    // Index 1: worker_id (str)
     let str_len = read_str_len(&mut cursor).ok()? as usize;
     let pos = cursor.position() as usize;
     if pos + str_len > data.len() {
@@ -92,7 +95,7 @@ fn extract_fpm_key(data: &[u8]) -> Option<(String, i64)> {
     let worker_id = std::str::from_utf8(&data[pos..pos + str_len]).ok()?.to_owned();
     cursor.set_position((pos + str_len) as u64);
 
-    // Index 1: dp_rank (int)
+    // Index 2: dp_rank (int)
     let dp_rank: i64 = read_int(&mut cursor).ok()?;
 
     Some((worker_id, dp_rank))
