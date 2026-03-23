@@ -2030,6 +2030,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
  "strum",
  "temp-env",
  "tempfile",

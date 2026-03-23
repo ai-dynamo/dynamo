@@ -308,7 +308,8 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] KV Router: Type of external shared KV cache to query. "
                 "'none' (default): disabled. "
-                "'hicache': query sglang workers for L3 (HiCache) cache state via request plane."
+                "'hicache': query Mooncake master directly for SGLang L3 (HiCache) state "
+                "using SGLang-compatible Mooncake key derivation."
             ),
             arg_type=str,
             choices=["none", "hicache"],
