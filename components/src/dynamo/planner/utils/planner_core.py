@@ -286,7 +286,8 @@ class BasePlanner:
                     )
                 elif config.environment == "kubernetes":
                     self.connector = KubernetesConnector(
-                        self.namespace, self.model_name
+                        self.namespace,
+                        self.model_name,
                     )
                 elif config.environment == "virtual":
                     self.connector = VirtualConnector(
@@ -893,10 +894,18 @@ class BasePlanner:
             dgd_count = (
                 num_p if self.component_type == SubComponentType.PREFILL else num_d
             )
-            if prom_count != dgd_count:
+            try:
+                all_p, all_d, _ = self.connector.get_actual_worker_counts(
+                    prefill_component_name=self.prefill_component_name,
+                    decode_component_name=self.decode_component_name,
+                )
+                total_workers_in_dgd = all_p + all_d
+            except Exception:
+                total_workers_in_dgd = dgd_count
+            if prom_count < 1 or prom_count > total_workers_in_dgd:
                 logger.warning(
-                    f"Worker count mismatch: DGD reports {dgd_count} workers, "
-                    f"router metrics reports {prom_count} workers. "
+                    f"Worker count mismatch: DGD has {total_workers_in_dgd} total workers "
+                    f"(prefill+decode), router metrics reports {prom_count}. "
                     "Skipping load-based scaling adjustment."
                 )
                 continue

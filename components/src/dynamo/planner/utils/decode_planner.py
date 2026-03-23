@@ -50,10 +50,16 @@ class DecodePlanner(BasePlanner):
             f"slope={self.itl_regression.slope:.6f}, intercept={self.itl_regression.intercept:.3f}"
         )
 
-        # Scale up: ALL workers above target (use recent metrics)
-        all_above = all(
-            m.get("active_decode_blocks", 0.0) > x_sla for m in recent.values()
-        )
+        all_metrics = list(recent.values())
+        if len(all_metrics) > num_workers:
+            all_metrics = sorted(
+                all_metrics,
+                key=lambda m: m.get("active_decode_blocks", 0.0),
+                reverse=True,
+            )[:num_workers]
+
+        # Scale up: ALL (managed) workers above target (use recent metrics)
+        all_above = all(m.get("active_decode_blocks", 0.0) > x_sla for m in all_metrics)
         if all_above:
             logger.info(
                 f"Load-based decode: ALL workers above target ({x_sla:.1f}), "
@@ -66,7 +72,7 @@ class DecodePlanner(BasePlanner):
             sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             all_below = all(
-                m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
+                m.get("active_decode_blocks", 0.0) < boundary for m in all_metrics
             )
             if all_below:
                 if num_workers - 1 < self.config.min_endpoint:
