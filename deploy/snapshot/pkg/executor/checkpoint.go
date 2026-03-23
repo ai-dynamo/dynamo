@@ -12,6 +12,7 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
+	"k8s.io/client-go/kubernetes"
 	"github.com/google/uuid"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
@@ -30,6 +31,7 @@ type CheckpointRequest struct {
 	NodeName              string
 	PodName               string
 	PodNamespace          string
+	Clientset             kubernetes.Interface
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -161,6 +163,14 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
+		}
+		if len(gpuUUIDs) == 0 {
+			log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, common.HostProcPath, pid)
+			if err != nil {
+				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
+			}
+			log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDs)
 		}
 	}
 
