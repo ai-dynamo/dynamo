@@ -69,14 +69,13 @@ mod http;
 mod kserve_grpc;
 mod llm;
 mod parsers;
+mod payload;
 mod planner;
 mod prometheus_metrics;
-mod payload;
 
 pub use payload::Payload;
 
-type JsonServerStreamingIngress =
-    Ingress<SingleIn<Payload>, ManyOut<RsAnnotated<Payload>>>;
+type JsonServerStreamingIngress = Ingress<SingleIn<Payload>, ManyOut<RsAnnotated<Payload>>>;
 
 static INIT: OnceCell<()> = OnceCell::new();
 
@@ -771,10 +770,14 @@ impl DistributedRuntime {
 
                     // Convert result back to serde_json::Value
                     Python::with_gil(|py| {
-                        py_result.extract::<Payload>(py)
+                        py_result
+                            .extract::<Payload>(py)
                             .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
-                            .and_then(|payload| payload.into_json()
-                                .map_err(|e| anyhow::anyhow!("Failed to convert to JSON: {}", e)))
+                            .and_then(|payload| {
+                                payload.into_json().map_err(|e| {
+                                    anyhow::anyhow!("Failed to convert to JSON: {}", e)
+                                })
+                            })
                     })
                 })
             });
@@ -884,12 +887,13 @@ impl Endpoint {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
-            let push_router = rs::pipeline::PushRouter::<
-                Payload,
-                RsAnnotated<Payload>,
-            >::from_client(client, router_mode.into())
-            .await
-            .map_err(to_pyerr)?;
+            let push_router =
+                rs::pipeline::PushRouter::<Payload, RsAnnotated<Payload>>::from_client(
+                    client,
+                    router_mode.into(),
+                )
+                .await
+                .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
             })
