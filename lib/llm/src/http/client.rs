@@ -319,7 +319,7 @@ impl<T: Data> AsyncEngineContextProvider for HttpResponseStream<T> {
 }
 
 impl<T: Data> HttpResponseStream<T> {
-    /// Convert this HttpResponseStream to a Pin<Box<dyn AsyncEngineStream<T>>>
+    /// Convert this `HttpResponseStream` to a `Pin<Box<dyn AsyncEngineStream<T>>>`
     /// This requires the stream to be Send + Sync, which may not be true for all streams
     pub fn into_async_engine_stream(self) -> Pin<Box<dyn AsyncEngineStream<T>>>
     where

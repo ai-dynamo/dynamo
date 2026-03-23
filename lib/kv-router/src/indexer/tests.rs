@@ -1725,6 +1725,37 @@ fn make_tree_indexer_with_frequency(
     }
 }
 
+fn make_tree_indexer_with_prune(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterface> {
+    use crate::indexer::pruning::PruneConfig;
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let kv_block_size = 32;
+    let prune_config = Some(PruneConfig {
+        ttl,
+        max_tree_size: usize::MAX, // disable size-based pruning; only TTL
+        prune_target_ratio: 0.8,
+    });
+
+    match variant {
+        "single" => Box::new(KvIndexer::new_with_frequency(
+            token,
+            None,
+            kv_block_size,
+            metrics,
+            prune_config,
+        )),
+        "sharded" => Box::new(KvIndexerSharded::new_with_frequency(
+            token,
+            4,
+            None,
+            kv_block_size,
+            metrics,
+            prune_config,
+        )),
+        _ => panic!("Unknown variant: {}", variant),
+    }
+}
+
 mod tree_specific_tests {
     use super::*;
     use rstest_reuse::apply;
@@ -1809,6 +1840,86 @@ mod tree_specific_tests {
         // The third access did not touch the last block
         let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
         assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
+    }
+
+    /// Verify that blocks stored via a `Stored` event are tracked in the PruneManager and
+    /// evicted from the trie after their TTL expires.
+    ///
+    /// This test covers the refactored code path in `kv_indexer.rs` and `sharded.rs` where
+    /// `block_entries_for_prune` is pre-extracted from the event *before* `apply_event`
+    /// consumes it, replacing the earlier approach that cloned the whole event.  The observable
+    /// behaviour must be identical: blocks become unfindable after TTL, and non-Stored events
+    /// (Remove / Clear) do not accidentally register entries with the PruneManager.
+    #[tokio::test]
+    #[apply(tree_indexer_template)]
+    async fn test_prune_manager_tracks_stored_blocks_and_evicts_after_ttl(variant: &str) {
+        // TTL must be longer than two flush_and_settle calls (~200ms total) so the
+        // intermediate assertions pass, but short enough to keep the test fast.
+        let ttl = Duration::from_millis(400);
+        let index = make_tree_indexer_with_prune(variant, ttl);
+
+        let hashes_a: Vec<LocalBlockHash> = (1u64..=3).map(LocalBlockHash).collect();
+        let hashes_b: Vec<LocalBlockHash> = (10u64..=12).map(LocalBlockHash).collect();
+
+        // Store two independent sequences on the same worker.
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        index.apply_event(make_store_event(0, &[10, 11, 12])).await;
+        flush_and_settle(index.as_ref()).await;
+
+        // Both sequences must be routable immediately after being stored.
+        let scores_a = index.find_matches(hashes_a.clone()).await.unwrap();
+        assert_eq!(
+            scores_a
+                .scores
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied()
+                .unwrap_or(0),
+            3,
+            "worker 0 should match all 3 blocks of sequence A before TTL"
+        );
+        let scores_b = index.find_matches(hashes_b.clone()).await.unwrap();
+        assert_eq!(
+            scores_b
+                .scores
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied()
+                .unwrap_or(0),
+            3,
+            "worker 0 should match all 3 blocks of sequence B before TTL"
+        );
+
+        // A Remove event for sequence A must not crash or corrupt the PruneManager state.
+        // (Non-Stored events should be ignored by the prune-tracking path.)
+        index.apply_event(make_remove_event(0, &[1, 2, 3])).await;
+        flush_and_settle(index.as_ref()).await;
+
+        // Sequence B must still be present — the Remove only targeted A.
+        let scores_b_after_remove = index.find_matches(hashes_b.clone()).await.unwrap();
+        assert_eq!(
+            scores_b_after_remove
+                .scores
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied()
+                .unwrap_or(0),
+            3,
+            "sequence B should still be routable after removing sequence A"
+        );
+
+        // Wait for TTL to expire, then let the indexer process the expiry tick.
+        time::sleep(ttl + Duration::from_millis(100)).await;
+        flush_and_settle(index.as_ref()).await;
+
+        // Sequence B should now be evicted by the PruneManager.
+        let scores_b_expired = index.find_matches(hashes_b.clone()).await.unwrap();
+        assert_eq!(
+            scores_b_expired
+                .scores
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "sequence B blocks should be evicted after TTL expires"
+        );
     }
 }
 
