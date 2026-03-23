@@ -1,0 +1,53 @@
+name: 'Connect to vCluster'
+description: 'Establish a port-forward to a vCluster and output its kubeconfig as base64'
+
+inputs:
+  host_kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for host cluster access'
+    required: true
+  vcluster_name:
+    description: 'Name of the vCluster to connect to'
+    required: true
+  vcluster_namespace:
+    description: 'Host namespace where the vCluster is running'
+    required: true
+outputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for the vCluster (points to 127.0.0.1:8443 via port-forward)'
+    value: ${{ steps.connect.outputs.kubeconfig_base64 }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup host kubeconfig
+      shell: bash
+      run: |
+        echo "${{ inputs.host_kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
+        chmod 600 ${{ github.workspace }}/.kubeconfig-host
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
+
+    - name: Install vCluster CLI
+      uses: ./.github/actions/install-vcluster-cli
+
+    - name: Connect to vCluster
+      id: connect
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        NAMESPACE: ${{ inputs.vcluster_namespace }}
+      run: |
+        echo "::group::Port-forward and generate vCluster kubeconfig"
+        kubectl port-forward -n ${NAMESPACE} svc/${VCLUSTER_NAME} 8443:443 &
+        sleep 5
+
+        vcluster connect ${VCLUSTER_NAME} \
+          --namespace ${NAMESPACE} \
+          --server=https://127.0.0.1:8443 \
+          --print > ${{ github.workspace }}/.kubeconfig-vcluster
+
+        echo "Verifying vCluster connectivity..."
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster get ns
+
+        KUBECONFIG_B64=$(base64 -w 0 < ${{ github.workspace }}/.kubeconfig-vcluster)
+        echo "kubeconfig_base64=${KUBECONFIG_B64}" >> $GITHUB_OUTPUT
+        echo "::endgroup::"

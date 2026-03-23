@@ -191,6 +191,8 @@ class ImageLoader:
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
+                    if self._nixl_connector is None:
+                        raise RuntimeError("NIXL connector is not initialized")
                     image_futures.append(
                         read_decoded_media_via_nixl(self._nixl_connector, metadata)
                     )

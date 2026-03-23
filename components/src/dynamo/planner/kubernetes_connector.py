@@ -222,15 +222,15 @@ class KubernetesConnector(PlannerConnector):
             else:
                 raise e
 
+        if not model_name:
+            raise ModelNameNotFoundError()
+
         # If user provided a model name and it doesn't match the model name from the deployment, raise an error
         if self.user_provided_model_name:
             if model_name != self.user_provided_model_name:
                 raise UserProvidedModelNameMismatchError(
                     model_name, self.user_provided_model_name
                 )
-
-        if not model_name:
-            raise ModelNameNotFoundError()
 
         return model_name
 

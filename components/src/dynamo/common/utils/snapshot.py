@@ -167,6 +167,15 @@ def configure_checkpoint_transport_env() -> None:
         )
     os.environ["NCCL_IB_DISABLE"] = "1"
 
+    nccl_ras_enable = os.environ.get("NCCL_RAS_ENABLE")
+    if nccl_ras_enable and nccl_ras_enable != "0":
+        logger.warning(
+            "Overriding NCCL_RAS_ENABLE=%r with '0' for checkpoint mode "
+            "because NCCL RAS background state is not part of the checkpoint contract",
+            nccl_ras_enable,
+        )
+    os.environ["NCCL_RAS_ENABLE"] = "0"
+
     torch_nccl_monitoring = os.environ.get("TORCH_NCCL_ENABLE_MONITORING")
     if torch_nccl_monitoring and torch_nccl_monitoring != "0":
         logger.warning(

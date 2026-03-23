@@ -172,19 +172,19 @@ if [ "$DEVICE" = "cuda" ]; then
     #           does not prevent uv from resolving the cu12 variant)
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
     if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-        if uv pip install "vllm[flashinfer,runai]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
+        if uv pip install "vllm[flashinfer,runai,otel]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
             echo "✓ vLLM ${VLLM_VER} installed from PyPI"
         else
             echo "⚠ PyPI install failed, installing from GitHub release..."
             uv pip install ${EXTRA_PIP_ARGS} \
-                "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+                "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
                 --torch-backend=${TORCH_BACKEND}
             echo "✓ vLLM ${VLLM_VER} installed from GitHub"
         fi
     else
         echo "Installing vLLM from GitHub release (cu130 wheel not available on PyPI)..."
         uv pip install ${EXTRA_PIP_ARGS} \
-            "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+            "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
             --torch-backend=${TORCH_BACKEND}
         echo "✓ vLLM ${VLLM_VER} installed from GitHub"
     fi

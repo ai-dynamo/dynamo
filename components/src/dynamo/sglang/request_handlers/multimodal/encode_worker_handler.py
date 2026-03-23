@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import torch
 
@@ -15,12 +16,16 @@ except (ImportError, OSError):
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
-import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
+from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import SglangMultimodalRequest
+from dynamo.sglang.protocol import (
+    MultiModalGroup,
+    MultiModalInput,
+    PreprocessedRequest,
+    SglangMultimodalRequest,
+)
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
@@ -38,11 +43,18 @@ except ImportError as e:
 
     DEVICE = "cpu"
 
+IMAGE_URL_KEY = "image_url"
 
-class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
+
+class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
     Handler for multimodal encode worker component that processes images/videos
     and forwards them to the downstream worker.
+
+    Receives pre-tokenized requests from the Rust frontend (ModelInput.Tokens)
+    with token_ids and multi_modal_data containing image URLs. Encodes images
+    via MMEncoder, expands placeholder tokens, transfers embeddings via NIXL,
+    and forwards to the PD worker.
     """
 
     def __init__(
@@ -85,61 +97,107 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
             # These are likely the individual special tokens for Qwen2.5-VL
             image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+            assert isinstance(
+                image_pad_id, int
+            ), f"Expected int token id, got {type(image_pad_id)}"
 
             # Use the image_pad token as the main image token
-            self.image_token_id = image_pad_id
+            self.image_token_id: int = image_pad_id
         else:
             # Fallback for other models
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
+            token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
+            assert isinstance(
+                token_id, int
+            ), f"Expected int token id, got {type(token_id)}"
+            self.image_token_id = token_id
 
         self.min_workers = 1
+
+        sender = EMBEDDING_SENDER_FACTORIES.get(
+            config.dynamo_args.embedding_transfer_mode
+        )
+        if sender is None:
+            raise ValueError(
+                "Invalid embedding transfer mode: "
+                f"{config.dynamo_args.embedding_transfer_mode}"
+            )
+        self.embedding_sender = sender()
 
     def cleanup(self) -> None:
         pass
 
+    def _extract_image_urls(self, request: Dict[str, Any]) -> list[str]:
+        """
+        Extract image URLs from the multi_modal_data field of a PreprocessedRequest.
+
+        The Rust frontend populates multi_modal_data with the format:
+            {"image_url": [{"Url": "https://..."}, ...]}
+        """
+        mm_data = request.get("multi_modal_data")
+        if not mm_data:
+            raise ValueError("multi_modal_data is required for the encode worker.")
+
+        image_items = mm_data.get(IMAGE_URL_KEY)
+        if not image_items:
+            raise ValueError("multi_modal_data must contain image_url entries.")
+
+        image_urls: list[str] = []
+        for item in image_items:
+            if isinstance(item, str):
+                image_urls.append(item)
+            elif isinstance(item, dict) and "Url" in item:
+                image_urls.append(item["Url"])
+            elif isinstance(item, dict) and "Decoded" in item:
+                raise ValueError(
+                    "Frontend-decoded media (Decoded variant) is incompatible "
+                    "with the multimodal encode worker. The encode worker "
+                    "requires image URLs to run vision encoding via MMEncoder. "
+                    "Disable --frontend-decoding when using EPD serving."
+                )
+            else:
+                raise ValueError(f"Unsupported multimodal data variant: {item}")
+
+        return image_urls
+
     @_nvtx.range_decorator("mm:enc:generate", color="blue")
     async def generate(
-        self, request: SglangMultimodalRequest, context: Context
-    ) -> AsyncIterator[str]:
+        self, raw_request: Dict[str, Any], context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Generate precomputed embeddings for multimodal input.
+        Encode images from a pre-tokenized multimodal request, expand placeholder
+        tokens, transfer embeddings via NIXL, and stream PD worker responses.
+
+        The Rust frontend (ModelInput.Tokens) sends a PreprocessedRequest dict
+        with token_ids and multi_modal_data. This handler:
+        1. Extracts image URLs from multi_modal_data.
+        2. Runs vision encoding via MMEncoder.
+        3. Expands image placeholder tokens to match patch counts.
+        4. Creates a NIXL descriptor for embedding transfer.
+        5. Forwards the request to the PD worker and streams responses back.
 
         Args:
-            request: Multimodal request with image/video data.
+            raw_request: PreprocessedRequest dict from the Rust frontend.
             context: Context object for cancellation handling.
         """
-        if not isinstance(request, SglangMultimodalRequest):
-            if isinstance(request, str):
-                request = SglangMultimodalRequest.model_validate_json(request)
-            else:
-                request = SglangMultimodalRequest.model_validate(request)
+        if isinstance(raw_request, str):
+            raw_request = json.loads(raw_request)
 
-        # The following steps encode the requested image for SGLang:
-        # 1. Pass the image URL to MMEncoder which loads, preprocesses, and
-        #    runs the vision encoder.
-        # 2. Expand each image placeholder token to match patch count.
-        # 3. Create a single NIXL descriptor for concatenated embeddings.
-        # 4. Send request + metadata to downstream worker.
-        # 5. Stream the downstream worker's response back to the caller.
+        # Extract image URLs from the frontend's multi_modal_data
+        image_urls = self._extract_image_urls(raw_request)
+
+        # Build MultiModalGroup objects for the downstream SglangMultimodalRequest
+        multimodal_groups = [
+            MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
+            for url in image_urls
+        ]
+
+        # Build SglangMultimodalRequest from the pre-tokenized request
+        request = SglangMultimodalRequest(
+            request=PreprocessedRequest(**raw_request),
+            multimodal_inputs=multimodal_groups,
+        )
 
         try:
-            multimodal_groups = request.multimodal_inputs
-            if not multimodal_groups:
-                raise ValueError("multimodal_inputs is required for the encode worker.")
-
-            image_urls = []
-            for idx, mm_group in enumerate(multimodal_groups):
-                mm_input = mm_group.multimodal_input
-                if not mm_input or not mm_input.image_url:
-                    raise ValueError(
-                        f"image_url is required for the encode worker (index={idx})."
-                    )
-                if mm_input.video_url is not None:
-                    raise NotImplementedError(
-                        "video_url encoding is not supported in SGLang encode worker"
-                    )
-                image_urls.append(mm_input.image_url)
-
             with _nvtx.annotate("mm:enc:vision_encode", color="red"):
                 image_grid_dim, precomputed_embeddings = await self.encoder._encode(
                     image_urls
@@ -221,11 +279,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 zip(multimodal_groups, image_grid_thw_list)
             ):
                 mm_group.image_grid_thw = image_grid_thw
-                mm_group.multimodal_input.image_url = None
+                if mm_group.multimodal_input is not None:
+                    mm_group.multimodal_input.image_url = None
 
-            # Store shared serialized tensor metadata at request level.
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
-            request.serialized_request = None
+            # Store shared tensor transfer metadata at request level.
+            request.embeddings_shape = tuple(precomputed_embeddings.shape)  # type: ignore[assignment]
+            request.transfer_payload = None
 
             search_start = 0
             for num_image_tokens in token_counts:
@@ -245,31 +304,39 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 )
                 search_start = image_token_id_index + num_image_tokens
 
-            descriptor = connect.Descriptor(precomputed_embeddings)
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
+            with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
+                (
+                    transfer_request,
+                    transfer_future,
+                ) = await self.embedding_sender.send_embeddings(precomputed_embeddings)
+                request.transfer_payload = transfer_request
                 logger.debug(f"Request: {request.model_dump_json()}")
 
-                # Get the response generator from downstream worker
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
-                )
-                with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                    await readable.wait_for_completion()
+            # Get the response generator from downstream worker
+            response_generator = await self.pd_worker_client.round_robin(
+                request.model_dump_json()
+            )
 
-                async for response in response_generator:
-                    yield response.data() if hasattr(response, "data") else str(
-                        response
-                    )
+            # Parse PD worker responses and yield as LLMEngineOutput-
+            # compatible dicts for the Rust frontend to post-process.
+            async for response in response_generator:
+                raw = response.data() if hasattr(response, "data") else str(response)
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) else raw
+                except json.JSONDecodeError:
+                    logger.warning("Non-JSON response from PD worker: %r", raw[:200])
+                    data = {"token_ids": [], "text": raw}
+                # Strip the internal 'finished' flag — the Rust frontend
+                # uses 'finish_reason' (present when finished=True).
+                data.pop("finished", None)
+                # Remove empty 'text' so the Rust frontend detokenizes
+                # from token_ids instead of using the empty string.
+                if not data.get("text"):
+                    data.pop("text", None)
+                yield data
+
+            await transfer_future
 
         except Exception as e:
             logger.error(f"Error processing request: {e}")
             raise
-
-    async def async_init(self, runtime: DistributedRuntime) -> None:
-        logger.info("Startup started.")
-        # Create and initialize a dynamo connector for this worker.
-        # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector()
-
-        logger.info("Startup completed.")

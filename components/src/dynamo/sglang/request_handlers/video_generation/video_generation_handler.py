@@ -103,16 +103,22 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             # Parse size
+            assert req.size is not None, "Size is required"
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
             num_frames = nvext.num_frames
+            assert nvext.fps is not None, "FPS is required"
             if num_frames is None:
+                assert req.seconds is not None, "Seconds is required"
                 num_frames = nvext.fps * req.seconds
 
             # Generate video
             context_id = context.id()
             assert context_id is not None
+            assert (
+                nvext.num_inference_steps is not None
+            ), "Num inference steps is required"
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,

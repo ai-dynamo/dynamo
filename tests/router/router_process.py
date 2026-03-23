@@ -89,6 +89,60 @@ class FrontendRouterProcess(ManagedProcess):
         super().__exit__(exc_type, exc_val, exc_tb)
 
 
+class DirectRouterProcess(ManagedProcess):
+    """Manages a process in Direct routing mode for EPP-style disagg tests.
+
+    In Direct mode, the router does not select workers itself — worker IDs
+    must be supplied via x-worker-instance-id and x-prefill-instance-id headers.
+    """
+
+    def __init__(
+        self,
+        request,
+        frontend_port: int,
+        namespace: str,
+        enforce_disagg: bool = True,
+        request_plane: str = "nats",
+    ):
+        command = [
+            "python3",
+            "-m",
+            "dynamo.frontend",
+            "--router-mode",
+            "direct",
+            "--http-port",
+            str(frontend_port),
+            "--namespace",
+            namespace,
+        ]
+
+        if enforce_disagg:
+            command.append("--enforce-disagg")
+
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
+        super().__init__(
+            command=command,
+            env=env,
+            timeout=60,
+            display_output=True,
+            health_check_ports=[frontend_port],
+            health_check_urls=[
+                (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
+            ],
+            log_dir=request.node.name,
+            terminate_all_matching_process_names=False,
+        )
+        self.port = frontend_port
+
+    def _check_ready(self, response):
+        return response.status_code == 200
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        super().__exit__(exc_type, exc_val, exc_tb)
+
+
 # Backward-compatible alias so existing callers that import KVRouterProcess
 # continue to work without changes.
 KVRouterProcess = FrontendRouterProcess
