@@ -15,11 +15,12 @@ use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
 /// daemon fails to deserialize the `DynamoWorkerMetadata` CR, and the worker is
 /// excluded from the `MetadataSnapshot` (i.e. invisible to service discovery),
 /// causing `KubeDiscoveryClient::list` to return 0 instances and all inference
-/// requests to 404. This is observed with vLLM elastic EP scaling:
-/// `scale_elastic_ep` reinitializes KV event ZMQ sockets, which causes the NATS
-/// event publisher to call `unregister_event_channel()`, leaving `event_channels`
-/// as an empty map `{}`. SSA then writes it back as `null`, breaking
-/// deserialization until this helper treats `null` as an empty map.
+/// requests to 404. One concrete example is vLLM elastic EP scaling:
+/// `scale_elastic_ep` reinitializes event plane sockets, which triggers
+/// `unregister_event_channel()`, leaving `event_channels` as an empty map `{}`.
+/// SSA then writes it back as `null`, breaking deserialization until this helper
+/// treats `null` as an empty map. The issue applies to any event plane
+/// implementation, not only a specific transport.
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
