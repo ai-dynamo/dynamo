@@ -111,13 +111,12 @@ class AggPlanner:
             logger.info(f"Detected model name from deployment: {model_name}")
             self.planner.model_name = model_name.lower()
         else:
-            model_name = getattr(self.config, "model_name", None)
-            if not model_name:
+            if not self.config.model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
                     "Please set model_name in the config."
                 )
-            self.planner.model_name = model_name.lower()
+            self.planner.model_name = self.config.model_name.lower()
 
         loops = [
             self._load_loop(),

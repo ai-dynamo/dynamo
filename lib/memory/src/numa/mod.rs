@@ -31,7 +31,14 @@ pub mod worker_pool;
 use cudarc::driver::sys::CUdevice_attribute_enum;
 use nix::libc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::{fs, mem, process::Command};
+
+/// Cache for GPU PCI address → NUMA node lookups.
+/// The mapping never changes at runtime, so we cache results (including negative
+/// lookups) to avoid repeated sysfs reads and nvidia-smi subprocesses.
+static NUMA_NODE_CACHE: OnceLock<Mutex<HashMap<String, Option<NumaNode>>>> = OnceLock::new();
 
 /// Check if NUMA optimization is disabled via environment variable.
 ///
@@ -183,35 +190,40 @@ pub fn get_device_numa_node(device_id: u32) -> Option<NumaNode> {
         }
     };
 
-    // Step 2: Read NUMA node from sysfs
-    if let Some(node) = read_numa_node_from_sysfs(&pci_address) {
-        tracing::trace!(
-            "GPU {} (PCI {}) on NUMA node {} (sysfs)",
-            device_id,
-            pci_address,
-            node.0
-        );
-        return Some(node);
+    // Step 2: Check cache (includes negative lookups)
+    let cache = NUMA_NODE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(cached) = guard.get(&pci_address) {
+            return *cached;
+        }
     }
 
-    // Step 3: Fallback to nvidia-smi with PCI address
-    if let Some(node) = get_numa_node_from_nvidia_smi(&pci_address) {
-        tracing::trace!(
-            "GPU {} (PCI {}) on NUMA node {} (nvidia-smi)",
-            device_id,
-            pci_address,
-            node.0
-        );
-        return Some(node);
+    // Step 3: Read NUMA node from sysfs
+    let result = read_numa_node_from_sysfs(&pci_address)
+        .or_else(|| get_numa_node_from_nvidia_smi(&pci_address));
+
+    match result {
+        Some(node) => {
+            tracing::trace!(
+                "GPU {} (PCI {}) on NUMA node {}",
+                device_id,
+                pci_address,
+                node.0
+            );
+        }
+        None => {
+            tracing::warn!(
+                "Could not determine NUMA node for GPU {} (PCI {}), skipping NUMA optimization",
+                device_id,
+                pci_address
+            );
+        }
     }
 
-    // No NUMA info available — caller should skip NUMA optimization
-    tracing::warn!(
-        "Could not determine NUMA node for GPU {} (PCI {}), skipping NUMA optimization",
-        device_id,
-        pci_address
-    );
-    None
+    // Cache result (including None for negative lookups)
+    cache.lock().unwrap().insert(pci_address, result);
+    result
 }
 
 /// Pin the current thread to a specific NUMA node's CPUs.

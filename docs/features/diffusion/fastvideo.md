@@ -15,12 +15,12 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 - **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
 - **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
-- **Optimized inference:** FP4 quantization and `torch.compile` are enabled by default for maximum throughput.
+- **Optimized inference:** FP4 quantization and `torch.compile` are available via `--enable-optimizations`; attention backend selection is controlled separately via `--attention-backend`.
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
 > [!IMPORTANT]
-> This example is optimized for **NVIDIA B200/B300** GPUs (CUDA arch 10.0) with FP4 quantization and flash-attention. It can run on other GPUs (H100, A100, etc.) by passing `--disable-optimizations` to `worker.py`, which disables FP4 quantization, `torch.compile`, and switches the attention backend from FLASH_ATTN to TORCH_SDPA. Expect lower performance but broader compatibility.
+> `worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
 
 ## Docker Image Build
 
@@ -31,12 +31,35 @@ The local Docker workflow builds a runtime image from the [`Dockerfile`](https:/
 - Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
 - Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
 
+The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture:
+
+```bash
+# Blackwell (default)
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a"
+
+# Hopper
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
+```
+
+`MAX_JOBS` (default: `4`) controls parallel compilation jobs for flash-attention. Lower it if the build runs out of memory:
+
+```bash
+docker build examples/diffusers/ --build-arg MAX_JOBS=2
+```
+
+When using Docker Compose, set these as environment variables before running `docker compose up --build`:
+
+```bash
+# Hopper on a memory-constrained builder
+TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
+```
+
 > [!WARNING]
 > The first Docker image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS` in the Dockerfile to reduce parallel compile memory usage. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
 
 ## Warmup Time
 
-On first start, workers download model weights and run compile/warmup steps. Expect roughly **10–20 minutes** before the first request is ready (hardware-dependent). After the first successful response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
+On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
 > [!TIP]
 > When using Kubernetes, mount a shared Hugging Face cache PVC (see [Kubernetes Deployment](#kubernetes-deployment)) so model weights are downloaded once and reused across pod restarts.
@@ -82,7 +105,7 @@ Environment variables:
 | `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (e.g., `--disable-optimizations`) |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--enable-optimizations --attention-backend FLASH_ATTN`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
@@ -91,12 +114,12 @@ Example:
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
 NUM_GPUS=1 \
 HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--disable-optimizations" \
+WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
 > [!NOTE]
-> `--disable-optimizations` is a `worker.py` flag (not a `dynamo.frontend` flag), so pass it through `WORKER_EXTRA_ARGS`.
+> `--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
 
 The script writes logs to:
 
@@ -214,7 +237,8 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `--model` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
-| `--disable-optimizations` | off | Disables FP4 quantization, `torch.compile`, and switches attention from FLASH_ATTN to TORCH_SDPA |
+| `--enable-optimizations` | off | Enables FP4 quantization and `torch.compile` |
+| `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
 
 ### Request Parameters (`nvext`)
 
@@ -233,7 +257,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `FASTVIDEO_VIDEO_CODEC` | `libx264` | Video codec for MP4 encoding |
 | `FASTVIDEO_X264_PRESET` | `ultrafast` | x264 encoding speed preset |
-| `FASTVIDEO_ATTENTION_BACKEND` | `FLASH_ATTN` | Attention backend (`FLASH_ATTN` or `TORCH_SDPA`) |
+| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `worker.py` sets this from `--attention-backend` and validates `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, and `SAGE_SLA_ATTN` |
 | `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
 | `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
 
@@ -241,10 +265,12 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| OOM during Docker build | `flash-attention` compilation uses too much RAM | Lower `MAX_JOBS` in the Dockerfile |
-| 10–20 min wait on first start | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
+| OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
+| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
+| 10–20 min wait on first start with optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Poor performance on non-B200/B300 GPUs | FP4 and flash-attention optimizations require CUDA arch 10.0 | Pass `--disable-optimizations` to `worker.py` |
+| Lower throughput than expected on B200/B300 | FP4/compile and flash-attention are configured separately | Pass `--enable-optimizations` and, if desired, `--attention-backend FLASH_ATTN` |
+| Startup or import failure after enabling optimizations or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--enable-optimizations`, or use `--attention-backend TORCH_SDPA` |
 
 ## Source Code
 

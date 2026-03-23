@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, Semaphore};
 
-use dynamo_llm::kv_router::protocols::{
+use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_hash,
     compute_seq_hash_for_block,

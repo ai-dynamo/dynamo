@@ -28,11 +28,13 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -6815,6 +6817,104 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 	}
 }
 
+func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				"user-label":                          "keep",
+				commonconsts.KubeLabelIsRestoreTarget: commonconsts.KubeLabelValueTrue,
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					"extra-label":                        "keep-too",
+					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+	)
+	require.NoError(t, err)
+	annotations := map[string]string{}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
+		Enabled: true,
+		Ready:   false,
+		Hash:    "resolved-hash",
+	})
+	assert.Equal(t, "keep", labels["user-label"])
+	assert.Equal(t, "keep-too", labels["extra-label"])
+	_, hasRestoreTarget := labels[commonconsts.KubeLabelIsRestoreTarget]
+	_, hasCheckpointHash := labels[commonconsts.KubeLabelCheckpointHash]
+	assert.False(t, hasRestoreTarget)
+	assert.False(t, hasCheckpointHash)
+}
+
+func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelIsRestoreTarget: "false",
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+	)
+	require.NoError(t, err)
+	annotations := map[string]string{}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
+		Enabled: true,
+		Ready:   true,
+		Hash:    "resolved-hash",
+	})
+	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[commonconsts.KubeLabelIsRestoreTarget])
+	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointHash])
+}
+
+func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace:           "wrong-from-labels",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-labels",
+				commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoNamespace:           "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+					commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoWorkerHash:          "wrong-from-extra-metadata",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
+	assert.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
+	assert.Equal(t, "test-dgd", labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "workerhash", labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
 func TestIsWorkerComponent(t *testing.T) {
 	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
 	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}
@@ -7235,6 +7335,323 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			} else {
 				for k, v := range tt.expectedAnnotation {
 					assert.Equal(t, v, component.Annotations[k], "annotation %s mismatch", k)
+				}
+			}
+		})
+	}
+}
+
+func TestPropagateDGDSpecMetadata(t *testing.T) {
+	tests := []struct {
+		name                string
+		dgdAnnotations      map[string]string
+		dgdLabels           map[string]string
+		serviceAnnotations  map[string]string
+		serviceLabels       map[string]string
+		expectedAnnotations map[string]string
+		expectedLabels      map[string]string
+	}{
+		{
+			name:                "nil metadata is a no-op",
+			dgdAnnotations:      nil,
+			dgdLabels:           nil,
+			serviceAnnotations:  map[string]string{"existing": "value"},
+			expectedAnnotations: map[string]string{"existing": "value"},
+			expectedLabels:      nil,
+		},
+		{
+			name:                "annotations and labels propagate to empty component",
+			dgdAnnotations:      map[string]string{"team/cost-center": "abc"},
+			dgdLabels:           map[string]string{"env": "prod"},
+			expectedAnnotations: map[string]string{"team/cost-center": "abc"},
+			expectedLabels:      map[string]string{"env": "prod"},
+		},
+		{
+			name:                "service-level annotations take precedence",
+			dgdAnnotations:      map[string]string{"shared": "from-dgd", "dgd-only": "val"},
+			serviceAnnotations:  map[string]string{"shared": "from-service"},
+			expectedAnnotations: map[string]string{"shared": "from-service", "dgd-only": "val"},
+		},
+		{
+			name:           "service-level labels take precedence",
+			dgdLabels:      map[string]string{"shared": "from-dgd", "dgd-only": "val"},
+			serviceLabels:  map[string]string{"shared": "from-service"},
+			expectedLabels: map[string]string{"shared": "from-service", "dgd-only": "val"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.serviceAnnotations,
+				Labels:      tt.serviceLabels,
+			}
+			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, component)
+
+			if tt.expectedAnnotations == nil {
+				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
+					"expected no annotations, got %v", component.Annotations)
+			} else {
+				assert.Equal(t, tt.expectedAnnotations, component.Annotations)
+			}
+			if tt.expectedLabels == nil {
+				assert.True(t, len(component.Labels) == 0 || component.Labels == nil,
+					"expected no labels, got %v", component.Labels)
+			} else {
+				assert.Equal(t, tt.expectedLabels, component.Labels)
+			}
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"team/cost-center": "abc"},
+			Labels:      map[string]string{"env": "prod"},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+					Annotations:   map[string]string{"team/cost-center": "svc-override"},
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	// PCS object-level metadata
+	assert.Equal(t, "abc", pcs.Annotations["team/cost-center"])
+	assert.Equal(t, "prod", pcs.Labels["env"])
+
+	// Clique-level: service annotation takes precedence
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	clique := pcs.Spec.Template.Cliques[0]
+	assert.Equal(t, "svc-override", clique.Annotations["team/cost-center"],
+		"service-level annotation should take precedence over spec.metadata")
+}
+
+func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"team/cost-center": "abc", "shared": "dgd"},
+			Labels:      map[string]string{"env": "prod", "shared-label": "dgd"},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+					Annotations:   map[string]string{"shared": "svc"},
+					Labels:        map[string]string{"shared-label": "svc", "svc-only": "val"},
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, &v1alpha1.IngressSpec{}, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	dcd := dcds["frontend"]
+	require.NotNil(t, dcd)
+
+	// Annotations: service-level takes precedence over DGD-level
+	assert.Equal(t, "abc", dcd.Spec.Annotations["team/cost-center"])
+	assert.Equal(t, "svc", dcd.Spec.Annotations["shared"],
+		"service-level annotation should take precedence over DGD annotation")
+
+	// Labels: service-level survives and takes precedence over DGD-level
+	assert.Equal(t, "svc", dcd.Spec.Labels["shared-label"],
+		"service-level label should take precedence over DGD label")
+	assert.Equal(t, "val", dcd.Spec.Labels["svc-only"],
+		"service-only label should be preserved")
+	assert.Equal(t, "prod", dcd.Spec.Labels["env"],
+		"DGD-level label should propagate when no service override")
+
+	// Controller labels must always be present
+	assert.Equal(t, "frontend", dcd.Spec.Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.Equal(t, dgd.Name, dcd.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+}
+
+func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+
+	tests := []struct {
+		name              string
+		deployment        *v1alpha1.DynamoGraphDeployment
+		wantPCSTemplateTC *grovev1alpha1.TopologyConstraint
+		wantCliqueTC      map[string]*grovev1alpha1.TopologyConstraint // clique name -> expected TC
+		wantPCSGTC        map[string]*grovev1alpha1.TopologyConstraint // pcsg name -> expected TC
+		wantPCSGCount     int
+	}{
+		{
+			name: "no topology constraints - PCS has no TC, cliques have no TC",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC:      map[string]*grovev1alpha1.TopologyConstraint{"worker": nil},
+			wantPCSGCount:     0,
+		},
+		{
+			name: "single-node service with topology constraints - TC on PCS template and clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+						PackDomain:      v1alpha1.TopologyDomain("zone"),
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
+				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+			},
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+			},
+			wantPCSGCount: 0,
+		},
+		{
+			name: "multinode service with topology constraints - TC on PCS template and PCSG, not clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+						PackDomain:      v1alpha1.TopologyDomain("zone"),
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							Multinode: &v1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("block"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
+				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+			},
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker-ldr": nil,
+				"worker-wkr": nil,
+			},
+			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
+			},
+			wantPCSGCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pcs, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				tt.deployment,
+				operatorConfig,
+				&controller_common.RuntimeConfig{},
+				secretsRetriever,
+				&RestartState{},
+				nil,
+				nil,
+			)
+			assert.NoError(t, err)
+			assert.NotNil(t, pcs)
+
+			// Verify PCS template-level TopologyConstraint
+			if tt.wantPCSTemplateTC == nil {
+				assert.Nil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be nil")
+			} else {
+				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
+				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+			}
+
+			// Verify clique-level TopologyConstraints (exhaustive)
+			assert.Equal(t, len(tt.wantCliqueTC), len(pcs.Spec.Template.Cliques), "clique count mismatch")
+			actualCliqueNames := make(map[string]struct{}, len(pcs.Spec.Template.Cliques))
+			for _, clique := range pcs.Spec.Template.Cliques {
+				actualCliqueNames[clique.Name] = struct{}{}
+				expectedTC, ok := tt.wantCliqueTC[clique.Name]
+				if !ok {
+					t.Errorf("unexpected clique %q in PCS", clique.Name)
+					continue
+				}
+				if expectedTC == nil {
+					assert.Nil(t, clique.TopologyConstraint, "clique %q: expected nil TopologyConstraint", clique.Name)
+				} else {
+					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
+					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+				}
+			}
+			for expectedName := range tt.wantCliqueTC {
+				if _, found := actualCliqueNames[expectedName]; !found {
+					t.Errorf("expected clique %q not found in PCS", expectedName)
+				}
+			}
+
+			// Verify PCSG-level TopologyConstraints (exhaustive)
+			assert.Equal(t, tt.wantPCSGCount, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs), "PCSG count mismatch")
+			actualPCSGNames := make(map[string]struct{}, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs))
+			for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+				actualPCSGNames[pcsg.Name] = struct{}{}
+				if tt.wantPCSGTC != nil {
+					expectedTC, ok := tt.wantPCSGTC[pcsg.Name]
+					if !ok {
+						t.Errorf("unexpected PCSG %q in PCS", pcsg.Name)
+						continue
+					}
+					if expectedTC == nil {
+						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
+					} else {
+						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
+						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+					}
+				}
+			}
+			for expectedName := range tt.wantPCSGTC {
+				if _, found := actualPCSGNames[expectedName]; !found {
+					t.Errorf("expected PCSG %q not found in PCS", expectedName)
 				}
 			}
 		})

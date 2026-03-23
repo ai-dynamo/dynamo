@@ -24,7 +24,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher,
+        publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
@@ -230,7 +230,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # This lets SGLang proceed to the second token generation, which will
                 # async context switch and allow the abort monitor to signal cancellation.
                 # The loop should exit by itself when context.is_stopped() returns True.
-                out = {}
+                out: dict[str, Any] = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
                     out["finish_reason"] = normalize_finish_reason(

@@ -28,7 +28,6 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::common::perf_model::PerfModel;
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     WorkerType,
@@ -37,6 +36,7 @@ use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
 use crate::common::utils::sleep_until_precise;
 use crate::kv_manager::KvManager;
+use crate::simulation::{TraceCollector, TraceSimulationReport};
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};
@@ -84,13 +84,11 @@ impl SchedulerState {
     /// Try to admit one request from waiting → prefill.
     /// Converts DirectRequest → ActiveSequence if needed. PrefillCost is computed
     /// later in simulate_prefill when the request reaches the front of the queue.
-    fn admit_one(&mut self, args: &MockEngineArgs) -> bool {
-        let Some(&uuid) = self.waiting.front() else {
-            return false;
-        };
+    fn admit_one(&mut self, args: &MockEngineArgs) -> Option<Uuid> {
+        let &uuid = self.waiting.front()?;
         let num_active = self.prefill.len() + self.decode.len();
         if args.max_num_seqs.is_some_and(|limit| num_active >= limit) {
-            return false;
+            return None;
         }
 
         self.waiting.pop_front();
@@ -113,7 +111,7 @@ impl SchedulerState {
         }
 
         self.prefill.push_back(uuid);
-        true
+        Some(uuid)
     }
 
     fn run(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
@@ -228,16 +226,7 @@ impl Scheduler {
                 // 2. Simulate prefill + decode
                 simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
 
-                simulate_decode(
-                    &mut state,
-                    &mut kv_manager,
-                    &output_tx,
-                    &args.perf_model,
-                    args.block_size,
-                    args.speedup_ratio,
-                    args.preemption_mode,
-                )
-                .await;
+                simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
                 // 3. Send metrics once per forward pass (after all prefill and decode processing)
                 let _ = metrics_tx.send(MockerMetrics {
@@ -253,18 +242,18 @@ impl Scheduler {
             _cancel_guard: cancel_guard,
         }
     }
+}
 
-    /// Add a new request to the prefill queue
-    pub async fn receive(&self, request: DirectRequest) {
+impl super::SchedulerHandle for Scheduler {
+    fn receive(&self, request: DirectRequest) {
         let _ = self.request_tx.send(request);
     }
 
-    pub fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
+    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
         self.request_tx.clone()
     }
 
-    /// Get a watch receiver for forward pass metrics
-    pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
+    fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
         self.metrics_rx.clone()
     }
 }
@@ -318,100 +307,7 @@ async fn simulate_prefill(
     args: &MockEngineArgs,
 ) -> Duration {
     let start_time = Instant::now();
-    let mut total_time = Duration::ZERO;
-
-    let mut token_budget = args
-        .max_num_batched_tokens
-        .map_or(usize::MAX, |t| t.saturating_sub(state.decode.len()));
-
-    'prefill: while token_budget > 0 {
-        // Drain prefill first, then pull from waiting one at a time
-        if state.prefill.is_empty() && !state.admit_one(args) {
-            break;
-        }
-        let uuid = state.prefill[0];
-
-        let Some(Request::Active(seq)) = state.requests.get(&uuid) else {
-            panic!("Request does not exist.");
-        };
-        let prefill_cost = kv_manager.get_prefill_cost(seq);
-        let sequence_len = seq.len();
-        let allocated_tokens = seq.num_allocated_tokens();
-        let remaining = prefill_cost.new_tokens;
-
-        // Token budget check
-        let tokens_left = sequence_len - allocated_tokens;
-        if !args.enable_chunked_prefill && tokens_left > token_budget {
-            break;
-        }
-        let chunk = tokens_left.min(token_budget);
-        let cumulative = allocated_tokens + chunk;
-
-        // Allocate blocks. process() returns the number of blocks committed.
-        // On partial success, preempt a decode request and retry — the next
-        // loop iteration re-prepares from the updated num_allocated_tokens.
-        let Some(Request::Active(seq)) = state.requests.get_mut(&uuid) else {
-            panic!("Request does not exist.");
-        };
-        if let Some(signal) = seq.prepare_allocation(cumulative) {
-            let expected = match &signal {
-                MoveBlock::Use(blocks, ..) => blocks.len(),
-                _ => unreachable!(),
-            };
-            let allocated = kv_manager.process(&signal);
-            // Commit the blocks that were actually allocated
-            let committed_tokens = if allocated == expected {
-                cumulative
-            } else {
-                // Partial: compute token boundary from block count
-                let prev_blocks = allocated_tokens
-                    .div_ceil(seq.block_size())
-                    .min(seq.unique_blocks().len());
-                (prev_blocks + allocated) * seq.block_size()
-            };
-            seq.commit_allocation(committed_tokens.min(cumulative));
-
-            if allocated < expected {
-                if state.decode.is_empty() {
-                    break;
-                }
-                for signal in state.preempt(args.preemption_mode) {
-                    kv_manager.process(&signal);
-                }
-                continue 'prefill; // retry with freed capacity
-            }
-        } else {
-            seq.commit_allocation(cumulative);
-        }
-
-        // Accumulate prefill compute time (only for the new tokens in this chunk)
-        let new_tokens_in_chunk = chunk.min(remaining);
-        if args.worker_type != WorkerType::Decode && new_tokens_in_chunk > 0 {
-            total_time += Duration::from_secs_f64(
-                prefill_cost.predict_prefill_compute(Some(new_tokens_in_chunk), &args.perf_model)
-                    / 1000.0,
-            );
-        }
-
-        // Hit rate: fraction of tokens that were already cached
-        let hit_rate = if sequence_len > 0 {
-            1.0 - (remaining as f32 / sequence_len as f32)
-        } else {
-            0.0
-        };
-        hit_rates.push(hit_rate);
-
-        token_budget -= chunk;
-
-        if cumulative >= sequence_len {
-            // Fully prefilled — promote to decode queue
-            state.prefill.pop_front();
-            state.decode.push_back(uuid);
-        } else {
-            // Partially prefilled — resume next iteration with updated allocated_tokens
-            break;
-        }
-    }
+    let total_time = simulate_prefill_step(state, kv_manager, hit_rates, args, None, 0.0, false);
 
     if args.speedup_ratio > 0.0 && total_time > Duration::ZERO {
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
@@ -429,41 +325,205 @@ async fn simulate_decode(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
-    perf_model: &PerfModel,
-    block_size: usize,
-    speedup_ratio: f64,
-    preemption_mode: PreemptionMode,
+    args: &MockEngineArgs,
 ) -> Duration {
     let start_time = Instant::now();
+    let total_time = simulate_decode_step(state, kv_manager, output_tx, args, None, 0.0, false);
 
-    // Compute decode timing
-    let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
+    let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
+    if effective_ratio > 0.0 && total_time > Duration::ZERO {
+        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / effective_ratio);
+        let deadline = start_time + sleep_duration;
 
-    // Compute average context length across all active decode requests
-    let total_length: usize = state
+        sleep_until_precise(deadline).await;
+    }
+
+    total_time
+}
+
+fn simulate_prefill_step(
+    state: &mut SchedulerState,
+    kv_manager: &mut KvManager,
+    hit_rates: &mut RunningMean<f32>,
+    args: &MockEngineArgs,
+    mut collector: Option<&mut TraceCollector>,
+    current_time_ms: f64,
+    apply_speedup: bool,
+) -> Duration {
+    let mut token_budget = args
+        .max_num_batched_tokens
+        .map_or(usize::MAX, |t| t.saturating_sub(state.decode.len()));
+
+    // Accumulate batch-level prefill stats for a single predict call after the loop.
+    let mut batch_count: usize = 0;
+    let mut batch_total_isl: usize = 0;
+    let mut batch_total_prefix: usize = 0;
+
+    'prefill: while token_budget > 0 {
+        // Drain prefill first, then pull from waiting one at a time.
+        if state.prefill.is_empty() {
+            let Some(admitted_uuid) = state.admit_one(args) else {
+                break;
+            };
+            if let Some(collector) = collector.as_deref_mut() {
+                let Some(Request::Active(seq)) = state.requests.get(&admitted_uuid) else {
+                    panic!("Request does not exist.");
+                };
+                let prefill_cost = kv_manager.get_prefill_cost(seq);
+                let reused_input_tokens = seq.len().saturating_sub(prefill_cost.new_tokens);
+                collector.on_admit(admitted_uuid, current_time_ms, reused_input_tokens);
+            }
+        }
+        let uuid = state.prefill[0];
+
+        let Some(Request::Active(seq)) = state.requests.get(&uuid) else {
+            panic!("Request does not exist.");
+        };
+        let prefill_cost = kv_manager.get_prefill_cost(seq);
+        let sequence_len = seq.len();
+        let allocated_tokens = seq.num_allocated_tokens();
+        let remaining = prefill_cost.new_tokens;
+
+        // Token budget check.
+        let tokens_left = sequence_len - allocated_tokens;
+        if !args.enable_chunked_prefill && tokens_left > token_budget {
+            break;
+        }
+        let chunk = tokens_left.min(token_budget);
+        let cumulative = allocated_tokens + chunk;
+
+        // Allocate blocks. process() returns the number of blocks committed.
+        // On partial success, preempt a decode request and retry; the next
+        // loop iteration re-prepares from the updated num_allocated_tokens.
+        let Some(Request::Active(seq)) = state.requests.get_mut(&uuid) else {
+            panic!("Request does not exist.");
+        };
+        if let Some(signal) = seq.prepare_allocation(cumulative) {
+            let expected = match &signal {
+                MoveBlock::Use(blocks, ..) => blocks.len(),
+                _ => unreachable!(),
+            };
+            let allocated = kv_manager.process(&signal);
+            // Commit the blocks that were actually allocated.
+            let committed_tokens = if allocated == expected {
+                cumulative
+            } else {
+                // Partial success: compute token boundary from block count.
+                let prev_blocks = allocated_tokens
+                    .div_ceil(seq.block_size())
+                    .min(seq.unique_blocks().len());
+                (prev_blocks + allocated) * seq.block_size()
+            };
+            seq.commit_allocation(committed_tokens.min(cumulative));
+
+            if allocated < expected {
+                if state.decode.is_empty() {
+                    break;
+                }
+                for signal in state.preempt(args.preemption_mode) {
+                    kv_manager.process(&signal);
+                }
+                continue 'prefill; // Retry with freed capacity.
+            }
+        } else {
+            seq.commit_allocation(cumulative);
+        }
+
+        // Accumulate per-request (isl, prefix) for batch-level prediction.
+        let new_tokens_in_chunk = chunk.min(remaining);
+        if args.worker_type != WorkerType::Decode && new_tokens_in_chunk > 0 {
+            let isl = prefill_cost.cached_tokens + new_tokens_in_chunk;
+            batch_total_isl += isl;
+            batch_total_prefix += prefill_cost.cached_tokens;
+            batch_count += 1;
+        }
+
+        // Hit rate: fraction of tokens that were already cached.
+        let hit_rate = if sequence_len > 0 {
+            1.0 - (remaining as f32 / sequence_len as f32)
+        } else {
+            0.0
+        };
+        hit_rates.push(hit_rate);
+
+        token_budget -= chunk;
+
+        if cumulative >= sequence_len {
+            // Fully prefilled: promote to decode queue.
+            state.prefill.pop_front();
+            state.decode.push_back(uuid);
+        } else {
+            // Partially prefilled: resume next iteration with updated allocation state.
+            break;
+        }
+    }
+
+    // One batch-level prefill prediction instead of summing per-request predictions.
+    let total_time = if batch_count > 0 {
+        let mean_isl = batch_total_isl / batch_count;
+        let mean_prefix = batch_total_prefix / batch_count;
+        let ms = args
+            .perf_model
+            .predict_prefill_time(batch_count, mean_isl, mean_prefix);
+        Duration::from_secs_f64(ms / 1000.0)
+    } else {
+        Duration::ZERO
+    };
+
+    if !apply_speedup || args.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
+        return total_time;
+    }
+
+    Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio)
+}
+
+fn simulate_decode_step(
+    state: &mut SchedulerState,
+    kv_manager: &mut KvManager,
+    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
+    args: &MockEngineArgs,
+    mut collector: Option<&mut TraceCollector>,
+    current_time_ms: f64,
+    apply_speedup: bool,
+) -> Duration {
+    if state.decode.is_empty() {
+        return Duration::ZERO;
+    }
+
+    let decode_start_ms = current_time_ms;
+
+    let decode_lengths = state
         .decode
         .iter()
-        .map(|uuid| {
-            if let Request::Active(seq) = state.requests.get(uuid).unwrap() {
-                seq.len()
-            } else {
-                0
-            }
+        .filter_map(|uuid| match state.requests.get(uuid).unwrap() {
+            Request::Active(seq) => Some(seq.len()),
+            Request::Direct(_) => None,
         })
-        .sum();
-    let count = state.decode.len();
+        .collect::<Vec<_>>();
+    if decode_lengths.is_empty() {
+        return Duration::ZERO;
+    }
 
-    let context_length = if count > 0 { total_length / count } else { 0 };
-    let decoding_time = perf_model.predict_decode_time(active_kv_tokens, context_length);
-    let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
+    let count = decode_lengths.len();
+    let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
+    let total_length: usize = decode_lengths.iter().sum();
+    let context_length = total_length / count;
+    let decoding_time =
+        args.perf_model
+            .predict_decode_time(count, active_kv_tokens, context_length);
+    let unscaled_time = Duration::from_secs_f64(decoding_time / 1000.0);
+    let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
+    let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
+        Duration::from_secs_f64(unscaled_time.as_secs_f64() / effective_ratio)
+    } else {
+        unscaled_time
+    };
+    let decode_end_ms = decode_start_ms + total_time.as_secs_f64() * 1000.0;
 
-    // Process decoding
+    // Process decoding.
     let uuids: Vec<Uuid> = state.decode.iter().copied().collect();
+    let mut emitted_any = false;
     for uuid in uuids {
-        // Try to generate; if allocation fails, preempt until it succeeds
-        // or nothing is left to preempt (matches vLLM v1 scheduler loop).
-        // Reborrow sequence each iteration so the mutable ref doesn't
-        // conflict with state.preempt().
         let mut allocated = false;
         loop {
             let Some(sequence) = state.run(uuid) else {
@@ -481,7 +541,7 @@ async fn simulate_decode(
             }
 
             // Preempt one request and free its blocks
-            for signal in state.preempt(preemption_mode) {
+            for signal in state.preempt(args.preemption_mode) {
                 kv_manager.process(&signal);
             }
 
@@ -498,8 +558,12 @@ async fn simulate_decode(
         let Some(sequence) = state.run(uuid) else {
             continue;
         };
+        emitted_any = true;
+        if let Some(collector) = collector.as_deref_mut() {
+            collector.on_token(uuid, decode_end_ms);
+        }
 
-        // Check completion and send notification
+        // Check completion and send notification.
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
 
         let send_failed = output_tx.as_ref().is_some_and(|tx| {
@@ -521,14 +585,197 @@ async fn simulate_decode(
         }
     }
 
-    if speedup_ratio > 0.0 && total_time > Duration::ZERO {
-        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-        let deadline = start_time + sleep_duration;
-
-        sleep_until_precise(deadline).await;
+    if !emitted_any {
+        return Duration::ZERO;
     }
 
     total_time
+}
+
+pub fn simulate_trace(
+    args: MockEngineArgs,
+    mut requests: Vec<DirectRequest>,
+) -> anyhow::Result<TraceSimulationReport> {
+    args.validate()?;
+
+    requests.sort_by(|left, right| {
+        let left_ts = left
+            .arrival_timestamp_ms
+            .expect("trace replay requests must have an arrival timestamp");
+        let right_ts = right
+            .arrival_timestamp_ms
+            .expect("trace replay requests must have an arrival timestamp");
+        left_ts.total_cmp(&right_ts)
+    });
+
+    let first_arrival_ms = requests
+        .first()
+        .and_then(|request| request.arrival_timestamp_ms)
+        .ok_or_else(|| anyhow::anyhow!("trace replay requires at least one timestamped request"))?;
+    let mut pending = VecDeque::from(
+        requests
+            .into_iter()
+            .map(|mut request| {
+                let arrival_timestamp_ms = request
+                    .arrival_timestamp_ms
+                    .expect("trace replay requests must have an arrival timestamp")
+                    - first_arrival_ms;
+                request.arrival_timestamp_ms = Some(arrival_timestamp_ms);
+                request
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let mut state = SchedulerState::default();
+    let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+    let mut hit_rates = RunningMean::new(1000);
+    let mut collector = TraceCollector::default();
+    let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+    let mut current_time_ms = 0.0;
+
+    while !pending.is_empty() || !state.is_empty() {
+        enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
+
+        if state.is_empty() {
+            let Some(next_arrival_ms) = pending
+                .front()
+                .and_then(|request| request.arrival_timestamp_ms)
+            else {
+                break;
+            };
+            current_time_ms = next_arrival_ms;
+            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
+            continue;
+        }
+
+        let prefill_time = simulate_prefill_step(
+            &mut state,
+            &mut kv_manager,
+            &mut hit_rates,
+            &args,
+            Some(&mut collector),
+            current_time_ms,
+            true,
+        );
+        current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+        enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
+
+        let decode_time = simulate_decode_step(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args,
+            Some(&mut collector),
+            current_time_ms,
+            true,
+        );
+        current_time_ms += decode_time.as_secs_f64() * 1000.0;
+    }
+
+    Ok(collector.finish())
+}
+
+pub fn simulate_concurrency(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+) -> anyhow::Result<TraceSimulationReport> {
+    args.validate()?;
+
+    let mut pending = VecDeque::from(requests);
+    let mut state = SchedulerState::default();
+    let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+    let mut hit_rates = RunningMean::new(1000);
+    let mut collector = TraceCollector::default();
+    let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+    let mut current_time_ms = 0.0;
+
+    while !pending.is_empty() || !state.is_empty() {
+        enqueue_concurrency_arrivals(
+            &mut pending,
+            &mut state,
+            &mut collector,
+            current_time_ms,
+            max_in_flight,
+        );
+
+        if state.is_empty() {
+            break;
+        }
+
+        let prefill_time = simulate_prefill_step(
+            &mut state,
+            &mut kv_manager,
+            &mut hit_rates,
+            &args,
+            Some(&mut collector),
+            current_time_ms,
+            true,
+        );
+        current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+
+        let decode_time = simulate_decode_step(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args,
+            Some(&mut collector),
+            current_time_ms,
+            true,
+        );
+        current_time_ms += decode_time.as_secs_f64() * 1000.0;
+    }
+
+    Ok(collector.finish())
+}
+fn enqueue_trace_arrivals(
+    pending: &mut VecDeque<DirectRequest>,
+    state: &mut SchedulerState,
+    collector: &mut TraceCollector,
+    current_time_ms: f64,
+) {
+    loop {
+        let Some(next_arrival_ms) = pending
+            .front()
+            .and_then(|request| request.arrival_timestamp_ms)
+        else {
+            break;
+        };
+        if next_arrival_ms > current_time_ms {
+            break;
+        }
+
+        let request = pending
+            .pop_front()
+            .expect("front request must exist when arrival is available");
+        let arrival_ms = request
+            .arrival_timestamp_ms
+            .expect("trace replay requests must have an arrival timestamp");
+        let input_length = request.tokens.len();
+        let output_length = request.max_output_tokens;
+        let uuid = state.receive(request);
+        collector.on_arrival(uuid, arrival_ms, input_length, output_length);
+    }
+}
+
+fn enqueue_concurrency_arrivals(
+    pending: &mut VecDeque<DirectRequest>,
+    state: &mut SchedulerState,
+    collector: &mut TraceCollector,
+    current_time_ms: f64,
+    max_in_flight: usize,
+) {
+    while state.requests.len() < max_in_flight {
+        let Some(mut request) = pending.pop_front() else {
+            break;
+        };
+
+        request.arrival_timestamp_ms = Some(current_time_ms);
+        let input_length = request.tokens.len();
+        let output_length = request.max_output_tokens;
+        let uuid = state.receive(request);
+        collector.on_arrival(uuid, current_time_ms, input_length, output_length);
+    }
 }
 
 /// Processes MoveBlock signals with the KvManager.
@@ -574,7 +821,10 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::SchedulerHandle;
+    use crate::simulation::{TraceCollector, TraceRequestStatsSnapshot};
     use rstest::rstest;
+    use std::collections::HashMap;
     use std::time::Duration;
     use tokio::time::interval;
 
@@ -602,125 +852,28 @@ mod tests {
         #[case] enable_prefix_caching: bool,
         #[case] enable_chunked_prefill: bool,
     ) {
-        unsafe { std::env::set_var("RUST_LOG", "debug") };
-
-        let kv_capacity: usize = 500;
-        let block_size: usize = 64;
-        let num_requests: usize = 200;
-        let input_len: usize = 1000;
-        let max_output_tokens: usize = 100;
-
-        // Create channel for token output
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
-        // Create scheduler args using builder - now including enable_prefix_caching
         let args = MockEngineArgs::builder()
-            .num_gpu_blocks(kv_capacity)
-            .block_size(block_size)
+            .num_gpu_blocks(500)
+            .block_size(64)
             .speedup_ratio(10.0)
             .enable_prefix_caching(enable_prefix_caching)
             .enable_chunked_prefill(enable_chunked_prefill)
             .build()
             .unwrap();
 
-        // Create scheduler with new args struct
         let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
-        // Create shared tokens for caching case
-        let shared_tokens = if use_shared_tokens {
-            Some(
-                (0..input_len / 2)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-
-        // Create test requests
-        for _ in 0..num_requests {
-            let input_tokens = if let Some(ref shared) = shared_tokens {
-                // For caching case: use shared tokens for first half, random for second half
-                let mut tokens = shared.clone();
-                tokens.extend((0..input_len / 2).map(|_| rand::random::<u32>() % 50000));
-                tokens
-            } else {
-                // For random case: create unique random token vector for each request
-                (0..input_len)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>()
-            };
-
-            let request = DirectRequest {
-                tokens: input_tokens,
-                max_output_tokens,
-                uuid: None,
-                dp_rank: 0,
-            };
-            scheduler.receive(request).await;
-        }
-
-        let start_time = std::time::Instant::now();
-
-        // Collect all generated tokens (should be num_requests * max_output_tokens)
-        let expected_tokens = num_requests * max_output_tokens;
-        let mut received_tokens = 0;
-
-        // Set up a timeout that causes the test to panic if no tokens are received for 2 seconds
-        let timeout = tokio::time::sleep(Duration::from_secs(2));
-        tokio::pin!(timeout);
-
-        // Get metrics receiver
-        let metrics_rx = scheduler.metrics_receiver();
-
-        // Set up debug ticker interval
-        let mut debug_interval = interval(Duration::from_millis(500));
-
-        loop {
-            tokio::select! {
-                biased;
-
-                // Manual debug ticker that prints forward pass metrics
-                _ = debug_interval.tick() => {
-                    let _metrics = metrics_rx.borrow().clone();
-                    tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
-                }
-
-                Some(_) = output_rx.recv() => {
-                    received_tokens += 1;
-                    // Reset timeout whenever we receive a token
-                    timeout.set(tokio::time::sleep(Duration::from_secs(2)));
-                }
-
-                _ = &mut timeout => {
-                    // Break instead of panicking when timeout occurs
-                    break;
-                }
-            }
-        }
-
-        // Calculate and print elapsed time
-        let elapsed = start_time.elapsed();
-        println!(
-            "Test completed in: {elapsed:?} for {} case with prefix_caching={enable_prefix_caching} and chunked_prefill={enable_chunked_prefill}",
-            if use_shared_tokens {
-                "caching"
-            } else {
-                "random"
-            }
-        );
-
-        // Assert that we received the expected number of tokens
-        assert!(
-            received_tokens == expected_tokens,
-            "Received {received_tokens} tokens but expected exactly {expected_tokens}"
-        );
-
-        // Wait a bit for final metrics update to propagate
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let metrics = scheduler.metrics_receiver().borrow().clone();
-        assert_scheduler_idle(&metrics);
+        crate::scheduler::test_utils::assert_scheduler_completes_all(
+            &scheduler,
+            &mut output_rx,
+            200,
+            1000,
+            100,
+            use_shared_tokens,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -755,8 +908,9 @@ mod tests {
                 max_output_tokens,
                 uuid: None,
                 dp_rank: 0,
+                arrival_timestamp_ms: None,
             };
-            scheduler.receive(request).await;
+            scheduler.receive(request);
             // Sleep for 0.1 second after each request
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -841,18 +995,21 @@ mod tests {
             max_output_tokens: 2,
             uuid: Some(r1_uuid),
             dp_rank: 0,
+            arrival_timestamp_ms: None,
         });
         state.receive(DirectRequest {
             tokens: (100..108).collect(),
             max_output_tokens: 2,
             uuid: Some(r2_uuid),
             dp_rank: 0,
+            arrival_timestamp_ms: None,
         });
         state.receive(DirectRequest {
             tokens: (200..212).collect(),
             max_output_tokens: 2,
             uuid: Some(r3_uuid),
             dp_rank: 0,
+            arrival_timestamp_ms: None,
         });
 
         assert_eq!(state.waiting.len(), 3);
@@ -889,16 +1046,7 @@ mod tests {
 
         // ── Step 3: First simulate_decode ──
         // R1 generates 1 token, gains a partial block.
-        simulate_decode(
-            &mut state,
-            &mut kv_manager,
-            &output_tx,
-            &args.perf_model,
-            args.block_size,
-            args.speedup_ratio,
-            args.preemption_mode,
-        )
-        .await;
+        simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
         assert_eq!(state.decode.len(), 1);
         assert_eq!(state.decode[0], r1_uuid);
@@ -933,16 +1081,7 @@ mod tests {
 
         // ── Step 5: Second simulate_decode ──
         // R1 generates 2nd token → complete. Frees 3 blocks (1 destroyed, 2 deactivated).
-        simulate_decode(
-            &mut state,
-            &mut kv_manager,
-            &output_tx,
-            &args.perf_model,
-            args.block_size,
-            args.speedup_ratio,
-            args.preemption_mode,
-        )
-        .await;
+        simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
         assert!(!state.requests.contains_key(&r1_uuid), "R1 completed");
         assert_eq!(state.decode.len(), 0);
@@ -965,16 +1104,7 @@ mod tests {
         // ── Steps 7+: Cycle until all requests complete ──
         loop {
             simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
-            simulate_decode(
-                &mut state,
-                &mut kv_manager,
-                &output_tx,
-                &args.perf_model,
-                args.block_size,
-                args.speedup_ratio,
-                args.preemption_mode,
-            )
-            .await;
+            simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
             if state.is_empty() {
                 break;
@@ -1014,9 +1144,10 @@ mod tests {
             max_output_tokens,
             uuid: None,
             dp_rank: 0,
+            arrival_timestamp_ms: None,
         };
 
-        scheduler.receive(request).await;
+        scheduler.receive(request);
 
         // Receive exactly 129 tokens
         let mut received_count = 0;
@@ -1039,5 +1170,467 @@ mod tests {
         let metrics = metrics_rx.borrow().clone();
 
         assert_scheduler_idle(&metrics);
+    }
+
+    #[derive(Debug)]
+    struct ManualReplayResult {
+        report: TraceSimulationReport,
+        snapshots: HashMap<Uuid, TraceRequestStatsSnapshot>,
+        idle_jump_ms: f64,
+        first_decode_end_ms: f64,
+    }
+
+    #[derive(Debug)]
+    struct ManualConcurrencyResult {
+        report: TraceSimulationReport,
+        snapshots: HashMap<Uuid, TraceRequestStatsSnapshot>,
+    }
+
+    fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(enable_prefix_caching)
+            .enable_chunked_prefill(enable_chunked_prefill)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    }
+
+    fn replay_fixture() -> Vec<DirectRequest> {
+        vec![
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+            DirectRequest {
+                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(101.0),
+            },
+            DirectRequest {
+                tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+            },
+        ]
+    }
+
+    fn run_trace_manually(
+        args: &MockEngineArgs,
+        requests: Vec<DirectRequest>,
+    ) -> ManualReplayResult {
+        let mut requests = requests;
+        requests.sort_by(|left, right| {
+            let left_ts = left.arrival_timestamp_ms.unwrap();
+            let right_ts = right.arrival_timestamp_ms.unwrap();
+            left_ts.total_cmp(&right_ts)
+        });
+
+        let first_arrival_ms = requests.first().unwrap().arrival_timestamp_ms.unwrap();
+        let mut pending = VecDeque::from(
+            requests
+                .into_iter()
+                .map(|mut request| {
+                    request.arrival_timestamp_ms =
+                        Some(request.arrival_timestamp_ms.unwrap() - first_arrival_ms);
+                    request
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let mut state = SchedulerState::default();
+        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+        let mut hit_rates = RunningMean::new(1000);
+        let mut collector = TraceCollector::default();
+        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+        let mut current_time_ms = 0.0;
+        let mut idle_jump_ms = 0.0;
+        let mut first_decode_end_ms = 0.0;
+
+        while !pending.is_empty() || !state.is_empty() {
+            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
+
+            if state.is_empty() {
+                let next_arrival_ms = pending.front().unwrap().arrival_timestamp_ms.unwrap();
+                current_time_ms = next_arrival_ms;
+                if idle_jump_ms == 0.0 && current_time_ms > 0.0 {
+                    idle_jump_ms = current_time_ms;
+                }
+                enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
+                continue;
+            }
+
+            let prefill_time = simulate_prefill_step(
+                &mut state,
+                &mut kv_manager,
+                &mut hit_rates,
+                args,
+                Some(&mut collector),
+                current_time_ms,
+                true,
+            );
+            current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+            enqueue_trace_arrivals(&mut pending, &mut state, &mut collector, current_time_ms);
+
+            let decode_time = simulate_decode_step(
+                &mut state,
+                &mut kv_manager,
+                &output_tx,
+                args,
+                Some(&mut collector),
+                current_time_ms,
+                true,
+            );
+            if first_decode_end_ms == 0.0 && decode_time > Duration::ZERO {
+                first_decode_end_ms = current_time_ms + decode_time.as_secs_f64() * 1000.0;
+            }
+            current_time_ms += decode_time.as_secs_f64() * 1000.0;
+        }
+
+        let snapshots = [
+            Uuid::from_u128(11),
+            Uuid::from_u128(22),
+            Uuid::from_u128(33),
+        ]
+        .into_iter()
+        .map(|uuid| (uuid, collector.snapshot(uuid).unwrap()))
+        .collect();
+
+        ManualReplayResult {
+            report: collector.finish(),
+            snapshots,
+            idle_jump_ms,
+            first_decode_end_ms,
+        }
+    }
+
+    fn run_concurrency_manually(
+        args: &MockEngineArgs,
+        requests: Vec<DirectRequest>,
+        max_in_flight: usize,
+    ) -> ManualConcurrencyResult {
+        let mut pending = VecDeque::from(requests);
+        let mut state = SchedulerState::default();
+        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+        let mut hit_rates = RunningMean::new(1000);
+        let mut collector = TraceCollector::default();
+        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+        let mut current_time_ms = 0.0;
+
+        while !pending.is_empty() || !state.is_empty() {
+            enqueue_concurrency_arrivals(
+                &mut pending,
+                &mut state,
+                &mut collector,
+                current_time_ms,
+                max_in_flight,
+            );
+
+            if state.is_empty() {
+                break;
+            }
+
+            let prefill_time = simulate_prefill_step(
+                &mut state,
+                &mut kv_manager,
+                &mut hit_rates,
+                args,
+                Some(&mut collector),
+                current_time_ms,
+                true,
+            );
+            current_time_ms += prefill_time.as_secs_f64() * 1000.0;
+
+            let decode_time = simulate_decode_step(
+                &mut state,
+                &mut kv_manager,
+                &output_tx,
+                args,
+                Some(&mut collector),
+                current_time_ms,
+                true,
+            );
+            current_time_ms += decode_time.as_secs_f64() * 1000.0;
+        }
+
+        let snapshots = [
+            Uuid::from_u128(11),
+            Uuid::from_u128(22),
+            Uuid::from_u128(33),
+        ]
+        .into_iter()
+        .map(|uuid| (uuid, collector.snapshot(uuid).unwrap()))
+        .collect();
+
+        ManualConcurrencyResult {
+            report: collector.finish(),
+            snapshots,
+        }
+    }
+
+    fn assert_report_close(left: &TraceSimulationReport, right: &TraceSimulationReport) {
+        let epsilon = 1e-9;
+        assert_eq!(
+            left.request_counts.num_requests,
+            right.request_counts.num_requests
+        );
+        assert_eq!(
+            left.request_counts.completed_requests,
+            right.request_counts.completed_requests
+        );
+        assert_eq!(
+            left.request_counts.total_input_tokens,
+            right.request_counts.total_input_tokens
+        );
+        assert_eq!(
+            left.request_counts.total_output_tokens,
+            right.request_counts.total_output_tokens
+        );
+        assert!((left.throughput.duration_ms - right.throughput.duration_ms).abs() <= epsilon);
+        assert!(
+            (left.throughput.request_throughput_rps - right.throughput.request_throughput_rps)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.throughput.input_throughput_tok_s - right.throughput.input_throughput_tok_s)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.throughput.output_throughput_tok_s - right.throughput.output_throughput_tok_s)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.throughput.total_throughput_tok_s - right.throughput.total_throughput_tok_s)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.prefix_cache_reused_ratio - right.prefix_cache_reused_ratio).abs() <= epsilon
+        );
+        assert!((left.latency.ttft.mean_ms - right.latency.ttft.mean_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.min_ms - right.latency.ttft.min_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.max_ms - right.latency.ttft.max_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.median_ms - right.latency.ttft.median_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p75_ms - right.latency.ttft.p75_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p90_ms - right.latency.ttft.p90_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p95_ms - right.latency.ttft.p95_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.p99_ms - right.latency.ttft.p99_ms).abs() <= epsilon);
+        assert!((left.latency.ttft.std_ms - right.latency.ttft.std_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.mean_ms - right.latency.ttst.mean_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.min_ms - right.latency.ttst.min_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.max_ms - right.latency.ttst.max_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.median_ms - right.latency.ttst.median_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p75_ms - right.latency.ttst.p75_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p90_ms - right.latency.ttst.p90_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p95_ms - right.latency.ttst.p95_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.p99_ms - right.latency.ttst.p99_ms).abs() <= epsilon);
+        assert!((left.latency.ttst.std_ms - right.latency.ttst.std_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.mean_ms - right.latency.tpot.mean_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.min_ms - right.latency.tpot.min_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.max_ms - right.latency.tpot.max_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.median_ms - right.latency.tpot.median_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p75_ms - right.latency.tpot.p75_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p90_ms - right.latency.tpot.p90_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p95_ms - right.latency.tpot.p95_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.p99_ms - right.latency.tpot.p99_ms).abs() <= epsilon);
+        assert!((left.latency.tpot.std_ms - right.latency.tpot.std_ms).abs() <= epsilon);
+        assert!(
+            (left.latency.itl.distribution.mean_ms - right.latency.itl.distribution.mean_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.min_ms - right.latency.itl.distribution.min_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.max_ms - right.latency.itl.distribution.max_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.median_ms - right.latency.itl.distribution.median_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p75_ms - right.latency.itl.distribution.p75_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p90_ms - right.latency.itl.distribution.p90_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p95_ms - right.latency.itl.distribution.p95_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.p99_ms - right.latency.itl.distribution.p99_ms).abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.itl.distribution.std_ms - right.latency.itl.distribution.std_ms).abs()
+                <= epsilon
+        );
+        assert!((left.latency.itl.max_ms - right.latency.itl.max_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.mean_ms - right.latency.e2e.mean_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.min_ms - right.latency.e2e.min_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.max_ms - right.latency.e2e.max_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.median_ms - right.latency.e2e.median_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p75_ms - right.latency.e2e.p75_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p90_ms - right.latency.e2e.p90_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p95_ms - right.latency.e2e.p95_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.p99_ms - right.latency.e2e.p99_ms).abs() <= epsilon);
+        assert!((left.latency.e2e.std_ms - right.latency.e2e.std_ms).abs() <= epsilon);
+        assert!(
+            (left.latency.output_token_throughput_per_user.mean_ms
+                - right.latency.output_token_throughput_per_user.mean_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.min_ms
+                - right.latency.output_token_throughput_per_user.min_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.max_ms
+                - right.latency.output_token_throughput_per_user.max_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.median_ms
+                - right.latency.output_token_throughput_per_user.median_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p75_ms
+                - right.latency.output_token_throughput_per_user.p75_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p90_ms
+                - right.latency.output_token_throughput_per_user.p90_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p95_ms
+                - right.latency.output_token_throughput_per_user.p95_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.p99_ms
+                - right.latency.output_token_throughput_per_user.p99_ms)
+                .abs()
+                <= epsilon
+        );
+        assert!(
+            (left.latency.output_token_throughput_per_user.std_ms
+                - right.latency.output_token_throughput_per_user.std_ms)
+                .abs()
+                <= epsilon
+        );
+    }
+
+    #[rstest]
+    #[case(false, false)]
+    #[case(false, true)]
+    #[case(true, false)]
+    #[case(true, true)]
+    fn test_trace_replay_matches_manual_steps(
+        #[case] enable_prefix_caching: bool,
+        #[case] enable_chunked_prefill: bool,
+    ) {
+        let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
+        let manual = run_trace_manually(&args, replay_fixture());
+        let replay_report = simulate_trace(args, replay_fixture()).unwrap();
+
+        let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
+        let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
+        let request_3 = manual.snapshots.get(&Uuid::from_u128(33)).unwrap();
+
+        assert_eq!(request_1.arrival_time_ms, 0.0);
+        assert_eq!(request_2.arrival_time_ms, 1.0);
+        assert_eq!(request_3.arrival_time_ms, 400.0);
+        assert_eq!(manual.idle_jump_ms, 400.0);
+        assert_eq!(
+            request_1.first_token_ms.unwrap(),
+            manual.first_decode_end_ms,
+        );
+        assert!(request_2.first_admit_ms.unwrap() >= request_2.arrival_time_ms);
+        assert!(request_3.first_admit_ms.unwrap() >= request_3.arrival_time_ms);
+        assert!(manual.report.latency.e2e.mean_ms >= manual.report.latency.ttft.mean_ms);
+
+        if enable_prefix_caching {
+            assert!(request_2.reused_input_tokens > 0);
+            assert!(manual.report.prefix_cache_reused_ratio > 0.0);
+        } else {
+            assert_eq!(request_2.reused_input_tokens, 0);
+            assert_eq!(manual.report.prefix_cache_reused_ratio, 0.0);
+        }
+
+        assert_report_close(&replay_report, &manual.report);
+    }
+
+    #[test]
+    fn test_concurrency_replay_matches_manual_steps() {
+        let args = replay_args(false, false);
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(900.0),
+            },
+            DirectRequest {
+                tokens: vec![1, 2, 3, 4, 5, 9, 10, 11],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(1000.0),
+            },
+            DirectRequest {
+                tokens: vec![12, 13, 14, 15, 16, 17, 18, 19],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+        ];
+        let manual = run_concurrency_manually(&args, requests.clone(), 2);
+        let replay_report = simulate_concurrency(args, requests, 2).unwrap();
+
+        let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
+        let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
+        let request_3 = manual.snapshots.get(&Uuid::from_u128(33)).unwrap();
+
+        assert_eq!(request_1.arrival_time_ms, 0.0);
+        assert_eq!(request_2.arrival_time_ms, 0.0);
+        assert_eq!(request_3.arrival_time_ms, request_1.last_token_ms.unwrap());
+        assert!(request_3.arrival_time_ms < request_2.last_token_ms.unwrap());
+        assert_eq!(manual.report.request_counts.completed_requests, 3);
+        assert_eq!(manual.report.request_counts.total_input_tokens, 24);
+        assert_eq!(manual.report.request_counts.total_output_tokens, 6);
+
+        assert_report_close(&replay_report, &manual.report);
     }
 }

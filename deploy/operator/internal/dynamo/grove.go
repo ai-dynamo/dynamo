@@ -239,6 +239,28 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	return true, "", serviceStatus
 }
 
+// specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
+// to a Grove TopologyConstraint, extracting only the PackDomain.
+func specToGroveTopologyConstraint(tc *v1alpha1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil || tc.PackDomain == "" {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
+// toGroveTopologyConstraint converts a service-level TopologyConstraint
+// to a Grove TopologyConstraint.
+func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil || tc.PackDomain == "" {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default
 // This is the shared logic between DetermineKaiSchedulerQueue and ResolveKaiSchedulerQueue
 func resolveKaiSchedulerQueueName(annotations map[string]string) string {

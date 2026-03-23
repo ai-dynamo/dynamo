@@ -1,6 +1,6 @@
-// Package main provides the snapshot DaemonSet agent.
-// The agent watches for pods with checkpoint/restore labels on its node
-// and triggers operations via the orchestrators.
+// Package main provides the snapshot-agent DaemonSet entrypoint.
+// The agent runs the node-local snapshot controller and delegates CRIU/CUDA
+// execution to the snapshot executor workflows.
 package main
 
 import (
@@ -13,8 +13,8 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/controller"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/watcher"
 )
 
 func main() {
@@ -43,37 +43,36 @@ func main() {
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
-		"checkpoint_dir", cfg.BasePath,
-		"watch_namespace", cfg.RestrictedNamespace,
+		"restricted_namespace", cfg.RestrictedNamespace,
 	)
 
-	podWatcher, err := watcher.NewWatcher(cfg, ctrd, rootLog.WithName("watcher"))
+	nodeController, err := controller.NewNodeController(cfg, ctrd, rootLog.WithName("controller"))
 	if err != nil {
-		fatal(agentLog, err, "Failed to create pod watcher")
+		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
 
-	// Run watcher in the background
-	watcherDone := make(chan error, 1)
+	// Run the node-local controller in the background.
+	controllerDone := make(chan error, 1)
 	go func() {
-		agentLog.Info("Pod watcher started")
-		watcherDone <- podWatcher.Start(ctx)
+		agentLog.Info("Snapshot node controller started")
+		controllerDone <- nodeController.Run(ctx)
 	}()
 
-	// Wait for signal or watcher exit
+	// Wait for signal or controller exit.
 	select {
 	case <-sigChan:
 		agentLog.Info("Shutting down")
 		cancel()
 		select {
-		case err := <-watcherDone:
+		case err := <-controllerDone:
 			if err != nil {
-				agentLog.Error(err, "Pod watcher exited with error during shutdown")
+				agentLog.Error(err, "Snapshot node controller exited with error during shutdown")
 			}
 		default:
 		}
-	case err := <-watcherDone:
+	case err := <-controllerDone:
 		if err != nil {
-			fatal(agentLog, err, "Pod watcher exited with error")
+			fatal(agentLog, err, "Snapshot node controller exited with error")
 		}
 	}
 

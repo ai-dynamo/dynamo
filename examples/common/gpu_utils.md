@@ -57,7 +57,7 @@ controls the *overall* VRAM budget (and thus whether the model fits), but the
 KV cache portion is pinned to the explicit byte value.
 
 Consequence for profiling: if a script uses `--kv-cache-memory-bytes`,
-changing `DYN_GPU_MEMORY_FRACTION_OVERRIDE` (which maps to
+changing `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` (which maps to
 `--gpu-memory-utilization`) won't change the KV cache size, only the leftover
 headroom for activations and overhead.
 
@@ -76,7 +76,7 @@ kv_cache_total = kv_cache_per_token * max_model_len * max_concurrent_seqs
 
 overhead ≈ engine-dependent (auto-computed by estimate_worker_vram):
            vllm:   1.2 + 1.0 * sqrt(params_b) GiB  (0.6B≈2.0, 8B≈4.0)
-           sglang: 2.5 + 1.5 * sqrt(params_b) GiB  (0.6B≈3.7, 8B≈6.7)
+           sglang: 1.5 + 1.0 * sqrt(params_b) GiB  (0.6B≈2.3, 8B≈4.3)
            trtllm: 2.0 + 1.2 * sqrt(params_b) GiB  (0.6B≈2.9, 8B≈5.4)
 ```
 
@@ -104,11 +104,27 @@ This is slightly different from vLLM (which includes activations in the budget).
 sglang recommends keeping 5-8 GiB free for activations and overhead. If you
 see OOM errors, decrease `--mem-fraction-static` by 0.01-0.05 increments.
 
-### How `--context-length` works
+### How `--context-length` and `--max-running-requests` work
 
-Equivalent to vLLM's `--max-model-len`. Defaults to the model's native context
-window. Reducing it shrinks the per-request KV cache requirement and allows more
-concurrent sequences.
+Unlike vLLM (where `--max-model-len` directly affects KV cache sizing), sglang's
+`--context-length` and `--max-running-requests` do **not** affect KV cache
+allocation. The KV cache pool is sized entirely from `--mem-fraction-static`:
+
+```
+kv_cache_pool = total_vram * mem_fraction_static - model_weights
+```
+
+Profiling confirmed this: changing `--context-length` from 512 to 40960 produced
+identical `max_total_num_tokens` values (269,136 on a 48 GiB GPU at fraction 0.95).
+
+These flags only affect **request scheduling**:
+- `--context-length` caps the per-request token usage from the KV pool
+- `--max-running-requests` limits concurrent request slots (allocated from
+  memory outside the `--mem-fraction-static` budget)
+
+Setting `--max-running-requests` too high at high fractions can cause OOM because
+the request slot pool competes for the small amount of memory left after KV cache
+allocation.
 
 ### Estimating total GPU usage
 
@@ -117,9 +133,9 @@ total_vram ≈ model_weights + kv_cache_pool + activations_and_overhead
 
 kv_cache_pool = total_vram * mem_fraction_static - model_weights
 
-activations_and_overhead ≈ 1-8 GiB (depends on model size, batch size, seq len;
-                           ~1-2 GiB for small models like 0.6B,
-                           ~5-8 GiB for larger models like 8B+ with CUDA graphs)
+activations_and_overhead ≈ 1-2 GiB for small models (0.6B-4B)
+                           ~3-5 GiB for larger models (7B+)
+  (CUDA context, graphs, request pools — allocated outside mem_fraction_static)
 ```
 
 ---
@@ -256,14 +272,13 @@ to get 10 GiB of KV cache with a 5 GiB model.
 The helper functions in `gpu_utils.sh` handle these differences:
 - `gpu_gb_to_total_fraction`: for vLLM/sglang (fraction of total VRAM)
 - `gpu_gb_to_free_fraction`: for TensorRT-LLM (fraction of free VRAM)
-- `gpu_worker_fraction <engine>`: unified wrapper — reads `_EW_*` vars from
-  `estimate_worker_vram` and calls the right function for the engine.
+- `gpu_worker_fraction <engine> <total_gib> <kv_gib>`: converts estimated GiB
+  into the engine-appropriate fraction (total for vllm/sglang, free for trtllm).
 
-Launch scripts use `gpu_worker_fraction` so they all follow the same pattern:
+Launch scripts use `build_gpu_mem_args` which calls these internally:
 
 ```bash
-estimate_worker_vram "$MODEL" "$SEQ_LEN" "$CONCURRENCY" trtllm
-GPU_MEM_FRACTION=$(gpu_worker_fraction trtllm)
+GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --max-model-len "$SEQ_LEN" --max-num-seqs "$CONCURRENCY")
 ```
 
 ---
@@ -291,7 +306,7 @@ kv_cache_gib = kv_bytes_per_token * max_model_len * max_concurrent_seqs / (1024^
 
 ---
 
-## `DYN_GPU_MEMORY_FRACTION_OVERRIDE`
+## `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE`
 
 Environment variable used by Dynamo's VRAM profiler to binary-search the minimum
 memory fraction a script needs.
@@ -299,8 +314,8 @@ memory fraction a script needs.
 - Maps to `--gpu-memory-utilization` in vLLM and `--mem-fraction-static` in sglang.
 - For TensorRT-LLM, maps to `kv_cache_config.free_gpu_memory_fraction` via
   `--override-engine-args`.
-- Launch scripts use `gpu_worker_fraction <engine>` to compute the default
-  fraction; the override bypasses this and splits the raw value between workers.
+- Launch scripts use `build_gpu_mem_args` to compute the default fraction;
+  the override bypasses the estimator and splits the raw value between workers.
 - Scripts that use `--kv-cache-memory-bytes` (vLLM) bypass the fraction-based KV
   cache sizing, making the profiler's fraction override ineffective for KV cache.
-  Those scripts should warn when `DYN_GPU_MEMORY_FRACTION_OVERRIDE` is set.
+  Those scripts should warn when `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is set.

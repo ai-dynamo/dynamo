@@ -9,18 +9,22 @@ use std::sync::Arc;
 
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
+use pythonize::pythonize;
 
+use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_mocker::common::perf_model::PerfModel;
+
+use super::aic_callback::create_aic_callback;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
@@ -40,21 +44,21 @@ pub enum EngineType {
 }
 
 #[pyclass]
-#[derive(Default, Clone, Debug, Copy)]
+#[derive(Default, Clone, Debug)]
 pub struct KvRouterConfig {
     inner: RsKvRouterConfig,
 }
 
 impl KvRouterConfig {
     pub fn inner(&self) -> RsKvRouterConfig {
-        self.inner
+        self.inner.clone()
     }
 }
 
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(2.0), router_event_threads=4, router_enable_cache_control=false, router_queue_policy="fcfs"))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(2.0), router_event_threads=4, router_enable_cache_control=false, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -74,6 +78,7 @@ impl KvRouterConfig {
         router_event_threads: u32,
         router_enable_cache_control: bool,
         router_queue_policy: &str,
+        remote_indexer_component: Option<String>,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -93,9 +98,11 @@ impl KvRouterConfig {
                 router_queue_threshold,
                 router_event_threads,
                 router_enable_cache_control,
+                skip_initial_worker_wait: false,
                 router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
                     panic!("invalid router_queue_policy: {router_queue_policy:?}")
                 }),
+                remote_indexer_component,
             },
         }
     }
@@ -412,7 +419,7 @@ async fn select_engine(
             }
         }
         EngineType::Mocker => {
-            let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
+            let mut mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to load mocker args from {:?}: {}",
@@ -426,6 +433,38 @@ async fn select_engine(
                 );
                 MockEngineArgs::default()
             };
+
+            // If aic_backend is set, create Python AIC callback and override perf_model
+            if let Some(ref backend_name) = mocker_args.aic_backend {
+                let backend = backend_name.clone();
+                let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
+                let model_name = mocker_args
+                    .aic_model_path
+                    .as_deref()
+                    .unwrap_or_else(|| local_model.card().source_path());
+                let backend_version = mocker_args.aic_backend_version.as_deref();
+                let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
+                match Python::with_gil(|py| {
+                    create_aic_callback(py, &backend, system, model_name, tp_size, backend_version)
+                }) {
+                    Ok(callback) => {
+                        tracing::info!(
+                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+                            backend,
+                            system,
+                            model_name,
+                            backend_version
+                        );
+                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
+                            e
+                        ));
+                    }
+                }
+            }
 
             let endpoint = local_model.endpoint_id().clone();
 
@@ -462,6 +501,84 @@ pub fn run_input<'p>(
         .map_err(to_pyerr)?;
         Ok(())
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (trace_file, extra_engine_args=None, num_workers=1, replay_concurrency=None))]
+pub fn run_mocker_trace_replay(
+    py: Python<'_>,
+    trace_file: PathBuf,
+    extra_engine_args: Option<PathBuf>,
+    num_workers: usize,
+    replay_concurrency: Option<isize>,
+) -> PyResult<PyObject> {
+    // Load args before allow_threads so we can use the GIL for AIC callback creation.
+    let mut args = if let Some(ref extra_args_path) = extra_engine_args {
+        MockEngineArgs::from_json_file(extra_args_path).map_err(|e| {
+            PyException::new_err(format!(
+                "Failed to load mocker args from {:?}: {}",
+                extra_args_path, e
+            ))
+        })?
+    } else {
+        MockEngineArgs::default()
+    };
+
+    // Create AIC callback if requested (requires GIL, must be done before allow_threads).
+    if let Some(ref backend_name) = args.aic_backend.clone() {
+        let backend = backend_name.clone();
+        let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
+        let model_name = args
+            .aic_model_path
+            .clone()
+            .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
+        let backend_version = args.aic_backend_version.clone();
+        let tp_size = args.aic_tp_size.unwrap_or(1);
+        let callback = create_aic_callback(
+            py,
+            &backend,
+            &system,
+            &model_name,
+            tp_size,
+            backend_version.as_deref(),
+        )
+        .map_err(|e| {
+            PyException::new_err(format!(
+                "Failed to create AIC callback (--aic-perf-model was requested): {}",
+                e
+            ))
+        })?;
+        tracing::info!(
+            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+            backend,
+            system,
+            model_name,
+            backend_version
+        );
+        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+    }
+
+    let report = py.allow_threads(move || {
+        let replay_concurrency = replay_concurrency
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("replay_concurrency must be at least 1"))?;
+
+        if let Some(max_in_flight) = replay_concurrency {
+            dynamo_mocker::simulation::simulate_concurrency_file(
+                args,
+                &trace_file,
+                max_in_flight,
+                num_workers,
+            )
+        } else {
+            dynamo_mocker::simulation::simulate_trace_file(args, &trace_file, num_workers)
+        }
+    });
+    let report = report.map_err(to_pyerr)?;
+    pythonize(py, &report)
+        .map_err(to_pyerr)
+        .map(|obj| obj.unbind())
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr

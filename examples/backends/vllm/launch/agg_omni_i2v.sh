@@ -49,9 +49,8 @@ sleep 2
 
 echo "Starting Omni worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm \
+    python -m dynamo.vllm.omni \
     --model "$MODEL" \
-    --omni \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
     "${EXTRA_ARGS[@]}"

@@ -53,6 +53,7 @@ pub struct DirectRequest {
     pub max_output_tokens: usize,
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
+    pub arrival_timestamp_ms: Option<f64>,
 }
 
 /// Represents the cost of prefilling content in the cache
@@ -60,6 +61,9 @@ pub struct DirectRequest {
 pub struct PrefillCost {
     pub new_blocks: usize,
     pub new_tokens: usize,
+    /// Number of tokens already cached (prefix hit).
+    /// isl = cached_tokens + new_tokens
+    pub cached_tokens: usize,
 }
 
 impl PrefillCost {
@@ -69,7 +73,8 @@ impl PrefillCost {
         perf_model: &PerfModel,
     ) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        perf_model.predict_prefill_time(tokens)
+        let isl = self.cached_tokens + tokens;
+        perf_model.predict_prefill_time(1, isl, self.cached_tokens)
     }
 }
 
@@ -88,6 +93,16 @@ pub enum PreemptionMode {
     Lifo,
     /// Evict the oldest request
     Fifo,
+}
+
+/// Engine type for selecting scheduling and KV cache simulation behavior
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EngineType {
+    /// vLLM-style scheduling with hash-based block KV cache
+    #[default]
+    Vllm,
+    /// SGLang-style scheduling with radix-tree KV cache
+    Sglang,
 }
 
 /// Worker type for disaggregated serving configurations
@@ -134,10 +149,39 @@ impl ReasoningConfig {
     }
 }
 
-/// Configuration arguments for MockVllmEngine
+/// SGLang-specific configuration parameters.
+///
+/// Grouped into a nested struct to keep the `MockEngineArgs` namespace clean,
+/// following the same pattern as [`ReasoningConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
+pub struct SglangArgs {
+    /// Scheduling policy: "fifo"/"fcfs" or "lpm". Default: "fifo".
+    pub schedule_policy: Option<String>,
+    /// Radix cache page size in tokens. Default: 1.
+    #[validate(range(min = 1))]
+    pub page_size: Option<usize>,
+    /// Maximum prefill tokens budget per batch. Default: 16384.
+    #[validate(range(min = 1))]
+    pub max_prefill_tokens: Option<usize>,
+    /// Chunked prefill size (max tokens per chunk). Default: 8192.
+    #[validate(range(min = 1))]
+    pub chunked_prefill_size: Option<usize>,
+    /// Clip max new tokens for admission budget. Default: 4096.
+    #[validate(range(min = 1))]
+    pub clip_max_new_tokens: Option<usize>,
+    /// Schedule conservativeness factor (0.0–1.0). Default: 1.0.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub schedule_conservativeness: Option<f64>,
+}
+
+/// Configuration arguments for MockEngine
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, Validate)]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
+    /// Engine type: vLLM or SGLang simulation
+    #[builder(default = "EngineType::Vllm")]
+    pub engine_type: EngineType,
+
     #[builder(default = "16384")]
     #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
@@ -166,6 +210,14 @@ pub struct MockEngineArgs {
     #[validate(range(min = 0.0))]
     pub speedup_ratio: f64,
 
+    /// Additional speedup multiplier applied only to decode steps.
+    /// Models speculative decoding (e.g. Eagle) where decode throughput improves
+    /// without affecting prefill latency. The effective decode speedup is
+    /// `speedup_ratio * decode_speedup_ratio`.
+    #[builder(default = "1.0")]
+    #[validate(range(min = 0.0))]
+    pub decode_speedup_ratio: f64,
+
     #[builder(default = "1")]
     #[validate(range(min = 1))]
     pub dp_size: u32,
@@ -183,6 +235,35 @@ pub struct MockEngineArgs {
     #[serde(skip)]
     #[builder(default = "Arc::new(PerfModel::default())")]
     pub perf_model: Arc<PerfModel>,
+
+    /// If set, indicates direct AIC SDK calls should be used.
+    /// The value is the backend name (e.g., "sglang", "vllm").
+    /// The Python layer reads this and overrides perf_model with an Aiconfigurator callback.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_backend: Option<String>,
+
+    /// AIC GPU system name (e.g., "h200_sxm"). Required when aic_backend is set.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_system: Option<String>,
+
+    /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
+    /// If None, uses the default version for the backend.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_backend_version: Option<String>,
+
+    /// Tensor parallel size for AIC latency prediction.
+    /// Only affects AIC performance model lookups, not mocker scheduling.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_tp_size: Option<usize>,
+
+    /// HuggingFace model path for AIC latency prediction (e.g., "nvidia/Llama-3.1-8B-Instruct-FP8").
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_model_path: Option<String>,
 
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
@@ -228,6 +309,10 @@ pub struct MockEngineArgs {
     /// Lifo (default) evicts the newest request; Fifo evicts the oldest.
     #[builder(default)]
     pub preemption_mode: PreemptionMode,
+
+    /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
+    #[builder(default = "None")]
+    pub sglang: Option<SglangArgs>,
 }
 
 impl Default for MockEngineArgs {
@@ -265,6 +350,7 @@ impl MockEngineArgs {
 
         // Define valid field names
         let valid_fields: HashSet<&str> = [
+            "engine_type",
             "num_gpu_blocks",
             "block_size",
             "max_num_seqs",
@@ -272,11 +358,17 @@ impl MockEngineArgs {
             "enable_prefix_caching",
             "enable_chunked_prefill",
             "speedup_ratio",
+            "decode_speedup_ratio",
             "dp_size",
             "startup_time",
             "is_prefill",
             "is_decode",
             "planner_profile_data",
+            "aic_backend",
+            "aic_system",
+            "aic_backend_version",
+            "aic_tp_size",
+            "aic_model_path",
             "enable_local_indexer",
             "bootstrap_port",
             "kv_bytes_per_token",
@@ -285,6 +377,7 @@ impl MockEngineArgs {
             "zmq_kv_events_port",
             "zmq_replay_port",
             "preemption_mode",
+            "sglang",
         ]
         .iter()
         .cloned()
@@ -306,6 +399,22 @@ impl MockEngineArgs {
         }
 
         // Apply each extra argument to the builder
+        if let Some(value) = extra_args.get("engine_type")
+            && let Some(s) = value.as_str()
+        {
+            let engine_type = match s {
+                "vllm" => EngineType::Vllm,
+                "sglang" => EngineType::Sglang,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid engine_type '{}'. Must be 'vllm' or 'sglang'.",
+                        other
+                    ));
+                }
+            };
+            builder = builder.engine_type(engine_type);
+        }
+
         if let Some(value) = extra_args.get("num_gpu_blocks")
             && let Some(num) = value.as_u64()
         {
@@ -346,6 +455,12 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.speedup_ratio(num);
+        }
+
+        if let Some(value) = extra_args.get("decode_speedup_ratio")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.decode_speedup_ratio(num);
         }
 
         if let Some(value) = extra_args.get("dp_size")
@@ -418,6 +533,12 @@ impl MockEngineArgs {
             builder = builder.preemption_mode(mode);
         }
 
+        if let Some(value) = extra_args.get("sglang") {
+            let cfg: SglangArgs = serde_json::from_value(value.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse sglang config: {}", e))?;
+            builder = builder.sglang(Some(cfg));
+        }
+
         // Parse worker type from is_prefill and is_decode flags
         let is_prefill = extra_args
             .get("is_prefill")
@@ -440,7 +561,7 @@ impl MockEngineArgs {
         };
         builder = builder.worker_type(worker_type);
 
-        // Load performance model from NPZ file if provided
+        // Load performance model from NPZ file if provided.
         let perf_model = if let Some(path_str) = extra_args.get("planner_profile_data")
             && let Some(path_str) = path_str.as_str()
         {
@@ -464,6 +585,32 @@ impl MockEngineArgs {
         };
         builder = builder.perf_model(perf_model);
 
+        // Check for AIC direct mode fields
+        if let Some(backend) = extra_args.get("aic_backend")
+            && let Some(backend_str) = backend.as_str()
+        {
+            builder = builder.aic_backend(Some(backend_str.to_string()));
+        }
+        if let Some(system) = extra_args.get("aic_system")
+            && let Some(s) = system.as_str()
+        {
+            builder = builder.aic_system(Some(s.to_string()));
+        }
+        if let Some(version) = extra_args.get("aic_backend_version")
+            && let Some(s) = version.as_str()
+        {
+            builder = builder.aic_backend_version(Some(s.to_string()));
+        }
+        if let Some(tp) = extra_args.get("aic_tp_size")
+            && let Some(n) = tp.as_u64()
+        {
+            builder = builder.aic_tp_size(Some(n as usize));
+        }
+        if let Some(mp) = extra_args.get("aic_model_path")
+            && let Some(s) = mp.as_str()
+        {
+            builder = builder.aic_model_path(Some(s.to_string()));
+        }
         // Build the MockEngineArgs with either defaults or overridden values
         builder
             .build()

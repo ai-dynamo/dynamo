@@ -71,27 +71,153 @@ python -m dynamo.mocker \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
-| `--endpoint` | `dyn://dynamo.backend.generate` | Dynamo endpoint string |
+| `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
+| `--trace-file` | None | Run offline trace replay from a Mooncake-style JSONL trace file |
+| `--output-file` | `<trace stem>.replay.json` | Write replay metrics JSON to this path |
+| `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 | Tokens per KV cache block |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
 | `--enable-prefix-caching` | True | Enable prefix caching |
+| `--no-enable-prefix-caching` | - | Disable prefix caching |
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
+| `--no-enable-chunked-prefill` | - | Disable chunked prefill |
+| `--preemption-mode` | `lifo` | Decode eviction policy under memory pressure: `lifo` (vLLM v1 style) or `fifo` |
 | `--watermark` | 0.01 | KV cache watermark (fraction reserved) |
 | `--speedup-ratio` | 1.0 | Timing speedup factor |
+| `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
 | `--data-parallel-size` | 1 | Number of DP replicas |
 | `--startup-time` | None | Simulated startup delay (seconds) |
-| `--planner-profile-data` | None | Path to NPZ file with timing data |
+| `--planner-profile-data` | None | Path to either a mocker-format `.npz` file or a profiler results directory |
 | `--num-workers` | 1 | Workers per process |
+| `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
+| `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
+| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
+| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens |
+| `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
+| `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
+| `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
+| `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
+| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Requires `aiconfigurator` SDK installed (install with `pip install ai-dynamo[mocker]`) |
+| `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
+| `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
+| `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
+| `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
-| `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
-| `--bootstrap-ports` | None | Ports for P/D rendezvous |
+| `--durable-kv-events` | False | Deprecated JetStream KV-event mode; prefer the local indexer / event-plane subscriber path |
+| `--zmq-kv-events-ports` | None | Comma-separated ZMQ PUB base ports for KV event publishing, one per worker |
+| `--zmq-replay-ports` | None | Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker |
+| `--bootstrap-ports` | None | Comma-separated rendezvous base ports, one per worker in disaggregated mode |
 | `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
+| `--discovery-backend` | Env-driven (`etcd`) | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
+| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `http`, or `tcp` |
+| `--event-plane` | Env-driven (`nats`) | Event transport: `nats` or `zmq` |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured KV cache allocation and eviction traces |
+
+> **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
+
+## Offline Trace Replay
+
+The mocker also supports an offline replay mode for Mooncake-style traces:
+
+```bash
+python -m dynamo.mocker \
+    --trace-file /path/to/mooncake_trace.jsonl \
+    --model-path Qwen/Qwen3-0.6B
+```
+
+This mode writes a replay report JSON and prints a `Replay Summary` table without launching a runtime or router.
+
+For full usage, constraints, and benchmarking guidance, see [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md).
+
+## Performance Modeling Setup
+
+By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, pass `--planner-profile-data` with either:
+
+- a mocker-format `.npz` file, or
+- a profiler output directory
+
+The mocker automatically accepts profiler-style results directories and converts them internally.
+
+It also accepts older raw-data directories containing:
+
+- `prefill_raw_data.json`
+- `decode_raw_data.json`
+
+```bash
+python -m dynamo.mocker \
+    --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
+    --speedup-ratio 1.0
+```
+
+### AIC Performance Model
+
+To use the AIC SDK for latency prediction:
+
+```bash
+pip install ai-dynamo[mocker]
+
+python -m dynamo.mocker \
+    --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --engine-type vllm \
+    --aic-perf-model \
+    --aic-system h200_sxm
+```
+
+The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
+
+Example `--reasoning` configuration:
+
+```bash
+python -m dynamo.mocker \
+    --model-path Qwen/Qwen3-0.6B \
+    --reasoning '{"start_thinking_token_id":123,"end_thinking_token_id":456,"thinking_ratio":0.6}'
+```
+
+The profile results directory should contain:
+
+- `selected_prefill_interpolation/raw_data.npz`
+- `selected_decode_interpolation/raw_data.npz`
+
+To generate profile data for your own model and hardware, run the profiler and then point `--planner-profile-data` at the resulting output directory.
+
+## Event Transport and Router Testing
+
+The default event path uses the local indexer / event-plane subscriber flow. The older durable KV-events mode is still available through `--durable-kv-events`, but it is deprecated and should not be the preferred setup for new tests.
+
+For router and indexer experiments that need native wire-format event forwarding, the mocker also supports a ZMQ path:
+
+- `--event-plane zmq`
+- `--zmq-kv-events-ports` for per-worker PUB base ports
+- `--zmq-replay-ports` for optional replay/gap-recovery ROUTER base ports
+
+When set, each worker binds on its base port plus `dp_rank`, so the number of comma-separated base ports must match `--num-workers`.
+
+## Disaggregation Port Layout
+
+`--bootstrap-ports` takes a comma-separated list of base ports, one per worker. In multi-worker mode, the number of listed ports must exactly match `--num-workers`.
+
+Prefill workers listen on these ports and publish the bootstrap endpoint through discovery. Decode workers use the matching ports to rendezvous before decode begins.
+
+## Kubernetes Deployment
+
+The mocker can be deployed through example `DynamoGraphDeployment` manifests for both aggregated and disaggregated setups:
+
+```bash
+kubectl apply -f examples/backends/mocker/deploy/agg.yaml
+kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
+```
 
 ## Architecture
 
@@ -151,11 +277,13 @@ Each active request is tracked as a sequence, managing its token blocks and gene
 
 ### Performance Model
 
-The mocker supports two timing prediction modes:
+The mocker supports three timing prediction modes:
 
 **Polynomial Model (Default):** Uses hardcoded polynomial formulas that approximate typical GPU behavior. Prefill time scales quadratically with token count, while decode time depends on the total active KV cache size.
 
 **Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
+
+**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode requires the `aiconfigurator` SDK, installable via `pip install ai-dynamo[mocker]`.
 
 ### Bootstrap Rendezvous (Disaggregated Serving)
 
@@ -205,6 +333,15 @@ The mocker is particularly useful for:
 | Timing | Real execution | Model-based |
 | KV Events | Native | Compatible |
 | Data Parallelism | Multi-GPU | Simulated |
+
+## Next Steps
+
+| Document | Description |
+|----------|-------------|
+| [Benchmarking Dynamo Deployments](../benchmarks/benchmarking.md) | Run AIPerf against a mocker-backed deployment to measure latency, TTFT, throughput, and scaling behavior |
+| [Aggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
+| [Disaggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
+| [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
 
 ## Feature Gaps (WIP)
 
