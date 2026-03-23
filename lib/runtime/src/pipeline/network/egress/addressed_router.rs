@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
@@ -270,13 +269,14 @@ where
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut is_complete_final = false;
-        let first_response = AtomicBool::new(true);
+        let mut first_response = true;
         let stream = tokio_stream::StreamNotifyClose::new(
             tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
         )
         .filter_map(move |res| {
             if let Some(res_bytes) = res {
-                if first_response.swap(false, Ordering::Relaxed) {
+                if first_response {
+                    first_response = false;
                     let roundtrip_ttft = tx_start.elapsed().as_secs_f64();
                     REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(roundtrip_ttft);
                     STAGE_DURATION_SECONDS
