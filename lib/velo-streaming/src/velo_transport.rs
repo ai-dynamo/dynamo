@@ -28,6 +28,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -53,6 +54,9 @@ pub struct VeloFrameTransport {
     messenger: Arc<Messenger>,
     dispatch: Arc<DashMap<u64, flume::Sender<Vec<u8>>>>,
     worker_id: WorkerId,
+    /// Number of times `_stream_data` hit the slow (blocking) send path
+    /// because the dispatch channel was full. Indicates consumer backpressure.
+    backpressure_count: Arc<AtomicU64>,
 }
 
 impl VeloFrameTransport {
@@ -68,34 +72,66 @@ impl VeloFrameTransport {
     /// Returns an error if handler registration fails (e.g., duplicate handler name).
     pub fn new(messenger: Arc<Messenger>, worker_id: WorkerId) -> Result<Self> {
         let dispatch: Arc<DashMap<u64, flume::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
+        let backpressure_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
         // Register the shared _stream_data handler.
         // The handler captures dispatch and routes incoming AM payloads to the
         // correct per-anchor transport channel based on the anchor_id AM header.
         let handler_dispatch = dispatch.clone();
-        let handler = Handler::am_handler("_stream_data", move |ctx: Context| {
-            let anchor_id = match ctx
-                .headers
-                .as_ref()
-                .and_then(|h| h.get(ANCHOR_ID_HEADER))
-                .and_then(|v| v.parse::<u64>().ok())
-            {
-                Some(id) => id,
-                None => {
-                    tracing::warn!(
-                        "_stream_data: missing or invalid {} header, dropping frame",
-                        ANCHOR_ID_HEADER
-                    );
-                    return Ok(());
+        let handler_backpressure = backpressure_count.clone();
+        let handler = Handler::am_handler_async("_stream_data", move |ctx: Context| {
+            let handler_dispatch = handler_dispatch.clone();
+            let backpressure = handler_backpressure.clone();
+            async move {
+                let anchor_id = match ctx
+                    .headers
+                    .as_ref()
+                    .and_then(|h| h.get(ANCHOR_ID_HEADER))
+                    .and_then(|v| v.parse::<u64>().ok())
+                {
+                    Some(id) => id,
+                    None => {
+                        tracing::warn!(
+                            "_stream_data: missing or invalid {} header, dropping frame",
+                            ANCHOR_ID_HEADER
+                        );
+                        return Ok(());
+                    }
+                };
+                let frame_bytes = ctx.payload.to_vec();
+                // Clone sender out of DashMap ref before the potential await point.
+                let tx = handler_dispatch
+                    .get(&anchor_id)
+                    .map(|entry| entry.value().clone());
+                if let Some(tx) = tx {
+                    // Fast path: try_send avoids async overhead when channel has space.
+                    // Slow path: recover the frame from TrySendError::Full and block
+                    // via send_async to guarantee delivery (no frame loss).
+                    match tx.try_send(frame_bytes) {
+                        Ok(()) => {}
+                        Err(flume::TrySendError::Full(frame_bytes)) => {
+                            backpressure.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(
+                                anchor_id,
+                                "_stream_data: dispatch channel full, blocking"
+                            );
+                            if tx.send_async(frame_bytes).await.is_err() {
+                                tracing::warn!(
+                                    anchor_id,
+                                    "_stream_data: receiver closed, dropping frame"
+                                );
+                            }
+                        }
+                        Err(flume::TrySendError::Disconnected(_)) => {
+                            tracing::warn!(
+                                anchor_id,
+                                "_stream_data: receiver closed, dropping frame"
+                            );
+                        }
+                    }
                 }
-            };
-            let frame_bytes = ctx.payload.to_vec();
-            if let Some(tx) = handler_dispatch.get(&anchor_id) {
-                // try_send: non-blocking, drops frame if channel full
-                // (back-pressure handled by TCP flow control at lower level)
-                let _ = tx.try_send(frame_bytes);
+                Ok(())
             }
-            Ok(())
         })
         .build();
 
@@ -105,7 +141,14 @@ impl VeloFrameTransport {
             messenger,
             dispatch,
             worker_id,
+            backpressure_count,
         })
+    }
+
+    /// Returns the number of times the `_stream_data` handler had to block
+    /// because a dispatch channel was full (backpressure from a slow consumer).
+    pub fn backpressure_count(&self) -> u64 {
+        self.backpressure_count.load(Ordering::Relaxed)
     }
 
     /// Remove an anchor's dispatch entry.
