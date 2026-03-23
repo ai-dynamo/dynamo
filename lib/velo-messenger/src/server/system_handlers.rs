@@ -34,14 +34,7 @@ fn create_hello_handler() -> Handler {
             "Received _hello handshake from peer"
         );
 
-        if let Err(e) = ctx.msg.register_peer(peer_info.clone()) {
-            tracing::warn!(
-                target: "velo_messenger::system",
-                instance_id = %peer_info.instance_id(),
-                error = %e,
-                "Failed to register peer from _hello"
-            );
-        }
+        ctx.msg.register_peer(peer_info.clone())?;
 
         let handlers = ctx.msg.list_local_handlers();
 

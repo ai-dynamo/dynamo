@@ -8,7 +8,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 
 use velo_common::{InstanceId, PeerInfo};
-use velo_events::DistributedEventFactory;
+use velo_events::{DistributedEventFactory, EventHandle};
 use velo_transports::{Transport, VeloBackend};
 
 use crate::PeerDiscovery;
@@ -298,6 +298,11 @@ impl Messenger {
         );
 
         self.register_peer(peer_info)
+    }
+
+    /// Check whether a specific instance has subscribed to a locally-owned event.
+    pub fn has_event_subscriber(&self, handle: EventHandle, subscriber: InstanceId) -> bool {
+        self.events.has_subscriber(handle, subscriber)
     }
 
     /// Get the list of handlers available on a remote instance.

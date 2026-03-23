@@ -184,6 +184,9 @@ pub(crate) struct DispatcherHub {
 
     /// Messenger system reference (late-bound via OnceLock)
     system: OnceLock<Arc<Messenger>>,
+
+    /// Notifies waiters when `system` has been set
+    system_ready: tokio::sync::Notify,
 }
 
 impl DispatcherHub {
@@ -194,6 +197,7 @@ impl DispatcherHub {
             backend,
             control_rx,
             system: OnceLock::new(),
+            system_ready: tokio::sync::Notify::new(),
         }
     }
 
@@ -201,7 +205,9 @@ impl DispatcherHub {
     pub fn set_system(&self, system: Arc<Messenger>) -> anyhow::Result<()> {
         self.system
             .set(system)
-            .map_err(|_| anyhow::anyhow!("System already initialized"))
+            .map_err(|_| anyhow::anyhow!("System already initialized"))?;
+        self.system_ready.notify_waiters();
+        Ok(())
     }
 
     /// Get the system reference (panics if not initialized)
@@ -209,6 +215,23 @@ impl DispatcherHub {
         self.system
             .get()
             .expect("System must be initialized before dispatching messages")
+    }
+
+    /// Wait until the system reference is available, then return it.
+    pub(crate) async fn wait_for_system(&self) -> &Arc<Messenger> {
+        // Fast path: already initialized
+        if let Some(system) = self.system.get() {
+            return system;
+        }
+        // Register interest before re-checking to avoid missed notification
+        let notified = self.system_ready.notified();
+        if let Some(system) = self.system.get() {
+            return system;
+        }
+        notified.await;
+        self.system
+            .get()
+            .expect("system must be set after notification")
     }
 
     /// Get a list of all registered handler names

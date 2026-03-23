@@ -322,6 +322,7 @@ where
         let backend = ctx.system.backend().clone();
         let response_id = ctx.message_id;
         let response_type = ctx.response_type;
+        let headers = ctx.headers.clone();
 
         Box::pin(async move {
             let result = executor.execute(am_ctx).await;
@@ -345,9 +346,25 @@ where
                     }
                 }
                 ResponseType::Unary => {
-                    error!("Unary message incorrectly routed to AM handler '{}'", name);
-                    if let Err(e) = result {
-                        error!("AM handler '{}' failed: {}", name, e);
+                    let error_message = match result {
+                        Ok(()) => {
+                            format!(
+                                "Unary message incorrectly routed to AM handler '{}'",
+                                name
+                            )
+                        }
+                        Err(ref e) => {
+                            format!(
+                                "Unary message incorrectly routed to AM handler '{}': {}",
+                                name, e
+                            )
+                        }
+                    };
+                    error!("{}", error_message);
+                    let send_result =
+                        send_response_error(backend, response_id, headers, error_message).await;
+                    if let Err(e) = send_result {
+                        debug!("Failed to send unary error response: {}", e);
                     }
                 }
             }
