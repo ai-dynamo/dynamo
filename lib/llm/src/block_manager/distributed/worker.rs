@@ -18,9 +18,9 @@ use crate::block_manager::{
     layout::LayoutType,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{
-        DeviceAllocator, DeviceBackend, DeviceStorage, DiskAllocator, PinnedAllocator,
-        Cuda, Ze, is_ze_available,
-        torch::{TorchTensor, is_cuda_tensors, is_ze_tensors},
+        Cuda, DeviceAllocator, DeviceBackend, DeviceStorage, DiskAllocator, PinnedAllocator,
+        StorageError, Ze, Synapse,
+        torch::{DeviceBackendKind, TorchTensor, infer_tensor_device_family, is_cuda_tensors, is_ze_tensors},
     },
 };
 
@@ -121,6 +121,33 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     Ok(agent)
 }
 
+fn build_transfer_stream(
+    backend: DeviceBackendKind,
+    device_id: usize,
+) -> anyhow::Result<DeviceStream> {
+    match backend {
+        DeviceBackendKind::Cuda => {
+            let cuda_ctx = Cuda::device_or_create(device_id)?;
+            Ok(DeviceStream::Cuda(cuda_ctx.new_stream()?))
+        }
+        DeviceBackendKind::Xpu => {
+            let ze_ctx = Ze::device_or_create(device_id)?;
+            if let DeviceStream::Ze(ze_queue) = ze_ctx.stream() {
+                Ok(DeviceStream::Ze(ze_queue.clone()))
+            } else {
+                Err(StorageError::OperationFailed(format!(
+                    "ZE context stream is not a ZE command queue for device {}",
+                    device_id
+                ))
+                .into())
+            }
+        }
+        DeviceBackendKind::Hpu => {
+            Ok(DeviceStream::Synapse(Synapse::stream_or_create(device_id)?))
+        }
+    }
+}
+
 // Helper: perform allocation and build transfer handler (factored from previous code)
 async fn perform_allocation_and_build_handler(
     device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
@@ -139,39 +166,8 @@ async fn perform_allocation_and_build_handler(
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
-
-    // Detect device backend: try both CUDA and Ze
-    let cuda_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Cuda::device_or_create(device_id)
-    }));
-
-    // Only try Ze if the loader library exists (prevents segfaults)
-    let ze_result = if is_ze_available() {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Ze::device_or_create(device_id)
-        }))
-    } else {
-        tracing::debug!("Level Zero loader not found, skipping Ze backend");
-        Err(Box::new("Ze loader not available") as Box<dyn std::any::Any + Send>)
-    };
-
-    // Select backend based on availability
-    let (backend, stream) = if let Ok(Ok(cuda_ctx)) = cuda_result {
-        tracing::info!("Using CUDA backend for device {}", device_id);
-        let stream = cuda_ctx.new_stream()?;
-        (DeviceBackend::Cuda, DeviceStream::Cuda(stream))
-    } else if let Ok(Ok(ze_ctx)) = ze_result {
-        tracing::info!("Using Ze backend for device {}", device_id);
-        let queue = ze_ctx.new_commandqueue().map_err(|e| anyhow::anyhow!("Failed to create Ze command queue: {:?}", e))?;
-        (DeviceBackend::Ze, DeviceStream::Ze(queue))
-    } else {
-        panic!(
-            "No device backend available for device {}. \
-             Both CUDA and Ze initialization failed. \
-             Please ensure either CUDA or Intel XPU/Level Zero is properly installed.",
-            device_id
-        );
-    };
+    let detected_backend = infer_tensor_device_family(&worker_config.tensors)?;
+    let stream = build_transfer_stream(detected_backend, device_id)?;
 
     let transfer_context = Arc::new(
         TransferContext::new(
@@ -182,12 +178,11 @@ async fn perform_allocation_and_build_handler(
         )
         .map_err(|e| {
             anyhow::anyhow!(
-                "Failed to create transfer context for worker {} with CUDA memory pool: {}. \
-                 This is a critical error - the worker cannot start without CUDA memory pools. \
-                 Please ensure sufficient GPU memory is available on device {}.",
+                "Failed to create transfer context for worker {} on backend {} (device {}): {}",
                 worker_id,
+                detected_backend.as_str(),
+                device_id,
                 e,
-                device_id
             )
         })?,
     );
@@ -201,7 +196,12 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::new(device_id, backend)?);
+        let host_backend = match detected_backend {
+            DeviceBackendKind::Cuda => DeviceBackend::Cuda,
+            DeviceBackendKind::Xpu => DeviceBackend::Ze,
+            DeviceBackendKind::Hpu => DeviceBackend::Hpu,
+        };
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id, host_backend)?);
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?
