@@ -4024,6 +4024,7 @@ dependencies = [
  "anyhow",
  "bincode 2.0.1",
  "blake3",
+ "clap 4.6.0",
  "cudarc",
  "derive-getters",
  "derive_builder",
