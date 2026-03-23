@@ -237,6 +237,9 @@ async def async_main():
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    if router_mode == RouterMode.LeastLoaded and config.enforce_disagg:
+        raise ValueError("least-loaded routing is not supported in disaggregated mode.")
+
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
         router_mode,
