@@ -2,37 +2,37 @@
 
 This directory contains the in-process offline replay harness used by `dynamo_mocker::replay`.
 
-The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into a [`TraceCollector`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/collector.rs).
+The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`.
 
 ## Where It Sits
 
-The public replay entrypoints live one level up in [entrypoints.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/entrypoints.rs). They:
+The public replay entrypoints live one level up in `lib/mocker/src/replay/entrypoints.rs`. They:
 
 - normalize `MockEngineArgs`
 - load or accept `DirectRequest`s
 - validate replay arguments
 - dispatch to offline or online replay
 
-Offline replay starts in [mod.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/mod.rs).
+Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
 `offline/mod.rs` chooses between two implementations:
 
-- [`single.rs`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/single.rs) for the special case `num_workers == 1` with the vLLM engine
-- [`multi.rs`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/multi.rs) for everything else, including multi-worker replay and `kv_router` replay
+- `lib/mocker/src/replay/offline/single.rs` for the special case `num_workers == 1` with the vLLM engine
+- `lib/mocker/src/replay/offline/multi.rs` for everything else, including multi-worker replay and `kv_router` replay
 
 ## File Map
 
-- [mod.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/mod.rs)
+- `lib/mocker/src/replay/offline/mod.rs`
   Chooses single-worker fast path vs multi-worker harness.
-- [single.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/single.rs)
+- `lib/mocker/src/replay/offline/single.rs`
   Minimal replay loop for one vLLM worker.
-- [multi.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/multi.rs)
+- `lib/mocker/src/replay/offline/multi.rs`
   General offline cluster simulator for multi-worker replay and KV-router replay.
-- [state.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/state.rs)
+- `lib/mocker/src/replay/offline/state.rs`
   Per-worker wrapper around `EngineCore`, including optional KV event capture.
-- [events.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/events.rs)
+- `lib/mocker/src/replay/offline/events.rs`
   Priority-queue event type used by the multi-worker harness.
-- [core.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/core.rs)
+- `lib/mocker/src/replay/offline/core.rs`
   Small `ReplayWorkerCore` wrapper used by the single-worker path.
 
 ## Single-Worker Fast Path
@@ -61,13 +61,13 @@ flowchart TD
 
 Important details:
 
-- Trace mode uses [`normalize_trace_requests`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/mod.rs#L35) so the first request starts at `0 ms`, then applies `arrival_speedup_ratio`.
+- Trace mode uses `normalize_trace_requests` in `lib/mocker/src/replay/mod.rs` so the first request starts at `0 ms`, then applies `arrival_speedup_ratio`.
 - Concurrency mode ignores original arrival spacing and keeps the worker filled up to `max_in_flight`.
 - The worker itself is still the real mocker engine core; only the scheduling loop is simplified.
 
 ## Multi-Worker Harness
 
-The general harness lives in [`multi.rs`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/multi.rs). It models a cluster with:
+The general harness lives in `lib/mocker/src/replay/offline/multi.rs`. It models a cluster with:
 
 - a logical clock `now_ms`
 - a pending request queue
@@ -93,7 +93,7 @@ It only advances `now_ms` to the next meaningful timestamp:
 
 ### Worker Model
 
-Each worker is represented by [`OfflineWorkerState`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/state.rs):
+Each worker is represented by `OfflineWorkerState` in `lib/mocker/src/replay/offline/state.rs`:
 
 - wraps an `EngineCore`
 - tracks whether a pass is currently in progress
@@ -109,7 +109,7 @@ So offline replay is not a toy simulator. It reuses the real per-pass mocker sch
 
 ## Completion Event Queue
 
-The multi-worker harness uses [`SimulationEvent`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/events.rs) as a min-time priority queue implemented with `BinaryHeap`.
+The multi-worker harness uses `SimulationEvent` from `lib/mocker/src/replay/offline/events.rs` as a min-time priority queue implemented with `BinaryHeap`.
 
 Right now the only scheduled event type is:
 
@@ -131,7 +131,7 @@ Offline replay can run in:
 - `round_robin`
 - `kv_router`
 
-The router implementation for offline mode lives in [router/offline.rs](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/router/offline.rs).
+The router implementation for offline mode lives in `lib/mocker/src/replay/router/offline.rs`.
 
 This router is synchronous and in-process:
 
@@ -166,8 +166,8 @@ flowchart LR
 
 When offline replay uses `kv_router`, workers are created with KV event capture enabled via:
 
-- [`VllmCore::new_with_kv_capture`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/scheduler/vllm/core.rs)
-- [`SglangCore::new_with_kv_capture`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/scheduler/sglang/core.rs)
+- `VllmCore::new_with_kv_capture` in `lib/mocker/src/scheduler/vllm/core.rs`
+- `SglangCore::new_with_kv_capture` in `lib/mocker/src/scheduler/sglang/core.rs`
 
 That causes each pass to return router-visible `kv_events`, which the harness applies synchronously to the offline router indexer after the pass completes.
 
@@ -187,21 +187,21 @@ Both single and multi harnesses support two admission modes:
   - keeps up to `max_in_flight` requests resident in the cluster
   - stamps synthetic arrival times as requests are admitted
 
-This split is why [`mod.rs`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/mod.rs) exposes both:
+This split is why `lib/mocker/src/replay/offline/mod.rs` exposes both:
 
 - `simulate_trace(...)`
 - `simulate_concurrency(...)`
 
 ## Metrics Collection
 
-Both harnesses emit request timing into [`TraceCollector`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/collector.rs):
+Both harnesses emit request timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`:
 
 - arrival
 - admission
 - token emission
 - completion
 
-The harness itself does not compute final throughput/latency metrics incrementally. It records events, then `TraceCollector::finish()` derives the final [`TraceSimulationReport`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/collector.rs).
+The harness itself does not compute final throughput/latency metrics incrementally. It records events, then `TraceCollector::finish()` derives the final `TraceSimulationReport` from `lib/mocker/src/replay/collector.rs`.
 
 ## Mental Model
 
