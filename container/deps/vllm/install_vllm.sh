@@ -26,7 +26,7 @@ TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to ad
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.6"
-LMCACHE_REF="0.4.1"
+LMCACHE_REF="0.4.2"
 VLLM_OMNI_REF="v0.16.0"
 
 while [[ $# -gt 0 ]]; do
