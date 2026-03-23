@@ -36,7 +36,25 @@ pytestmark = [
 ]
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 10
-BLOCK_SIZE = 16
+
+
+def _is_xpu_runtime() -> bool:
+    return (os.environ.get("VLLM_TARGET_DEVICE") or "").lower() == "xpu"
+
+
+BLOCK_SIZE = 64 if _is_xpu_runtime() else 16
+
+
+def _get_device_visibility_env_var() -> str:
+    """Return the runtime-specific device visibility env var.
+
+    CUDA runtime uses CUDA_VISIBLE_DEVICES, while XPU runtime uses
+    ZE_AFFINITY_MASK.
+    """
+    target_device = (os.environ.get("VLLM_TARGET_DEVICE") or "").lower()
+    if target_device == "xpu":
+        return "ZE_AFFINITY_MASK"
+    return "CUDA_VISIBLE_DEVICES"
 
 
 def allocate_frontend_ports(request, count: int) -> list[int]:
@@ -146,8 +164,10 @@ class VLLMProcess:
         # Matches test.sh behavior:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
-        # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
+        # - Each process runs on its own device via runtime-specific visibility env
         # - --kv-transfer-config enables KV cache transfer between ranks
+
+        device_visibility_env = _get_device_visibility_env_var()
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -232,13 +252,19 @@ class VLLMProcess:
 
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
-                "CUDA_VISIBLE_DEVICES": gpu_device,
+                device_visibility_env: gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
+
+            # Avoid carrying an incompatible visibility variable into the child.
+            if device_visibility_env == "ZE_AFFINITY_MASK":
+                env.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                env.pop("ZE_AFFINITY_MASK", None)
 
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
@@ -364,6 +390,7 @@ class VLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
@@ -412,6 +439,7 @@ def test_vllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
@@ -451,6 +479,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.xpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
@@ -501,6 +530,7 @@ def test_router_decisions_vllm_dp(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
