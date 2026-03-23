@@ -106,7 +106,7 @@ jobs:
       build_timeout_minutes: 60
       push_image: true
       run_compliance_scan: true
-      auto_acr_deploy: true
+      copy_to_acr: true
     secrets: inherit
 
   sglang-dev-pipeline:
@@ -121,7 +121,7 @@ jobs:
       build_timeout_minutes: 60
       push_image: true
       run_compliance_scan: true
-      auto_acr_deploy: true
+      copy_to_acr: true
     secrets: inherit
 
   trtllm-dev-pipeline:
@@ -136,7 +136,7 @@ jobs:
       build_timeout_minutes: 60
       push_image: true
       run_compliance_scan: true
-      auto_acr_deploy: true
+      copy_to_acr: true
     secrets: inherit
 
   # ============================================================================
@@ -297,153 +297,74 @@ jobs:
   # ============================================================================
 
   deploy-operator:
-    runs-on: prod-default-small-v2
     needs: [operator]
+    runs-on: prod-default-small-v2
     outputs:
-      NAMESPACE: ${{ steps.namespace.outputs.namespace }}
-      OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
     - uses: actions/checkout@v4
-    - name: Determine operator tag
-      id: operator-tag
-      run: |
-        if [ "${{ needs.operator.result }}" == "success" ]; then
-          TAG="${{ needs.operator.outputs.operator_default_tag }}"
-        else
-          TAG="main-operator"
-        fi
-        echo "tag=${TAG}" >> $GITHUB_OUTPUT
-        echo "Using operator tag: ${TAG}"
-    - name: Generate namespace name
-      id: namespace
-      env:
-        BRANCH: ${{ github.ref_name }}
-      run: |
-        # Sanitize branch name for k8s namespace
-        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
-        BRANCH_SANITIZED="${BRANCH//\//-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
-        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
-        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
-    - name: Setup namespace and operator
-      uses: ./.github/actions/setup-deploy-namespace
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        namespace: ${{ steps.namespace.outputs.namespace }}
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-        operator_tag: ${{ steps.operator-tag.outputs.tag }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
-
-  # ============================================================================
-  # End-to-end tests for each framework with various deployment profiles
-  # ============================================================================
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
-    runs-on: prod-default-small-v2
     needs: [deploy-operator, vllm-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
-          platform_arch: amd64
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    with:
+      framework: vllm
+      profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
+      image_suffix: vllm-runtime-cuda12-amd64
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
 
   deploy-test-sglang:
-    runs-on: prod-default-small-v2
     needs: [deploy-operator, sglang-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-    name: deploy-test-sglang (${{ matrix.profile }})
-    env:
-      FRAMEWORK: sglang
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
-          platform_arch: amd64
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    with:
+      framework: sglang
+      profiles: '["agg", "agg_router"]'
+      image_suffix: sglang-runtime-cuda12-amd64
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
 
   deploy-test-trtllm:
-    runs-on: prod-default-small-v2
     needs: [deploy-operator, trtllm-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          # Disabled: trtllm disagg profiles consistently timeout (~32 min) with 0% success rate.
-          # Re-enable once the underlying disagg deployment issue is resolved.
-          # - disagg
-          # - disagg_router
-    name: deploy-test-trtllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: trtllm
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    with:
+      framework: trtllm
+      profiles: '["agg", "agg_router"]'
+      image_suffix: trtllm-runtime-cuda13-amd64
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-cleanup:
+    if: always()
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    runs-on: prod-default-small-v2
     steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
-          platform_arch: amd64
+    - uses: actions/checkout@v4
+    - name: Teardown vCluster
+      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
   deploy-status-check:
     runs-on: ubuntu-latest
@@ -452,7 +373,7 @@ jobs:
     steps:
       - name: "Check all deploy test jobs"
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
 
   # ============================================================================
   # CLEANUP JOBS
@@ -477,21 +398,6 @@ jobs:
       shell: bash
       run: |
         docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
-
-  cleanup:
-    name: Cleanup AKS resources
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Teardown namespace
-      if: needs.deploy-operator.outputs.NAMESPACE != ''
-      uses: ./.github/actions/teardown-deploy-namespace
-      with:
-        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:

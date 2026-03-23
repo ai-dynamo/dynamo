@@ -19,7 +19,7 @@ import warnings
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -389,7 +389,7 @@ class KalmanPredictor(BasePredictor):
         )
 
 
-LOAD_PREDICTORS = {
+LOAD_PREDICTORS: dict[str, Callable[[PlannerConfig], BasePredictor]] = {
     "constant": ConstantPredictor,
     "arima": ARIMAPredictor,
     "kalman": KalmanPredictor,

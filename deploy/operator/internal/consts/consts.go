@@ -144,11 +144,13 @@ const (
 	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
 
 	// Kubernetes labels
-	KubeLabelIsCheckpointSource         = "nvidia.com/snapshot-is-checkpoint-source"    // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointHash             = "nvidia.com/snapshot-checkpoint-hash"         // Checkpoint identity hash used for lookup/reuse (may differ from DynamoCheckpoint metadata.name)
-	KubeLabelIsRestoreTarget            = "nvidia.com/snapshot-is-restore-target"       // Pod label that triggers DaemonSet auto-restore
-	KubeAnnotationCheckpointLocation    = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
-	KubeAnnotationCheckpointStorageType = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
+	KubeLabelIsCheckpointSource             = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash                 = "nvidia.com/snapshot-checkpoint-hash"      // Checkpoint identity hash used for lookup/reuse (may differ from DynamoCheckpoint metadata.name)
+	KubeLabelIsRestoreTarget                = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
+	KubeAnnotationCheckpointArtifactVersion = "nvidia.com/snapshot-artifact-version"     // Checkpoint artifact generation; changing it triggers a new immutable capture attempt
+	DefaultCheckpointArtifactVersion        = "1"
+	KubeAnnotationCheckpointLocation        = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
+	KubeAnnotationCheckpointStorageType     = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
 
 	// Environment variables injected into pods
 	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods

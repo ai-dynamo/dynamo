@@ -242,38 +242,55 @@ func InjectCheckpointIntoPodSpec(
 			storageType = storageConfig.Type
 		}
 	}
-
-	switch storageType {
-	case configv1alpha1.CheckpointStorageTypeS3:
-		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
-		if storageConfig == nil || storageConfig.S3.URI == "" {
-			return fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
-		}
-		info.Location = fmt.Sprintf("%s/%s.tar", storageConfig.S3.URI, info.Hash)
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
-		if storageConfig == nil || storageConfig.OCI.URI == "" {
-			return fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
-		}
-		info.Location = fmt.Sprintf("%s:%s", storageConfig.OCI.URI, info.Hash)
-	default:
-		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
-		basePath := ""
-		if storageConfig != nil && storageConfig.PVC.BasePath != "" {
-			basePath = storageConfig.PVC.BasePath
-		}
-		if storageConfig == nil || storageConfig.PVC.PVCName == "" {
-			return fmt.Errorf("PVC storage type selected but no PVC name configured (set checkpoint.storage.pvc.pvcName)")
-		}
-		if basePath == "" {
-			return fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
-		}
-		info.Location = fmt.Sprintf("%s/%s", basePath, info.Hash)
-		InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
-		InjectCheckpointVolumeMount(mainContainer, basePath)
+	if err := injectCheckpointStorage(podSpec, mainContainer, info, storageType, storageConfig); err != nil {
+		return err
 	}
 
 	InjectPodInfoVolume(podSpec)
 	InjectPodInfoVolumeMount(mainContainer)
 	return nil
+}
+
+func injectCheckpointStorage(
+	podSpec *corev1.PodSpec,
+	mainContainer *corev1.Container,
+	info *CheckpointInfo,
+	storageType string,
+	storageConfig *configv1alpha1.CheckpointStorageConfiguration,
+) error {
+	if info.StorageType == "" {
+		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
+	}
+
+	switch storageType {
+	case configv1alpha1.CheckpointStorageTypeS3:
+		if storageConfig == nil || storageConfig.S3.URI == "" {
+			return fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
+		}
+		if info.Location == "" {
+			info.Location = fmt.Sprintf("%s/%s.tar", storageConfig.S3.URI, info.Hash)
+		}
+		return nil
+	case configv1alpha1.CheckpointStorageTypeOCI:
+		if storageConfig == nil || storageConfig.OCI.URI == "" {
+			return fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
+		}
+		if info.Location == "" {
+			info.Location = fmt.Sprintf("%s:%s", storageConfig.OCI.URI, info.Hash)
+		}
+		return nil
+	default:
+		if storageConfig == nil || storageConfig.PVC.PVCName == "" {
+			return fmt.Errorf("PVC storage type selected but no PVC name configured (set checkpoint.storage.pvc.pvcName)")
+		}
+		if storageConfig.PVC.BasePath == "" {
+			return fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
+		}
+		if info.Location == "" {
+			info.Location = fmt.Sprintf("%s/%s", storageConfig.PVC.BasePath, info.Hash)
+		}
+		InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
+		InjectCheckpointVolumeMount(mainContainer, storageConfig.PVC.BasePath)
+		return nil
+	}
 }

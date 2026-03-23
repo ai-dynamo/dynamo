@@ -302,6 +302,22 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
+        let (queue, slots, _tx) =
+            make_queue_with_sender(num_workers, block_size, isl, threshold_frac);
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_sender(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
+    ) {
         let dp_range: HashMap<u64, (u32, u32)> =
             (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
@@ -324,7 +340,6 @@ mod tests {
             );
         }
         let (cfg_tx, cfg_rx) = watch::channel(configs);
-        std::mem::forget(cfg_tx);
 
         let selector = Box::new(DefaultWorkerSelector::new(None, "test"));
         let queue = Arc::new(SchedulerQueue::new(
@@ -336,7 +351,7 @@ mod tests {
             FcfsPolicy,
         ));
 
-        (queue, slots)
+        (queue, slots, cfg_tx)
     }
 
     fn make_request(
@@ -514,5 +529,189 @@ mod tests {
             ),
             "expected NoEndpoints, got {resp:?}"
         );
+    }
+
+    /// Simulates the EPP path: router starts with zero workers (skip_initial_worker_wait),
+    /// then register_workers lazily injects workers before routing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_register_workers_lazy_epp_path() {
+        let block_size = 16;
+        let isl = 512;
+
+        // Start with zero workers (mimics skip_initial_worker_wait=true)
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+
+        // Routing with no workers must fail
+        let (req_fail, rx_fail) = make_request("before-register", isl);
+        queue.enqueue(req_fail).await;
+        let resp = rx_fail.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp,
+                Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
+            ),
+            "expected NoEndpoints before register_workers, got {resp:?}"
+        );
+
+        // Lazily register two workers in the slot tracker (EPP supplies pod list)
+        let mut dp_range = std::collections::HashMap::new();
+        dp_range.insert(100_u64, (0_u32, 1_u32));
+        dp_range.insert(200_u64, (0_u32, 1_u32));
+        slots.register_external_workers(&dp_range);
+
+        // Also update the config watch so the selector can see these workers
+        let mut configs = HashMap::new();
+        for &id in &[100_u64, 200_u64] {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        cfg_tx.send(configs).unwrap();
+
+        // Routing after registration must succeed and pick one of the registered workers
+        let (req_ok, rx_ok) = make_request("after-register", isl);
+        queue.enqueue(req_ok).await;
+        let resp = rx_ok
+            .await
+            .expect("oneshot dropped")
+            .expect("scheduling failed");
+        assert!(
+            resp.best_worker.worker_id == 100 || resp.best_worker.worker_id == 200,
+            "expected worker 100 or 200, got {}",
+            resp.best_worker.worker_id
+        );
+
+        // Clean up
+        slots
+            .mark_prefill_completed(&"after-register".to_string())
+            .await
+            .unwrap();
+        slots.free(&"after-register".to_string()).await.unwrap();
+    }
+
+    /// Register_workers is additive: calling with a new set does NOT remove old workers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_register_workers_additive() {
+        let block_size = 16;
+        let isl = 256;
+
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+
+        // Register worker 10 in slots and config
+        let mut dp1 = std::collections::HashMap::new();
+        dp1.insert(10_u64, (0_u32, 1_u32));
+        slots.register_external_workers(&dp1);
+
+        let mut configs = HashMap::new();
+        configs.insert(
+            10_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        );
+        cfg_tx.send(configs.clone()).unwrap();
+
+        // Register worker 20 (worker 10 must NOT be evicted)
+        let mut dp2 = std::collections::HashMap::new();
+        dp2.insert(20_u64, (0_u32, 1_u32));
+        slots.register_external_workers(&dp2);
+
+        configs.insert(
+            20_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        );
+        cfg_tx.send(configs).unwrap();
+
+        // Send enough requests to statistically prove both workers are available
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20 {
+            let req_id = format!("add-{i}");
+            let (req, rx) = make_request(&req_id, isl);
+            queue.enqueue(req).await;
+            let resp = rx
+                .await
+                .expect("oneshot dropped")
+                .expect("scheduling failed");
+            seen.insert(resp.best_worker.worker_id);
+            slots.mark_prefill_completed(&req_id).await.unwrap();
+            slots.free(&req_id).await.unwrap();
+        }
+
+        assert!(
+            seen.contains(&10) && seen.contains(&20),
+            "both workers should be reachable after additive registration, saw: {seen:?}"
+        );
+    }
+
+    /// Requests with allowed_worker_ids should only route to the specified subset.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_allowed_worker_ids_filter() {
+        let block_size = 16;
+        let isl = 256;
+
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+
+        // Register three workers
+        let mut dp = std::collections::HashMap::new();
+        dp.insert(1_u64, (0_u32, 1_u32));
+        dp.insert(2_u64, (0_u32, 1_u32));
+        dp.insert(3_u64, (0_u32, 1_u32));
+        slots.register_external_workers(&dp);
+
+        let mut configs = HashMap::new();
+        for &id in &[1_u64, 2_u64, 3_u64] {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        cfg_tx.send(configs).unwrap();
+
+        // Send a request with allowed_worker_ids = {2} only
+        let mut allowed = std::collections::HashSet::new();
+        allowed.insert(2_u64);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = SchedulingRequest {
+            maybe_request_id: Some("filter-0".to_string()),
+            token_seq: None,
+            isl_tokens: isl,
+            overlaps: OverlapScores::default(),
+            decode_blocks: HashMap::new(),
+            prefill_tokens: HashMap::new(),
+            router_config_override: None,
+            update_states: true,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            allowed_worker_ids: Some(allowed),
+            resp_tx: Some(tx),
+        };
+        queue.enqueue(req).await;
+        let resp = rx
+            .await
+            .expect("oneshot dropped")
+            .expect("scheduling failed");
+        assert_eq!(
+            resp.best_worker.worker_id, 2,
+            "request must be routed to allowed worker 2, got {}",
+            resp.best_worker.worker_id
+        );
+        slots
+            .mark_prefill_completed(&"filter-0".to_string())
+            .await
+            .unwrap();
+        slots.free(&"filter-0".to_string()).await.unwrap();
     }
 }

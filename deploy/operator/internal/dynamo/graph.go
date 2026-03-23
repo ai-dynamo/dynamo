@@ -322,11 +322,12 @@ func generateSingleDCD(
 	deployment.Spec.DynamoNamespace = &dynamoNamespace
 
 	labels := make(map[string]string)
-	deployment.Spec.Labels = labels
-	deployment.Labels = labels
+	maps.Copy(labels, component.Labels)
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+	deployment.Spec.Labels = labels
+	deployment.Labels = labels
 
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(component.ComponentType) {
@@ -334,6 +335,7 @@ func generateSingleDCD(
 	}
 
 	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+	propagateDGDSpecMetadata(parentDGD.Spec.Annotations, parentDGD.Spec.Labels, &deployment.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Apply restart annotation if this service should be restarted.
 	if restartState.ShouldAnnotateService(componentName) {
@@ -1295,6 +1297,7 @@ func GeneratePodSpecForComponent(
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
@@ -1329,6 +1332,27 @@ func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1alph
 	}
 }
 
+// propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
+// the component as a low-priority base. Service-level values take precedence.
+func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for k, v := range annotations {
+		if component.Annotations == nil {
+			component.Annotations = make(map[string]string)
+		}
+		if _, exists := component.Annotations[k]; !exists {
+			component.Annotations[k] = v
+		}
+	}
+	for k, v := range labels {
+		if component.Labels == nil {
+			component.Labels = make(map[string]string)
+		}
+		if _, exists := component.Labels[k]; !exists {
+			component.Labels[k] = v
+		}
+	}
+}
+
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
@@ -1343,6 +1367,8 @@ func GenerateGrovePodCliqueSet(
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
+	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
@@ -1351,6 +1377,10 @@ func GenerateGrovePodCliqueSet(
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}
+
+	// Inject deployment-level topology constraint (PCS template).
+	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
+	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
 	// Validate kai-scheduler queue once if kai-scheduler is enabled
 	var validatedQueueName string
@@ -1418,6 +1448,13 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
+
+			// For single-node services, set topology constraint directly on the clique.
+			// For multinode services, the constraint goes on the PCSG instead;
+			// child cliques inherit from PCSG and should NOT have explicit constraints.
+			if !isMultinode {
+				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
+			}
 			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
@@ -1459,10 +1496,11 @@ func GenerateGrovePodCliqueSet(
 
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:         strings.ToLower(serviceName),
-				CliqueNames:  cliqueNames,
-				Replicas:     component.Replicas,
-				MinAvailable: ptr.To(int32(1)),
+				Name:               strings.ToLower(serviceName),
+				CliqueNames:        cliqueNames,
+				Replicas:           component.Replicas,
+				MinAvailable:       ptr.To(int32(1)),
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			})
 		}
 	}

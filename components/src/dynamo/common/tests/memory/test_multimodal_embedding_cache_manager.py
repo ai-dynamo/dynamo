@@ -57,6 +57,7 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         cache.set("key1", CachedEmbedding(tensor2))
 
         retrieved = cache.get("key1")
+        assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor2)
         assert cache.stats["entries"] == 1
 
