@@ -988,7 +988,7 @@ mod tests {
     struct MockTransport;
 
     impl crate::transport::FrameTransport for MockTransport {
-        fn bind(&self, _anchor_id: u64) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
+        fn bind(&self, _anchor_id: u64, _session_id: u64) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
             Box::pin(async {
                 Ok(("mock://endpoint".to_string(), flume::bounded::<Vec<u8>>(256).1))
             })
@@ -1870,6 +1870,7 @@ mod tests {
         fn bind(
             &self,
             _anchor_id: u64,
+            _session_id: u64,
         ) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
             Box::pin(async { Ok(("noop://".to_string(), flume::bounded(1).1)) })
         }

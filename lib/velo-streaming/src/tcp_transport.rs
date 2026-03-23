@@ -161,7 +161,7 @@ fn is_terminal_sentinel(bytes: &[u8]) -> bool {
 }
 
 impl FrameTransport for TcpFrameTransport {
-    fn bind(&self, _anchor_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>> {
+    fn bind(&self, _anchor_id: u64, _session_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>> {
         let bind_addr = self.bind_addr;
         Box::pin(async move {
             // Bind on ephemeral port (OS-assigned)
@@ -328,7 +328,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_bind_returns_tcp_endpoint() {
         let transport = TcpFrameTransport::default();
-        let (endpoint, _rx) = transport.bind(1).await.unwrap();
+        let (endpoint, _rx) = transport.bind(1, 0).await.unwrap();
 
         // Verify endpoint format: tcp://addr:port/uuid
         assert!(endpoint.starts_with("tcp://"), "endpoint should start with tcp://: {}", endpoint);
@@ -341,7 +341,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_connect_handshake() {
         let transport = TcpFrameTransport::default();
-        let (endpoint, rx) = transport.bind(1).await.unwrap();
+        let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
 
         // Connect and send some data
         let sender = transport.connect(&endpoint, 1, 1).await.unwrap();
@@ -368,7 +368,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_invalid_token_rejected() {
         let transport = TcpFrameTransport::default();
-        let (endpoint, rx) = transport.bind(1).await.unwrap();
+        let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
 
         // Parse endpoint to get addr but use a different token
         let (addr, _valid_token) = parse_tcp_endpoint(&endpoint).unwrap();
@@ -427,7 +427,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_connect_round_trip_multiple_frames() {
         let transport = TcpFrameTransport::default();
-        let (endpoint, rx) = transport.bind(42).await.unwrap();
+        let (endpoint, rx) = transport.bind(42, 0).await.unwrap();
 
         let sender = transport.connect(&endpoint, 42, 1).await.unwrap();
 
@@ -452,7 +452,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dropped_sentinel_injected_on_abrupt_close() {
         let transport = TcpFrameTransport::default();
-        let (endpoint, rx) = transport.bind(1).await.unwrap();
+        let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
 
         // Connect and send one frame, then drop sender without finalize
         let sender = transport.connect(&endpoint, 1, 1).await.unwrap();
@@ -488,7 +488,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_no_extra_dropped_after_finalized() {
         let transport = TcpFrameTransport::default();
-        let (endpoint, rx) = transport.bind(1).await.unwrap();
+        let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
 
         let sender = transport.connect(&endpoint, 1, 1).await.unwrap();
 

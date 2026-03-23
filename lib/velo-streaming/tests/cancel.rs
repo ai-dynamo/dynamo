@@ -22,7 +22,7 @@ use velo_streaming::{AnchorManager, AnchorManagerBuilder, AttachError};
 struct LocalMockTransport;
 
 impl velo_streaming::FrameTransport for LocalMockTransport {
-    fn bind(&self, anchor_id: u64) -> BoxFuture<'_, anyhow::Result<(String, flume::Receiver<Vec<u8>>)>> {
+    fn bind(&self, anchor_id: u64, _session_id: u64) -> BoxFuture<'_, anyhow::Result<(String, flume::Receiver<Vec<u8>>)>> {
         Box::pin(async move {
             let (_tx, rx) = flume::bounded::<Vec<u8>>(256);
             Ok((format!("mock://{}", anchor_id), rx))

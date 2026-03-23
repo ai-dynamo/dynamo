@@ -299,7 +299,7 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                 } // DashMap ref dropped here
 
                 // Step 2: Async bind OUTSIDE shard lock
-                let (endpoint, receiver) = match manager.transport.bind(local_id).await {
+                let (endpoint, receiver) = match manager.transport.bind(local_id, req.session_id).await {
                     Ok(pair) => pair,
                     Err(e) => {
                         return Ok(AnchorAttachResponse::Err {
@@ -482,7 +482,7 @@ mod tests {
     struct MockFrameTransport;
 
     impl crate::transport::FrameTransport for MockFrameTransport {
-        fn bind(&self, _anchor_id: u64) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
+        fn bind(&self, _anchor_id: u64, _session_id: u64) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
             Box::pin(async {
                 Ok(("mock://test-endpoint".to_string(), flume::bounded::<Vec<u8>>(256).1))
             })
@@ -566,7 +566,7 @@ mod tests {
 
         // Simulate bind-then-lock attach handler logic:
         // Step 1: async bind outside shard lock
-        let (endpoint, _receiver) = manager.transport.bind(local_id).await.unwrap();
+        let (endpoint, _receiver) = manager.transport.bind(local_id, 0).await.unwrap();
 
         // Step 2: atomically set attachment under shard lock
         use dashmap::mapref::entry::Entry;

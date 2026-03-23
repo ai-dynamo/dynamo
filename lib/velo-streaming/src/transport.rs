@@ -50,9 +50,14 @@ pub trait FrameTransport: Send + Sync {
     /// opaque string the sender passes to [`connect`][FrameTransport::connect]
     /// and `receiver` is the receive half of the frame channel.
     ///
+    /// - `anchor_id`: identifies which anchor this binding is for.
+    /// - `session_id`: unique session identifier for this attachment; used by
+    ///   the transport to discriminate between successive sessions on the same
+    ///   anchor so that stale frames from a prior session are not delivered.
+    ///
     /// The channel established by `bind` / `connect` MUST provide ordered,
     /// loss-free delivery of all frames including sentinels.
-    fn bind(&self, anchor_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>>;
+    fn bind(&self, anchor_id: u64, session_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>>;
 
     /// Connect a write endpoint to the given anchor.
     ///

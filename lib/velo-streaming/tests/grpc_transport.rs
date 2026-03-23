@@ -47,7 +47,7 @@ async fn test_bind_returns_grpc_endpoint() {
         .await
         .unwrap();
 
-    let (endpoint, _rx) = transport.bind(1).await.unwrap();
+    let (endpoint, _rx) = transport.bind(1, 0).await.unwrap();
 
     assert!(
         endpoint.starts_with("grpc://"),
@@ -71,7 +71,7 @@ async fn test_connect_round_trip() {
         .await
         .unwrap();
 
-    let (endpoint, rx) = transport.bind(2).await.unwrap();
+    let (endpoint, rx) = transport.bind(2, 0).await.unwrap();
     let tx = transport.connect(&endpoint, 2, 1).await.unwrap();
 
     // Send 5 frames
@@ -104,7 +104,7 @@ async fn test_dropped_on_abrupt_close() {
         .await
         .unwrap();
 
-    let (endpoint, rx) = transport.bind(3).await.unwrap();
+    let (endpoint, rx) = transport.bind(3, 0).await.unwrap();
     let tx = transport.connect(&endpoint, 3, 1).await.unwrap();
 
     // Send one data frame
@@ -145,7 +145,7 @@ async fn test_exclusive_attach_enforcement() {
         .await
         .unwrap();
 
-    let (endpoint, rx) = transport.bind(4).await.unwrap();
+    let (endpoint, rx) = transport.bind(4, 0).await.unwrap();
 
     // First connect should succeed
     let tx1 = transport.connect(&endpoint, 4, 1).await.unwrap();

@@ -313,7 +313,7 @@ pub fn parse_grpc_endpoint(endpoint: &str) -> Result<(SocketAddr, u64)> {
 }
 
 impl FrameTransport for GrpcFrameTransport {
-    fn bind(&self, anchor_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>> {
+    fn bind(&self, anchor_id: u64, _session_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>> {
         let addr = self.bound_addr;
         let routing = self.routing.clone();
         Box::pin(async move {

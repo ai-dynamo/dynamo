@@ -42,7 +42,7 @@ fn finalized_bytes() -> Vec<u8> {
 async fn test_local_round_trip() {
     let transport = TcpFrameTransport::new(std::net::Ipv4Addr::LOCALHOST.into());
 
-    let (endpoint, rx) = transport.bind(1).await.unwrap();
+    let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
     let tx = transport.connect(&endpoint, 1, 1).await.unwrap();
 
     // Send 10 string items
@@ -101,7 +101,7 @@ async fn test_local_round_trip() {
 async fn test_connection_drop() {
     let transport = TcpFrameTransport::new(std::net::Ipv4Addr::LOCALHOST.into());
 
-    let (endpoint, rx) = transport.bind(1).await.unwrap();
+    let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
     let tx = transport.connect(&endpoint, 1, 1).await.unwrap();
 
     // Send a few items
@@ -152,7 +152,7 @@ async fn test_connection_drop() {
 async fn test_sender_close_first() {
     let transport = TcpFrameTransport::new(std::net::Ipv4Addr::LOCALHOST.into());
 
-    let (endpoint, rx) = transport.bind(1).await.unwrap();
+    let (endpoint, rx) = transport.bind(1, 0).await.unwrap();
     let tx = transport.connect(&endpoint, 1, 1).await.unwrap();
 
     // Send items then explicitly drop tx (sender-initiated close)
@@ -215,7 +215,7 @@ async fn test_remote_attach() {
     // Transport B (sender side): connects to transport A's endpoint
     let transport_b = TcpFrameTransport::new(std::net::Ipv4Addr::LOCALHOST.into());
 
-    let (endpoint, rx) = transport_a.bind(42).await.unwrap();
+    let (endpoint, rx) = transport_a.bind(42, 0).await.unwrap();
 
     // B connects to A's endpoint
     let tx = transport_b.connect(&endpoint, 42, 1).await.unwrap();

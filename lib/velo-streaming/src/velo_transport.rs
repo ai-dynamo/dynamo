@@ -13,7 +13,7 @@
 //! # Routing
 //!
 //! ```text
-//! AM headers: { "anchor_id": "<u64>" }
+//! AM headers: { "anchor_id": "<u64>", "session_id": "<u64>" }
 //! AM payload: [ frame_bytes: ... ]
 //! ```
 //!
@@ -42,17 +42,20 @@ use crate::transport::FrameTransport;
 /// AM header key used to route frames to the correct anchor's dispatch channel.
 const ANCHOR_ID_HEADER: &str = "anchor_id";
 
+/// AM header key for session-level routing within a single anchor.
+const SESSION_ID_HEADER: &str = "session_id";
+
 /// Production [`FrameTransport`] backed by velo-messenger active messages.
 ///
-/// Holds its own internal `DashMap<u64, flume::Sender<Vec<u8>>>` dispatch map
-/// for transport-level routing. The `_stream_data` AM handler extracts the
-/// target `anchor_id` from the AM headers ([`ANCHOR_ID_HEADER`]) and writes
-/// the payload directly into the matching dispatch channel. The existing
-/// `reader_pump` (spawned by `_anchor_attach`) reads from the transport
-/// receiver and bridges to `frame_tx` with heartbeat monitoring intact.
+/// Holds its own internal `DashMap<(u64, u64), flume::Sender<Vec<u8>>>` dispatch
+/// map keyed by `(anchor_id, session_id)` for transport-level routing. The
+/// `_stream_data` AM handler extracts both `anchor_id` and `session_id` from
+/// the AM headers and writes the payload directly into the matching dispatch
+/// channel. This composite key ensures that stale frames from a prior session
+/// are silently dropped after a detach+reattach cycle.
 pub struct VeloFrameTransport {
     messenger: Arc<Messenger>,
-    dispatch: Arc<DashMap<u64, flume::Sender<Vec<u8>>>>,
+    dispatch: Arc<DashMap<(u64, u64), flume::Sender<Vec<u8>>>>,
     worker_id: WorkerId,
     /// Number of times `_stream_data` hit the slow (blocking) send path
     /// because the dispatch channel was full. Indicates consumer backpressure.
@@ -71,7 +74,7 @@ impl VeloFrameTransport {
     ///
     /// Returns an error if handler registration fails (e.g., duplicate handler name).
     pub fn new(messenger: Arc<Messenger>, worker_id: WorkerId) -> Result<Self> {
-        let dispatch: Arc<DashMap<u64, flume::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
+        let dispatch: Arc<DashMap<(u64, u64), flume::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
         let backpressure_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
         // Register the shared _stream_data handler.
@@ -83,10 +86,17 @@ impl VeloFrameTransport {
             let handler_dispatch = handler_dispatch.clone();
             let backpressure = handler_backpressure.clone();
             async move {
-                let anchor_id = match ctx
-                    .headers
-                    .as_ref()
-                    .and_then(|h| h.get(ANCHOR_ID_HEADER))
+                let headers = match ctx.headers.as_ref() {
+                    Some(h) => h,
+                    None => {
+                        tracing::warn!(
+                            "_stream_data: missing headers, dropping frame"
+                        );
+                        return Ok(());
+                    }
+                };
+                let anchor_id = match headers
+                    .get(ANCHOR_ID_HEADER)
                     .and_then(|v| v.parse::<u64>().ok())
                 {
                     Some(id) => id,
@@ -98,10 +108,24 @@ impl VeloFrameTransport {
                         return Ok(());
                     }
                 };
+                let session_id = match headers
+                    .get(SESSION_ID_HEADER)
+                    .and_then(|v| v.parse::<u64>().ok())
+                {
+                    Some(id) => id,
+                    None => {
+                        tracing::warn!(
+                            anchor_id,
+                            "_stream_data: missing or invalid {} header, dropping frame",
+                            SESSION_ID_HEADER
+                        );
+                        return Ok(());
+                    }
+                };
                 let frame_bytes = ctx.payload.to_vec();
                 // Clone sender out of DashMap ref before the potential await point.
                 let tx = handler_dispatch
-                    .get(&anchor_id)
+                    .get(&(anchor_id, session_id))
                     .map(|entry| entry.value().clone());
                 if let Some(tx) = tx {
                     // Fast path: try_send avoids async overhead when channel has space.
@@ -151,22 +175,25 @@ impl VeloFrameTransport {
         self.backpressure_count.load(Ordering::Relaxed)
     }
 
-    /// Remove an anchor's dispatch entry.
+    /// Remove all dispatch entries for the given anchor (any session).
     ///
     /// Called when the reader_pump exits or the anchor is cleaned up.
     /// After unbind, subsequent AM frames targeting this anchor_id are silently dropped.
     pub fn unbind(&self, anchor_id: u64) {
-        self.dispatch.remove(&anchor_id);
+        self.dispatch.retain(|&(aid, _), _| aid != anchor_id);
     }
 }
 
 impl FrameTransport for VeloFrameTransport {
-    fn bind(&self, anchor_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>> {
+    fn bind(&self, anchor_id: u64, session_id: u64) -> BoxFuture<'_, Result<(String, flume::Receiver<Vec<u8>>)>> {
         let worker_id = self.worker_id;
         let dispatch = self.dispatch.clone();
         Box::pin(async move {
             let (tx, rx) = flume::bounded::<Vec<u8>>(256);
-            dispatch.insert(anchor_id, tx);
+            // Remove any stale entry for a prior session on this anchor_id
+            // before inserting the new one.
+            dispatch.retain(|&(aid, _), _| aid != anchor_id);
+            dispatch.insert((anchor_id, session_id), tx);
             let endpoint = format!("velo://{}/stream/{}", worker_id.as_u64(), anchor_id);
             Ok((endpoint, rx))
         })
@@ -176,7 +203,7 @@ impl FrameTransport for VeloFrameTransport {
         &self,
         endpoint: &str,
         _anchor_id: u64,
-        _session_id: u64,
+        session_id: u64,
     ) -> BoxFuture<'_, Result<flume::Sender<Vec<u8>>>> {
         let endpoint = endpoint.to_string();
         let messenger = self.messenger.clone();
@@ -185,13 +212,17 @@ impl FrameTransport for VeloFrameTransport {
             let (tx, rx) = flume::bounded::<Vec<u8>>(256);
 
             // Spawn pump task: reads from rx, sends AM per frame with
-            // anchor_id routed via AM headers (no payload prefix).
+            // anchor_id + session_id routed via AM headers (no payload prefix).
             tokio::spawn(async move {
                 while let Ok(frame_bytes) = rx.recv_async().await {
-                    let mut headers = HashMap::with_capacity(1);
+                    let mut headers = HashMap::with_capacity(2);
                     headers.insert(
                         ANCHOR_ID_HEADER.to_string(),
                         target_anchor_id.to_string(),
+                    );
+                    headers.insert(
+                        SESSION_ID_HEADER.to_string(),
+                        session_id.to_string(),
                     );
 
                     if let Err(e) = messenger

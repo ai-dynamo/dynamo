@@ -31,7 +31,7 @@ impl MockFrameTransport {
 }
 
 impl FrameTransport for MockFrameTransport {
-    fn bind(&self, anchor_id: u64) -> BoxFuture<'_, anyhow::Result<(String, flume::Receiver<Vec<u8>>)>> {
+    fn bind(&self, anchor_id: u64, _session_id: u64) -> BoxFuture<'_, anyhow::Result<(String, flume::Receiver<Vec<u8>>)>> {
         Box::pin(async move {
             let (_tx, rx) = flume::bounded::<Vec<u8>>(256);
             // tx dropped immediately — bind receiver is for reader_pump only.
