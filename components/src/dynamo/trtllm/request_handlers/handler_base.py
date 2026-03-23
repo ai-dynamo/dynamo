@@ -233,7 +233,10 @@ class HandlerBase(BaseGenerativeHandler):
         torch.cuda.synchronize()
         if method == "sleep":
             for tag in tags:
-                release_with_tag(tag)
+                released = release_with_tag(tag)
+                logger.info(
+                    "[GMS] release_with_tag(%r) released %d blob(s)", tag, released
+                )
             torch.cuda.synchronize()
             gc.collect()
             torch.cuda.empty_cache()

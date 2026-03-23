@@ -88,7 +88,7 @@ def _sleep_engine(
     sleep_result = engine.sleep()
     assert sleep_result["status"] == "ok"
 
-    mem_after = wait_for_memory_drop(mem_before, timeout_s=30.0, device=0)
+    mem_after = wait_for_memory_drop(mem_before, timeout_s=30.0)
     released_bytes = mem_before - mem_after
     logger.info(
         "%s sleep: %.2f → %.2f GiB (freed %.0f MB)",

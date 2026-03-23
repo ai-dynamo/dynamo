@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -18,7 +19,28 @@ DYNAMO_BIN = REPO_ROOT / "dynamo" / "bin"
 MIN_EXPECTED_MEMORY_RETURN_FRACTION = 0.6
 
 
-def get_gpu_memory_used(device: int = 0) -> int:
+def _default_nvml_device() -> int:
+    """Return the NVML physical device index for CUDA device 0.
+
+    With CUDA_VISIBLE_DEVICES set (e.g. "1,2"), CUDA device 0 maps to the
+    first entry, which is NVML physical device 1.  NVML always uses physical
+    indices, so we parse the first entry from CUDA_VISIBLE_DEVICES to get the
+    correct NVML index.
+    """
+    cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda_vis:
+        first = cuda_vis.split(",")[0].strip()
+        try:
+            return int(first)
+        except ValueError:
+            pass
+    return 0
+
+
+_GMS_NVML_DEVICE: int = _default_nvml_device()
+
+
+def get_gpu_memory_used(device: int = _GMS_NVML_DEVICE) -> int:
     pynvml.nvmlInit()
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
@@ -71,7 +93,7 @@ def wait_for_memory_drop(
     *,
     timeout_s: float = 30.0,
     poll_interval_s: float = 0.5,
-    device: int = 0,
+    device: int = _GMS_NVML_DEVICE,
 ) -> int:
     """Poll until GPU memory drops below *baseline_bytes*, then return current usage.
 

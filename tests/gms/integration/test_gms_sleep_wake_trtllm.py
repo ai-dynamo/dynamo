@@ -88,7 +88,7 @@ def test_gms_basic_sleep_wake_trtllm(
             assert sleep_result["status"] == "ok"
 
             # Poll until GPU memory drops (KV cache freed via TRTLLM VMM).
-            mem_after_sleep = wait_for_memory_drop(mem_before, timeout_s=30.0, device=0)
+            mem_after_sleep = wait_for_memory_drop(mem_before, timeout_s=30.0)
             released_bytes = mem_before - mem_after_sleep
             logger.info(
                 "Memory after sleep: %.2f GiB (freed %.0f MB)",
