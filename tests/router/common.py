@@ -972,6 +972,42 @@ def _test_python_router_bindings(
 
     logger.info(f"Generated {num_input_tokens} random token IDs")
 
+    # Verify the additive best_worker() return shape and overlap map typing.
+    best_worker_result = asyncio.run(kv_router.best_worker(token_ids[:50]))
+    assert isinstance(
+        best_worker_result, tuple
+    ), f"Expected tuple result, got {type(best_worker_result)}"
+    assert (
+        len(best_worker_result) == 4
+    ), f"Expected 4 values from best_worker(), got {len(best_worker_result)}"
+
+    worker_id, dp_rank, overlap_blocks, overlaps_by_worker = best_worker_result
+    assert isinstance(worker_id, int), f"Expected worker_id int, got {type(worker_id)}"
+    assert isinstance(dp_rank, int), f"Expected dp_rank int, got {type(dp_rank)}"
+    assert isinstance(
+        overlap_blocks, int
+    ), f"Expected overlap_blocks int, got {type(overlap_blocks)}"
+    assert isinstance(
+        overlaps_by_worker, dict
+    ), f"Expected overlaps_by_worker dict, got {type(overlaps_by_worker)}"
+    assert overlap_blocks == overlaps_by_worker.get((worker_id, dp_rank), 0), (
+        "Selected worker overlap should match overlaps_by_worker entry "
+        "or default to 0 when no cached blocks exist"
+    )
+    for worker_key, overlap in overlaps_by_worker.items():
+        assert isinstance(worker_key, tuple), (
+            f"Expected worker key tuple, got {type(worker_key)}"
+        )
+        assert len(worker_key) == 2, (
+            f"Expected worker key to have 2 items, got {len(worker_key)}"
+        )
+        assert all(isinstance(part, int) for part in worker_key), (
+            f"Expected worker key ints, got {worker_key}"
+        )
+        assert isinstance(overlap, int), (
+            f"Expected overlap int for {worker_key}, got {type(overlap)}"
+        )
+
     # Test with full overrides
     logger.info(f"Testing with full router config overrides: {router_config_override}")
     asyncio.run(

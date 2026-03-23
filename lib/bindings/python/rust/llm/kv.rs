@@ -254,16 +254,22 @@ pub(crate) struct OverlapScores {
     inner: llm_rs::kv_router::protocols::OverlapScores,
 }
 
+impl OverlapScores {
+    fn scores_map(inner: &llm_rs::kv_router::protocols::OverlapScores) -> HashMap<(u64, u32), u32> {
+        inner
+            .scores
+            .iter()
+            .map(|(worker, score)| ((worker.worker_id, worker.dp_rank), *score))
+            .collect()
+    }
+}
+
 #[pymethods]
 impl OverlapScores {
     #[getter]
     fn scores(&self) -> HashMap<(u64, u32), u32> {
         // Return scores with full WorkerWithDpRank granularity as (worker_id, dp_rank) tuples
-        self.inner
-            .scores
-            .iter()
-            .map(|(worker, score)| ((worker.worker_id, worker.dp_rank), *score))
-            .collect()
+        Self::scores_map(&self.inner)
     }
 
     #[getter]
@@ -773,17 +779,11 @@ impl KvRouter {
             256,
             1,
         );
-        let inner_router = RsKvRouter::new_standalone(
-            workers,
-            block_size as u32,
-            None,
-            Some(config),
-            "decode",
-        )
-        .map_err(to_pyerr)?;
+        let inner_router =
+            RsKvRouter::new_standalone(workers, block_size as u32, None, Some(config), "decode")
+                .map_err(to_pyerr)?;
 
-        let kv_push_router =
-            RsKvPushRouter::new_chooser_only(Arc::new(inner_router));
+        let kv_push_router = RsKvPushRouter::new_chooser_only(Arc::new(inner_router));
         Ok(Self {
             inner: Arc::new(kv_push_router),
         })
@@ -944,8 +944,8 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
+            let (best_worker, overlap_blocks, overlap_scores) = chooser
+                .find_best_match_with_overlaps(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
@@ -957,7 +957,52 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
+            let overlaps_by_worker = OverlapScores::scores_map(&overlap_scores);
+
+            Ok((
+                best_worker.worker_id,
+                best_worker.dp_rank,
+                overlap_blocks,
+                overlaps_by_worker,
+            ))
+        })
+    }
+
+    #[pyo3(signature = (request_id, token_ids, overlap_blocks, worker_id, dp_rank=0, router_config_override=None))]
+    fn add_request<'p>(
+        &self,
+        py: Python<'p>,
+        request_id: String,
+        token_ids: Vec<u32>,
+        overlap_blocks: u32,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        router_config_override: Option<PyObject>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+
+        let chooser = self.inner.chooser.clone();
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            chooser
+                .add_request(
+                    request_id,
+                    &token_ids,
+                    overlap_blocks,
+                    None,
+                    worker,
+                    None,
+                    router_config_override.as_ref(),
+                )
+                .await;
+            Ok(())
         })
     }
 

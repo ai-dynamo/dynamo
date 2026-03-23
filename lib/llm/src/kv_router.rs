@@ -428,7 +428,7 @@ impl KvRouter {
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
-    /// Now also takes optional context_id for request tracking
+    /// Now also takes optional context_id for request tracking.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
@@ -440,6 +440,34 @@ impl KvRouter {
         lora_name: Option<String>,
         priority_jump: f64,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+        let (best_worker, overlap_amount, _overlap_scores) = self
+            .find_best_match_with_overlaps(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                update_states,
+                lora_name,
+                priority_jump,
+            )
+            .await?;
+
+        Ok((best_worker, overlap_amount))
+    }
+
+    /// Give these tokens, find the worker with the best match in its KV cache,
+    /// and return the full overlap map used during selection.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_with_overlaps(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+    ) -> anyhow::Result<(WorkerWithDpRank, u32, OverlapScores)> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -512,8 +540,7 @@ impl KvRouter {
         // In approximate mode (use_kv_events=false), record the routing decision
         // so the indexer tracks estimated cache state per worker.
         if update_states && !self.kv_router_config.use_kv_events {
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(tokens.to_vec(), self.block_size);
+            let mut tokens_with_hashes = TokensWithHashes::new(tokens.to_vec(), self.block_size);
             if let Err(e) = self
                 .indexer
                 .process_routing_decision_for_request(&mut tokens_with_hashes, best_worker)
@@ -529,7 +556,7 @@ impl KvRouter {
             }
         }
 
-        Ok((best_worker, overlap_amount))
+        Ok((best_worker, overlap_amount, overlap_scores))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -547,8 +574,7 @@ impl KvRouter {
         // find_best_match path handles its own update; this covers callers
         // that skip find_best_match and register a worker directly).
         if !self.kv_router_config.use_kv_events {
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(tokens.to_vec(), self.block_size);
+            let mut tokens_with_hashes = TokensWithHashes::new(tokens.to_vec(), self.block_size);
             if let Err(e) = self
                 .indexer
                 .process_routing_decision_for_request(&mut tokens_with_hashes, worker)

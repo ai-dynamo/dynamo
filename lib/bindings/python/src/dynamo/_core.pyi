@@ -1408,7 +1408,7 @@ class KvRouter:
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
-    ) -> Tuple[int, int, int]:
+    ) -> Tuple[int, int, int, Dict[Tuple[int, int], int]]:
         """
         Find the best matching worker for the given tokens.
 
@@ -1423,10 +1423,39 @@ class KvRouter:
                            to enable MM-aware worker selection.
 
         Returns:
-            A tuple of (worker_id, dp_rank, overlap_blocks) where:
+            A tuple of (worker_id, dp_rank, overlap_blocks, overlaps_by_worker) where:
                 - worker_id: The ID of the best matching worker
                 - dp_rank: The data parallel rank of the selected worker
                 - overlap_blocks: The number of overlapping blocks found
+                - overlaps_by_worker: Dict keyed by `(worker_id, dp_rank)` with each
+                  worker replica's overlap block count
+        """
+        ...
+
+    async def add_request(
+        self,
+        request_id: str,
+        token_ids: List[int],
+        overlap_blocks: int,
+        worker_id: int,
+        dp_rank: int = 0,
+        router_config_override: Optional[JsonLike] = None,
+    ) -> None:
+        """
+        Register a manually-routed request with the KV router.
+
+        Args:
+            request_id: Unique request identifier to track
+            token_ids: Input token IDs for the request
+            overlap_blocks: Estimated overlap block count for the selected worker
+            worker_id: Worker chosen by the external routing policy
+            dp_rank: Data-parallel rank for the selected worker replica
+            router_config_override: Optional router configuration override
+
+        Note:
+            Use this after a query-only `best_worker()` call when an external
+            policy decides the final worker. This keeps approximate-mode cache
+            tracking and request lifecycle state aligned with the actual worker.
         """
         ...
 

@@ -817,10 +817,8 @@ impl ActiveSequencesMultiWorker {
         for worker in &workers_to_add {
             tracing::warn!("Adding worker {:?}", worker);
 
-            let (sender, handle) = Self::start_worker(
-                self.block_size,
-                self.parent_cancel_token.child_token(),
-            );
+            let (sender, handle) =
+                Self::start_worker(self.block_size, self.parent_cancel_token.child_token());
             self.senders.insert(*worker, sender);
             self.handles.insert(*worker, handle);
         }
@@ -1113,7 +1111,9 @@ impl ActiveSequencesMultiWorker {
 
         if let Some(ref publisher) = self.metrics_publisher {
             if let Err(e) = publisher.publish(&active_load).await {
-                tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
+                tracing::trace!(
+                    "Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}"
+                );
             }
         }
     }

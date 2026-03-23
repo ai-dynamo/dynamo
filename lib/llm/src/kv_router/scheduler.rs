@@ -282,14 +282,12 @@ impl KvScheduler {
             *kv_router_config,
         ))));
 
-        let slots = Arc::new(
-            ActiveSequencesMultiWorker::new_standalone(
-                cancellation_token.clone(),
-                block_size as usize,
-                workers.clone(),
-                worker_type,
-            ),
-        );
+        let slots = Arc::new(ActiveSequencesMultiWorker::new_standalone(
+            cancellation_token.clone(),
+            block_size as usize,
+            workers.clone(),
+            worker_type,
+        ));
 
         // Create a watch channel seeded with the static workers
         let (static_tx, rx): (watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>, _) =

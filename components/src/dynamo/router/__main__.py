@@ -142,8 +142,8 @@ class StandaloneRouterHandler:
             logger.error("KvRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
-            token_ids, router_config_override
+        (worker_id, _dp_rank, _overlap_blocks, _overlaps_by_worker) = (
+            await self.kv_router.best_worker(token_ids, router_config_override)
         )
 
         yield worker_id

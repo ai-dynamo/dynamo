@@ -16,11 +16,7 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter,
-        metrics::RouterRequestMetrics,
-        protocols::WorkerWithDpRank,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, protocols::WorkerWithDpRank},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -357,13 +353,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             overlap_amount,
         } = selection;
 
-
         // Record routing metrics on tracker and observe ISL + prefill start.
         let client = self.chooser.client().ok_or_else(|| {
             anyhow::anyhow!("KvPushRouter requires a KvRouter with a Client (not standalone)")
         })?;
-        let request_metrics =
-            RouterRequestMetrics::from_component(client.endpoint.component());
+        let request_metrics = RouterRequestMetrics::from_component(client.endpoint.component());
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
