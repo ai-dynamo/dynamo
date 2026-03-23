@@ -59,7 +59,7 @@ Disaggregated mode is activated automatically when prefill workers register alon
 | **Frontend-embedded** | `python -m dynamo.frontend --router-mode kv` | Frontend HTTP port (default 8000) | Standard deployment; router runs inside the frontend process |
 | **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, SGLang disagg prefill routing, custom pipelines |
 
-The standalone router does not include the HTTP frontend (no `/v1/chat/completions` endpoint). It exposes only the `RouterRequestMetrics` via the system status server. See the [Standalone Router README](../../../components/src/dynamo/router/README.md).
+The standalone router does not include the HTTP frontend (no `/v1/chat/completions` endpoint). It exposes only the `RouterRequestMetrics` via the system status server. See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
 
 ## Quick Start
 
@@ -87,8 +87,8 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
 | `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
-| `--router-queue-threshold <float>` | `2.0` | Queue threshold fraction; enables priority scheduling via `latency_sensitivity` |
-| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
+| `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
+| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -137,7 +137,7 @@ For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guid
 
 ### Standalone Router
 
-You can also run the KV router as a standalone service (without the Dynamo frontend) for disaggregated serving (e.g., routing to prefill workers), multi-tier architectures, or any scenario requiring intelligent KV cache-aware routing decisions. See the [Standalone Router component](../../../components/src/dynamo/router/) for more details.
+You can also run the KV router as a standalone service (without the Dynamo frontend) for disaggregated serving (e.g., routing to prefill workers), multi-tier architectures, or any scenario requiring intelligent KV cache-aware routing decisions. See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
 
 ## KV Cache Routing
 
@@ -231,10 +231,11 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 2.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `latency_sensitivity` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `priority` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
 
-- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Two policies are available:
+- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Three policies are available:
   - **`fcfs`** (first-come first-served): Orders by adjusted arrival time (`priority_jump - arrival_offset`). Optimizes **tail TTFT** — no request waits longer than necessary.
+  - **`lcfs`** (last-come first-served): Orders by adjusted reverse arrival time (`priority_jump + arrival_offset`). Intentionally favors newer arrivals under saturation and is mainly useful for controlled comparison experiments.
   - **`wspt`** (weighted shortest processing time, Smith's rule): Orders by `(1 + priority_jump) / isl_tokens`. Optimizes **average TTFT** — short or high-priority requests are scheduled before long low-priority ones, minimizing total weighted completion time.
 
 ### KV Event Transport and Persistence
@@ -265,11 +266,11 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. For example, with a value of 0.8 (default) and max tree size of 1048576, the router will prune down to approximately 838860 blocks when the threshold is exceeded. Defaults to 0.8 when `--no-router-kv-events` is used. This creates headroom before the next pruning cycle.
 
-- `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). When set to 1, the router uses a single-threaded radix tree with channel-based event processing. When set to a value greater than 1 (the default), the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. This setting only applies when KV events are enabled (the default). When `--no-router-kv-events` is set (approximate mode), the router always uses a single-threaded indexer with TTL-based expiration and pruning regardless of this setting. Can be set via `DYN_ROUTER_EVENT_THREADS` env var. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](../../../lib/kv-router/src/indexer/README.md).
+- `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). When set to 1, the router uses a single-threaded radix tree with channel-based event processing. When set to a value greater than 1 (the default), the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. This setting only applies when KV events are enabled (the default). When `--no-router-kv-events` is set (approximate mode), the router always uses a single-threaded indexer with TTL-based expiration and pruning regardless of this setting. This can be set via the `DYN_ROUTER_EVENT_THREADS` environment variable. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md).
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
-For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints) documentation.
+For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see the [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints) documentation.
 
 ### Tuning Guidelines
 
@@ -281,7 +282,7 @@ Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worke
 
 Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
 
-The `--router-queue-threshold` (default: 2.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. Set to None to disable queueing entirely.
+The `--router-queue-threshold` (default: 4.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.priority`. Set to None to disable queueing entirely.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize **average** TTFT. WSPT (Smith's rule) schedules short or high-priority requests first, reducing mean latency across the batch. Use the default `fcfs` when you want to minimize **tail** TTFT — no request waits longer than necessary, since ordering is purely by (adjusted) arrival time.
 
@@ -341,7 +342,7 @@ await register_model(
 await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
-<Note>The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](../../../components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).</Note>
+<Note>The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).</Note>
 
 ### Request Flow
 
@@ -374,7 +375,7 @@ graph TD
 
 ## Serving Multiple Router Replicas
 
-For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](../../../components/src/dynamo/router/README.md).
+For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
 
 ### Router State Management
 
@@ -449,13 +450,13 @@ When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and
 
 The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
 
-**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. The busy thresholds can be updated at runtime without restarting the frontend via the `/busy_threshold` HTTP endpoint. For details on busy detection, threshold tuning, and the runtime API, see [Request Rejection](../../fault-tolerance/request-rejection.md).
+**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.priority`. The busy thresholds can be updated at runtime without restarting the frontend via the `/busy_threshold` HTTP endpoint. For details on busy detection, threshold tuning, and the runtime API, see [Request Rejection](../../fault-tolerance/request-rejection.md).
 
 ## See Also
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
-- **[KV Router Index Data Structures](../../../lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
+- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
 - **[KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)**: How Dynamo's local indexer compares to vLLM's replay buffer for gap detection and recovery
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing

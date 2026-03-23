@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import time
-from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
@@ -25,9 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class DisaggPlanner:
-    def __init__(
-        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
-    ) -> None:
+    def __init__(self, runtime: DistributedRuntime, config: PlannerConfig) -> None:
         self.config = config
         self.shared_state = PlannerSharedState()
         prometheus_metrics = PlannerPrometheusMetrics()

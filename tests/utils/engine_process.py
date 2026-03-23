@@ -187,6 +187,9 @@ class EngineProcess(ManagedProcess):
                 ),
             ],
             delayed_start=config.delayed_start,
+            # Must stay False: command[0] is "bash", so True would kill every
+            # bash process system-wide.  Stale cleanup relies on stragglers list
+            # and process-group termination in __exit__ instead.
             terminate_all_matching_process_names=False,
             stragglers=config.stragglers,
             log_dir=request.node.name,

@@ -9,8 +9,9 @@ use clap::Parser;
 use common::NoopSequencePublisher;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
-use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};
+use dynamo_mocker::common::protocols::{DirectRequest, KvEventPublishers, OutputSignal};
 use dynamo_mocker::scheduler::Scheduler;
+use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,7 +101,13 @@ async fn generate_sequence_events(
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
             // No KvCacheEventSink — we only need output signals
-            let scheduler = Scheduler::new(sched_args, 0, Some(output_tx), None, None);
+            let scheduler = Scheduler::new(
+                sched_args,
+                0,
+                Some(output_tx),
+                KvEventPublishers::default(),
+                None,
+            );
 
             // Pre-compute metadata for each request before submission
             let mut metadata: HashMap<Uuid, RequestMetadata> = HashMap::new();
@@ -170,27 +177,25 @@ async fn generate_sequence_events(
 
             while i < worker_trace.len() {
                 let prev_i = i;
-                scheduler
-                    .receive(DirectRequest {
-                        tokens: tokens_from_request(&worker_trace[i], block_size),
-                        max_output_tokens: worker_trace[i].output_length as usize,
-                        uuid: Some(worker_trace[i].uuid),
-                        dp_rank: 0,
-                    })
-                    .await;
+                scheduler.receive(DirectRequest {
+                    tokens: tokens_from_request(&worker_trace[i], block_size),
+                    max_output_tokens: worker_trace[i].output_length as usize,
+                    uuid: Some(worker_trace[i].uuid),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                });
                 i += 1;
 
                 while i < worker_trace.len()
                     && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
                 {
-                    scheduler
-                        .receive(DirectRequest {
-                            tokens: tokens_from_request(&worker_trace[i], block_size),
-                            max_output_tokens: worker_trace[i].output_length as usize,
-                            uuid: Some(worker_trace[i].uuid),
-                            dp_rank: 0,
-                        })
-                        .await;
+                    scheduler.receive(DirectRequest {
+                        tokens: tokens_from_request(&worker_trace[i], block_size),
+                        max_output_tokens: worker_trace[i].output_length as usize,
+                        uuid: Some(worker_trace[i].uuid),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: None,
+                    });
                     i += 1;
                 }
 

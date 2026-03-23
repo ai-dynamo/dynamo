@@ -42,6 +42,9 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     enable_local_indexer: bool = True
     use_kv_events: bool
 
+    # GMS configuration
+    gms_shadow_mode: bool = False
+
     # mirror vLLM
     model: str
     served_model_name: Optional[str] = None
@@ -126,6 +129,13 @@ def cross_validate_config(
             "bypassing vLLM's OutputProcessor buffering."
         )
 
+    # Validate --gms-shadow-mode requires --load-format gms
+    if dynamo_config.gms_shadow_mode and engine_config.load_format != "gms":
+        raise ValueError(
+            "--gms-shadow-mode requires --load-format gms. "
+            "Shadow mode depends on GMS for VA-stable weight sharing."
+        )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -156,9 +166,6 @@ def update_dynamo_config_with_engine(
         dynamo_config.multimodal_worker
         and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
     ):
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
-    elif dynamo_config.omni:
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:

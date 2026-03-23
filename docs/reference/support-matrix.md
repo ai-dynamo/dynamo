@@ -9,7 +9,9 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v1.0.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
+**Latest stable release:** [v1.0.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
+
+**Experimental release:** [v1.1.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.17.1` | NIXL `0.10.1`
 
 | Requirement | Supported |
 | :--- | :--- |
@@ -17,7 +19,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 | **OS** | Ubuntu 22.04, Ubuntu 24.04, CentOS Stream 9 (experimental) |
 | **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
 | **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
-| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.0); experimental for SGLang and vLLM in v0.8.x |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0) |
 
 **On this page:** [Backend Dependencies](#backend-dependencies) | [CUDA and Drivers](#cuda-and-driver-requirements) | [Hardware](#hardware-compatibility) | [Platform](#platform-architecture-compatibility) | [Cloud](#cloud-service-provider-compatibility) | [Build Support](#build-support)
 
@@ -27,7 +29,9 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **main (ToT)** | `0.5.9` | `1.3.0rc8` | `0.17.1` | `0.10.1` |
+| **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
+| **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v0.9.1** | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
 | **v0.9.0** | `0.5.8` | `1.3.0rc1` | `0.14.1` | `0.9.0` |
@@ -59,6 +63,11 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| **1.0.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
 | **1.0.0** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |

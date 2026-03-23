@@ -18,11 +18,9 @@ func TestBuildExclusions(t *testing.T) {
 		want     map[string]bool // expected entries (true = must be present)
 	}{
 		{
-			name: "merges all lists and normalizes paths",
+			name: "normalizes rooted paths",
 			settings: types.OverlaySettings{
-				SystemDirs:           []string{"/proc", "/sys"},
-				CacheDirs:            []string{"/root/.cache"},
-				AdditionalExclusions: []string{"/tmp"},
+				Exclusions: []string{"/proc", "/sys", "/root/.cache", "/tmp"},
 			},
 			want: map[string]bool{
 				"./proc":        true,
@@ -34,7 +32,7 @@ func TestBuildExclusions(t *testing.T) {
 		{
 			name: "strips leading dot and slash before prepending ./",
 			settings: types.OverlaySettings{
-				SystemDirs: []string{"./proc", "/sys", "tmp"},
+				Exclusions: []string{"./proc", "/sys", "tmp"},
 			},
 			want: map[string]bool{
 				"./proc": true,
@@ -45,11 +43,13 @@ func TestBuildExclusions(t *testing.T) {
 		{
 			name: "glob patterns starting with * are untouched",
 			settings: types.OverlaySettings{
-				AdditionalExclusions: []string{"*.pyc", "*/__pycache__"},
+				Exclusions: []string{"*/.cache/huggingface", "*/.cache/vllm/torch_compile_cache", "*.pyc", "*/__pycache__"},
 			},
 			want: map[string]bool{
-				"*.pyc":         true,
-				"*/__pycache__": true,
+				"*/.cache/huggingface":              true,
+				"*/.cache/vllm/torch_compile_cache": true,
+				"*.pyc":                             true,
+				"*/__pycache__":                     true,
 			},
 		},
 		{
