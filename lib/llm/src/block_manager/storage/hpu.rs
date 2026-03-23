@@ -15,6 +15,7 @@ use synapse::{
     copy_device_to_device as synapse_copy_d2d,
     copy_device_to_host_view as synapse_copy_d2h,
     copy_host_view_to_device as synapse_copy_h2d,
+    synapse_sys,
 };
 use tokio::sync::oneshot;
 
@@ -22,6 +23,56 @@ pub fn device_storage_from_torch(_tensor: Arc<dyn TorchTensor>) -> Result<Device
     Err(StorageError::NotAccessible(
         "HPU device storage integration is not implemented yet".to_string(),
     ))
+}
+
+/// Allocate pinned host memory using Synapse API.
+///
+/// # Safety
+/// Caller must ensure device_id is valid.
+pub(crate) unsafe fn malloc_host_pinned_synapse(
+    device_id: u32,
+    size: usize,
+) -> Result<*mut u8, StorageError> {
+    let mut raw: *mut std::ffi::c_void = std::ptr::null_mut();
+    let status = synapse_sys::runtime::synHostMalloc(
+        device_id,
+        size as u64,
+        0,  // flags (no write-combined support in current Synapse)
+        &mut raw as *mut _,
+    );
+
+    if status != synapse_sys::synStatus_synSuccess {
+        return Err(StorageError::OperationFailed(format!(
+            "Synapse synHostMalloc failed with status: {:?}",
+            status
+        )));
+    }
+
+    Ok(raw as *mut u8)
+}
+
+/// Free pinned host memory using Synapse API.
+///
+/// # Safety
+/// Caller must ensure ptr was allocated by synHostMalloc and device_id matches.
+pub(crate) unsafe fn free_host_synapse(
+    device_id: u32,
+    ptr: *mut u8,
+) -> Result<(), StorageError> {
+    let status = synapse_sys::runtime::synHostFree(
+        device_id,
+        ptr as *const std::ffi::c_void,
+        0,  // flags
+    );
+
+    if status != synapse_sys::synStatus_synSuccess {
+        return Err(StorageError::OperationFailed(format!(
+            "Synapse synHostFree failed with status: {:?}",
+            status
+        )));
+    }
+
+    Ok(())
 }
 
 pub struct SynapseContext {
@@ -226,4 +277,60 @@ pub fn copy_device_to_device_raw(
     let dst_view = DeviceBufferView::from_raw_parts(dst_ptr as usize as u64, size);
     synapse_copy_d2d(stream, &src_view, &dst_view)
         .map_err(|e| StorageError::OperationFailed(format!("Synapse D2D copy failed: {}", e)))
+}
+
+impl super::StorageBackendOps for std::sync::Arc<SynapseContext> {
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, super::StorageError> {
+        malloc_host_pinned_synapse(self.device().id(), size)
+    }
+
+    unsafe fn free_pinned(&self, ptr: u64, _size: usize) -> Result<(), super::StorageError> {
+        free_host_synapse(self.device().id(), ptr as *mut u8)
+    }
+
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, super::DeviceStorageType), super::StorageError> {
+        let mut addr: u64 = 0;
+        let status = synapse_sys::runtime::synDeviceMalloc(
+            self.device().id(),
+            size as u64,
+            0,  // reqAddr (0 = no preference)
+            0,  // flags
+            &mut addr as *mut _,
+        );
+
+        if status != synapse_sys::synStatus_synSuccess {
+            return Err(super::StorageError::OperationFailed(format!(
+                "Synapse synDeviceMalloc failed with status: {:?}",
+                status
+            )));
+        }
+
+        Ok((
+            addr,
+            self.device().id(),
+            super::DeviceStorageType::Owned {
+                _ze_device_buffer: None,
+            },
+        ))
+    }
+
+    unsafe fn free_device(&self, ptr: u64) -> Result<(), super::StorageError> {
+        let status = synapse_sys::runtime::synDeviceFree(self.device().id(), ptr, 0);
+
+        if status != synapse_sys::synStatus_synSuccess {
+            return Err(super::StorageError::OperationFailed(format!(
+                "Synapse synDeviceFree failed with status: {:?}",
+                status
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device().id()
+    }
 }

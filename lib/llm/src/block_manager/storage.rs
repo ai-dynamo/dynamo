@@ -103,7 +103,7 @@ use thiserror::Error;
 
 use crate::block_manager::numa_allocator;
 
-use self::hpu::SynapseContext;
+use self::hpu::{SynapseContext, free_host_synapse, malloc_host_pinned_synapse};
 use self::ze::{ZeContext, free_host_ze, malloc_host_prefer_writecombined_ze};
 
 /// Result type for storage operations
