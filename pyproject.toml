@@ -81,6 +81,10 @@ fastvideo = [
     "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git",
 ]
 
+mocker = [
+    "aiconfigurator>=0.7.0",
+]
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"

@@ -456,11 +456,13 @@ The profiler sets the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` environment variable 
 
 | Engine  | CLI flag                         | Launch script support |
 |---------|----------------------------------|-----------------------|
-| vLLM    | `--gpu-memory-utilization`       | Implemented in `agg.sh`, `disagg.sh`, etc. |
-| SGLang  | `--mem-fraction-static`          | Not yet implemented (TODO) |
+| vLLM    | `--gpu-memory-utilization`       | Implemented in `agg.sh`, `disagg.sh`, etc. via `build_gpu_mem_args` |
+| SGLang  | `--mem-fraction-static`          | Implemented in `agg.sh`, `agg_embed.sh`, `disagg.sh`, `agg_router.sh`, `disagg_same_gpu.sh` via `build_gpu_mem_args`. Multimodal scripts (`multimodal_epd.sh`, `multimodal_disagg.sh`) split the override proportionally between workers. |
 | TRT-LLM | `--free-gpu-memory-fraction`    | Not yet implemented (has its own `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`, TODO: unify) |
 
-Scripts that already hard-code their own memory fraction (e.g. `agg_multimodal.sh` with 0.85) have a TODO to honor `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` in the future. If the profiler detects constant VRAM across all probes (meaning the env var is ignored), it prints a warning and skips marker recommendations.
+**Note on sglang:** Unlike vLLM (where `--max-model-len` affects KV cache sizing), sglang's `--mem-fraction-static` is the sole knob for KV cache allocation. `--context-length` and `--max-running-requests` only affect request scheduling, not memory allocation. See `examples/common/gpu_utils.md` for details.
+
+If the profiler detects constant VRAM across all probes (meaning the env var is ignored), it prints a warning and skips marker recommendations.
 
 ### Usage
 
