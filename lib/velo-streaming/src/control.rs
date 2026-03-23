@@ -132,24 +132,20 @@ pub struct SenderRegistry {
 ///
 /// Idempotent: if the entry is absent the handler returns `Ok(())` silently.
 pub fn create_stream_cancel_handler(sender_registry: Arc<SenderRegistry>) -> velo_messenger::Handler {
-    velo_messenger::Handler::typed_unary_async(
+    velo_messenger::Handler::am_handler(
         "_stream_cancel",
-        move |ctx: velo_messenger::TypedContext<StreamCancelRequest>| {
-            let registry = sender_registry.clone();
-            async move {
-                let req = ctx.input;
-                if let Some((_, entry)) = registry.senders.remove(&req.sender_stream_id) {
-                    // Poison the tx channel: drop the receiver end so
-                    // poison_tx.is_disconnected() is true in StreamSender::send()
-                    drop(entry.rx_closer.lock().unwrap().take());
-                    // Signal the token so user code can react proactively
-                    entry.cancel_token.cancel();
-                }
-                Ok(())
+        move |ctx: velo_messenger::Context| {
+            let req = serde_json::from_slice::<StreamCancelRequest>(&ctx.payload)?;
+            if let Some((_, entry)) = sender_registry.senders.remove(&req.sender_stream_id) {
+                // Poison the tx channel: drop the receiver end so
+                // poison_tx.is_disconnected() is true in StreamSender::send()
+                drop(entry.rx_closer.lock().unwrap().take());
+                // Signal the token so user code can react proactively
+                entry.cancel_token.cancel();
             }
+            Ok(())
         },
     )
-    .spawn()
     .build()
 }
 
