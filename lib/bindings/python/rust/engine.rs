@@ -21,7 +21,6 @@ pub use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-use super::Payload;
 use super::context::{Context, callable_accepts_kwarg};
 
 /// Add bingings from this crate to the provided module
