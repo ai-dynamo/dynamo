@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, SubSocket};
 
-use crate::protocols::{RouterEvent, WorkerId, WorkerWithDpRank};
+use crate::protocols::{WorkerId, WorkerWithDpRank};
 use crate::zmq_wire::{KvEventBatch, convert_event};
 
 use super::indexer::Indexer;

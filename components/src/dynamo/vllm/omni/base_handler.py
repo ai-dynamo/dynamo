@@ -16,12 +16,13 @@ try:
 except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
+from dynamo._core import Context
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 logger = logging.getLogger(__name__)
 
 
-class BaseOmniHandler(BaseWorkerHandler):
+class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
     """Base handler for multi-stage pipelines using vLLM-Omni's AsyncOmni orchestrator."""
 
     def __init__(
@@ -107,8 +108,8 @@ class BaseOmniHandler(BaseWorkerHandler):
         return omni_kwargs
 
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs using AsyncOmni orchestrator with OpenAI-compatible format.
 
         Subclasses should override ``_generate_openai_mode`` for custom output handling.
@@ -116,7 +117,7 @@ class BaseOmniHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Omni Request ID: {request_id}")
 
-        async for chunk in self._generate_openai_mode(request, context, request_id):  # type: ignore
+        async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
@@ -130,6 +131,8 @@ class BaseOmniHandler(BaseWorkerHandler):
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement _generate_openai_mode"
         )
+        # Make this a proper async generator so the return type is correct.
+        yield  # pragma: no cover
 
     def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
         """Extract text prompt from OpenAI messages format.

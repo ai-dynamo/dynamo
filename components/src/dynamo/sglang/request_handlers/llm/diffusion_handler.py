@@ -21,7 +21,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher = None,
+        publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:

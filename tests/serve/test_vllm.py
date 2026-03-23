@@ -311,9 +311,6 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        env={
-            "DYN_VLLM_EMBEDDING_TRANSFER_MODE": "nixl-write",
-        },
         request_payloads=[
             chat_payload(
                 [
@@ -386,8 +383,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.max_vram_gib(19.4),  # observed peak 17.6 GiB (+10% safety)
-            pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2265"),
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],

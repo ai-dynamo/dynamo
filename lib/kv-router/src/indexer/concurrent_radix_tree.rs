@@ -347,8 +347,6 @@ impl ConcurrentRadixTree {
 
         let num_blocks_added = op.blocks.len();
 
-        // In each iteration, we lock the parent block and insert the worker into it from
-        // the previous iteration. This avoids locking a block twice.
         for block_data in op.blocks {
             let child = {
                 let mut parent_guard = current.write();
@@ -364,7 +362,6 @@ impl ConcurrentRadixTree {
                 // parent_guard is dropped at the end of this block
                 match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
-                        // Verify our simplifying assumption: block_hash is uniform across workers
                         {
                             let existing_guard = existing.read();
                             if existing_guard.block_hash != Some(block_data.block_hash) {
@@ -410,8 +407,6 @@ impl ConcurrentRadixTree {
             }
         }
 
-        // Insert worker into the last child (not yet handled since there is
-        // no subsequent iteration to pick it up).
         if needs_worker_insert {
             current.write().workers.insert(worker);
         }
@@ -451,7 +446,6 @@ impl ConcurrentRadixTree {
                 continue;
             };
 
-            // Remove the worker from this block's worker set.
             let mut guard = block.write();
             guard.workers.remove(&worker);
             if guard.workers.is_empty() {
@@ -569,7 +563,6 @@ impl ConcurrentRadixTree {
         // Queue entries: (current_block, parent_hash, tokens_hash)
         let mut queue = VecDeque::new();
 
-        // Process root's children first
         {
             let root_guard = self.root.read();
             for (tokens_hash, child_block) in &root_guard.children {

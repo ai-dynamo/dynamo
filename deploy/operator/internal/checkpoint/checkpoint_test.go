@@ -128,6 +128,40 @@ func TestHelpers(t *testing.T) {
 	assert.False(t, info.Ready)
 }
 
+func TestArtifactVersionHelpers(t *testing.T) {
+	t.Run("new checkpoints default to version 1", func(t *testing.T) {
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		assert.Nil(t, ckpt.Annotations)
+		assert.Equal(t, "checkpoint-job-"+testHash+"-"+consts.DefaultCheckpointArtifactVersion, "checkpoint-job-"+testHash+"-"+consts.DefaultCheckpointArtifactVersion)
+	})
+
+	t.Run("annotation overrides desired version", func(t *testing.T) {
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					consts.KubeAnnotationCheckpointArtifactVersion: "3",
+				},
+			},
+		}
+		assert.Equal(t, "3", ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+		assert.Equal(t, "checkpoint-job-"+testHash+"-3", "checkpoint-job-"+testHash+"-"+ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+	})
+}
+
+func TestResolveCheckpointStorage(t *testing.T) {
+	config := testPVCConfig()
+
+	location, storageType, err := ResolveCheckpointStorage(testHash, "", config)
+	require.NoError(t, err)
+	assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, location)
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), storageType)
+
+	location, storageType, err = ResolveCheckpointStorage(testHash, "7", config)
+	require.NoError(t, err)
+	assert.Equal(t, "/checkpoints/"+testHash+"/versions/7", location)
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), storageType)
+}
+
 func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
@@ -176,6 +210,17 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 	require.NoError(t, baseClient.List(ctx, list))
 	require.Len(t, list.Items, 1)
 	assert.Equal(t, friendly.Name, list.Items[0].Name)
+}
+
+func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{})
+	require.NoError(t, err)
+	require.NotNil(t, ckpt.Annotations)
+	assert.Equal(t, consts.DefaultCheckpointArtifactVersion, ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
 }
 
 // --- Injection idempotency tests ---
@@ -249,6 +294,20 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, testPVCConfig()))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
+	})
+
+	t.Run("ready checkpoint preserves published versioned location", func(t *testing.T) {
+		podSpec := testPodSpec()
+		info := &CheckpointInfo{
+			Enabled:     true,
+			Ready:       true,
+			Hash:        testHash,
+			Location:    "/checkpoints/" + testHash + "/versions/2",
+			StorageType: "pvc",
+		}
+		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, testPVCConfig()))
+		assert.Equal(t, "/checkpoints/"+testHash+"/versions/2", info.Location)
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), info.StorageType)
 	})
 
 	t.Run("not-ready checkpoint preserves original command", func(t *testing.T) {

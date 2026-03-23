@@ -45,7 +45,10 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
 
 # SGLang test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
-# TODO: Parallelize these tests to reduce total execution time
+# TODO: Now that these tests use dynamic ports and each config has a max_vram_gib marker,
+# optimize the runtime by bin-packing multiple engine deployments in parallel on the same GPU.
+# A future collector/launcher can sum max_vram_gib values to decide how many tests fit
+# concurrently without exceeding available VRAM.
 sglang_configs = {
     "aggregated": SGLangConfig(
         # Uses backend agg.sh (with metrics enabled) for testing standard
@@ -55,8 +58,9 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.max_vram_gib(6.1),  # observed peak 5.6 GiB (+10% safety)
+            pytest.mark.timeout(240),  # profiled 34.4s on A6000
             pytest.mark.pre_merge,
-            pytest.mark.timeout(240),  # 3x measured time (39s) + download time (120s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -76,7 +80,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-        ],
+        ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
@@ -96,8 +100,10 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="unstable"),
+            # TODO: profile to get max_vram and timeout (currently skipped)
         ],
         model="Qwen/Qwen3-0.6B",
+        delayed_start=30,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -126,7 +132,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-        ],
+        ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
@@ -154,9 +160,9 @@ sglang_configs = {
         script_name="template_verifier.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.timeout(240),  # profiled 11.7s on A6000 (no GPU model load)
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(240),  # 3x measured time (20s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -167,13 +173,21 @@ sglang_configs = {
             )
         ],
     ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
+    # NOTE: multimodal_epd.sh uses explicit --mem-fraction-static via DYN_ENCODE_GPU_MEM
+    # / DYN_WORKER_GPU_MEM env vars, so _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE has no effect.
+    # Regardless of fraction overrides, the workers combined consistently use ~23.6 GiB.
     "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_e_pd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.max_vram_gib(13.3),  # observed peak 12.1 GiB (+10% safety)
+            pytest.mark.timeout(360),  # profiled 31.0s on A6000
+            pytest.mark.pre_merge,
+        ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
@@ -212,8 +226,9 @@ sglang_configs = {
         script_name="multimodal_disagg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.max_vram_gib(17.7),  # observed peak 16.1 GiB (+10% safety)
+            pytest.mark.timeout(360),  # profiled 36.0s on A6000
             pytest.mark.pre_merge,
-            pytest.mark.timeout(360),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
@@ -246,9 +261,10 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.max_vram_gib(21.0),  # observed peak 19.1 GiB (+10% safety)
+            pytest.mark.timeout(300),  # profiled 41.3s on A6000
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(300),
         ],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=[
@@ -284,9 +300,10 @@ sglang_configs = {
         script_name="agg_embed.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.max_vram_gib(12.1),  # observed peak 11.0 GiB (+10% safety)
+            pytest.mark.timeout(270),  # profiled 25.5s on A6000
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(270),  # 3x measured time (29s) + download time (180s)
         ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
@@ -321,10 +338,9 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.max_vram_gib(16.2),  # observed peak 14.8 GiB (+10% safety)
+            pytest.mark.timeout(420),  # profiled 73s on A6000
             pytest.mark.post_merge,
-            pytest.mark.timeout(
-                420
-            ),  # Total test timeout: 2x measured average (79.36s) + download time (240s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
@@ -346,6 +362,7 @@ sglang_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(240),
             pytest.mark.skip(reason="DYN-2261"),
+            # TODO: profile to get max_vram (currently skipped)
         ],
         model="Qwen/Qwen3-0.6B",
         env={"DYN_ENABLE_ANTHROPIC_API": "1"},

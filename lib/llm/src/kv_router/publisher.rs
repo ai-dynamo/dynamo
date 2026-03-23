@@ -490,11 +490,11 @@ impl Drop for KvEventPublisher {
     }
 }
 
-use dynamo_kv_router::EventSink;
+use dynamo_kv_router::RouterEventSink;
 
 struct EventPlanePublisher(EventPublisher);
 
-impl EventSink for EventPlanePublisher {
+impl RouterEventSink for EventPlanePublisher {
     fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
         self.0.publish(event)
     }
@@ -502,7 +502,7 @@ impl EventSink for EventPlanePublisher {
 
 struct JetStreamPublisher(NatsQueue);
 
-impl EventSink for JetStreamPublisher {
+impl RouterEventSink for JetStreamPublisher {
     fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
         NatsQueue::publish_event(&self.0, KV_EVENT_SUBJECT, event)
     }
@@ -510,7 +510,7 @@ impl EventSink for JetStreamPublisher {
 
 /// Publishes a single [`KvCacheEvent`] to the event sink and, when present, the local indexer.
 /// Errors are logged and swallowed so the caller loop can continue uninterrupted.
-async fn emit<P: EventSink>(
+async fn emit<P: RouterEventSink>(
     publisher: &P,
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
@@ -530,7 +530,7 @@ async fn emit<P: EventSink>(
 impl BatchingState {
     /// Publishes any pending batch as a single [`RouterEvent`] and advances the monotonic
     /// batch ID. No-ops when nothing is pending, so callers may call unconditionally.
-    async fn flush<P: EventSink + Send + Sync + 'static>(
+    async fn flush<P: RouterEventSink + Send + Sync + 'static>(
         &mut self,
         publisher: &P,
         local_indexer: &Option<Arc<LocalKvIndexer>>,
@@ -581,7 +581,7 @@ impl BatchingState {
 /// - A `Stored` event's `parent_hash` breaks the sequential chain
 /// - The batch window expires (`Some(timeout_ms)`; `None` = disabled, flush every event)
 /// - Channel is closed or a cancellation signal is received
-async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
+async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -719,7 +719,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor for ephemeral transports (NATS Core / ZMQ).
-async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
+async fn start_event_processor<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -740,7 +740,7 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor using JetStream (durable).
-async fn start_event_processor_jetstream<P: EventSink + Send + Sync + 'static>(
+async fn start_event_processor_jetstream<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -1481,7 +1481,7 @@ mod tests_startup_helpers {
         }
     }
 
-    impl EventSink for MockComponent {
+    impl RouterEventSink for MockComponent {
         fn publish_event(
             &self,
             event: &RouterEvent,
@@ -2466,7 +2466,7 @@ mod event_processor_tests {
         }
     }
 
-    impl EventSink for MockPublisher {
+    impl RouterEventSink for MockPublisher {
         fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
             self.events.lock().unwrap().push(event.clone());
             async { Ok(()) }
@@ -2757,6 +2757,116 @@ mod event_processor_tests {
             })
             .sum();
         assert_eq!(total_blocks, 3, "All 3 blocks should be accounted for");
+    }
+
+    /// Test that reusing an older parent hash breaks the current sequential batch.
+    #[tokio::test]
+    async fn test_run_event_processor_loop_reused_parent_hash_breaks_chain() {
+        let timeout_ms = Some(100); // 100ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(2),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(3),
+                    tokens_hash: LocalBlockHash(300),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        assert_eq!(
+            events.len(),
+            2,
+            "Reused parent hash should flush the current batch before starting a new one"
+        );
+
+        if let KvCacheEventData::Stored(data) = &events[0].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                2,
+                "First batch should keep the valid chain"
+            );
+            assert_eq!(
+                data.parent_hash, None,
+                "First batch should preserve the original root parent"
+            );
+        } else {
+            panic!("Expected first event to be Stored");
+        }
+
+        if let KvCacheEventData::Stored(data) = &events[1].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                1,
+                "Second batch should contain only the inconsistent event"
+            );
+            assert_eq!(
+                data.parent_hash,
+                Some(ExternalSequenceBlockHash(1)),
+                "Second batch should preserve the reused parent hash"
+            );
+        } else {
+            panic!("Expected second event to be Stored");
+        }
     }
 
     /// Test that with short timeout and slow input, events are NOT batched

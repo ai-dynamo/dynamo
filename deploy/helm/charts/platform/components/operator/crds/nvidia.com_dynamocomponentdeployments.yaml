@@ -11213,10 +11213,25 @@ spec:
                   type: object
                   x-kubernetes-validations:
                     - message: sharedMemory.size must not be set when sharedMemory.disabled is true
-                      rule: '!(self.disabled && has(self.size))'
+                      rule: '!(has(self.disabled) && self.disabled && has(self.size))'
                 subComponentType:
                   description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                   type: string
+                topologyConstraint:
+                  description: |-
+                    TopologyConstraint for this service. packDomain is required.
+                    When both this and spec.topologyConstraint.packDomain are set, packDomain
+                    must be narrower than or equal to the spec-level packDomain.
+                  properties:
+                    packDomain:
+                      description: |-
+                        PackDomain is the topology domain to pack pods within. Must match a
+                        domain defined in the referenced ClusterTopology CR.
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      type: string
+                  required:
+                    - packDomain
+                  type: object
                 volumeMounts:
                   description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
                   items:

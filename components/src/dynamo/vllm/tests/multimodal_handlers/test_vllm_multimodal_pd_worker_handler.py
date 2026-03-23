@@ -193,8 +193,8 @@ class TestLoadMultimodalData:
         assert result is fake_mm_data
 
     @pytest.mark.asyncio
-    async def test_passes_model_and_dtype(self):
-        """Model name and embeddings dtype are forwarded."""
+    async def test_passes_model(self):
+        """Model name is forwarded."""
         mock_client = MagicMock()
         handler = _make_handler(encode_worker_client=mock_client)
 
@@ -207,9 +207,6 @@ class TestLoadMultimodalData:
             await handler._load_multimodal_data(["http://img.png"], "req-1")
 
         assert mock_load.call_args.kwargs["model"] == handler.config.model
-        assert (
-            mock_load.call_args.kwargs["embeddings_dtype"] == handler.EMBEDDINGS_DTYPE
-        )
 
 
 class TestGenerateAgg:
