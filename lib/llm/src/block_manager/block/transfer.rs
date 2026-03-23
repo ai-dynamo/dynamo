@@ -3,6 +3,7 @@
 
 pub mod context;
 mod cuda;
+mod hpu;
 mod memcpy;
 mod nixl;
 mod strategy;
@@ -101,6 +102,22 @@ pub enum TransferStrategy {
     Invalid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferBackend {
+    Cuda,
+    Ze,
+    Synapse,
+}
+
+#[inline]
+fn resolve_transfer_backend(ctx: &TransferContext) -> TransferBackend {
+    match ctx.device_stream() {
+        DeviceStream::Cuda(_) => TransferBackend::Cuda,
+        DeviceStream::Ze(_) => TransferBackend::Ze,
+        DeviceStream::Synapse(_) => TransferBackend::Synapse,
+    }
+}
+
 /// Trait for determining the transfer strategy for writing from a local
 /// source to a target destination which could be local or remote
 pub trait WriteToStrategy<Target> {
@@ -186,6 +203,7 @@ where
     match device_stream {
         DeviceStream::Cuda(stream) => cuda::copy_block(sources, destinations, stream.as_ref(), strategy),
         DeviceStream::Ze(queue) => ze::copy_block(sources, destinations, queue.as_ref(), strategy),
+        DeviceStream::Synapse(stream) => hpu::copy_block(sources, destinations, stream.as_ref(), strategy),
     }
 }
 
@@ -211,6 +229,9 @@ where
         }
         DeviceStream::Ze(queue) => {
             ze::copy_blocks_with_customized_kernel(sources, destinations, queue.as_ref(), ctx)
+        }
+            DeviceStream::Synapse(stream) => {
+            hpu::copy_blocks_with_customized_kernel(sources, destinations, stream.as_ref(), ctx)
         }
     }
 }
@@ -256,18 +277,21 @@ where
         TransferStrategy::AsyncH2D
         | TransferStrategy::AsyncD2H
         | TransferStrategy::AsyncD2D => {
+            let strategy = RB::write_to_strategy();
+            let backend = resolve_transfer_backend(&ctx);
             tracing::debug!(
-                "Transfer: Using strategy: {:?}",
-                RB::write_to_strategy()
+                "Transfer: Using strategy {:?} on backend {:?}",
+                strategy,
+                backend
             );
 
-            if RB::write_to_strategy() == TransferStrategy::AsyncH2D
-                || RB::write_to_strategy() == TransferStrategy::AsyncD2H
+            if strategy == TransferStrategy::AsyncH2D
+                || strategy == TransferStrategy::AsyncD2H
             {
                 let is_contiguous = sources[0].block_data().is_fully_contiguous()
                     && targets[0].block_data().is_fully_contiguous();
                 let transfer_mode =
-                    resolve_transfer_mode(RB::write_to_strategy(), is_contiguous);
+                    resolve_transfer_mode(strategy, is_contiguous);
 
                 match transfer_mode {
                     TransferMode::Custom => {
@@ -285,20 +309,20 @@ where
                                 src,
                                 dst,
                                 ctx.device_stream(),
-                                RB::write_to_strategy(),
+                                strategy,
                             )?;
                         }
                     }
                 }
-                ctx.device_event(tx)?;
+                ctx.complete_transfer(tx)?;
 
                 Ok(rx)
             } else {
                 // Fall back to individual copy for D2Dblocks
                 for (src, dst) in sources.iter().zip(targets.iter_mut()) {
-                    copy_block(src, dst, ctx.device_stream(), RB::write_to_strategy())?;
+                    copy_block(src, dst, ctx.device_stream(), strategy)?;
                 }
-                ctx.device_event(tx)?;
+                ctx.complete_transfer(tx)?;
                 Ok(rx)
             }
         }

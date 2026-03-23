@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::block_manager::storage::hpu::{SynapseMemPool, signal_event as synapse_signal_event};
 use super::ze::ZeMemPool;
+use synapse::Stream;
 
 use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
 use nixl_sys::Agent as NixlAgent;
@@ -16,9 +18,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "block-manager")]
 use level_zero::ZE_EVENT_SCOPE_FLAG_HOST;
-#[cfg(feature = "block-manager")]
 use crate::block_manager::storage::ze::ZeCommandQueue;
 
 // ============================================================================
@@ -179,17 +179,20 @@ pub struct PoolConfig {
 pub enum DeviceStream {
     Cuda(Arc<CudaStream>),
     Ze(Arc<ZeCommandQueue>),
+    Synapse(Arc<Stream>),
 }
 
 #[derive(Clone)]
 pub enum DeviceMemPool {
     Cuda(Arc<CudaMemPool>),
     Ze(Arc<ZeMemPool>),
+        Synapse(Arc<SynapseMemPool>),
 }
 
 enum BackendState {
     Cuda(TransferBackendCuda),
     Ze(TransferBackendZe),
+        Synapse(TransferBackendSynapse),
 }
 
 pub struct TransferContext {
@@ -206,12 +209,16 @@ impl TransferContext {
         async_rt_handle: Handle,
         config: Option<PoolConfig>,
     ) -> Result<Self, anyhow::Error> {
+
         let backend = match &stream {
             DeviceStream::Cuda(cuda_stream) => {
                 BackendState::Cuda(TransferBackendCuda::new(cuda_stream.clone(), config.as_ref())?)
             }
             DeviceStream::Ze(ze_queue) => {
                 BackendState::Ze(TransferBackendZe::new(ze_queue.clone(), config.as_ref()))
+            }
+                        DeviceStream::Synapse(synapse_stream) => {
+                BackendState::Synapse(TransferBackendSynapse::new(synapse_stream.clone(), config.as_ref()))
             }
         };
 
@@ -222,6 +229,9 @@ impl TransferContext {
             BackendState::Ze(ze) => ze
                 .ze_mem_pool()
                 .map(|pool| DeviceMemPool::Ze(pool.clone())),
+                        BackendState::Synapse(synapse) => synapse
+                .synapse_mem_pool()
+                .map(|pool| DeviceMemPool::Synapse(pool.clone())),
         }.map(Arc::new);
 
         Ok(Self {
@@ -253,6 +263,15 @@ impl TransferContext {
         match &self.backend {
             BackendState::Cuda(cuda) => cuda.cuda_event(tx),
             BackendState::Ze(ze) => ze.ze_event(tx),
+                        BackendState::Synapse(synapse) => synapse.synapse_event(tx),
+        }
+    }
+
+    pub fn complete_transfer(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        match &self.backend {
+            BackendState::Cuda(cuda) => cuda.cuda_event(tx),
+            BackendState::Ze(ze) => ze.ze_event(tx),
+                        BackendState::Synapse(synapse) => synapse.synapse_event(tx),
         }
     }
 
@@ -268,6 +287,7 @@ impl TransferContext {
                 "Pinned transfer resources are not supported on ZE backend".to_string(),
             ))
             }
+            BackendState::Synapse(synapse) => synapse.acquire_resources_for_transfer_sync(size),
         }
     }
 }
@@ -375,6 +395,10 @@ impl TransferBackendCuda {
                 }
             });
         })
+    }
+
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
     }
 
     /// Get the CUDA memory pool for stream-ordered allocations
@@ -514,6 +538,10 @@ impl TransferBackendZe {
         })
     }
 
+    pub fn queue(&self) -> &Arc<ZeCommandQueue> {
+        &self.queue
+    }
+
     pub fn ze_mem_pool(&self) -> Option<&Arc<ZeMemPool>> {
         self.ze_mem_pool.as_ref()
     }
@@ -543,6 +571,55 @@ impl TransferBackendZe {
     pub fn acquire_resources_for_transfer_sync(&self) {}
 }
 
+struct TransferBackendSynapse {
+    stream: Arc<Stream>,
+    synapse_mem_pool: Option<Arc<SynapseMemPool>>,
+}
+
+impl TransferBackendSynapse {
+    fn new(stream: Arc<Stream>, config: Option<&PoolConfig>) -> Self {
+        let synapse_mem_pool = if let Some(cfg) = config {
+            if cfg.enable_pool {
+                tracing::debug!("Creating placeholder Synapse memory pool");
+                Some(Arc::new(SynapseMemPool))
+            } else {
+                tracing::debug!("Synapse memory pool disabled by configuration");
+                None
+            }
+        } else {
+            tracing::debug!("No pool configuration provided - Synapse memory pool disabled");
+            None
+        };
+
+        Self {
+            stream,
+            synapse_mem_pool,
+        }
+    }
+
+    fn stream(&self) -> &Arc<Stream> {
+        &self.stream
+    }
+
+    fn synapse_mem_pool(&self) -> Option<&Arc<SynapseMemPool>> {
+        self.synapse_mem_pool.as_ref()
+    }
+
+    fn synapse_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        synapse_signal_event(self.stream().clone(), tx)
+            .map_err(|e| TransferError::ExecutionError(e.to_string()))
+    }
+
+
+    fn acquire_resources_for_transfer_sync(
+        &self,
+        _size: usize,
+    ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError> {
+        Err(TransferError::ExecutionError(
+            "Pinned transfer resources are not supported on Synapse backend".to_string(),
+        ))
+    }
+}
 impl Drop for TransferContext {
     fn drop(&mut self) {
         match &mut self.backend {
@@ -562,6 +639,7 @@ impl Drop for TransferContext {
                     tracing::error!("Error joining ZE event worker: {:?}", e);
                 }
             }
+                        BackendState::Synapse(_synapse) => {}
         }
     }
 }
