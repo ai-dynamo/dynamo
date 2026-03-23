@@ -39,6 +39,10 @@ impl VllmEventBatch {
         &self.1
     }
 
+    fn into_events(self) -> Vec<RawKvEvent> {
+        self.1
+    }
+
     fn data_parallel_rank(&self) -> Option<i32> {
         self.2
     }
@@ -129,17 +133,19 @@ async fn run_listener_loop(
                 };
 
                 let dp_rank = batch.data_parallel_rank();
+                let num_events = batch.events().len();
+                let ts = batch.ts();
                 tracing::debug!(
                     "Consolidator received event batch with {} events (ts={:.2}, dp_rank={:?})",
-                    batch.events().len(),
-                    batch.ts(),
+                    num_events,
+                    ts,
                     dp_rank
                 );
 
-                // Process events
+                // Process events - consume batch to avoid cloning each event
                 let mut tracker_guard = tracker.write().await;
-                for event in batch.events() {
-                    process_event(&mut tracker_guard, event.clone(), dp_rank, engine_source);
+                for event in batch.into_events() {
+                    process_event(&mut tracker_guard, event, dp_rank, engine_source);
                 }
             }
         }
@@ -203,8 +209,7 @@ fn process_event(
             // For batches, chain the blocks: each block's parent is the previous block
             let mut current_parent = parent_block_hash.map(|h| h.into_u64().to_string());
 
-            for (i, block_hash) in block_hashes.into_iter().enumerate() {
-                let block_tokens = token_chunks[i].clone();
+            for (block_hash, block_tokens) in block_hashes.into_iter().zip(token_chunks) {
                 let block_hash_u64 = block_hash.into_u64();
 
                 tracker.handle_store(

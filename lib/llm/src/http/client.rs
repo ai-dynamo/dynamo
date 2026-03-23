@@ -413,8 +413,6 @@ impl PureOpenAIClient {
         request: dynamo_async_openai::types::CreateChatCompletionRequest,
         context: HttpRequestContext,
     ) -> Result<OpenAIHttpResponseStream, HttpClientError> {
-        let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context.clone());
-
         if !request.stream.unwrap_or(false) {
             return Err(HttpClientError::InvalidRequest(
                 "chat_stream requires the request to have 'stream': true".to_string(),
@@ -428,6 +426,7 @@ impl PureOpenAIClient {
             );
         }
 
+        let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context);
         // Create the stream with cancellation support
         let stream = self
             .base
@@ -472,7 +471,6 @@ impl NvCustomClient {
         request: NvCreateChatCompletionRequest,
         context: HttpRequestContext,
     ) -> Result<NvHttpResponseStream, HttpClientError> {
-        let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context.clone());
 
         if !request.inner.stream.unwrap_or(false) {
             return Err(HttpClientError::InvalidRequest(
@@ -486,6 +484,8 @@ impl NvCustomClient {
                 context.id()
             );
         }
+
+        let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context);
 
         // Use BYOT feature to send NvCreateChatCompletionRequest
         // The stream type is explicitly specified to deserialize directly into Annotated<NvCreateChatCompletionStreamResponse>
@@ -530,14 +530,14 @@ impl GenericBYOTClient {
         request: Value,
         context: HttpRequestContext,
     ) -> Result<ByotHttpResponseStream, HttpClientError> {
-        let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context.clone());
-
         if self.base.is_verbose() {
             tracing::info!(
                 "Starting generic BYOT chat stream for request {}",
                 context.id()
             );
         }
+
+        let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context);
 
         // Validate that the request has stream: true
         if let Some(stream_val) = request.get("stream") {

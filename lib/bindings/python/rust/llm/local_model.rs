@@ -122,7 +122,7 @@ impl ModelRuntimeConfig {
     #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
-        for (key, value) in self.inner.runtime_data.clone() {
+        for (key, value) in &self.inner.runtime_data {
             dict.set_item(key, value.to_string())?;
         }
         Ok(dict.into())

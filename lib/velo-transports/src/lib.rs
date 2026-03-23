@@ -336,10 +336,9 @@ impl VeloBackend {
             "failed to properly sort compatible transports"
         );
 
-        let primary_transport_key = sorted_transports[0].clone();
         let alternative_transport_keys = sorted_transports[1..].to_vec();
 
-        let primary_transport = self.transports.get(&primary_transport_key).unwrap();
+        let primary_transport = self.transports.get(&sorted_transports[0]).unwrap();
 
         self.primary_transport
             .insert(instance_id, primary_transport.clone());
