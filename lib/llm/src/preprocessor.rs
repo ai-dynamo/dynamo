@@ -27,6 +27,12 @@ use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use std::time::{Duration, Instant};
+
+use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::metrics::frontend_perf::{
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
+    TOKENIZE_SECONDS,
+};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -228,10 +234,16 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
-        let formatted_prompt = self
-            .apply_template(request)
-            .with_context(|| "Failed to apply prompt template")?;
+
+        let template_start = Instant::now();
+        let formatted_prompt = {
+            let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            self.apply_template(request)
+                .with_context(|| "Failed to apply prompt template")?
+        };
+        TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
         // Check if the chat template injected a reasoning start token at the end
         // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
@@ -241,12 +253,21 @@ impl OpenAIPreprocessor {
             .as_ref()
             .is_some_and(|p| p.trim_end().ends_with("<think>"));
 
-        let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
-            .with_context(|| "Failed to gather tokens")?;
+        let tokenize_start = Instant::now();
+        let annotations = {
+            let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
+            self.gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
+                .with_context(|| "Failed to gather tokens")?
+        };
+        TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
+
         self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
+
+        STAGE_DURATION_SECONDS
+            .with_label_values(&["preprocess"])
+            .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
     }
@@ -872,6 +893,15 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
+                    // Flush per-request detokenize accumulators to global Prometheus counters
+                    // (once per request instead of per-token).
+                    if let Some(t) = tracker.as_ref() {
+                        if let Some(total) = t.detokenize_total_latency() {
+                            DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                        }
+                        DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                    }
+
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
                         // Only set event if not already set to avoid overriding existing events (like errors)
                         if response.event.is_none() {
@@ -936,6 +966,15 @@ impl OpenAIPreprocessor {
                                 .and_then(|t| t.detokenize_total_latency()),
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
+
+                        // Flush per-request detokenize accumulators to global Prometheus counters
+                        // (once per request instead of per-token).
+                        if let Some(t) = tracker.as_ref() {
+                            if let Some(total) = t.detokenize_total_latency() {
+                                DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                            }
+                            DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                        }
 
                         // Create annotation string
                         let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {

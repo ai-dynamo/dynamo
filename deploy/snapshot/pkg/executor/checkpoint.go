@@ -141,9 +141,23 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 
 	// Discover CUDA processes and GPU UUIDs
 	allPIDs := common.ProcessTreePIDs(pid)
-	cudaPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
+	cudaHostPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
+	cudaNamespacePIDs := make([]int, 0, len(cudaHostPIDs))
+	for _, cudaHostPID := range cudaHostPIDs {
+		process, err := common.ReadProcessDetails(common.HostProcPath, cudaHostPID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
+		}
+		if len(process.NamespacePIDs) != 2 {
+			return nil, fmt.Errorf("CUDA process %d has namespace depth %d, want 2", cudaHostPID, len(process.NamespacePIDs))
+		}
+		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
+	}
+	if len(cudaHostPIDs) > 0 {
+		log.Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
+	}
 	var gpuUUIDs []string
-	if len(cudaPIDs) > 0 {
+	if len(cudaHostPIDs) > 0 {
 		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
@@ -159,7 +173,8 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		NetNSInode:     netNSInode,
 		StdioFDs:       stdioFDs,
 		HostCgroupPath: hostCgroupPath,
-		CUDAPIDs:       cudaPIDs,
+		CUDAHostPIDs:   cudaHostPIDs,
+		CUDANSPIDs:     cudaNamespacePIDs,
 		GPUUUIDs:       gpuUUIDs,
 	}, nil
 }
@@ -182,8 +197,8 @@ func configureCheckpoint(
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
-	if len(state.CUDAPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDAPIDs, state.GPUUUIDs)
+	if len(state.CUDANSPIDs) > 0 {
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
@@ -195,8 +210,8 @@ func configureCheckpoint(
 
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (time.Duration, error) {
 	// CUDA lock+checkpoint must happen before CRIU dump
-	if len(state.CUDAPIDs) > 0 {
-		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAPIDs, log); err != nil {
+	if len(state.CUDAHostPIDs) > 0 {
+		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log); err != nil {
 			return 0, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
 	}
