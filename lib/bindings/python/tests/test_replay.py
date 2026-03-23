@@ -7,6 +7,8 @@ import pytest
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.main import main
+from dynamo.replay.reporting import format_report_table, write_report_json
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -419,3 +421,107 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
         input_tokens=64,
         output_tokens=2,
     )
+
+
+def test_format_report_table_matches_aiperf_shape():
+    report = {
+        "mean_ttft_ms": 18.26,
+        "min_ttft_ms": 11.22,
+        "max_ttft_ms": 106.32,
+        "p99_ttft_ms": 68.82,
+        "p90_ttft_ms": 27.76,
+        "p75_ttft_ms": 16.62,
+        "std_ttft_ms": 12.07,
+        "mean_ttst_ms": 11.40,
+        "min_ttst_ms": 0.02,
+        "max_ttst_ms": 85.91,
+        "p99_ttst_ms": 34.54,
+        "p90_ttst_ms": 12.59,
+        "p75_ttst_ms": 11.65,
+        "std_ttst_ms": 7.01,
+        "mean_e2e_latency_ms": 487.30,
+        "min_e2e_latency_ms": 267.07,
+        "max_e2e_latency_ms": 769.57,
+        "p99_e2e_latency_ms": 715.99,
+        "p90_e2e_latency_ms": 580.83,
+        "p75_e2e_latency_ms": 536.17,
+        "std_e2e_latency_ms": 79.60,
+        "mean_itl_ms": 11.23,
+        "min_itl_ms": 8.80,
+        "max_itl_ms": 13.17,
+        "p99_itl_ms": 12.48,
+        "p90_itl_ms": 11.73,
+        "p75_itl_ms": 11.37,
+        "std_itl_ms": 0.45,
+        "mean_output_token_throughput_per_user": 89.23,
+        "min_output_token_throughput_per_user": 75.93,
+        "max_output_token_throughput_per_user": 113.60,
+        "p99_output_token_throughput_per_user": 102.28,
+        "p90_output_token_throughput_per_user": 90.91,
+        "p75_output_token_throughput_per_user": 90.29,
+        "std_output_token_throughput_per_user": 3.70,
+        "output_throughput_tok_s": 10944.03,
+        "request_throughput_rps": 255.54,
+        "completed_requests": 711,
+        "wall_time_ms": 4046.31,
+        "prefix_cache_reused_ratio": 0.3587,
+    }
+
+    rendered = format_report_table(report)
+
+    assert "NVIDIA AIPerf | LLM Metrics" in rendered
+    assert "Time to First Token (ms)" in rendered
+    assert "Output Token Throughput (tokens/sec)" in rendered
+    assert "Request Throughput (requests/sec)" in rendered
+    assert "Prefix Cache Reused Ratio: 0.36" in rendered
+    assert "10,944.03" in rendered
+    assert "255.54" in rendered
+    assert "N/A" in rendered
+
+
+def test_write_report_json_creates_file(tmp_path):
+    report_path = write_report_json({"completed_requests": 2}, tmp_path / "report.json")
+    assert (
+        report_path.read_text(encoding="utf-8") == '{\n  "completed_requests": 2\n}\n'
+    )
+
+
+def test_replay_cli_prints_table_and_saves_json(tmp_path, monkeypatch, capsys):
+    report = {
+        "mean_ttft_ms": 10.0,
+        "min_ttft_ms": 9.0,
+        "max_ttft_ms": 12.0,
+        "p99_ttft_ms": 12.0,
+        "p90_ttft_ms": 11.0,
+        "p75_ttft_ms": 10.5,
+        "std_ttft_ms": 1.0,
+        "output_throughput_tok_s": 123.0,
+        "request_throughput_rps": 4.0,
+        "completed_requests": 3,
+    }
+
+    def fake_run(*args, **kwargs):
+        return report
+
+    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
+    report_path = tmp_path / "cli_report.json"
+
+    exit_code = main(
+        [
+            "--input-tokens",
+            "16",
+            "--output-tokens",
+            "8",
+            "--request-count",
+            "3",
+            "--report-json",
+            str(report_path),
+        ]
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "NVIDIA AIPerf | LLM Metrics" in stdout
+    assert "Saved full report to:" in stdout
+    assert '"completed_requests"' not in stdout
+    assert json.loads(report_path.read_text(encoding="utf-8")) == report

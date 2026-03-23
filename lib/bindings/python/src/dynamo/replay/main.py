@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from collections.abc import Sequence
@@ -13,6 +12,7 @@ os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.reporting import format_report_table, write_report_json
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -37,6 +37,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="round_robin",
     )
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
+    parser.add_argument(
+        "--report-json",
+        help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     using_trace_file = args.trace_file is not None
@@ -89,6 +93,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             arrival_interval_ms=args.arrival_interval_ms,
         )
 
-    json.dump(report, sys.stdout, indent=2, sort_keys=True)
+    report_path = write_report_json(report, args.report_json)
+    sys.stdout.write(format_report_table(report))
     sys.stdout.write("\n")
+    sys.stdout.write(f"Saved full report to: {report_path}\n")
     return 0
