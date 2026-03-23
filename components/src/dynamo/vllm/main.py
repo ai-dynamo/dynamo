@@ -34,6 +34,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -143,32 +144,27 @@ async def worker() -> None:
     # there
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
-    # Route to appropriate initialization based on config flags
-    if WorkerFactory.handles(config):
-        # Create worker factory with setup functions
-        factory = WorkerFactory(
-            setup_vllm_engine_fn=setup_vllm_engine,
-            setup_kv_event_publisher_fn=setup_kv_event_publisher,
-            register_vllm_model_fn=register_vllm_model,
-            setup_fpm_relay_fn=setup_fpm_relay,
-            setup_metrics_collection_fn=setup_metrics_collection,
-        )
-        await factory.create(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            snapshot_engine=snapshot_engine,
-        )
-        logger.debug("worker init completed")
-    else:
-        raise ValueError("Unsupported worker configuration")
+    # Use WorkerFactory to appropriate initialize worker based on config flags
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=setup_kv_event_publisher,
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=setup_fpm_relay,
+        setup_metrics_collection_fn=setup_metrics_collection,
+    )
+    await factory.create(
+        runtime,
+        config,
+        shutdown_event,
+        shutdown_endpoints,
+        snapshot_engine=snapshot_engine,
+    )
 
     logger.debug("Worker function completed, exiting...")
 
 
 def setup_metrics_collection(
-    config: Config, generate_endpoint: Endpoint, logger: logging.Logger
+    config: Config | OmniConfig, generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 

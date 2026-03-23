@@ -8,13 +8,23 @@ import random
 import socket
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional, Tuple
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Dict,
+    Generic,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 
 import sglang as sgl
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -72,7 +82,11 @@ class SGLangEngineQuiesceController:
         self._is_quiesced = False
 
 
-class BaseGenerativeHandler(ABC):
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+
+
+class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     """Minimal base class for all generative handlers (LLM, diffusion, etc.).
 
     Provides common infrastructure for:
@@ -95,27 +109,24 @@ class BaseGenerativeHandler(ABC):
         self.config = config
 
         # Set up metrics and KV publishers
+        self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
+        self.kv_publisher: Optional[KvEventPublisher] = None
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
-        else:
-            self.metrics_publisher = None
-            self.kv_publisher = None
 
     @abstractmethod
-    async def generate(
-        self, request: Dict[str, Any], context: Context
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         """Generate response from request.
 
         Args:
-            request: Request dict with input and parameters.
+            request: Request with input and parameters.
             context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
         """
-        pass
+        ...
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
@@ -137,7 +148,7 @@ class BaseGenerativeHandler(ABC):
         return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
 
-class BaseWorkerHandler(BaseGenerativeHandler):
+class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -175,9 +186,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
-        else:
-            self.metrics_publisher = None
-            self.kv_publisher = None
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
@@ -203,7 +211,12 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
-            return {"priority": priority}
+            normalized = int(priority)
+            if getattr(
+                self.config.server_args, "schedule_low_priority_values_first", False
+            ):
+                normalized = -normalized
+            return {"priority": normalized}
         return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
@@ -454,17 +467,17 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         )
 
     @abstractmethod
-    async def generate(self, request: Dict[str, Any], context: Context):
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         """Generate response from request.
 
         Args:
-            request: Request dict with input and parameters.
+            request: Request with input and parameters.
             context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
         """
-        pass
+        ...
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""

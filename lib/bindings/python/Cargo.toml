@@ -27,6 +27,7 @@ media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-runtime = ["kv-indexer", "dynamo-kv-router/indexer-runtime"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
@@ -79,3 +80,8 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -182,6 +182,11 @@ get_model_params() {
         # MHA (not GQA): num_key_value_heads == num_attention_heads == 32
         deepseek-ai/deepseek-llm-7b-base)
             pb=6.9;  wb=2; layers=30; kvh=32; hd=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-Embedding-4B/raw/main/config.json
+        # params_b from model.safetensors.index.json metadata.total_size / 2 / 1e9
+        # head_dim = hidden_size(2560) / num_attention_heads(32) = 80
+        Qwen/Qwen3-Embedding-4B)
+            pb=4.0;  wb=2; layers=36; kvh=8;  hd=80 ;;
         # https://huggingface.co/llava-hf/llava-1.5-7b-hf/raw/main/config.json  (text_config)
         # MHA: num_key_value_heads == num_attention_heads == 32
         llava-hf/llava-1.5-7b-hf)
@@ -216,8 +221,12 @@ get_model_params() {
 #
 # Per-engine constants (calibrated from measurements on RTX 6000 Ada 48 GiB):
 #   vllm:   base=1.2, scale=1.0  → 0.6B≈2.0, 8B≈4.0, 30B≈6.7
-#   sglang: base=2.5, scale=1.5  → 0.6B≈3.7, 8B≈6.7, 30B≈10.8
+#   sglang: base=1.5, scale=1.0  → 0.6B≈2.3, 8B≈4.3, 30B≈7.0
 #   trtllm: base=2.0, scale=1.2  → 0.6B≈2.9, 8B≈5.4, 30B≈8.6
+#
+# sglang overhead was re-calibrated via profile_pytest.py bisection on
+# RTX 6000 Ada 48 GiB. Observed CUDA overhead (outside --mem-fraction-static):
+#   Qwen3-0.6B: ~1.8 GiB. Previous coefficients (2.5, 1.5) over-estimated by ~2x.
 #
 # If the 4th argument is a number, it's used directly (backward compatible).
 # If omitted, defaults to 2.0 (backward compatible).
@@ -241,7 +250,7 @@ estimate_worker_vram() {
     local overhead
     case "$engine_or_overhead" in
         vllm)   overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 1.2 + 1.0 * sqrt(p) }') ;;
-        sglang) overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 2.5 + 1.5 * sqrt(p) }') ;;
+        sglang) overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 1.5 + 1.0 * sqrt(p) }') ;;
         trtllm) overhead=$(awk -v p="$pb" 'BEGIN { printf "%.1f", 2.0 + 1.2 * sqrt(p) }') ;;
         *)      overhead="$engine_or_overhead" ;;
     esac

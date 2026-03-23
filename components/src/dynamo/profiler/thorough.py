@@ -43,6 +43,7 @@ from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
+    ProfilingPhase,
 )
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
@@ -51,6 +52,7 @@ from dynamo.profiler.utils.profile_common import (
     inject_tolerations_into_dgd,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
+from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,8 @@ async def _benchmark_prefill_candidates(
 ) -> pd.DataFrame:
     """Deploy each prefill candidate, measure TTFT, return prefill_df."""
     prefill_rows: list[dict] = []
-    for candidate in prefill_candidates:
+    total_prefill = len(prefill_candidates)
+    for idx, candidate in enumerate(prefill_candidates, 1):
         num_gpus = candidate.num_gpus
         label = make_parallel_label(
             candidate.tp,
@@ -88,7 +91,18 @@ async def _benchmark_prefill_candidates(
         model_name, model_path = config_modifier.get_model_name(candidate.dgd_config)
         frontend_port = config_modifier.get_port(candidate.dgd_config)
 
+        progress_msg = (
+            f"Benchmarking prefill candidate {idx}/{total_prefill}: "
+            f"{label} ({num_gpus} GPUs)"
+        )
         logger.info("Profiling prefill candidate %s with %d GPUs...", label, num_gpus)
+        ops.current_phase = ProfilingPhase.SweepingPrefill
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message=progress_msg,
+            phase=ProfilingPhase.SweepingPrefill,
+        )
 
         client = DynamoDeploymentClient(
             namespace=ops.k8s_namespace,
@@ -158,7 +172,8 @@ async def _benchmark_decode_candidates(
 ) -> pd.DataFrame:
     """Deploy each decode candidate, sweep num_request, return decode_df."""
     decode_rows: list[dict] = []
-    for candidate in decode_candidates:
+    total_decode = len(decode_candidates)
+    for idx, candidate in enumerate(decode_candidates, 1):
         num_gpus = candidate.num_gpus
         label = make_parallel_label(
             candidate.tp,
@@ -178,7 +193,18 @@ async def _benchmark_decode_candidates(
         model_name, model_path = config_modifier.get_model_name(candidate.dgd_config)
         frontend_port = config_modifier.get_port(candidate.dgd_config)
 
+        progress_msg = (
+            f"Benchmarking decode candidate {idx}/{total_decode}: "
+            f"{label} ({num_gpus} GPUs)"
+        )
         logger.info("Profiling decode candidate %s with %d GPUs...", label, num_gpus)
+        ops.current_phase = ProfilingPhase.SweepingDecode
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message=progress_msg,
+            phase=ProfilingPhase.SweepingDecode,
+        )
 
         client = DynamoDeploymentClient(
             namespace=ops.k8s_namespace,
@@ -377,6 +403,13 @@ async def run_thorough(
     config_modifier = CONFIG_MODIFIERS[backend]
 
     # --- Stage 2: Benchmarking ---
+    ops.current_phase = ProfilingPhase.SweepingPrefill
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Sweeping parallelization strategies for prefill, measuring TTFT",
+        phase=ops.current_phase,
+    )
     prefill_df = await _benchmark_prefill_candidates(
         prefill_candidates,
         ops,
@@ -387,6 +420,13 @@ async def run_thorough(
         backend,
         deployment_clients,
         config_modifier,
+    )
+    ops.current_phase = ProfilingPhase.SweepingDecode
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Sweeping parallelization strategies for decode, measuring ITL",
+        phase=ops.current_phase,
     )
     decode_df = await _benchmark_decode_candidates(
         decode_candidates,
