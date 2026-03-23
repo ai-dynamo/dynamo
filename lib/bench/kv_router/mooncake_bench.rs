@@ -11,7 +11,9 @@ use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
-use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -47,6 +49,13 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Compressed concurrent radix tree indexer (compressed edges).
+    ConcurrentRadixTreeCompressed {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -75,6 +84,13 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTree { num_event_workers } => Arc::new(
                 ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_event_workers, block_size),
             ),
+            IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
+                Arc::new(ThreadPoolIndexer::new(
+                    ConcurrentRadixTreeCompressed::new(),
+                    num_event_workers,
+                    block_size,
+                ))
+            }
         }
     }
 
@@ -83,7 +99,10 @@ impl IndexerArgs {
     }
 
     fn is_multi_threaded(name: &str) -> bool {
-        matches!(name, "nested-map" | "concurrent-radix-tree")
+        matches!(
+            name,
+            "nested-map" | "concurrent-radix-tree" | "concurrent-radix-tree-compressed"
+        )
     }
 
     /// Construct an indexer from a short name string.
@@ -103,9 +122,12 @@ impl IndexerArgs {
             "concurrent-radix-tree" => IndexerArgs::ConcurrentRadixTree {
                 num_event_workers: nw,
             },
+            "concurrent-radix-tree-compressed" => IndexerArgs::ConcurrentRadixTreeCompressed {
+                num_event_workers: nw,
+            },
             _ => anyhow::bail!(
                 "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
-                 nested-map, concurrent-radix-tree",
+                 nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed",
                 name
             ),
         };
@@ -125,7 +147,8 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree.
+    /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree,
+    /// concurrent-radix-tree-compressed.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
@@ -536,6 +559,7 @@ async fn main() -> anyhow::Result<()> {
             IndexerArgs::RadixTreeSharded { .. } => "radix-tree-sharded",
             IndexerArgs::NestedMap { .. } => "nested-map",
             IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
+            IndexerArgs::ConcurrentRadixTreeCompressed { .. } => "concurrent-radix-tree-compressed",
         };
         vec![name.to_string()]
     } else {
