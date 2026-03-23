@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import tempfile
 import time
 import uuid
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+
+import yaml
 
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
@@ -81,7 +85,6 @@ class FastVideoHandler:
     def _load_generator(self) -> Any:
         try:
             from fastvideo import VideoGenerator
-            from fastvideo.configs.pipelines.base import PipelineConfig
         except ImportError as exc:
             raise ImportError(
                 "FastVideo backend dependencies are not installed. "
@@ -89,24 +92,57 @@ class FastVideoHandler:
                 "python -m dynamo.fastvideo."
             ) from exc
 
-        pipeline_config = PipelineConfig.from_pretrained(self.config.model_path)
-        optimization_kwargs = self._build_optimization_kwargs(pipeline_config)
+        pipeline_config = self._create_pipeline_config()
+        generator_kwargs = self._build_generator_kwargs()
 
         return VideoGenerator.from_pretrained(
             self.config.model_path,
             num_gpus=self.config.num_gpus,
             pipeline_config=pipeline_config,
-            **optimization_kwargs,
+            **generator_kwargs,
         )
 
-    def _build_optimization_kwargs(self, pipeline_config: Any) -> dict[str, Any]:
-        if self.config.optimization_profile == "none":
-            return {}
+    def _read_extra_generator_args_file(self, path: str) -> dict[str, Any]:
+        config_path = os.path.expanduser(os.path.expandvars(path))
+        with open(config_path, encoding="utf-8") as file:
+            text = file.read()
 
-        if self.config.optimization_profile != "latency":
+        suffix = os.path.splitext(config_path)[1].lower()
+        if suffix in (".yaml", ".yml"):
+            data = yaml.safe_load(text)
+        else:
+            data = json.loads(text)
+
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
             raise ValueError(
-                f"Unsupported optimization profile: {self.config.optimization_profile}"
+                f"Extra args file must contain a mapping, got {type(data).__name__}"
             )
+        return data
+
+    def _parse_override_generator_args_json(self, override: str) -> dict[str, Any]:
+        data = json.loads(override)
+        if not isinstance(data, dict):
+            raise ValueError(
+                "--override-generator-args-json must decode to a JSON object"
+            )
+        return data
+
+    def _deep_update(self, target: dict[str, Any], source: Mapping[str, Any]) -> None:
+        for key, value in source.items():
+            existing = target.get(key)
+            if isinstance(value, dict) and isinstance(existing, dict):
+                self._deep_update(existing, value)
+            else:
+                target[key] = value
+
+    def _create_pipeline_config(self) -> Any:
+        from fastvideo.configs.pipelines.base import PipelineConfig
+
+        pipeline_config = PipelineConfig.from_pretrained(self.config.model_path)
+        if not self.config.enable_fp4_quantization:
+            return pipeline_config
 
         import torch
 
@@ -115,7 +151,7 @@ class FastVideoHandler:
             logger.warning(
                 "FP4 quantization is only supported on Blackwell GPUs "
                 "(compute capability 10.0+). Detected %d.%d; continuing "
-                "with compile-only latency optimizations.",
+                "without FP4 quantization.",
                 major,
                 minor,
             )
@@ -125,32 +161,48 @@ class FastVideoHandler:
                 from fastvideo.layers.quantization.fp4_config import FP4Config
             except ImportError as exc:
                 raise RuntimeError(
-                    "FastVideo latency optimizations require "
+                    "FastVideo FP4 quantization requires "
                     "fastvideo.layers.quantization.fp4_config, but this "
                     "FastVideo build does not provide it. Re-run without "
-                    "--optimization-profile latency or install a build that "
-                    "includes FP4 support."
+                    "--fp4-quantization or install a build that includes "
+                    "FP4 support."
                 ) from exc
             pipeline_config.dit_config.quant_config = FP4Config()
 
-        return {
-            "ltx2_refine_enabled": True,
-            "ltx2_refine_lora_path": "",
-            "ltx2_refine_num_inference_steps": 2,
-            "ltx2_refine_guidance_scale": 1.0,
-            "ltx2_refine_add_noise": True,
-            "enable_torch_compile": True,
-            "enable_torch_compile_text_encoder": True,
-            "torch_compile_kwargs": {
-                "backend": "inductor",
-                "fullgraph": True,
-                "mode": "max-autotune-no-cudagraphs",
-            },
-            "dit_cpu_offload": False,
-            "vae_cpu_offload": False,
-            "text_encoder_cpu_offload": False,
-            "ltx2_vae_tiling": False,
+        return pipeline_config
+
+    def _build_generator_kwargs(self) -> dict[str, Any]:
+
+        generator_kwargs: dict[str, Any] = {
+            "enable_torch_compile": self.config.enable_torch_compile,
+            "dit_cpu_offload": self.config.dit_cpu_offload,
+            "vae_cpu_offload": self.config.vae_cpu_offload,
+            "text_encoder_cpu_offload": self.config.text_encoder_cpu_offload,
         }
+        if self.config.ltx2_vae_tiling is not None:
+            generator_kwargs["ltx2_vae_tiling"] = self.config.ltx2_vae_tiling
+        if self.config.enable_torch_compile:
+            generator_kwargs["torch_compile_kwargs"] = {
+                "backend": "inductor",
+                "fullgraph": self.config.torch_compile_fullgraph,
+                "mode": self.config.torch_compile_mode,
+            }
+        if self.config.extra_generator_args_file:
+            self._deep_update(
+                generator_kwargs,
+                self._read_extra_generator_args_file(
+                    self.config.extra_generator_args_file
+                ),
+            )
+        if self.config.override_generator_args_json:
+            self._deep_update(
+                generator_kwargs,
+                self._parse_override_generator_args_json(
+                    self.config.override_generator_args_json
+                ),
+            )
+
+        return generator_kwargs
 
     def _parse_size(self, size: Optional[str]) -> tuple[int, int]:
         size_value = size or self.config.default_size

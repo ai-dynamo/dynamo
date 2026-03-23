@@ -17,14 +17,18 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    env_or_default,
+)
 from dynamo.common.utils.runtime import parse_endpoint
 
 DEFAULT_MODEL_PATH = "FastVideo/LTX2-Distilled-Diffusers"
 DEFAULT_COMPONENT_NAME = "backend"
 DEFAULT_ENDPOINT_NAME = "generate"
 DEFAULT_ATTENTION_BACKEND = "TORCH_SDPA"
-DEFAULT_OPTIMIZATION_PROFILE = "none"
+DEFAULT_TORCH_COMPILE_MODE = "max-autotune-no-cudagraphs"
 DEFAULT_SIZE = "1920x1088"
 DEFAULT_SECONDS = 5
 DEFAULT_FPS = 24
@@ -32,8 +36,12 @@ DEFAULT_NUM_FRAMES = 121
 DEFAULT_NUM_INFERENCE_STEPS = 5
 DEFAULT_GUIDANCE_SCALE = 1.0
 DEFAULT_SEED = 10
-
-OPTIMIZATION_PROFILE_CHOICES = ("none", "latency")
+TORCH_COMPILE_MODE_CHOICES = (
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+)
 
 
 @lru_cache(maxsize=1)
@@ -111,23 +119,93 @@ class FastVideoArgGroup(ArgGroup):
         )
         add_argument(
             group,
-            flag_name="--optimization-profile",
-            env_var="DYN_FASTVIDEO_OPTIMIZATION_PROFILE",
-            default=DEFAULT_OPTIMIZATION_PROFILE,
-            choices=list(OPTIMIZATION_PROFILE_CHOICES),
-            help=(
-                "Supported backend optimization profile. 'latency' enables "
-                "FastVideo's compile/refine path and uses FP4 quantization "
-                "automatically on Blackwell GPUs when available."
-            ),
-        )
-        add_argument(
-            group,
             flag_name="--attention-backend",
             env_var="FASTVIDEO_ATTENTION_BACKEND",
             default=DEFAULT_ATTENTION_BACKEND,
             choices=list(get_attention_backend_choices()),
             help="Attention backend for FastVideo inference.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--dit-cpu-offload",
+            env_var="DYN_FASTVIDEO_DIT_CPU_OFFLOAD",
+            default=True,
+            help="Enable DiT CPU offload.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--vae-cpu-offload",
+            env_var="DYN_FASTVIDEO_VAE_CPU_OFFLOAD",
+            default=True,
+            help="Enable VAE CPU offload.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--text-encoder-cpu-offload",
+            env_var="DYN_FASTVIDEO_TEXT_ENCODER_CPU_OFFLOAD",
+            default=True,
+            help="Enable text encoder CPU offload.",
+        )
+        group.add_argument(
+            "--ltx2-vae-tiling",
+            dest="ltx2_vae_tiling",
+            action=argparse.BooleanOptionalAction,
+            default=env_or_default(
+                "DYN_FASTVIDEO_LTX2_VAE_TILING", None, value_type=bool
+            ),
+            help=(
+                "Enable LTX-2 VAE tiling overrides.\n"
+                "env var: DYN_FASTVIDEO_LTX2_VAE_TILING | default: None"
+            ),
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--torch-compile",
+            env_var="DYN_FASTVIDEO_ENABLE_TORCH_COMPILE",
+            dest="enable_torch_compile",
+            default=False,
+            help="Enable torch.compile for FastVideo.",
+        )
+        add_argument(
+            group,
+            flag_name="--torch-compile-mode",
+            env_var="DYN_FASTVIDEO_TORCH_COMPILE_MODE",
+            default=DEFAULT_TORCH_COMPILE_MODE,
+            choices=list(TORCH_COMPILE_MODE_CHOICES),
+            help="torch.compile mode to use when compilation is enabled.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--torch-compile-fullgraph",
+            env_var="DYN_FASTVIDEO_TORCH_COMPILE_FULLGRAPH",
+            default=True,
+            help="Enable torch.compile fullgraph mode.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--fp4-quantization",
+            env_var="DYN_FASTVIDEO_FP4_QUANTIZATION",
+            dest="enable_fp4_quantization",
+            default=False,
+            help=(
+                "Enable FP4 quantization for FastVideo DiT weights. "
+                "Only supported on Blackwell GPUs and newer "
+                "(compute capability 10.0+)."
+            ),
+        )
+        add_argument(
+            group,
+            flag_name="--extra-generator-args-file",
+            env_var="DYN_FASTVIDEO_EXTRA_GENERATOR_ARGS_FILE",
+            default="",
+            help="Path to a YAML or JSON file containing additional keyword arguments to pass to FastVideo's generator.",
+        )
+        add_argument(
+            group,
+            flag_name="--override-generator-args-json",
+            env_var="DYN_FASTVIDEO_OVERRIDE_GENERATOR_ARGS_JSON",
+            default="",
+            help='JSON string to override specific FastVideo generator keyword arguments. Example: \'{"torch_compile_kwargs": {"mode": "reduce-overhead"}}\'',
         )
 
 
@@ -141,8 +219,17 @@ class FastVideoConfig(DynamoRuntimeConfig):
     model_path: str = DEFAULT_MODEL_PATH
     served_model_name: Optional[str] = None
     num_gpus: int = 1
-    optimization_profile: str = DEFAULT_OPTIMIZATION_PROFILE
     attention_backend: str = DEFAULT_ATTENTION_BACKEND
+    dit_cpu_offload: bool = True
+    vae_cpu_offload: bool = True
+    text_encoder_cpu_offload: bool = True
+    ltx2_vae_tiling: bool | None = None
+    enable_torch_compile: bool = False
+    torch_compile_mode: str = DEFAULT_TORCH_COMPILE_MODE
+    torch_compile_fullgraph: bool = True
+    enable_fp4_quantization: bool = False
+    extra_generator_args_file: str = ""
+    override_generator_args_json: str = ""
 
     default_size: str = DEFAULT_SIZE
     default_seconds: int = DEFAULT_SECONDS
@@ -157,10 +244,6 @@ class FastVideoConfig(DynamoRuntimeConfig):
 
         if self.num_gpus <= 0:
             raise ValueError("--num-gpus must be > 0")
-        if self.optimization_profile not in OPTIMIZATION_PROFILE_CHOICES:
-            raise ValueError(
-                f"--optimization-profile must be one of: {', '.join(OPTIMIZATION_PROFILE_CHOICES)}"
-            )
         attention_backend_choices = get_attention_backend_choices()
         if self.attention_backend not in attention_backend_choices:
             raise ValueError(
@@ -190,21 +273,8 @@ def parse_fastvideo_args(argv: Sequence[str] | None = None) -> FastVideoConfig:
     )
     DynamoRuntimeArgGroup().add_arguments(parser)
     FastVideoArgGroup().add_arguments(parser)
-    # TODO: This is overkill, we need to think about optimizations better or expose them in a more granular way.
-    parser.add_argument(
-        "--enable-optimizations",
-        action="store_true",
-        dest="_legacy_enable_optimizations",
-        help=argparse.SUPPRESS,
-    )
 
     args = parser.parse_args(None if argv is None else list(argv))
-
-    if args._legacy_enable_optimizations and (
-        args.optimization_profile == DEFAULT_OPTIMIZATION_PROFILE
-    ):
-        args.optimization_profile = "latency"
-    delattr(args, "_legacy_enable_optimizations")
 
     if not args.output_modalities or args.output_modalities == ["text"]:
         args.output_modalities = ["video"]

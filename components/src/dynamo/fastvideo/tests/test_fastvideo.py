@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import base64
+import json
+import sys
+import types
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -37,28 +40,81 @@ class _FakeGenerator:
 
 
 def test_parse_fastvideo_args_uses_builtin_defaults():
+    config = parse_fastvideo_args(["--model-path", "org/model"])
+
+    assert config.model_path == "org/model"
+    assert config.served_model_name == "org/model"
+    assert config.num_gpus == 1
+    assert config.attention_backend == "TORCH_SDPA"
+    assert config.dit_cpu_offload is True
+    assert config.vae_cpu_offload is True
+    assert config.text_encoder_cpu_offload is True
+    assert config.ltx2_vae_tiling is None
+    assert config.enable_torch_compile is False
+    assert config.torch_compile_mode == "max-autotune-no-cudagraphs"
+    assert config.torch_compile_fullgraph is True
+    assert config.enable_fp4_quantization is False
+    assert config.extra_generator_args_file == ""
+    assert config.override_generator_args_json == ""
+    assert config.namespace == "dynamo"
+    assert config.component == "backend"
+    assert config.endpoint == "generate"
+    assert config.output_modalities == ["video"]
+
+
+def test_parse_fastvideo_args_applies_explicit_overrides():
     config = parse_fastvideo_args(
         [
             "--model-path",
             "org/model",
             "--num-gpus",
             "2",
-            "--optimization-profile",
-            "latency",
             "--attention-backend",
             "FLASH_ATTN",
+            "--no-dit-cpu-offload",
+            "--no-vae-cpu-offload",
+            "--no-text-encoder-cpu-offload",
+            "--ltx2-vae-tiling",
+            "--torch-compile",
+            "--torch-compile-mode",
+            "max-autotune",
+            "--no-torch-compile-fullgraph",
+            "--fp4-quantization",
         ]
     )
 
     assert config.model_path == "org/model"
     assert config.served_model_name == "org/model"
     assert config.num_gpus == 2
-    assert config.optimization_profile == "latency"
     assert config.attention_backend == "FLASH_ATTN"
+    assert config.dit_cpu_offload is False
+    assert config.vae_cpu_offload is False
+    assert config.text_encoder_cpu_offload is False
+    assert config.ltx2_vae_tiling is True
+    assert config.enable_torch_compile is True
+    assert config.torch_compile_mode == "max-autotune"
+    assert config.torch_compile_fullgraph is False
+    assert config.enable_fp4_quantization is True
     assert config.namespace == "dynamo"
     assert config.component == "backend"
     assert config.endpoint == "generate"
     assert config.output_modalities == ["video"]
+
+
+def test_parse_fastvideo_args_keeps_generator_args_for_backend_validation():
+    config = parse_fastvideo_args(
+        [
+            "--model-path",
+            "org/model",
+            "--extra-generator-args-file",
+            "/tmp/nonexistent-generator-args.json",
+            "--override-generator-args-json",
+            '["not", "an", "object"]',
+        ]
+    )
+
+    assert config.extra_generator_args_file == "/tmp/nonexistent-generator-args.json"
+    assert config.override_generator_args_json == '["not", "an", "object"]'
 
 
 @pytest.mark.asyncio
@@ -106,3 +162,89 @@ async def test_fastvideo_handler_generates_minimal_video_response():
     assert response["data"] == [
         {"url": None, "b64_json": base64.b64encode(b"fake-mp4-bytes").decode("utf-8")}
     ]
+
+
+def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_generator_args_json(
+    tmp_path,
+):
+    extra_generator_args_file = tmp_path / "generator_args.json"
+    extra_generator_args_file.write_text(
+        json.dumps(
+            {
+                "custom_option": 1,
+                "torch_compile_kwargs": {
+                    "mode": "reduce-overhead",
+                    "dynamic": True,
+                },
+                "nested": {"from_file": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = parse_fastvideo_args(
+        [
+            "--model-path",
+            "org/model",
+            "--no-dit-cpu-offload",
+            "--no-vae-cpu-offload",
+            "--no-text-encoder-cpu-offload",
+            "--torch-compile",
+            "--extra-generator-args-file",
+            str(extra_generator_args_file),
+            "--override-generator-args-json",
+            '{"torch_compile_kwargs": {"fullgraph": false}, "custom_option": 3, "nested": {"from_override": true}}',
+        ]
+    )
+    handler = FastVideoHandler(config, generator=_FakeGenerator())
+
+    generator_kwargs = handler._build_generator_kwargs()
+
+    assert generator_kwargs["dit_cpu_offload"] is False
+    assert generator_kwargs["vae_cpu_offload"] is False
+    assert generator_kwargs["text_encoder_cpu_offload"] is False
+    assert generator_kwargs["enable_torch_compile"] is True
+    assert generator_kwargs["custom_option"] == 3
+    assert generator_kwargs["nested"] == {
+        "from_file": True,
+        "from_override": True,
+    }
+    assert generator_kwargs["torch_compile_kwargs"] == {
+        "backend": "inductor",
+        "fullgraph": False,
+        "mode": "reduce-overhead",
+        "dynamic": True,
+    }
+
+
+def test_fastvideo_handler_rejects_non_object_override_generator_args_json():
+    config = parse_fastvideo_args(
+        [
+            "--model-path",
+            "org/model",
+            "--override-generator-args-json",
+            '["not", "an", "object"]',
+        ]
+    )
+    handler = FastVideoHandler(config, generator=_FakeGenerator())
+
+    with pytest.raises(
+        ValueError,
+        match="--override-generator-args-json must decode to a JSON object",
+    ):
+        handler._build_generator_kwargs()
+
+
+def test_fastvideo_handler_rejects_missing_generator_args_file():
+    config = parse_fastvideo_args(
+        [
+            "--model-path",
+            "org/model",
+            "--extra-generator-args-file",
+            "/tmp/definitely-missing-generator-args.yaml",
+        ]
+    )
+    handler = FastVideoHandler(config, generator=_FakeGenerator())
+
+    with pytest.raises(FileNotFoundError):
+        handler._build_generator_kwargs()
