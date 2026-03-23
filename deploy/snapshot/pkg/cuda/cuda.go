@@ -12,7 +12,6 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"k8s.io/client-go/kubernetes"
 
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
