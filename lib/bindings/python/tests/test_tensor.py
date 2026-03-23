@@ -4,12 +4,19 @@
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
 
 import os
+from typing import Any, cast
 
 import pytest
 import uvloop
 
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
@@ -42,7 +49,7 @@ async def test_register(runtime: DistributedRuntime):
     )
 
     if TEST_END_TO_END:
-        await endpoint.serve_endpoint(generate)
+        await endpoint.serve_endpoint(cast(Any, generate))
 
 
 async def generate(request, context):

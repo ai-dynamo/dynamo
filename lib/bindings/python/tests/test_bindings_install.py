@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import pytest
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 def test_bindings_install():
@@ -27,6 +33,7 @@ def test_bindings_install():
 
 
 def test_version():
-    from dynamo._core import __version__
+    import dynamo._core as dynamo_core
 
-    assert __version__[0].isdigit()  # semver should start with a digit
+    version = cast(str, getattr(dynamo_core, "__version__"))
+    assert version[0].isdigit()  # semver should start with a digit

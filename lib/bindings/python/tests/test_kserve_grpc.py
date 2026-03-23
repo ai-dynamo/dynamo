@@ -17,7 +17,11 @@ except ImportError:
 
 from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 async def _fetch_model_config(
@@ -55,7 +59,7 @@ class EchoTensorEngine:
 
 
 @pytest.fixture
-def tensor_service(runtime):
+def tensor_service(runtime, dynamo_dynamic_ports):
     @asynccontextmanager
     async def _start(
         model_name: str,
@@ -64,7 +68,7 @@ def tensor_service(runtime):
         checksum: str = "dummy-mdcsum",
     ) -> AsyncIterator[Tuple[str, int]]:
         host = "127.0.0.1"
-        port = 8787
+        port = dynamo_dynamic_ports.frontend_port
         loop = asyncio.get_running_loop()
         engine = PythonAsyncEngine(EchoTensorEngine(model_name).generate, loop)
         tensor_model_service = KserveGrpcService(port=port, host=host)

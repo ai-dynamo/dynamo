@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 
 import uvloop
 
@@ -13,17 +14,23 @@ logger = logging.getLogger(__name__)
 configure_dynamo_logging(service_name="backend")
 
 
+def get_word_delay() -> float:
+    """Return the per-word response delay, preserving the example default."""
+    return float(os.environ.get("DYN_TEST_HELLO_WORLD_WORD_DELAY_SEC", "1.0"))
+
+
 @dynamo_endpoint(str, str)
 async def content_generator(request: str):
     logger.info(f"Received request: {request}")
+    word_delay = get_word_delay()
     for word in request.split(","):
-        await asyncio.sleep(1)
+        await asyncio.sleep(word_delay)
         yield f"Hello {word}!"
 
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    namespace_name = "hello_world"
+    namespace_name = os.environ.get("DYN_TEST_HELLO_WORLD_NAMESPACE", "hello_world")
     component_name = "backend"
     endpoint_name = "generate"
 

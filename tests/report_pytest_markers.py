@@ -118,6 +118,7 @@ STUB_MODULES = [
     "prometheus_client.parser",
     "sklearn",
     "sklearn.linear_model",
+    "uvloop",
 ]
 
 # Project paths for local imports

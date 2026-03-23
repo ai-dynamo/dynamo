@@ -18,7 +18,7 @@
 import asyncio
 import json
 import time
-from typing import AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, cast
 
 import aiohttp
 import pytest
@@ -29,7 +29,11 @@ from dynamo.runtime import DistributedRuntime
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 class MockHttpEngine:
@@ -79,9 +83,9 @@ class MockHttpEngine:
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def http_server(runtime: DistributedRuntime):
+async def http_server(runtime: DistributedRuntime, dynamo_dynamic_ports):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten."""
-    port = 8008
+    port = dynamo_dynamic_ports.frontend_port
     model_name = "test_model"
     start_done = asyncio.Event()
     checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
@@ -92,10 +96,12 @@ async def http_server(runtime: DistributedRuntime):
         try:
             loop = asyncio.get_running_loop()
             python_engine = MockHttpEngine(model_name)
-            engine = HttpAsyncEngine(python_engine.generate, loop)
+            http_async_engine = cast(Any, HttpAsyncEngine)
+            engine = http_async_engine(python_engine.generate, loop)
+            service_any = cast(Any, service)
 
-            service.add_chat_completions_model(model_name, checksum, engine)
-            service.enable_endpoint("chat", True)
+            service_any.add_chat_completions_model(model_name, checksum, engine)
+            service_any.enable_endpoint("chat", True)
 
             shutdown_signal = service.run(runtime)
             print("Starting service on port", port)
