@@ -3,71 +3,15 @@
 
 //! # CUDA Storage Support
 //!
-//! This module provides CUDA-specific storage implementations for the block manager.
-//! It is conditionally compiled based on the `cuda` feature flag.
-//!
-//! ## Features
-//!
-//! The following types are available when the `cuda` feature is enabled:
-//! - [`PinnedStorage`] - Page-locked host memory for efficient GPU transfers
-//! - [`DeviceStorage`] - Direct GPU memory allocation
-//!
-//! ## Storage Allocators
-//!
-//! The module provides allocators for each storage type:
-//! - [`PinnedAllocator`] - Creates pinned host memory allocations
-//! - [`DeviceAllocator`] - Creates device memory allocations
-//!
-//! ## CUDA Context Management
+//! This module provides CUDA context management and allocation helpers used by
+//! storage implementations in the parent [`storage`](super) module.
 //!
 //! The module provides a singleton [`Cuda`] type for managing CUDA contexts:
 //! - Thread-safe context management
 //! - Lazy initialization of device contexts
 //! - Automatic cleanup of resources
-//!
-//! ## Usage
-//!
-//! ### Using Allocators
-//! ```rust
-//! use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, StorageAllocator};
-//!
-//! // Create a pinned memory allocator
-//! let pinned_allocator = PinnedAllocator::default();
-//! let pinned_storage = pinned_allocator.allocate(1024).unwrap();
-//!
-//! // Create a device memory allocator for a specific device
-//! let device_allocator = DeviceAllocator::new(1).unwrap();  // Use device 1
-//! let device_storage = device_allocator.allocate(1024).unwrap();
-//! ```
-//!
-//! ### Memory Operations
-//! ```rust
-//! use dynamo_llm::block_manager::storage::{
-//!     PinnedAllocator, StorageAllocator, Storage, StorageMemset
-//! };
-//!
-//! // Initialize memory
-//! let mut storage = PinnedAllocator::default().allocate(1024).unwrap();
-//!
-//! // Initialize memory
-//! storage.memset(0, 0, 1024).unwrap();
-//!
-//! // Access memory through raw pointers (requires unsafe)
-//! unsafe {
-//!     let ptr = storage.as_mut_ptr();
-//!     // Use the pointer...
-//! }
-//! ```
-//!
-//! ## Safety
-//!
-//! All CUDA operations are wrapped in safe Rust interfaces that ensure:
-//! - Proper resource cleanup
-//! - Thread safety
-//! - Memory alignment requirements
-//! - Error handling for CUDA operations
 
-use super::*;
+use super::StorageError;
 
 use std::{
     collections::HashMap,
@@ -75,8 +19,6 @@ use std::{
 };
 
 use cudarc::driver::{CudaContext, sys};
-
-use crate::block_manager::numa_allocator;
 
 /// Allocates pinned host memory, preferring write-combined if supported.
 ///
@@ -88,7 +30,9 @@ use crate::block_manager::numa_allocator;
 /// # Safety
 ///
 /// Caller must ensure a valid CUDA context is bound to the current thread.
-unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, StorageError> {
+pub(crate) unsafe fn malloc_host_prefer_writecombined(
+    size: usize,
+) -> Result<*mut u8, StorageError> {
     // First, try write-combined allocation (optimal for PCIe systems)
     // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
     match unsafe { cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED) } {
@@ -103,15 +47,6 @@ unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, Stora
                 .map_err(StorageError::Cuda)
         }
     }
-}
-
-/// Trait for [Storage] types that can be accessed by CUDA
-pub trait CudaAccessible: Storage {}
-
-/// Trait for types that can provide a CUDA context.
-pub trait CudaContextProivder {
-    /// Get a referene to the [`CudaContext`].
-    fn cuda_context(&self) -> &Arc<CudaContext>;
 }
 
 /// Singleton for managing CUDA contexts.
@@ -186,494 +121,87 @@ impl Cuda {
     }
 }
 
-/// Pinned host memory storage using CUDA page-locked memory
-#[derive(Debug)]
-pub struct PinnedStorage {
-    ptr: u64,
-    size: usize,
-    handles: RegistrationHandles,
-    ctx: Arc<CudaContext>,
-}
+impl super::StorageBackendOps for std::sync::Arc<CudaContext> {
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, super::StorageError> {
+        self.bind_to_thread()
+            .map_err(super::StorageError::Cuda)?;
 
-impl Local for PinnedStorage {}
-impl SystemAccessible for PinnedStorage {}
-impl CudaAccessible for PinnedStorage {}
-
-impl PinnedStorage {
-    /// Create a new pinned storage with the given size
-    pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        unsafe {
-            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-
-            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
-            let ptr = if numa_allocator::is_numa_enabled() {
-                let device_id = ctx.cu_device() as u32;
-                match numa_allocator::worker_pool::NumaWorkerPool::global()
-                    .allocate_pinned_for_gpu(size, device_id)
-                {
-                    Ok(ptr) => ptr,
-                    Err(e) => {
-                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                        malloc_host_prefer_writecombined(size)?
-                    }
+        // Try NUMA-aware allocation if enabled, otherwise use direct allocation.
+        if crate::block_manager::numa_allocator::is_numa_enabled() {
+            let device_id = self.cu_device() as u32;
+            match crate::block_manager::numa_allocator::worker_pool::NumaWorkerPool::global()
+                .allocate_pinned_for_gpu(size, device_id)
+            {
+                Ok(ptr) => return Ok(ptr),
+                Err(e) => {
+                    tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
                 }
-            } else {
-                malloc_host_prefer_writecombined(size)?
-            };
-
-            assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-            assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-            assert!(size < isize::MAX as usize);
-
-            let ptr = ptr as u64;
-            Ok(Self {
-                ptr,
-                size,
-                handles: RegistrationHandles::new(),
-                ctx: ctx.clone(),
-            })
-        }
-    }
-}
-
-impl Drop for PinnedStorage {
-    fn drop(&mut self) {
-        self.handles.release();
-        unsafe {
-            if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
-                tracing::error!(
-                    "Failed to free pinned storage at 0x{:x} (size={}): {}",
-                    self.ptr,
-                    self.size,
-                    e
-                );
             }
         }
-    }
-}
 
-impl Storage for PinnedStorage {
-    fn storage_type(&self) -> StorageType {
-        StorageType::Pinned
+        unsafe { malloc_host_prefer_writecombined(size) }
     }
 
-    fn addr(&self) -> u64 {
-        self.ptr
+    unsafe fn free_pinned(&self, ptr: u64, _size: usize) -> Result<(), super::StorageError> {
+        unsafe { cudarc::driver::result::free_host(ptr as _).map_err(super::StorageError::Cuda) }
     }
 
-    fn size(&self) -> usize {
-        self.size
-    }
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, super::DeviceStorageType), super::StorageError> {
+        self.bind_to_thread()
+            .map_err(super::StorageError::Cuda)?;
 
-    unsafe fn as_ptr(&self) -> *const u8 {
-        self.ptr as *const u8
-    }
+        let ptr = unsafe { cudarc::driver::result::malloc_sync(size).map_err(super::StorageError::Cuda)? };
 
-    unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr as *mut u8
-    }
-}
-
-impl CudaContextProivder for PinnedStorage {
-    fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.ctx
-    }
-}
-
-impl RegisterableStorage for PinnedStorage {
-    fn register(
-        &mut self,
-        key: &str,
-        handle: Box<dyn RegistationHandle>,
-    ) -> Result<(), StorageError> {
-        self.handles.register(key, handle)
-    }
-
-    fn is_registered(&self, key: &str) -> bool {
-        self.handles.is_registered(key)
-    }
-
-    fn registration_handle(&self, key: &str) -> Option<&dyn RegistationHandle> {
-        self.handles.registration_handle(key)
-    }
-}
-
-impl StorageMemset for PinnedStorage {
-    fn memset(&mut self, value: u8, offset: usize, size: usize) -> Result<(), StorageError> {
-        if offset + size > self.size {
-            return Err(StorageError::OperationFailed(
-                "memset: offset + size > storage size".into(),
-            ));
-        }
-        unsafe {
-            let ptr = (self.ptr as *mut u8).add(offset);
-            std::ptr::write_bytes(ptr, value, size);
-        }
-        Ok(())
-    }
-}
-
-/// Allocator for PinnedStorage
-pub struct PinnedAllocator {
-    ctx: Arc<CudaContext>,
-}
-
-impl Default for PinnedAllocator {
-    fn default() -> Self {
-        Self {
-            ctx: Cuda::device_or_create(0).expect("Failed to create CUDA context"),
-        }
-    }
-}
-
-impl PinnedAllocator {
-    /// Create a new pinned allocator
-    pub fn new() -> Result<Self, StorageError> {
-        Ok(Self {
-            ctx: Cuda::device_or_create(0)?,
-        })
-    }
-}
-
-impl StorageAllocator<PinnedStorage> for PinnedAllocator {
-    fn allocate(&self, size: usize) -> Result<PinnedStorage, StorageError> {
-        PinnedStorage::new(&self.ctx, size)
-    }
-}
-
-/// An enum indicating the type of device storage.
-/// This is needed to ensure ownership of memory is correctly handled.
-/// When building a [`DeviceStorage`] from a torch tensor, we need to ensure that
-/// the torch tensor is not GCed until the [`DeviceStorage`] is dropped.
-/// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
-#[derive(Debug)]
-enum DeviceStorageType {
-    Owned,                                   // Memory that we allocated ourselves.
-    Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
-}
-
-/// CUDA device memory storage
-#[derive(Debug)]
-pub struct DeviceStorage {
-    ptr: u64,
-    size: usize,
-    ctx: Arc<CudaContext>,
-    handles: RegistrationHandles,
-    _storage_type: DeviceStorageType,
-}
-
-impl Local for DeviceStorage {}
-impl CudaAccessible for DeviceStorage {}
-
-impl DeviceStorage {
-    /// Create a new device storage with the given size
-    pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-        let ptr = unsafe { cudarc::driver::result::malloc_sync(size).map_err(StorageError::Cuda)? };
-
-        Ok(Self {
+        Ok((
             ptr,
-            size,
-            ctx: ctx.clone(),
-            handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Owned,
-        })
+            self.cu_device() as u32,
+            super::DeviceStorageType::Owned {
+                _ze_device_buffer: None,
+            },
+        ))
     }
 
-    pub fn new_from_torch(
-        ctx: &Arc<CudaContext>,
-        tensor: Arc<dyn TorchTensor>,
-    ) -> Result<Self, StorageError> {
-        let device = tensor.device();
+    unsafe fn free_device(&self, ptr: u64) -> Result<(), super::StorageError> {
+        unsafe { cudarc::driver::result::free_sync(ptr as _).map_err(super::StorageError::Cuda) }
+    }
 
-        let TorchDevice::Cuda(device_id) = device else {
-            return Err(StorageError::InvalidConfig("Tensor is not CUDA!".into()));
+    fn device_id(&self) -> u32 {
+        self.cu_device() as u32
+    }
+}
+
+/// CUDA-specific DeviceStorage methods
+impl super::DeviceStorage {
+    /// Create a CUDA device storage from a torch tensor.
+    pub fn new_from_torch_cuda(
+        ctx: &Arc<CudaContext>,
+        tensor: Arc<dyn super::torch::TorchTensor>,
+    ) -> Result<Self, super::StorageError> {
+        use super::torch::{TorchDevice, is_cuda};
+
+        if !is_cuda(tensor.as_ref()) {
+            return Err(super::StorageError::InvalidConfig("Tensor is not CUDA!".into()));
+        }
+
+        let TorchDevice::Cuda(device_id) = tensor.device() else {
+            unreachable!("is_cuda() returned true but device is not CUDA");
         };
 
         if device_id != ctx.cu_device() as usize {
-            return Err(StorageError::InvalidConfig(
+            return Err(super::StorageError::InvalidConfig(
                 "Tensor is not on the same device as the context!".into(),
             ));
         }
 
-        let data_ptr = tensor.data_ptr();
-        let size = tensor.size_bytes();
-
         Ok(Self {
-            ptr: data_ptr,
-            size,
-            ctx: ctx.clone(),
-            handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Torch { _tensor: tensor },
+            ptr: tensor.data_ptr(),
+            size: tensor.size_bytes(),
+            ctx: super::DeviceContext::Cuda(ctx.clone()),
+            handles: super::RegistrationHandles::new(),
+            storage_type: super::DeviceStorageType::Torch { _tensor: tensor },
         })
-    }
-
-    /// Get the CUDA context
-    pub fn context(&self) -> &Arc<CudaContext> {
-        &self.ctx
-    }
-}
-
-impl Storage for DeviceStorage {
-    fn storage_type(&self) -> StorageType {
-        StorageType::Device(self.ctx.cu_device() as u32)
-    }
-
-    fn addr(&self) -> u64 {
-        self.ptr
-    }
-
-    fn size(&self) -> usize {
-        self.size
-    }
-
-    unsafe fn as_ptr(&self) -> *const u8 {
-        self.ptr as *const u8
-    }
-
-    unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr as *mut u8
-    }
-}
-
-impl CudaContextProivder for DeviceStorage {
-    fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.ctx
-    }
-}
-
-impl Drop for DeviceStorage {
-    fn drop(&mut self) {
-        self.handles.release();
-        match &self._storage_type {
-            DeviceStorageType::Owned => {
-                unsafe { cudarc::driver::result::free_sync(self.ptr as _) }.unwrap()
-            }
-            DeviceStorageType::Torch { _tensor } => {
-                // Do nothing. The torch storage is resposible for cleaning up itself.
-            }
-        }
-    }
-}
-
-impl RegisterableStorage for DeviceStorage {
-    fn register(
-        &mut self,
-        key: &str,
-        handle: Box<dyn RegistationHandle>,
-    ) -> Result<(), StorageError> {
-        self.handles.register(key, handle)
-    }
-
-    fn is_registered(&self, key: &str) -> bool {
-        self.handles.is_registered(key)
-    }
-
-    fn registration_handle(&self, key: &str) -> Option<&dyn RegistationHandle> {
-        self.handles.registration_handle(key)
-    }
-}
-
-/// Allocator for DeviceStorage
-pub struct DeviceAllocator {
-    ctx: Arc<CudaContext>,
-}
-
-impl Default for DeviceAllocator {
-    fn default() -> Self {
-        Self {
-            ctx: CudaContext::new(0).expect("Failed to create CUDA context"),
-        }
-    }
-}
-
-impl DeviceAllocator {
-    /// Create a new device allocator
-    pub fn new(device_id: usize) -> Result<Self, StorageError> {
-        Ok(Self {
-            ctx: Cuda::device_or_create(device_id)?,
-        })
-    }
-
-    pub fn ctx(&self) -> &Arc<CudaContext> {
-        &self.ctx
-    }
-}
-
-impl StorageAllocator<DeviceStorage> for DeviceAllocator {
-    fn allocate(&self, size: usize) -> Result<DeviceStorage, StorageError> {
-        DeviceStorage::new(&self.ctx, size)
-    }
-}
-
-#[cfg(all(test, feature = "testing-cuda"))]
-mod tests {
-    use super::*;
-
-    #[derive(Debug, Clone)]
-    struct MockTensor {
-        device: TorchDevice,
-        data_ptr: u64,
-        size_bytes: usize,
-    }
-
-    impl MockTensor {
-        pub fn new(device: TorchDevice, data_ptr: u64, size_bytes: usize) -> Self {
-            Self {
-                device,
-                data_ptr,
-                size_bytes,
-            }
-        }
-    }
-
-    impl TorchTensor for MockTensor {
-        fn device(&self) -> TorchDevice {
-            self.device.clone()
-        }
-
-        fn data_ptr(&self) -> u64 {
-            self.data_ptr
-        }
-
-        fn size_bytes(&self) -> usize {
-            self.size_bytes
-        }
-
-        fn shape(&self) -> Vec<usize> {
-            vec![self.size_bytes]
-        }
-
-        fn stride(&self) -> Vec<usize> {
-            vec![1]
-        }
-    }
-
-    #[test]
-    fn test_device_storage_from_torch_valid_tensor() {
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-        let size_bytes = 1024;
-
-        let actual_storage =
-            std::mem::ManuallyDrop::new(DeviceStorage::new(&ctx, size_bytes).unwrap());
-
-        let tensor = MockTensor::new(TorchDevice::Cuda(0), actual_storage.addr(), size_bytes);
-
-        let storage = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor)).unwrap();
-
-        assert_eq!(storage.size(), size_bytes);
-        assert_eq!(storage.storage_type(), StorageType::Device(0));
-        assert_eq!(storage.addr(), actual_storage.addr());
-    }
-
-    #[test]
-    fn test_device_storage_from_torch_cpu_tensor_fails() {
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-        let size_bytes = 1024;
-
-        let actual_storage = DeviceStorage::new(&ctx, size_bytes).unwrap();
-
-        let tensor = MockTensor::new(
-            TorchDevice::Other("cpu".to_string()),
-            actual_storage.addr(),
-            size_bytes,
-        );
-
-        let result = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor));
-        assert!(result.is_err());
-
-        if let Err(StorageError::InvalidConfig(msg)) = result {
-            assert!(msg.contains("Tensor is not CUDA"));
-        } else {
-            panic!("Expected InvalidConfig error for CPU tensor");
-        }
-    }
-
-    #[test]
-    fn test_device_storage_wrong_device() {
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-        let size_bytes = 1024;
-
-        let actual_storage = DeviceStorage::new(&ctx, size_bytes).unwrap();
-
-        let tensor = MockTensor::new(TorchDevice::Cuda(1), actual_storage.addr(), size_bytes);
-
-        let result = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_malloc_host_prefer_writecombined_allocates_memory() {
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-        let size = 4096; // One page
-
-        unsafe {
-            ctx.bind_to_thread().expect("Failed to bind CUDA context");
-
-            // Test allocation succeeds (either write-combined or fallback)
-            let ptr = malloc_host_prefer_writecombined(size)
-                .expect("malloc_host_prefer_writecombined should succeed");
-
-            // Verify pointer is valid and non-null
-            assert!(!ptr.is_null(), "Allocated pointer should not be null");
-
-            // Verify memory is accessible by writing and reading
-            std::ptr::write_volatile(ptr, 0xAB);
-            let val = std::ptr::read_volatile(ptr);
-            assert_eq!(val, 0xAB, "Should be able to write and read pinned memory");
-
-            // Clean up
-            cudarc::driver::result::free_host(ptr as _).expect("Failed to free pinned memory");
-        }
-    }
-
-    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path)
-    ///
-    /// This test confirms that when `DYN_KVBM_ENABLE_NUMA` is not set,
-    /// PinnedStorage::new uses the direct malloc_host_prefer_writecombined path
-    /// (lines 222-224 in the source).
-    #[test]
-    // `remove_var` is not thread-safe, so we need to run this test in a serial context
-    // #[serial]
-    fn test_pinned_storage_new_without_numa() {
-        // Verify NUMA is actually disabled for this test
-        assert!(
-            !numa_allocator::is_numa_enabled(),
-            "NUMA should be disabled for this test"
-        );
-
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-        let size = 8192;
-
-        // Create PinnedStorage - this should take the non-NUMA path
-        let mut storage =
-            PinnedStorage::new(&ctx, size).expect("PinnedStorage::new should succeed");
-
-        // Verify storage properties
-        assert_eq!(storage.size(), size);
-        assert_eq!(storage.storage_type(), StorageType::Pinned);
-        assert_ne!(storage.addr(), 0, "Address should be non-zero");
-
-        // Verify memory is accessible
-        unsafe {
-            let ptr = storage.as_mut_ptr();
-            assert!(!ptr.is_null(), "Pointer should not be null");
-
-            // Write a pattern to verify memory is usable
-            for i in 0..size {
-                std::ptr::write_volatile(ptr.add(i), (i & 0xFF) as u8);
-            }
-
-            // Read back and verify
-            for i in 0..size {
-                let val = std::ptr::read_volatile(ptr.add(i));
-                assert_eq!(
-                    val,
-                    (i & 0xFF) as u8,
-                    "Memory content mismatch at offset {}",
-                    i
-                );
-            }
-        }
     }
 }

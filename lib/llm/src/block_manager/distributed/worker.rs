@@ -12,12 +12,16 @@ use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
     block::{
         Block, layout_to_blocks, locality,
-        transfer::{PoolConfig, TransferContext},
+        transfer::{DeviceStream, PoolConfig, TransferContext},
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
-    storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
+    storage::{
+        Cuda, DeviceAllocator, DeviceBackend, DeviceStorage, DiskAllocator, PinnedAllocator,
+        StorageError, Ze, Synapse,
+        torch::{DeviceBackendKind, TorchTensor, infer_tensor_device_family, is_cuda_tensors, is_ze_tensors},
+    },
 };
 
 use derive_builder::Builder;
@@ -54,10 +58,24 @@ pub fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
-    let mut shape = None;
+    if tensors.is_empty() {
+        return Err(anyhow::anyhow!("No tensors provided"));
+    }
 
+    // Detect backend from tensors
+    let backend = if is_cuda_tensors(tensors) {
+        DeviceBackend::Cuda
+    } else if is_ze_tensors(tensors) {
+        DeviceBackend::Ze
+    } else {
+        return Err(anyhow::anyhow!(
+            "Unsupported or mixed device types in tensors. All tensors must be either CUDA or XPU/Ze/SYCL"
+        ));
+    };
+
+    let mut shape = None;
     let mut device_tensors = Vec::with_capacity(tensors.len());
-    let allocator = DeviceAllocator::new(device_id)?;
+    let allocator = DeviceAllocator::new(device_id, backend)?;
 
     for tensor in tensors {
         // Check the stride, and ensure our tensor is contiguous.
@@ -82,7 +100,8 @@ pub fn load_and_validate_tensors(
         }
 
         // Build the storage object from the tensor.
-        let device_tensor = DeviceStorage::new_from_torch(allocator.ctx(), tensor.clone())?;
+        let device_tensor =
+            DeviceStorage::new_from_torch(allocator.ctx().as_ref(), tensor.clone())?;
 
         device_tensors.push(device_tensor);
     }
@@ -102,6 +121,33 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     Ok(agent)
 }
 
+fn build_transfer_stream(
+    backend: DeviceBackendKind,
+    device_id: usize,
+) -> anyhow::Result<DeviceStream> {
+    match backend {
+        DeviceBackendKind::Cuda => {
+            let cuda_ctx = Cuda::device_or_create(device_id)?;
+            Ok(DeviceStream::Cuda(cuda_ctx.new_stream()?))
+        }
+        DeviceBackendKind::Xpu => {
+            let ze_ctx = Ze::device_or_create(device_id)?;
+            if let DeviceStream::Ze(ze_queue) = ze_ctx.stream() {
+                Ok(DeviceStream::Ze(ze_queue.clone()))
+            } else {
+                Err(StorageError::OperationFailed(format!(
+                    "ZE context stream is not a ZE command queue for device {}",
+                    device_id
+                ))
+                .into())
+            }
+        }
+        DeviceBackendKind::Hpu => {
+            Ok(DeviceStream::Synapse(Synapse::stream_or_create(device_id)?))
+        }
+    }
+}
+
 // Helper: perform allocation and build transfer handler (factored from previous code)
 async fn perform_allocation_and_build_handler(
     device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
@@ -114,27 +160,29 @@ async fn perform_allocation_and_build_handler(
 ) -> anyhow::Result<BlockTransferHandler> {
     let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
     let pool_config = PoolConfig {
-        enable_pool: true,
+        enable_pool: false,
         max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
         max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
+    let detected_backend = infer_tensor_device_family(&worker_config.tensors)?;
+    let stream = build_transfer_stream(detected_backend, device_id)?;
+
     let transfer_context = Arc::new(
         TransferContext::new(
             Arc::new(Some(agent)),
-            DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+            stream,
             Handle::current(),
             Some(pool_config),
         )
         .map_err(|e| {
             anyhow::anyhow!(
-                "Failed to create transfer context for worker {} with CUDA memory pool: {}. \
-                 This is a critical error - the worker cannot start without CUDA memory pools. \
-                 Please ensure sufficient GPU memory is available on device {}.",
+                "Failed to create transfer context for worker {} on backend {} (device {}): {}",
                 worker_id,
+                detected_backend.as_str(),
+                device_id,
                 e,
-                device_id
             )
         })?,
     );
@@ -148,7 +196,12 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
+        let host_backend = match detected_backend {
+            DeviceBackendKind::Cuda => DeviceBackend::Cuda,
+            DeviceBackendKind::Xpu => DeviceBackend::Ze,
+            DeviceBackendKind::Hpu => DeviceBackend::Hpu,
+        };
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id, host_backend)?);
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?

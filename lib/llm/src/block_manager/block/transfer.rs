@@ -3,9 +3,11 @@
 
 pub mod context;
 mod cuda;
+mod hpu;
 mod memcpy;
 mod nixl;
 mod strategy;
+mod ze;
 
 use super::*;
 
@@ -21,7 +23,7 @@ use tokio::sync::oneshot;
 
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
-pub use context::{PoolConfig, TransferContext};
+pub use context::{DeviceStream, PoolConfig, TransferContext};
 
 /// A block that can be the target of a write
 pub trait Writable {}
@@ -81,7 +83,7 @@ impl NixlTransfer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CudaTransferMode {
+pub enum TransferMode {
     /// Use the custom CUDA kernel for G1 <-> G2 transfers
     Custom,
     /// Use the default CUDA async memcpy for G1 <-> G2 transfers
@@ -91,13 +93,29 @@ pub enum CudaTransferMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStrategy {
     Memcpy,
-    CudaAsyncH2D,
-    CudaAsyncD2H,
-    CudaAsyncD2D,
-    CudaBlockingH2D,
-    CudaBlockingD2H,
+    AsyncH2D,
+    AsyncD2H,
+    AsyncD2D,
+    BlockingH2D,
+    BlockingD2H,
     Nixl(NixlTransfer),
     Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferBackend {
+    Cuda,
+    Ze,
+    Synapse,
+}
+
+#[inline]
+fn resolve_transfer_backend(ctx: &TransferContext) -> TransferBackend {
+    match ctx.device_stream() {
+        DeviceStream::Cuda(_) => TransferBackend::Cuda,
+        DeviceStream::Ze(_) => TransferBackend::Ze,
+        DeviceStream::Synapse(_) => TransferBackend::Synapse,
+    }
 }
 
 /// Trait for determining the transfer strategy for writing from a local
@@ -142,29 +160,79 @@ where
 }
 
 #[inline]
-fn resolve_cuda_transfer_mode(
+fn resolve_transfer_mode(
     base_strategy: TransferStrategy,
     is_contiguous: bool,
-) -> CudaTransferMode {
+) -> TransferMode {
     match base_strategy {
-        TransferStrategy::CudaAsyncH2D => {
+        TransferStrategy::AsyncH2D => {
             if is_contiguous {
-                CudaTransferMode::Default
+                TransferMode::Default
             } else {
-                CudaTransferMode::Custom
+                TransferMode::Custom
             }
         }
-        TransferStrategy::CudaAsyncD2H => {
+        TransferStrategy::AsyncD2H => {
             if is_contiguous {
-                CudaTransferMode::Default
+                TransferMode::Default
             } else {
-                CudaTransferMode::Custom
+                TransferMode::Custom
             }
         }
         other => panic!(
-            "resolve_cuda_strategy called with non-CUDA strategy: {:?}",
+            "resolve_transfer_mode called with non-CUDA strategy: {:?}",
             other
         ),
+    }
+}
+
+/// Backend-dispatched block copy using a unified [`DeviceStream`] input.
+///
+/// This keeps backend-specific copy function signatures intact while exposing a
+/// single call path for callers that already have `DeviceStream`.
+pub fn copy_block<'a, Source, Destination>(
+    sources: &'a Source,
+    destinations: &'a mut Destination,
+    device_stream: &DeviceStream,
+    strategy: TransferStrategy,
+) -> Result<(), TransferError>
+where
+    Source: BlockDataProvider,
+    Destination: BlockDataProviderMut,
+{
+    match device_stream {
+        DeviceStream::Cuda(stream) => cuda::copy_block(sources, destinations, stream.as_ref(), strategy),
+        DeviceStream::Ze(queue) => ze::copy_block(sources, destinations, queue.as_ref(), strategy),
+        DeviceStream::Synapse(stream) => hpu::copy_block(sources, destinations, stream.as_ref(), strategy),
+    }
+}
+
+/// Backend-dispatched batched block copy using backend-specific custom kernels.
+pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
+    sources: &'a [Source],
+    destinations: &'a mut [Destination],
+    device_stream: &DeviceStream,
+    ctx: &TransferContext,
+) -> Result<(), TransferError>
+where
+    Source: BlockDataProvider,
+    Destination: BlockDataProviderMut,
+{
+    match device_stream {
+        DeviceStream::Cuda(stream) => {
+            cuda::copy_blocks_with_customized_kernel(
+                sources,
+                destinations,
+                stream.as_ref(),
+                ctx,
+            )
+        }
+        DeviceStream::Ze(queue) => {
+            ze::copy_blocks_with_customized_kernel(sources, destinations, queue.as_ref(), ctx)
+        }
+            DeviceStream::Synapse(stream) => {
+            hpu::copy_blocks_with_customized_kernel(sources, destinations, stream.as_ref(), ctx)
+        }
     }
 }
 
@@ -206,52 +274,55 @@ where
             tx.send(()).unwrap();
             Ok(rx)
         }
-        TransferStrategy::CudaAsyncH2D
-        | TransferStrategy::CudaAsyncD2H
-        | TransferStrategy::CudaAsyncD2D => {
+        TransferStrategy::AsyncH2D
+        | TransferStrategy::AsyncD2H
+        | TransferStrategy::AsyncD2D => {
+            let strategy = RB::write_to_strategy();
+            let backend = resolve_transfer_backend(&ctx);
             tracing::debug!(
-                "Transfer: Using CUDA strategy: {:?}",
-                RB::write_to_strategy()
+                "Transfer: Using strategy {:?} on backend {:?}",
+                strategy,
+                backend
             );
 
-            if RB::write_to_strategy() == TransferStrategy::CudaAsyncH2D
-                || RB::write_to_strategy() == TransferStrategy::CudaAsyncD2H
+            if strategy == TransferStrategy::AsyncH2D
+                || strategy == TransferStrategy::AsyncD2H
             {
                 let is_contiguous = sources[0].block_data().is_fully_contiguous()
                     && targets[0].block_data().is_fully_contiguous();
                 let transfer_mode =
-                    resolve_cuda_transfer_mode(RB::write_to_strategy(), is_contiguous);
+                    resolve_transfer_mode(strategy, is_contiguous);
 
                 match transfer_mode {
-                    CudaTransferMode::Custom => {
-                        let selected_stream = ctx.stream();
-                        cuda::copy_blocks_with_customized_kernel(
+                    TransferMode::Custom => {
+                        let selected_stream = ctx.device_stream();
+                        copy_blocks_with_customized_kernel(
                             sources,
                             targets,
-                            selected_stream.as_ref(),
+                            selected_stream,
                             &ctx,
                         )?;
                     }
-                    CudaTransferMode::Default => {
+                    TransferMode::Default => {
                         for (src, dst) in sources.iter().zip(targets.iter_mut()) {
-                            cuda::copy_block(
+                            copy_block(
                                 src,
                                 dst,
-                                ctx.stream().as_ref(),
-                                RB::write_to_strategy(),
+                                ctx.device_stream(),
+                                strategy,
                             )?;
                         }
                     }
-                };
-                ctx.cuda_event(tx)?;
+                }
+                ctx.complete_transfer(tx)?;
 
                 Ok(rx)
             } else {
                 // Fall back to individual copy for D2Dblocks
                 for (src, dst) in sources.iter().zip(targets.iter_mut()) {
-                    cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
+                    copy_block(src, dst, ctx.device_stream(), strategy)?;
                 }
-                ctx.cuda_event(tx)?;
+                ctx.complete_transfer(tx)?;
                 Ok(rx)
             }
         }
@@ -315,7 +386,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
-            TransferStrategy::CudaBlockingH2D
+            TransferStrategy::BlockingH2D
         );
 
         assert_eq!(
@@ -334,7 +405,7 @@ mod tests {
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
-            TransferStrategy::CudaAsyncH2D
+            TransferStrategy::AsyncH2D
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
@@ -344,15 +415,15 @@ mod tests {
         // Device to ...
         assert_eq!(
             <DeviceStorage as WriteToStrategy<SystemStorage>>::write_to_strategy(),
-            TransferStrategy::CudaBlockingD2H
+            TransferStrategy::BlockingD2H
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<PinnedStorage>>::write_to_strategy(),
-            TransferStrategy::CudaAsyncD2H
+            TransferStrategy::AsyncD2H
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
-            TransferStrategy::CudaAsyncD2D
+            TransferStrategy::AsyncD2D
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),

@@ -1759,6 +1759,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "level-zero",
 ]
 
 [[package]]
@@ -8469,6 +8470,21 @@ checksum = "d59cefebd0c892fa2dd6de581e937301d8552cb44489cdff035c6187cb63fa5e"
 dependencies = [
  "winapi 0.2.8",
  "winapi-build",
+]
+
+[[package]]
+name = "level-zero"
+version = "0.2.0"
+dependencies = [
+ "level-zero-sys",
+ "libc",
+]
+
+[[package]]
+name = "level-zero-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

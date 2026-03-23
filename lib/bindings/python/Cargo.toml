@@ -29,6 +29,8 @@ media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-parsers = { path = "../../parsers" }
+level-zero = { path = "../../../../level-zero-rc/level-zero" }
+
 
 anyhow = { version = "1" }
 dynamo-async-openai = { path = "../../async-openai" }

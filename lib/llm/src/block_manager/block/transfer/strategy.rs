@@ -58,7 +58,7 @@ impl WriteToStrategy<PinnedStorage> for SystemStorage {
 impl WriteToStrategy<DeviceStorage> for SystemStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::CudaBlockingH2D
+        TransferStrategy::BlockingH2D
     }
 }
 
@@ -86,7 +86,7 @@ impl WriteToStrategy<PinnedStorage> for PinnedStorage {
 impl WriteToStrategy<DeviceStorage> for PinnedStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::CudaAsyncH2D
+        TransferStrategy::AsyncH2D
     }
 }
 
@@ -100,21 +100,21 @@ impl WriteToStrategy<DiskStorage> for DeviceStorage {
 impl WriteToStrategy<SystemStorage> for DeviceStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::CudaBlockingD2H
+        TransferStrategy::BlockingD2H
     }
 }
 
 impl WriteToStrategy<PinnedStorage> for DeviceStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::CudaAsyncD2H
+        TransferStrategy::AsyncD2H
     }
 }
 
 impl WriteToStrategy<DeviceStorage> for DeviceStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::CudaAsyncD2D
+        TransferStrategy::AsyncD2D
     }
 }
 
@@ -181,7 +181,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
-            TransferStrategy::CudaBlockingH2D
+            TransferStrategy::BlockingH2D
         );
 
         assert_eq!(
@@ -200,7 +200,7 @@ mod tests {
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
-            TransferStrategy::CudaAsyncH2D
+            TransferStrategy::AsyncH2D
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
@@ -210,15 +210,15 @@ mod tests {
         // Device to ...
         assert_eq!(
             <DeviceStorage as WriteToStrategy<SystemStorage>>::write_to_strategy(),
-            TransferStrategy::CudaBlockingD2H
+            TransferStrategy::BlockingD2H
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<PinnedStorage>>::write_to_strategy(),
-            TransferStrategy::CudaAsyncD2H
+            TransferStrategy::AsyncD2H
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
-            TransferStrategy::CudaAsyncD2D
+            TransferStrategy::AsyncD2D
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
@@ -259,7 +259,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as ReadFromStrategy<DeviceStorage>>::read_from_strategy(),
-            TransferStrategy::CudaBlockingD2H
+            TransferStrategy::BlockingD2H
         );
 
         assert_eq!(
@@ -280,7 +280,7 @@ mod tests {
 
         assert_eq!(
             <PinnedStorage as ReadFromStrategy<DeviceStorage>>::read_from_strategy(),
-            TransferStrategy::CudaAsyncD2H
+            TransferStrategy::AsyncD2H
         );
 
         assert_eq!(
@@ -291,17 +291,17 @@ mod tests {
         // Device to ...
         assert_eq!(
             <DeviceStorage as ReadFromStrategy<SystemStorage>>::read_from_strategy(),
-            TransferStrategy::CudaBlockingH2D
+            TransferStrategy::BlockingH2D
         );
 
         assert_eq!(
             <DeviceStorage as ReadFromStrategy<PinnedStorage>>::read_from_strategy(),
-            TransferStrategy::CudaAsyncH2D
+            TransferStrategy::AsyncH2D
         );
 
         assert_eq!(
             <DeviceStorage as ReadFromStrategy<DeviceStorage>>::read_from_strategy(),
-            TransferStrategy::CudaAsyncD2D
+            TransferStrategy::AsyncD2D
         );
 
         assert_eq!(

@@ -307,7 +307,7 @@ mod tests {
             builder.device_layout(
                 KvManagerLayoutConfig::builder()
                     .num_blocks(device)
-                    .allocator(storage::DeviceAllocator::new(0).unwrap())
+                    .allocator(storage::DeviceAllocator::new(0, storage::DeviceBackend::Cuda).unwrap())
                     .build()
                     .unwrap(),
             )

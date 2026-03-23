@@ -77,16 +77,34 @@ class KvConnectorWorker:
             )
         ]
 
-        events = [
-            torch.cuda.Event(enable_timing=False, interprocess=False)
-            for _ in range(len(ordered_kv_caches))
-        ]
+        # Get first tensor to detect device type/id for event handling.
+        first_tensor = ordered_kv_caches[0][1]
+        self.device_type = first_tensor.device.type
+        self.device_id = first_tensor.device.index if self.device_type=="cuda" else (first_tensor.device.index or 0)
 
-        # events are lazy, if we don't record them once here, the raw handles we pass to rust will be null
-        for event in events:
-            event.record(torch.cuda.current_stream())
-
-        raw_event_handles = [event.cuda_event for event in events]
+        if self.device_type == "cuda":
+            events = [
+                torch.cuda.Event(enable_timing=False, interprocess=False)
+                for _ in range(len(ordered_kv_caches))
+            ]
+            # Events are lazy: record once so raw handles are valid.
+            for event in events:
+                event.record(torch.cuda.current_stream(self.device_id))
+            raw_event_handles = [event.cuda_event for event in events]
+        elif self.device_type == "xpu":
+            events = [torch.xpu.Event(enable_timing=False) for _ in range(len(ordered_kv_caches))]
+            for event in events:
+                event.record(torch.xpu.current_stream(self.device_id))
+            # Pass raw SYCL event handles for Rust-side XPU waiting.
+            raw_event_handles = [event.sycl_event for event in events]
+        elif self.device_type == "hpu":
+            events = [torch.hpu.Event(enable_timing=False) for _ in range(len(ordered_kv_caches))]
+            for event in events:
+                event.record(torch.hpu.current_stream(self.device_id))
+            # Pass raw Synapse event handles for Rust-side HPU waiting.
+            raw_event_handles = [event.hpu_event for event in events]
+        else:
+            raise NotImplementedError(f"Unsupported KV cache device type: {self.device_type}")
 
         self.events = {
             layer_name: event
@@ -94,7 +112,6 @@ class KvConnectorWorker:
         }
 
         # Get first tensor to extract common properties
-        first_tensor = ordered_kv_caches[0][1]
         shape = first_tensor.shape
 
         # Validate all tensors have same shape
@@ -107,7 +124,7 @@ class KvConnectorWorker:
         # TODO: Assume the block dimension is within the first 2. This will break if you're doing something weird like having 1 or 2 device blocks.
         num_device_blocks = max(shape[0], shape[1])
         page_size = cache_config.block_size
-        device_id = first_tensor.device.index
+        device_id = self.device_id
 
         # Determine cache dtype
         if cache_config.cache_dtype == "auto":
@@ -181,7 +198,19 @@ class KvConnectorWorker:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        self.events[layer_name].record(torch.cuda.current_stream())
+        if self.device_type == "cuda":
+            self.events[layer_name].record(torch.cuda.current_stream(self.device_id))
+        elif self.device_type == "xpu":
+            self.events[layer_name].record(torch.xpu.current_stream(self.device_id))
+            # Host wait for XPU path until Rust-side XPU event wait is available.
+            print('buke before sync in save_kv_layer, device_id:', self.device_id)
+            self.events[layer_name].synchronize()
+        elif self.device_type == "hpu":
+            self.events[layer_name].record(torch.hpu.current_stream(self.device_id))
+            # Host wait for HPU path until Rust-side HPU event wait is available.
+            self.events[layer_name].synchronize()
+        else:
+            raise NotImplementedError(f"Unsupported KV cache device type: {self.device_type}")
         self._connector.save_kv_layer(layer_name, kv_layer)
 
     def get_finished(
