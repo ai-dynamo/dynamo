@@ -25,11 +25,11 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 
 | Backend | Supported | Notes |
 |---------|-----------|-------|
-| **vLLM** | ✅* | Requires vLLM with KV events `extra_keys` support ([PR #33304](https://github.com/vllm-project/vllm/pull/33304)) |
+| **vLLM** | ✅ | Requires vLLM with KV events `extra_keys` support ([PR #33304](https://github.com/vllm-project/vllm/pull/33304)) |
 | **TRT-LLM** | ✅ | Requires `--publish-events-and-metrics` on TRT-LLM workers |
 | **SGLang** | ❌ | Not supported yet |
 
-*Requires an upcoming version of vLLM that has not yet been released. Support will be available once the new vLLM release is published.
+This support requires vLLM `0.18.0` or newer.
 
 ## How It Works
 
