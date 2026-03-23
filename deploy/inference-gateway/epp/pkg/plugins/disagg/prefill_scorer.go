@@ -127,6 +127,10 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
 		"prefillWorkerID", prefillWorkerID,
 		"tokenCount", len(result.TokenData))
+	logger.V(logutil.DEFAULT).Info("[DISAGG-DEBUG] EPP prefill scorer: selected prefill worker via FFI",
+		"prefillWorkerID", prefillWorkerID,
+		"tokenCount", len(result.TokenData),
+		"willSetHeader", PrefillWorkerIDHeader)
 
 	// Set the prefill worker ID header directly on the request.
 	// The request object is shared across all profile runs in the scheduling

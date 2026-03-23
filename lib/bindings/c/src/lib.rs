@@ -1187,7 +1187,7 @@ pub unsafe extern "C" fn route_prefill_request(
         tracing::info!(
             prefill_worker_id = prefill_worker_id,
             token_count = tokens.len(),
-            "Routed prefill request"
+            "[DISAGG-DEBUG] C FFI route_prefill_request: selected prefill worker"
         );
 
         Ok(prefill_worker_id)
@@ -1255,7 +1255,7 @@ pub unsafe extern "C" fn route_decode_request(
             decode_worker_id = decode_worker.worker_id,
             decode_dp_rank = decode_worker.dp_rank,
             token_count = tokens.len(),
-            "Routed decode request"
+            "[DISAGG-DEBUG] C FFI route_decode_request: selected decode worker"
         );
 
         Ok(decode_worker)
@@ -1366,7 +1366,10 @@ fn spawn_prefill_discovery_watcher(
                         tracing::info!(
                             model_name = card.name(),
                             namespace = namespace.as_str(),
-                            "Prefill worker discovered, activating PrefillRouter"
+                            component = component.as_str(),
+                            endpoint = endpoint.as_str(),
+                            "[DISAGG-DEBUG] C FFI: Prefill worker discovered in discovery, activating PrefillRouter. \
+                             EPP will now route disaggregated requests."
                         );
 
                         if let Ok(ns) = drt.namespace(namespace)

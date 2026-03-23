@@ -131,6 +131,10 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 		state := &PrefillEnabledState{Enabled: prefillExists}
 		cycleState.Write(PrefillEnabledStateKey, state)
 		logger.Info("DisaggProfileHandler: prefill enabled state determined", "prefillEnabled", prefillExists)
+		logger.Info("[DISAGG-DEBUG] DisaggProfileHandler: profile detection",
+			"prefillProfileExists", prefillExists,
+			"totalProfiles", len(profiles),
+			"profileNames", fmt.Sprintf("%v", func() []string { names := make([]string, 0, len(profiles)); for n := range profiles { names = append(names, n) }; return names }()))
 
 		if prefillExists {
 			// Run prefill profile first.
