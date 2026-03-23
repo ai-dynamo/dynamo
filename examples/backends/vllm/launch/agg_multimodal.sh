@@ -22,6 +22,7 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
     MODEL_NAME="Qwen/Qwen3-VL-8B-Instruct"
     BLOCK_SIZE=${BLOCK_SIZE:-64}
+    export VLLM_TARGET_DEVICE=xpu
 else
     MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
     BLOCK_SIZE=${BLOCK_SIZE:-}

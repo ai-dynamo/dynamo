@@ -41,9 +41,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 MODEL="Qwen/Qwen3-0.6B"
-# --block-size 64 is required for XPU; on CUDA vLLM uses its default
+
 if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
+    # --block-size 64 is required for XPU; on CUDA vLLM uses its default
     BLOCK_SIZE_ARG=(--block-size "${BLOCK_SIZE:-64}")
+    export VLLM_TARGET_DEVICE=xpu
 else
     BLOCK_SIZE_ARG=()
 fi

@@ -17,6 +17,7 @@ if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
     # --block-size 64 is required for XPU; on CUDA vLLM uses its default
     BLOCK_SIZE_ARG=(--block-size "${BLOCK_SIZE:-64}")
     KV_TRANSFER_CONFIG='{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+    export VLLM_TARGET_DEVICE=xpu
 else
     BLOCK_SIZE_ARG=()
     KV_TRANSFER_CONFIG='{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
