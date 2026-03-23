@@ -42,6 +42,50 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 """
 
 
+def _vllm_args_payload():
+    return {
+        "block_size": 64,
+        "speedup_ratio": 1000.0,
+    }
+
+
+def _sglang_args_payload():
+    return {
+        "engine_type": "sglang",
+        "num_gpu_blocks": 512,
+        "block_size": 64,
+        "speedup_ratio": 1000.0,
+        "sglang": {
+            "page_size": 64,
+        },
+    }
+
+
+def _router_config_payload():
+    return {
+        "router_queue_threshold": 1.25,
+        "router_event_threads": 1,
+        "router_queue_policy": "wspt",
+        "router_temperature": 0.0,
+        "overlap_score_weight": 1.0,
+        "use_kv_events": True,
+        "durable_kv_events": False,
+        "router_replica_sync": False,
+        "router_track_active_blocks": True,
+        "router_track_output_blocks": False,
+        "router_assume_kv_reuse": True,
+        "router_snapshot_threshold": 1000000,
+        "router_reset_states": False,
+        "router_ttl_secs": 120.0,
+        "router_max_tree_size": 1048576,
+        "router_prune_target_ratio": 0.8,
+        "router_enable_cache_control": False,
+        "skip_initial_worker_wait": False,
+        "min_initial_workers": 1,
+        "remote_indexer_component": None,
+    }
+
+
 def _write_trace_and_args(tmp_path):
     trace_path = tmp_path / "trace.jsonl"
     records = [
@@ -87,122 +131,40 @@ def _write_cli_smoke_trace(tmp_path):
 def _write_vllm_args(tmp_path):
     args_path = tmp_path / "args.json"
     args_path.write_text(
-        json.dumps(
-            {
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-            }
-        ),
+        json.dumps(_vllm_args_payload()),
         encoding="utf-8",
     )
     return args_path
 
 
 def _vllm_args():
-    return MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-            }
-        )
-    )
+    return MockEngineArgs.from_json(json.dumps(_vllm_args_payload()))
 
 
 def _write_sglang_args(tmp_path):
     args_path = tmp_path / "sglang_args.json"
     args_path.write_text(
-        json.dumps(
-            {
-                "engine_type": "sglang",
-                "num_gpu_blocks": 512,
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-                "sglang": {
-                    "page_size": 64,
-                },
-            }
-        ),
+        json.dumps(_sglang_args_payload()),
         encoding="utf-8",
     )
     return args_path
 
 
 def _sglang_args():
-    return MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "engine_type": "sglang",
-                "num_gpu_blocks": 512,
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-                "sglang": {
-                    "page_size": 64,
-                },
-            }
-        )
-    )
+    return MockEngineArgs.from_json(json.dumps(_sglang_args_payload()))
 
 
 def _write_router_config(tmp_path):
     config_path = tmp_path / "router_config.json"
     config_path.write_text(
-        json.dumps(
-            {
-                "router_queue_threshold": 1.25,
-                "router_event_threads": 1,
-                "router_queue_policy": "wspt",
-                "router_temperature": 0.0,
-                "overlap_score_weight": 1.0,
-                "use_kv_events": True,
-                "durable_kv_events": False,
-                "router_replica_sync": False,
-                "router_track_active_blocks": True,
-                "router_track_output_blocks": False,
-                "router_assume_kv_reuse": True,
-                "router_snapshot_threshold": 1000000,
-                "router_reset_states": False,
-                "router_ttl_secs": 120.0,
-                "router_max_tree_size": 1048576,
-                "router_prune_target_ratio": 0.8,
-                "router_enable_cache_control": False,
-                "skip_initial_worker_wait": False,
-                "min_initial_workers": 1,
-                "remote_indexer_component": None,
-            }
-        ),
+        json.dumps(_router_config_payload()),
         encoding="utf-8",
     )
     return config_path
 
 
 def _router_config():
-    return KvRouterConfig.from_json(
-        json.dumps(
-            {
-                "router_queue_threshold": 1.25,
-                "router_event_threads": 1,
-                "router_queue_policy": "wspt",
-                "router_temperature": 0.0,
-                "overlap_score_weight": 1.0,
-                "use_kv_events": True,
-                "durable_kv_events": False,
-                "router_replica_sync": False,
-                "router_track_active_blocks": True,
-                "router_track_output_blocks": False,
-                "router_assume_kv_reuse": True,
-                "router_snapshot_threshold": 1000000,
-                "router_reset_states": False,
-                "router_ttl_secs": 120.0,
-                "router_max_tree_size": 1048576,
-                "router_prune_target_ratio": 0.8,
-                "router_enable_cache_control": False,
-                "skip_initial_worker_wait": False,
-                "min_initial_workers": 1,
-                "remote_indexer_component": None,
-            }
-        )
-    )
+    return KvRouterConfig.from_json(json.dumps(_router_config_payload()))
 
 
 def _partial_router_config():
@@ -220,6 +182,12 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
     assert report["total_output_tokens"] == num_requests * output_tokens
 
 
+def _assert_basic_report_metrics(report):
+    assert report["request_throughput_rps"] > 0
+    assert report["output_throughput_tok_s"] > 0
+    assert report["duration_ms"] > 0
+
+
 def _replay_cli_env() -> dict[str, str]:
     env = os.environ.copy()
     pythonpath_entries = ["lib/bindings/python/src", "components/src"]
@@ -228,6 +196,29 @@ def _replay_cli_env() -> dict[str, str]:
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = ":".join(pythonpath_entries)
     return env
+
+
+def _run_replay_cli(tmp_path, *args):
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.replay",
+            *args,
+        ],
+        capture_output=True,
+        check=True,
+        cwd=str(tmp_path),
+        env=_replay_cli_env(),
+        text=True,
+    )
+
+
+def _assert_replay_cli_outputs(completed, report_path):
+    assert "NVIDIA AIPerf | LLM Metrics" in completed.stdout
+    assert "Saved full report to:" in completed.stdout
+    assert '"completed_requests"' not in completed.stdout
+    return json.loads(report_path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -562,82 +553,58 @@ def test_replay_cli_prints_table_and_saves_json(tmp_path, monkeypatch, capsys):
 def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     report_path = tmp_path / "synthetic_report.json"
 
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "dynamo.replay",
-            "--input-tokens",
-            "250",
-            "--output-tokens",
-            "25",
-            "--request-count",
-            "10",
-            "--num-workers",
-            "4",
-            "--replay-concurrency",
-            "4",
-            "--report-json",
-            str(report_path),
-            "--extra-engine-args",
-            '{"block_size":64,"speedup_ratio":1000.0}',
-        ],
-        capture_output=True,
-        check=True,
-        cwd=str(tmp_path),
-        env=_replay_cli_env(),
-        text=True,
+    completed = _run_replay_cli(
+        tmp_path,
+        "--input-tokens",
+        "250",
+        "--output-tokens",
+        "25",
+        "--request-count",
+        "10",
+        "--num-workers",
+        "4",
+        "--replay-concurrency",
+        "4",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
     )
 
-    assert "NVIDIA AIPerf | LLM Metrics" in completed.stdout
-    assert "Saved full report to:" in completed.stdout
-    assert '"completed_requests"' not in completed.stdout
-
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = _assert_replay_cli_outputs(completed, report_path)
     _assert_basic_report_counts(
         report,
         num_requests=10,
         input_tokens=250,
         output_tokens=25,
     )
+    _assert_basic_report_metrics(report)
 
 
 def test_replay_cli_subprocess_trace_smoke(tmp_path):
     trace_path = _write_cli_smoke_trace(tmp_path)
     report_path = tmp_path / "trace_report.json"
 
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "dynamo.replay",
-            str(trace_path),
-            "--replay-mode",
-            "offline",
-            "--router-mode",
-            "kv_router",
-            "--num-workers",
-            "4",
-            "--report-json",
-            str(report_path),
-            "--extra-engine-args",
-            '{"block_size":64,"speedup_ratio":1000.0}',
-        ],
-        capture_output=True,
-        check=True,
-        cwd=str(tmp_path),
-        env=_replay_cli_env(),
-        text=True,
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "offline",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "4",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
     )
 
-    assert "NVIDIA AIPerf | LLM Metrics" in completed.stdout
-    assert "Saved full report to:" in completed.stdout
-    assert '"completed_requests"' not in completed.stdout
-
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = _assert_replay_cli_outputs(completed, report_path)
     _assert_basic_report_counts(
         report,
         num_requests=10,
         input_tokens=250,
         output_tokens=25,
     )
+    _assert_basic_report_metrics(report)
