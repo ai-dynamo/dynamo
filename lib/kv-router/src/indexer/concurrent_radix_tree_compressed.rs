@@ -511,7 +511,7 @@ impl ConcurrentRadixTreeCompressed {
             Some(parent_hash) => {
                 // Retry loop: re-resolve if a concurrent split moves parent_hash
                 // into a descendant between resolve_lookup and the write lock below.
-                let node = loop {
+                loop {
                     let node = {
                         let wl = lookup.get_mut(&worker).unwrap();
                         match Self::resolve_lookup(wl, parent_hash) {
@@ -590,9 +590,7 @@ impl ConcurrentRadixTreeCompressed {
                     }
 
                     break node;
-                };
-
-                node
+                }
             }
             None => self.root.clone(),
         };
@@ -643,15 +641,15 @@ impl ConcurrentRadixTreeCompressed {
                 // Detect concurrent split: if last_ext_hash is no longer in
                 // this node's edge_index, another thread shortened this edge.
                 // Drop the lock, re-resolve to the correct suffix node, retry.
-                if let Some(hash) = last_ext_hash {
-                    if !parent_guard.edge_index.contains_key(&hash) {
-                        drop(parent_guard);
-                        let wl = lookup.get_mut(&worker).unwrap();
-                        if let Some(resolved) = Self::resolve_lookup(wl, hash) {
-                            current_parent = resolved;
-                        }
-                        continue;
+                if let Some(hash) = last_ext_hash
+                    && !parent_guard.edge_index.contains_key(&hash)
+                {
+                    drop(parent_guard);
+                    let wl = lookup.get_mut(&worker).unwrap();
+                    if let Some(resolved) = Self::resolve_lookup(wl, hash) {
+                        current_parent = resolved;
                     }
+                    continue;
                 }
 
                 match parent_guard.children.get(&first_local).cloned() {
