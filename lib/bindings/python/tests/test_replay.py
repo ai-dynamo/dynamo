@@ -17,6 +17,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
+    pytest.mark.unit,
 ]
 
 MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]}

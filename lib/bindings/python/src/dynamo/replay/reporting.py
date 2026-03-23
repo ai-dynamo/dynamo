@@ -49,7 +49,7 @@ def format_report_table(report: dict[str, object]) -> str:
 
 
 def _build_rows(report: dict[str, object]) -> list[list[str]]:
-    rows = []
+    rows: list[list[str]] = []
     _append_stat_row(rows, report, "Time to First Token (ms)", "ttft_ms")
     _append_stat_row(rows, report, "Time to Second Token (ms)", "ttst_ms")
     _append_stat_row(rows, report, "Request Latency (ms)", "e2e_latency_ms")
