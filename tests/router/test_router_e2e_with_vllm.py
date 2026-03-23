@@ -38,11 +38,32 @@ SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 10
 
 
+def _detect_target_device() -> str:
+    """Detect runtime device from torch backends.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return "xpu"
+    except Exception:
+        # Keep fallback behavior stable in minimal test environments.
+        pass
+
+    return "cuda"
+
+
 def _is_xpu_runtime() -> bool:
-    return (os.environ.get("VLLM_TARGET_DEVICE") or "").lower() == "xpu"
+    return _detect_target_device() == "xpu"
 
 
-BLOCK_SIZE = 64 if _is_xpu_runtime() else 16
+def _default_block_size() -> int:
+    return 64 if _is_xpu_runtime() else 16
+
+
+BLOCK_SIZE = _default_block_size()
 
 
 def _get_device_visibility_env_var() -> str:
@@ -51,7 +72,7 @@ def _get_device_visibility_env_var() -> str:
     CUDA runtime uses CUDA_VISIBLE_DEVICES, while XPU runtime uses
     ZE_AFFINITY_MASK.
     """
-    target_device = (os.environ.get("VLLM_TARGET_DEVICE") or "").lower()
+    target_device = _detect_target_device()
     if target_device == "xpu":
         return "ZE_AFFINITY_MASK"
     return "CUDA_VISIBLE_DEVICES"
@@ -80,7 +101,7 @@ TEST_PAYLOAD: Dict[str, Any] = {
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
 VLLM_ARGS: Dict[str, Any] = {
-    "block_size": BLOCK_SIZE,
+    "block_size": _default_block_size(),
     "model": MODEL_NAME,
     "gpu_memory_utilization": 0.4,  # Limit VRAM allocation per worker
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
@@ -151,7 +172,7 @@ class VLLMProcess:
         if vllm_args is None:
             vllm_args = {}
 
-        block_size = vllm_args.get("block_size", BLOCK_SIZE)
+        block_size = vllm_args.get("block_size", _default_block_size())
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
