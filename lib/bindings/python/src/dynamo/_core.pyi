@@ -93,6 +93,12 @@ class DistributedRuntime:
         """
         ...
 
+    def set_health_status(self, ready: bool) -> None:
+        """
+        Explicitly set the system-level health status (Ready / NotReady).
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
