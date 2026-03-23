@@ -471,7 +471,6 @@ impl NvCustomClient {
         request: NvCreateChatCompletionRequest,
         context: HttpRequestContext,
     ) -> Result<NvHttpResponseStream, HttpClientError> {
-
         if !request.inner.stream.unwrap_or(false) {
             return Err(HttpClientError::InvalidRequest(
                 "chat_stream requires the request to have 'stream': true".to_string(),
