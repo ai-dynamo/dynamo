@@ -334,3 +334,28 @@ impl super::StorageBackendOps for std::sync::Arc<SynapseContext> {
         self.device().id()
     }
 }
+
+/// HPU-specific DeviceStorage methods
+impl super::DeviceStorage {
+    /// Create an HPU device storage from a torch tensor.
+    pub fn new_from_torch_synapse(
+        ctx: &Arc<SynapseContext>,
+        tensor: Arc<dyn super::torch::TorchTensor>,
+    ) -> Result<Self, super::StorageError> {
+        use super::torch::is_hpu;
+
+        if !is_hpu(tensor.as_ref()) {
+            return Err(super::StorageError::InvalidConfig(
+                "Tensor is not an HPU/Synapse tensor!".into(),
+            ));
+        }
+
+        Ok(Self {
+            ptr: tensor.data_ptr(),
+            size: tensor.size_bytes(),
+            ctx: super::DeviceContext::Synapse(ctx.clone()),
+            handles: super::RegistrationHandles::new(),
+            storage_type: super::DeviceStorageType::Torch { _tensor: tensor },
+        })
+    }
+}
