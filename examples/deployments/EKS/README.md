@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Steps to create an EKS cluster
 
-This guide demonstrates Dynamo platform on Amazon Elastic Kuberentes Service (EKS) platform.
+This guide demonstrates the Dynamo platform on Amazon Elastic Kubernetes Service (EKS).
 
 ## Setup environment variables
 
