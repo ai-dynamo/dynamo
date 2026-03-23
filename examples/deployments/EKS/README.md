@@ -71,7 +71,7 @@ export EKS_CP_AZS=$(aws ec2 describe-availability-zones \
       --query "AvailabilityZones[?ZoneId!='use1-az3'].[ZoneName]" \
       --output text | sed 's/ /, /g; s/^/  - /')
 
-eksctl create cluster -f <(envsubst < eksctl.yaml)
+eksctl create cluster -f <(envsubst < templates/eksctl.yaml)
 ```
 *Note: eksctl will automatically configure kubeconfig context for you, if not you can run: `aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME`*
 
@@ -543,5 +543,5 @@ Cleanup EFS related resources, follow the [EFS setup guide](EFS.md#cleanup) clea
 Delete the EKS Auto Mode cluster using Eksctl
 
 ```bash
-eksctl delete cluster -f <(envsubst < eksctl.yaml)
+eksctl delete cluster -f <(envsubst < templates/eksctl.yaml)
 ```
