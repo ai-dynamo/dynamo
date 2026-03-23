@@ -28,7 +28,7 @@ var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-f
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
 // PodResources (nvidia.com/gpu entries in GetDevices()).
-func GetPodGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, log logr.Logger) ([]string, error) {
+func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
 	}

@@ -367,8 +367,7 @@ fn register_model<'p>(
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            let ignore_weights = true;
-            LocalModel::fetch(&source_path, ignore_weights)
+            LocalModel::fetch(&source_path, false)
                 .await
                 .map_err(to_pyerr)?
         };
