@@ -58,6 +58,11 @@ async fn test_bind_returns_grpc_endpoint() {
     let (addr, anchor_id) = parse_grpc_endpoint(&endpoint).unwrap();
     assert!(addr.port() > 0, "port should be non-zero, got {}", addr.port());
     assert_eq!(anchor_id, 1, "anchor_id should match bound value");
+    assert!(
+        addr.ip().is_loopback(),
+        "unspecified bind should resolve to loopback in endpoint: {}",
+        endpoint
+    );
 }
 
 // ---------------------------------------------------------------------------

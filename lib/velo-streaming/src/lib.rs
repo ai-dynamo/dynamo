@@ -27,6 +27,7 @@ pub mod handle;
 pub mod sender;
 pub mod tcp_transport;
 pub mod transport;
+pub(crate) mod util;
 pub mod velo_transport;
 #[cfg(feature = "grpc")]
 pub mod grpc_transport;

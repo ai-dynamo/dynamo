@@ -11,7 +11,8 @@
 //! # Endpoint Format
 //!
 //! ```text
-//! tcp://{bind_addr}:{port}/{uuid_token}
+//! tcp://{ip}:{port}/{uuid_token}           (IPv4)
+//! tcp://[{ip}]:{port}/{uuid_token}         (IPv6)
 //! ```
 //!
 //! # Connection Lifecycle
@@ -172,8 +173,11 @@ impl FrameTransport for TcpFrameTransport {
             // Frame delivery channel (same capacity as VeloFrameTransport)
             let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
 
-            // Construct endpoint before spawning so it's ready immediately
-            let endpoint = format!("tcp://{}:{}/{}", bind_addr, port, token);
+            // Resolve unspecified bind addresses to routable loopback and use
+            // SocketAddr display for correct IPv6 bracket formatting.
+            let advertise_ip = crate::util::resolve_advertise_ip(bind_addr);
+            let sock_addr = std::net::SocketAddr::new(advertise_ip, port);
+            let endpoint = format!("tcp://{}/{}", sock_addr, token);
 
             // Spawn accept-once task
             let expected_token = token;
@@ -521,5 +525,38 @@ mod tests {
             Ok(Err(_)) => {} // channel closed -- expected
             Err(_) => {}     // timeout -- also fine
         }
+    }
+
+    #[test]
+    fn test_parse_tcp_endpoint_ipv6() {
+        let endpoint = "tcp://[::1]:8080/550e8400-e29b-41d4-a716-446655440000";
+        let (addr, token) = parse_tcp_endpoint(endpoint).unwrap();
+        assert_eq!(addr, "[::1]:8080".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(token.to_string(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_bind_ipv6_endpoint_format() {
+        let transport = TcpFrameTransport::new(std::net::Ipv6Addr::LOCALHOST.into());
+        let (endpoint, _rx) = transport.bind(1, 0).await.unwrap();
+        assert!(
+            endpoint.contains("[::1]"),
+            "IPv6 endpoint must bracket the address: {}",
+            endpoint
+        );
+        let (addr, _token) = parse_tcp_endpoint(&endpoint).unwrap();
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_bind_unspecified_resolves_to_loopback() {
+        let transport = TcpFrameTransport::default(); // 0.0.0.0
+        let (endpoint, _rx) = transport.bind(1, 0).await.unwrap();
+        let (addr, _token) = parse_tcp_endpoint(&endpoint).unwrap();
+        assert!(
+            addr.ip().is_loopback(),
+            "unspecified bind should resolve to loopback in endpoint: {}",
+            endpoint
+        );
     }
 }

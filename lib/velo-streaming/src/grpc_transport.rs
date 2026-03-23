@@ -10,7 +10,8 @@
 //! # Endpoint Format
 //!
 //! ```text
-//! grpc://{ip}:{port}/{anchor_id}
+//! grpc://{ip}:{port}/{anchor_id}           (IPv4)
+//! grpc://[{ip}]:{port}/{anchor_id}         (IPv6)
 //! ```
 //!
 //! # Key Design Decisions
@@ -322,7 +323,11 @@ impl FrameTransport for GrpcFrameTransport {
             // Insert routing slot synchronously (no race with connect)
             routing.insert(anchor_id, frame_tx);
 
-            let endpoint = format!("grpc://{}:{}/{}", addr.ip(), addr.port(), anchor_id);
+            let advertise_addr = std::net::SocketAddr::new(
+                crate::util::resolve_advertise_ip(addr.ip()),
+                addr.port(),
+            );
+            let endpoint = format!("grpc://{}/{}", advertise_addr, anchor_id);
             Ok((endpoint, frame_rx))
         })
     }
@@ -389,5 +394,18 @@ impl FrameTransport for GrpcFrameTransport {
 
             Ok(frame_tx)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_grpc_endpoint_ipv6() {
+        let endpoint = "grpc://[::1]:50051/42";
+        let (addr, anchor_id) = parse_grpc_endpoint(endpoint).unwrap();
+        assert_eq!(addr, "[::1]:50051".parse::<SocketAddr>().unwrap());
+        assert_eq!(anchor_id, 42);
     }
 }
