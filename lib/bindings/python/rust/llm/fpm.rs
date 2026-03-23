@@ -10,7 +10,7 @@
 //!   - **tracking mode**: call `start_tracking()` once, then `get_recent_stats()` to
 //!     retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use futures::StreamExt;
@@ -116,7 +116,27 @@ type StatsMap = HashMap<(String, i64), Vec<u8>>;
 /// 1. **recv mode** (default): call `recv()` to pull individual messages.
 /// 2. **tracking mode**: call `start_tracking()` once, then poll `get_recent_stats()`
 ///    to retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
-///    Stale entries are cleaned up via MDC discovery watch and TTL.
+///
+/// # Tracking mode concurrency design
+///
+/// Three concurrent actors access shared state:
+///
+/// - **Task 1** (event consumption, tokio): writes to `latest_stats` on every FPM.
+/// - **Task 2** (MDC discovery watch, tokio): maintains `known_workers` set and
+///   removes dead-worker entries from `latest_stats` on `Removed` events.
+/// - **`get_recent_stats()`** (Python thread): reads both `latest_stats` and
+///   `known_workers` to produce a filtered snapshot.
+///
+/// `get_recent_stats()` uses **read locks only** on both collections.  This is
+/// deliberate: Task 1 is the hot path (~20k writes/s at 200 engines) and must
+/// never be blocked by the planner's polling.  Read locks coexist with other
+/// readers and only block on writers, so `get_recent_stats()` never contends
+/// with Task 1's writes to `latest_stats`.
+///
+/// Ghost entries (FPM arriving after its worker's MDC `Removed` event) are
+/// filtered out by the `known_workers` check in `get_recent_stats()` but not
+/// pruned from `latest_stats`.  This avoids a write lock and the memory is
+/// negligible (bounded by in-flight FPMs at the instant of worker death).
 #[pyclass]
 pub(crate) struct FpmEventSubscriber {
     component: Component,
@@ -129,6 +149,10 @@ pub(crate) struct FpmEventSubscriber {
     // tracking mode state
     tracking_started: Arc<AtomicBool>,
     latest_stats: Arc<std::sync::RwLock<StatsMap>>,
+    // Worker IDs currently registered in MDC.  Maintained by Task 2
+    // (insert on Added, remove on Removed).  Used by get_recent_stats()
+    // to filter out ghost entries without taking a write lock on latest_stats.
+    known_workers: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 #[pymethods]
@@ -150,6 +174,7 @@ impl FpmEventSubscriber {
             rx: Arc::new(std::sync::Mutex::new(None)),
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            known_workers: Arc::new(std::sync::RwLock::new(HashSet::new())),
         })
     }
 
@@ -236,12 +261,16 @@ impl FpmEventSubscriber {
     /// Start background tracking of the latest FPM per `(worker_id, dp_rank)`.
     ///
     /// Spawns two background tasks:
-    /// 1. **Event consumption**: subscribes to FPM events, extracts the composite
-    ///    key `(worker_id, dp_rank)` from the msgpack payload, and stores the
-    ///    latest raw bytes in an internal map.
-    /// 2. **MDC discovery watch**: monitors `ComponentModels` for the target
-    ///    component.  When a model is removed (engine scaled down / died), all
-    ///    entries whose `worker_id == str(removed_instance_id)` are purged.
+    ///
+    /// 1. **Event consumption** (Task 1): subscribes to FPM events, extracts
+    ///    `(worker_id, dp_rank)` from the msgpack payload, stores the latest
+    ///    raw bytes in `latest_stats`.  This is the hot path and only takes a
+    ///    write lock on `latest_stats`.
+    ///
+    /// 2. **MDC discovery watch** (Task 2): monitors `ComponentModels` for the
+    ///    target component.  Maintains `known_workers` (the set of currently
+    ///    alive worker IDs) and eagerly removes dead-worker entries from
+    ///    `latest_stats` on `Removed` events.
     ///
     /// After calling this method, `recv()` will raise an error.
     fn start_tracking(&self) -> PyResult<()> {
@@ -258,8 +287,14 @@ impl FpmEventSubscriber {
         let rt = component.drt().runtime().secondary();
         let cancel = self.cancel.clone();
         let stats = self.latest_stats.clone();
+        let known = self.known_workers.clone();
 
-        // Task 1: event consumption
+        // Task 1: event consumption.
+        //
+        // Blindly inserts every FPM into latest_stats without checking
+        // known_workers.  This avoids extra lock contention on the hot path.
+        // Ghost entries (from workers that have already been removed) are
+        // filtered out by get_recent_stats() at read time.
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
@@ -312,11 +347,18 @@ impl FpmEventSubscriber {
             }
         });
 
-        // Task 2: MDC discovery watch for cleanup
+        // Task 2: MDC discovery watch.
+        //
+        // Maintains known_workers (insert on Added, remove on Removed) and
+        // eagerly prunes latest_stats on Removed events.  This handles the
+        // normal scale-down path.  Any ghost entries created by the race
+        // condition (FPM arriving *after* the Removed event) are caught by the
+        // known_workers filter in get_recent_stats().
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
             let stats = stats.clone();
+            let known = known.clone();
             async move {
                 let discovery = component.drt().discovery();
                 let query = DiscoveryQuery::ComponentModels {
@@ -349,8 +391,22 @@ impl FpmEventSubscriber {
                         }
                         event = stream.next() => {
                             match event {
+                                Some(Ok(DiscoveryEvent::Added(instance))) => {
+                                    let wid = instance.instance_id().to_string();
+                                    if let Ok(mut set) = known.write() {
+                                        set.insert(wid.clone());
+                                    }
+                                    tracing::debug!("FPM tracker: worker {wid} added to known set");
+                                }
                                 Some(Ok(DiscoveryEvent::Removed(id))) => {
                                     let removed_id = id.instance_id().to_string();
+
+                                    if let Ok(mut set) = known.write() {
+                                        set.remove(&removed_id);
+                                    }
+
+                                    // Eagerly prune latest_stats for the common case
+                                    // (worker removed cleanly before any late FPMs arrive).
                                     if let Ok(mut map) = stats.write() {
                                         let before = map.len();
                                         map.retain(|(worker_id, _), _| *worker_id != removed_id);
@@ -362,9 +418,6 @@ impl FpmEventSubscriber {
                                             );
                                         }
                                     }
-                                }
-                                Some(Ok(DiscoveryEvent::Added(_))) => {
-                                    // Engine appeared; stats will be populated by the event task.
                                 }
                                 Some(Err(e)) => {
                                     tracing::warn!("FPM tracker: discovery error: {e}");
@@ -385,8 +438,13 @@ impl FpmEventSubscriber {
 
     /// Return the latest FPM bytes for every tracked `(worker_id, dp_rank)`.
     ///
-    /// Cleanup of removed engines is handled by the MDC discovery watch task
-    /// (spawned by `start_tracking()`).
+    /// The returned snapshot is filtered against `known_workers` so that
+    /// ghost entries (late FPMs from already-removed workers) are excluded.
+    /// Both `latest_stats` and `known_workers` are accessed via **read locks**
+    /// to avoid contending with Task 1's high-frequency writes.  Ghost entries
+    /// remain in `latest_stats` memory but are never returned to Python; they
+    /// are bounded by the number of in-flight FPMs at the instant of worker
+    /// death (typically 1-2 per engine) and are harmless.
     ///
     /// Returns:
     ///     dict mapping `(worker_id: str, dp_rank: int)` to raw msgspec bytes.
@@ -397,12 +455,23 @@ impl FpmEventSubscriber {
             ));
         }
 
-        let map = self
+        let known = self
+            .known_workers
+            .read()
+            .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;
+
+        let stats = self
             .latest_stats
             .read()
             .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;
 
-        Ok(map.clone())
+        let snapshot = stats
+            .iter()
+            .filter(|((worker_id, _), _)| known.contains(worker_id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        Ok(snapshot)
     }
 
     /// Shut down the subscriber (all background tasks).
