@@ -17,9 +17,11 @@ import logging
 import os
 from typing import Optional
 
+from prometheus_client import Gauge
 from pydantic import BaseModel
 
 from dynamo.planner.defaults import (
+    Service,
     SubComponentType,
     get_service_from_sub_component_type_or_name,
 )
@@ -34,6 +36,13 @@ from dynamo.planner.utils.exceptions import (
     UserProvidedModelNameMismatchError,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
+
+# 1 if workers use GMS weight sharing (--load-format gms) at scale-up time, 0 otherwise
+_SCALE_UP_GMS_AVAILABLE = Gauge(
+    "planner_scale_up_gms_available",
+    "Whether scale-up workers are configured to use GMS weight sharing (--load-format gms)",
+    ["service"],
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -359,6 +368,19 @@ class KubernetesConnector(PlannerConnector):
 
         return prefill_count, decode_count, all_stable
 
+    def _check_weight_load_format(self, service: Service) -> str | None:
+        """Return the --load-format value configured for the service, or None if absent."""
+        try:
+            args = (
+                service.service.get("extraPodSpec", {})
+                .get("mainContainer", {})
+                .get("args", [])
+            )
+            idx = args.index("--load-format")
+            return args[idx + 1]
+        except (ValueError, IndexError):
+            return None
+
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
     ):
@@ -382,6 +404,18 @@ class KubernetesConnector(PlannerConnector):
             )
             current_replicas = service.number_replicas()
             if current_replicas != target_replica.desired_replicas:
+                is_scale_up = target_replica.desired_replicas > current_replicas
+                if is_scale_up:
+                    load_format = self._check_weight_load_format(service)
+                    _SCALE_UP_GMS_AVAILABLE.labels(service=service.name).set(
+                        1 if load_format == "gms" else 0
+                    )
+                    if load_format is not None:
+                        logger.info(
+                            f"Scaling {target_replica.sub_component_type.value} "
+                            f"{service.name!r} {current_replicas}→{target_replica.desired_replicas} "
+                            f"(--load-format {load_format})"
+                        )
                 logger.info(
                     f"Updating {target_replica.sub_component_type.value} component {service.name} to desired replica count {target_replica.desired_replicas}"
                 )
