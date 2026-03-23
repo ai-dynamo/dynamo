@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -196,6 +199,16 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
     assert report["completed_requests"] == num_requests
     assert report["total_input_tokens"] == num_requests * input_tokens
     assert report["total_output_tokens"] == num_requests * output_tokens
+
+
+def _replay_cli_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pythonpath_entries = ["lib/bindings/python/src", "components/src"]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = ":".join(pythonpath_entries)
+    return env
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -525,3 +538,83 @@ def test_replay_cli_prints_table_and_saves_json(tmp_path, monkeypatch, capsys):
     assert "Saved full report to:" in stdout
     assert '"completed_requests"' not in stdout
     assert json.loads(report_path.read_text(encoding="utf-8")) == report
+
+
+def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
+    report_path = tmp_path / "synthetic_report.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.replay",
+            "--input-tokens",
+            "16",
+            "--output-tokens",
+            "8",
+            "--request-count",
+            "3",
+            "--report-json",
+            str(report_path),
+            "--extra-engine-args",
+            '{"block_size":64,"speedup_ratio":1000.0}',
+        ],
+        capture_output=True,
+        check=True,
+        cwd=str(tmp_path),
+        env=_replay_cli_env(),
+        text=True,
+    )
+
+    assert "NVIDIA AIPerf | LLM Metrics" in completed.stdout
+    assert "Saved full report to:" in completed.stdout
+    assert '"completed_requests"' not in completed.stdout
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    _assert_basic_report_counts(
+        report,
+        num_requests=3,
+        input_tokens=16,
+        output_tokens=8,
+    )
+
+
+def test_replay_cli_subprocess_trace_smoke(tmp_path):
+    trace_path = _write_trace_and_args(tmp_path)
+    report_path = tmp_path / "trace_report.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.replay",
+            str(trace_path),
+            "--replay-mode",
+            "offline",
+            "--router-mode",
+            "kv_router",
+            "--num-workers",
+            "2",
+            "--report-json",
+            str(report_path),
+            "--extra-engine-args",
+            '{"block_size":64,"speedup_ratio":1000.0}',
+        ],
+        capture_output=True,
+        check=True,
+        cwd=str(tmp_path),
+        env=_replay_cli_env(),
+        text=True,
+    )
+
+    assert "NVIDIA AIPerf | LLM Metrics" in completed.stdout
+    assert "Saved full report to:" in completed.stdout
+    assert '"completed_requests"' not in completed.stdout
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
