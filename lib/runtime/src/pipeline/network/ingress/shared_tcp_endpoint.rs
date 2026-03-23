@@ -186,6 +186,20 @@ impl SharedTcpServer {
             "TCP worker processing request"
         );
 
+        // Compute network transit time from the transport header stamped right
+        // before the TCP write on the frontend side.
+        if let Some(t1_str) = work_item.headers.get("x-frontend-send-ts-ns")
+            && let Ok(t1_ns) = t1_str.parse::<u64>()
+        {
+            let t2_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let transit_ns = t2_ns.saturating_sub(t1_ns);
+            crate::metrics::work_handler_perf::WORK_HANDLER_NETWORK_TRANSIT_SECONDS
+                .observe(transit_ns as f64 / 1_000_000_000.0);
+        }
+
         // Create span with trace context from headers
         let span = crate::logging::make_handle_payload_span_from_tcp_headers(
             &work_item.headers,

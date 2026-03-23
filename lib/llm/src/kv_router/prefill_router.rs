@@ -10,6 +10,10 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
@@ -21,8 +25,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::protocols::WorkerId,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
+    kv_router::KvPushRouter,
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
@@ -218,6 +221,7 @@ impl PrefillRouter {
                     kv_cache_block_size,
                     kv_router_config,
                     WORKER_TYPE_PREFILL,
+                    Some(self.model_name.clone()),
                 )
                 .await?;
 
@@ -498,6 +502,13 @@ impl PrefillRouter {
     ///
     /// This is the shared worker selection logic used by both `resolve_prefill_worker`
     /// and `query_route`.
+    /// Register externally-provided workers in the prefill router's slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
+            r.chooser.register_workers(worker_ids);
+        }
+    }
+
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
@@ -605,6 +616,13 @@ impl
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
+
+        if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
+            return Err(anyhow::anyhow!(
+                "Prefill worker ID required in Direct routing mode but none found in request. \
+                 Expected prefill_worker_id to be set via x-prefill-instance-id header by external router (e.g., EPP)."
+            ));
+        }
 
         let prefill_result = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self

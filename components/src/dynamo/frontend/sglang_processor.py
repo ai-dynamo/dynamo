@@ -17,6 +17,7 @@ from typing import Any
 
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+from dynamo._core import Client
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
@@ -233,7 +234,10 @@ class SglangProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
         if self.debug_perf:
-            from .perf_instrumentation import enter_generator, exit_generator
+            from .perf_instrumentation import (  # type: ignore[import-not-found, import-untyped]
+                enter_generator,
+                exit_generator,
+            )
 
             active = enter_generator()
             t_start = time.monotonic()
@@ -320,6 +324,8 @@ class SglangProcessor:
         request_id = random_uuid()
 
         # --- Phase 1: Preprocess (semaphore held) ---
+        assert self._worker_semaphore is not None
+        assert self.preprocess_pool is not None
         try:
             async with self._worker_semaphore:
                 future = self.preprocess_pool.submit(
@@ -543,7 +549,7 @@ class SglangEngineFactory:
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
-
+        router: Client | KvRouter
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,

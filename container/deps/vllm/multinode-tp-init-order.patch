@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hotfix for vLLM 0.17.1: multi-node TP init ordering
+# Upstream fix: https://github.com/vllm-project/vllm/commit/86e1060b
+# Upstream PR:  https://github.com/vllm-project/vllm/pull/35892
+# Issue:        https://github.com/vllm-project/vllm/issues/36389
+#
+# WorkerProc.__init__ calls _init_message_queues() before init_device(),
+# but the former needs _INNER_DP_WORLD which the latter creates.
+# Move _init_message_queues() after init_device()+load_model().
+#
+# Remove this patch once vLLM >= 0.17.2 is adopted.
+diff --git a/vllm/v1/executor/multiproc_executor.py b/vllm/v1/executor/multiproc_executor.py
+index e3376ba..39a3646 100644
+--- a/vllm/v1/executor/multiproc_executor.py
++++ b/vllm/v1/executor/multiproc_executor.py
+@@ -586,7 +586,6 @@ class WorkerProc:
+         )
+
+         # Load model
+-        self._init_message_queues(input_shm_handle, vllm_config)
+         is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+         if not is_eep_new_worker:
+             self.worker.init_device()
+@@ -596,6 +595,10 @@ class WorkerProc:
+             )
+             self.worker.load_model()
+
++        # Initialize message queues after init_device() since multi-node setups
++        # (nnodes_within_dp > 1) require distributed groups to be initialized
++        self._init_message_queues(input_shm_handle, vllm_config)
++
+         # Enable environment variable cache (e.g. assume no more
+         # environment variable overrides after this point)
+         enable_envs_cache()

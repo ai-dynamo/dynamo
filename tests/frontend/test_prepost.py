@@ -1553,7 +1553,6 @@ def sampling_params():
         prompt_logprobs=None,
         skip_special_tokens=False,
         spaces_between_special_tokens=True,
-        truncate_prompt_tokens=None,
     )
 
 
