@@ -5,13 +5,10 @@ title: Mocker Trace Replay
 subtitle: Replay Mooncake-style traces through the mocker in offline or online mode
 ---
 
-This guide covers the mocker's trace replay support for Mooncake-style JSONL traces. The replay
-surface is available in two forms:
-
-- `python -m dynamo.mocker --trace-file ...`, which writes a report file and prints a replay summary
-- `python -m dynamo.replay ...`, which prints an AIPerf-style summary table, writes the full
-  replay report JSON to disk, and exposes `offline|online`, `round_robin|kv_router`,
-  `arrival_speedup_ratio`, and synthetic replay inputs directly
+This guide covers trace replay support for Mooncake-style JSONL traces via `python -m dynamo.replay`,
+which prints an AIPerf-style summary table, writes the full replay report JSON to disk, and exposes
+`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, and synthetic replay inputs
+directly.
 
 Unlike normal `dynamo.mocker` usage, offline replay does not launch workers, register endpoints, or
 require NATS, etcd, or a frontend. Online replay does exercise the live mock-worker runtime path.
@@ -31,7 +28,7 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode round_robin \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --report-json /tmp/replay-report.json
 ```
 
@@ -46,27 +43,12 @@ python -m dynamo.replay \
     --num-workers 1 \
     --replay-mode offline \
     --replay-concurrency 100 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --report-json /tmp/replay-report.json
 ```
 
-You can also run replay through the mocker CLI by passing `--trace-file`:
-
-```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B
-```
-
-This writes a JSON report next to the trace file by default:
-
-```text
-/path/to/mooncake_trace.replay.json
-```
-
 `python -m dynamo.replay` prints an AIPerf-style summary table to stdout and writes the full replay
-report JSON to disk. The mocker CLI prints a `Replay Summary` table to stdout and writes the report
-JSON to disk.
+report JSON to disk.
 
 ## Input Format
 
@@ -115,7 +97,7 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --router-config '{"router_queue_policy":"fcfs","router_temperature":0.0}' \
     --report-json /tmp/replay-report.json
 ```
@@ -127,7 +109,6 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 {
   "engine_type": "sglang",
   "num_gpu_blocks": 512,
-  "speedup_ratio": 1000.0,
   "sglang": {
     "page_size": 2
   }
@@ -137,11 +118,6 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 Both `--extra-engine-args` and `--router-config` accept partial JSON objects. Unspecified fields
 fall back to the same defaults used by `MockEngineArgs::default()` and
 `KvRouterConfig::default()`.
-
-### `python -m dynamo.mocker --trace-file`
-
-The mocker CLI supports offline replay and remains useful when you want the historical
-`Replay Summary` output and report-file workflow.
 
 ### Synthetic Replay
 
@@ -156,7 +132,7 @@ python -m dynamo.replay \
     --arrival-interval-ms 0.5 \
     --replay-mode offline \
     --replay-concurrency 50 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}'
+    --extra-engine-args '{"block_size":512}'
 ```
 
 This is useful for parameter sweeps where Mooncake-style prefix structure is not required.
@@ -172,7 +148,7 @@ those timestamps:
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}'
+    --extra-engine-args '{"block_size":512}'
 ```
 
 This is the right mode when you want deterministic replay of the original arrival pattern.
@@ -203,7 +179,7 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}'
+    --extra-engine-args '{"block_size":512}'
 ```
 
 ### Arrival Speedup
@@ -216,7 +192,7 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --num-workers 4 \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}'
+    --extra-engine-args '{"block_size":512}'
 ```
 
 ### Router Modes
@@ -243,14 +219,14 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --router-config '{"router_queue_policy":"fcfs"}'
 
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --router-config '{"router_queue_policy":"lcfs"}'
 ```
 
@@ -258,17 +234,6 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
 an expected production default.
 
 ## Output
-
-Use `--output-file` to override the default report location:
-
-```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B \
-    --output-file /tmp/replay-report.json
-```
-
-If `--output-file` is not set, the report path defaults to `TRACE_STEM.replay.json` in the same directory as the input trace.
 
 The report contains:
 

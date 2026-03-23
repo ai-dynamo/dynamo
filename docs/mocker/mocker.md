@@ -73,9 +73,6 @@ python -m dynamo.mocker \
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
 | `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
-| `--trace-file` | None | Run offline trace replay from a Mooncake-style JSONL trace file |
-| `--output-file` | `TRACE_STEM.replay.json` | Write replay metrics JSON to this path |
-| `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
@@ -127,19 +124,9 @@ python -m dynamo.mocker \
 
 ## Trace Replay
 
-The mocker also supports replaying Mooncake-style traces through both the original mocker CLI and
-the dedicated replay harness.
-
-For the original mocker CLI flow:
-
-```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B
-```
-
-For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`,
-`arrival_speedup_ratio`, and the synthetic replay path directly:
+The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
+`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, and the synthetic replay path
+directly:
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
@@ -147,7 +134,7 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --router-config '{"router_queue_policy":"fcfs"}' \
     --report-json /tmp/replay-report.json
 ```
@@ -163,13 +150,12 @@ python -m dynamo.replay \
     --num-workers 1 \
     --replay-mode offline \
     --replay-concurrency 100 \
-    --extra-engine-args '{"block_size":512,"speedup_ratio":1000.0}' \
+    --extra-engine-args '{"block_size":512}' \
     --report-json /tmp/replay-report.json
 ```
 
 The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
-report JSON to disk. The `dynamo.mocker` trace-file flow still writes a report file and prints a
-`Replay Summary` table.
+report JSON to disk.
 
 For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
 
