@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 use super::policy::{FcfsPolicy, SchedulingPolicy};
-use super::selector::WorkerSelector;
+use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{SchedulingRequest, SchedulingResponse};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -53,6 +53,7 @@ pub struct SchedulerQueue<
     P: SequencePublisher,
     C: WorkerConfigLike,
     S: SchedulingPolicy = FcfsPolicy,
+    Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
     /// Number of requests currently parked in the pending queue.
@@ -65,19 +66,23 @@ pub struct SchedulerQueue<
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
-    selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+    selector: Sel,
     policy: S,
 }
 
-impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
-    SchedulerQueue<P, C, S>
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy,
+    Sel: WorkerSelector<C>,
+> SchedulerQueue<P, C, S, Sel>
 {
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
         block_size: u32,
-        selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+        selector: Sel,
         policy: S,
     ) -> Self {
         if let Some(frac) = threshold_frac {
@@ -341,7 +346,7 @@ mod tests {
         }
         let (cfg_tx, cfg_rx) = watch::channel(configs);
 
-        let selector = Box::new(DefaultWorkerSelector::new(None, "test"));
+        let selector = DefaultWorkerSelector::new(None, "test");
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,

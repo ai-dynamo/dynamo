@@ -46,6 +46,7 @@ tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }
+uuid = { version = "1.18.1" }
 
 # kv-indexer / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"] }

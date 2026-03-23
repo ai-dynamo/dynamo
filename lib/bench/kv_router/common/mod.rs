@@ -11,7 +11,9 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, RouterEvent, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
 };
 pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use dynamo_mocker::common::protocols::{
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_tokens::compute_hash_v2;
@@ -122,11 +124,7 @@ impl EventCollector {
 }
 
 impl KvCacheEventSink for EventCollector {
-    fn publish(
-        &self,
-        event: KvCacheEvent,
-        _block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()> {
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         let timestamp = Instant::now();
         if let Some(events) = self.events.lock().unwrap().as_mut() {
             events.push((event, timestamp));
@@ -361,7 +359,13 @@ pub async fn generate_kv_events(
         tasks.push(tokio::spawn(async move {
             let collector = EventCollector::new();
 
-            let scheduler = Scheduler::new(sched_args, 0, None, Some(collector.clone()), None);
+            let scheduler = Scheduler::new(
+                sched_args,
+                0,
+                None,
+                KvEventPublishers::new(Some(collector.clone()), None),
+                None,
+            );
 
             let mut i = 0;
             let mut target = Instant::now();
