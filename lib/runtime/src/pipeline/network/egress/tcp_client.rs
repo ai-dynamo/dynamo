@@ -512,6 +512,7 @@ impl RequestPlaneClient for TcpRequestClient {
         self.stats
             .bytes_sent
             .fetch_add(payload_len as u64, Ordering::Relaxed);
+        TCP_BYTES_SENT_TOTAL.inc_by(payload_len as f64);
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
@@ -540,7 +541,6 @@ impl RequestPlaneClient for TcpRequestClient {
                     .bytes_received
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
                 TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
-                TCP_BYTES_SENT_TOTAL.inc_by(payload_len as f64);
 
                 // Return connection to pool (health check happens inside)
                 self.pool.return_connection(conn).await;

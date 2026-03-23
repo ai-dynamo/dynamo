@@ -278,9 +278,6 @@ impl HttpService {
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
 
-        // Spawn tokio runtime metrics collector and event-loop canary on this runtime
-        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
@@ -314,6 +311,9 @@ impl HttpService {
             let server = axum_server::bind_rustls(addr, config)
                 .handle(handle.clone())
                 .serve(router.into_make_service());
+
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             tokio::select! {
                 result = server => {
@@ -349,6 +349,9 @@ impl HttpService {
                     ),
                 }
             })?;
+
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {

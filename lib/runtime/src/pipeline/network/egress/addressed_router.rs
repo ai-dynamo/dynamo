@@ -199,12 +199,7 @@ where
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
             connection_info,
-            frontend_send_ts_ns: Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64,
-            ),
+            frontend_send_ts_ns: None,
         };
 
         // next build the two part message where we package the connection info and the request into
@@ -247,6 +242,14 @@ where
         // Prepare trace headers using shared helper
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
+
+        // Stamp send time right before the transport write so the network
+        // transit metric excludes serialization/encoding overhead.
+        let send_ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
 
         // Phase A: Frontend → Backend (network + queue + ack)
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
