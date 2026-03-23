@@ -116,11 +116,11 @@ async fn test_cancel_02_controller_cancel() {
     let cancel_token = sender.cancellation_token();
     assert!(!cancel_token.is_cancelled(), "token must not be cancelled initially");
 
-    // Move anchor into _ — drop it without calling cancel on itself
-    let _ = anchor;
-
-    // Now explicitly cancel via the controller
+    // Explicitly cancel via the controller (anchor still alive, so Drop hasn't fired yet)
     ctrl.cancel();
+
+    // Drop anchor after — Drop's cancel() will no-op due to AtomicBool gate
+    drop(anchor);
 
     // Wait for async propagation
     tokio::time::sleep(Duration::from_millis(50)).await;
