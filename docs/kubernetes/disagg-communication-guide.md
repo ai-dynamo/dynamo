@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Disaggregated Inference Communication Guide
+sidebar-title: Disagg Communication
 subtitle: Best practices for prefill/decode worker communication on Kubernetes
 ---
 
@@ -9,11 +9,11 @@ subtitle: Best practices for prefill/decode worker communication on Kubernetes
 
 This guide explains how prefill and decode workers communicate in Dynamo's disaggregated inference architecture on Kubernetes. It answers the frequently asked question: **Why can't prefill and decode workers use NVLink to communicate on the same node?**
 
-## Executive Summary
+## Summary
 
 - **NVLink cannot be used between Kubernetes pods** due to process isolation and GPU partitioning
 - **RDMA (InfiniBand/RoCE) is required** for production disaggregated deployments
-- **Without RDMA, expect 10-40x performance degradation** in Time To First Token (TTFT)
+- **Without RDMA, expect 200-500x performance degradation** in Time To First Token (TTFT) — observed ~98s TTFT with TCP vs ~200-500ms with RDMA
 - **UCX is the communication layer** that NIXL uses to transfer KV cache between workers
 
 ---
@@ -76,7 +76,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 
 NVLink is a **direct GPU-to-GPU interconnect** that operates at the hardware level. It requires:
 
-1. **Shared CUDA context** - GPUs must be visible to the same process
+1. **Same process** - Both GPUs must be visible to a single process so `cudaDeviceEnablePeerAccess()` can be called
 2. **Direct memory access** - Process must have permission to access both GPU memory regions
 3. **Peer-to-peer mapping** - CUDA runtime must establish memory mappings between GPUs
 
@@ -112,13 +112,13 @@ NVLink is a **direct GPU-to-GPU interconnect** that operates at the hardware lev
 
 2. **GPU Partitioning**: The Kubernetes device plugin assigns specific GPUs to each pod via `CUDA_VISIBLE_DEVICES`. Pod A's GPU 0 and Pod B's GPU 0 are physically different devices.
 
-3. **CUDA Context Separation**: Each pod initializes its own CUDA context. NVLink peer-to-peer transfers require both GPUs to be within the same CUDA context.
+3. **Process/Namespace Isolation**: Each pod runs in a separate process namespace. NVLink peer-to-peer transfers require both GPUs to be within the same process so `cudaDeviceEnablePeerAccess()` can be called.
 
 4. **Memory Registration**: NVLink transfers use `cudaMemcpy` with peer access enabled. This requires calling `cudaDeviceEnablePeerAccess()` - impossible across process boundaries.
 
 ### Where NVLink DOES Work
 
-NVLink works **within a pod** for tensor parallelism:
+NVLink works **within a pod** for parallelism strategies (TP, EP) where all GPUs are in the same process:
 
 ```yaml
 # Decode worker with TP=4 uses NVLink between its 4 GPUs
@@ -128,7 +128,7 @@ VLLMDecodeWorker:
       gpu: "4"   # All 4 GPUs visible to single process
   args:
     - --tensor-parallel-size
-    - "4"        # NVLink used for TP communication
+    - "4"        # NVLink used for TP/EP communication within pod
 ```
 
 ---
@@ -142,7 +142,7 @@ VLLMDecodeWorker:
 | **NVLink** | 450-900 GB/s | ~µs | ✅ (intra-pod only) | ❌ | ✅ |
 | **InfiniBand RDMA** | 20-50 GB/s | ~1 µs | ✅ | ✅ | ✅ (with GPUDirect) |
 | **RoCE RDMA** | 10-25 GB/s | ~2 µs | ✅ | ✅ | ✅ (with GPUDirect) |
-| **TCP** | 1-10 GB/s | ~50 µs | ✅ | ✅ | ❌ (host staging) |
+| **TCP** | 1-3 GB/s | ~50 µs | ✅ | ✅ | ❌ (host staging) |
 
 ### Same-Node Communication
 
@@ -313,7 +313,6 @@ env:
 > **You MUST use the configuration below** — do not copy the standard InfiniBand settings.
 
 > **Note: NIXL is migrating from UCX to libfabric for AWS**
->
 > The Dynamo team is transitioning NIXL to use **libfabric** instead of UCX for AWS EFA deployments. This change is driven by:
 > - **Better topology awareness**: libfabric provides hierarchical topology awareness similar to NCCL
 > - **Native EFA support**: libfabric is the recommended communication layer for AWS EFA
@@ -340,7 +339,7 @@ env:
 **Known Limitations**:
 - GPU Direct RDMA is non-functional on AWS EFA with Ubuntu 24.04 + kernel ≥6.8
 - Expect 3x performance degradation compared to InfiniBand (host-staged transfers)
-- For optimal disaggregated performance on AWS, prefer InfiniBand or RoCE environments until libfabric support is available
+- For optimal disaggregated performance, consider clusters with InfiniBand/RoCE, or wait for libfabric support on AWS
 
 ---
 
@@ -509,13 +508,16 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 
 ### KV Cache Transfer Overhead
 
-| Configuration | TTFT Overhead | Notes |
-|---------------|---------------|-------|
+| Configuration | TTFT Overhead | Source |
+|---------------|---------------|--------|
 | Aggregated (baseline) | 0 | No KV transfer needed |
-| Disagg + InfiniBand RDMA | +200-500ms | Optimal disaggregated performance |
-| Disagg + RoCE RDMA | +300-800ms | Slightly higher than InfiniBand |
-| Disagg + Host-staged RDMA | +1-3s | No GPUDirect, CPU bottleneck |
-| Disagg + TCP only | **+90-100s** | **Effectively unusable** - observed ~98s TTFT on p5.48xlarge |
+| Disagg + InfiniBand RDMA with GPUDirect | +200-500ms | *Expected* based on hardware specs |
+| Disagg + RoCE RDMA with GPUDirect | +300-800ms | *Expected* based on hardware specs |
+| Disagg + Host-staged (no GPUDirect) | +1-3s | *Expected* - CPU bottleneck |
+| Disagg + AWS EFA (without GPUDirect) | ~3x slower than aggregated | *Measured* on AWS p5.48xlarge |
+| Disagg + TCP fallback | **+90-100s** | *Measured* ~98s TTFT on AWS p5.48xlarge |
+
+> **Note**: InfiniBand/RoCE numbers with GPUDirect are expected values based on hardware specifications and have not been validated. AWS measurements reflect EFA without functional GPUDirect RDMA (see [AWS EFA Configuration](#aws-efa-configuration) for details).
 
 ### When Disaggregated Makes Sense
 
@@ -531,12 +533,12 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 
 ### Break-Even Analysis
 
-The KV transfer overhead is amortized across output tokens:
+The KV transfer overhead is amortized across output tokens. Example data from **Llama-3.1-8B-Instruct** on AWS p5.48xlarge:
 
 ```text
 Total Latency = TTFT + (OSL × ITL)
 
-Example (ISL=4000):
+Example (Llama-3.1-8B, ISL=4000):
 - Aggregated:    218ms + (OSL × 8.0ms)
 - Disaggregated: 2400ms + (OSL × 7.8ms)
 
@@ -646,5 +648,5 @@ resources:
 
 - [Disaggregated Serving Architecture](../design-docs/disagg-serving.md)
 - [AIConfigurator Deployment Guide](../features/disaggregated-serving/README.md)
-- [NIXL Benchmark Deployment](../../../deploy/pre-deployment/nixl/README.md)
-- [KV Cache Transfer Methods](../backends/trtllm/kv-cache-transfer.md)
+- [NIXL Benchmark Deployment](../../deploy/pre-deployment/nixl/README.md)
+- [KV Cache Transfer Methods](../backends/trtllm/trtllm-kv-cache-transfer.md)
