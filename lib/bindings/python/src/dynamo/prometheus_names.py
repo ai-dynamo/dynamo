@@ -51,8 +51,10 @@ class frontend_perf:
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
     TEMPLATE_SECONDS = "template_seconds"
-    # Per-token detokenization cost (microseconds)
-    DETOKENIZE_PER_TOKEN_US = "detokenize_per_token_us"
+    # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    DETOKENIZE_TOTAL_US = "detokenize_total_us"
+    # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    DETOKENIZE_TOKEN_COUNT = "detokenize_token_count"
     # Event loop delay canary (sleep 10ms, measure drift)
     EVENT_LOOP_DELAY_SECONDS = "event_loop_delay_seconds"
     # Count of event loop stalls (delay > 5ms)

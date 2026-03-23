@@ -22,7 +22,6 @@ use futures::stream::{self, StreamExt};
 
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::dynamo_nvtx_range;
-use dynamo_runtime::metrics::frontend_perf::DETOKENIZE_PER_TOKEN_US;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
@@ -475,7 +474,6 @@ impl Decoder {
             self.decode_stream.step(token_id)?
         };
         let detokenize_elapsed = detokenize_start.elapsed();
-        DETOKENIZE_PER_TOKEN_US.observe(detokenize_elapsed.as_micros() as f64);
         if let Some(tracker) = &self.tracker {
             tracker.record_detokenize_latency(detokenize_elapsed);
         }

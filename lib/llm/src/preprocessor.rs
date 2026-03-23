@@ -30,7 +30,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
-    STAGE_DURATION_SECONDS, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
+    TOKENIZE_SECONDS,
 };
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
@@ -892,6 +893,15 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
+                    // Flush per-request detokenize accumulators to global Prometheus counters
+                    // (once per request instead of per-token).
+                    if let Some(t) = tracker.as_ref() {
+                        if let Some(total) = t.detokenize_total_latency() {
+                            DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                        }
+                        DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                    }
+
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
                         // Only set event if not already set to avoid overriding existing events (like errors)
                         if response.event.is_none() {
@@ -956,6 +966,15 @@ impl OpenAIPreprocessor {
                                 .and_then(|t| t.detokenize_total_latency()),
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
+
+                        // Flush per-request detokenize accumulators to global Prometheus counters
+                        // (once per request instead of per-token).
+                        if let Some(t) = tracker.as_ref() {
+                            if let Some(total) = t.detokenize_total_latency() {
+                                DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                            }
+                            DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                        }
 
                         // Create annotation string
                         let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {

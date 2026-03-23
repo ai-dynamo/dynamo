@@ -518,8 +518,10 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// Per-token detokenization cost (microseconds)
-    pub const DETOKENIZE_PER_TOKEN_US: &str = "detokenize_per_token_us";
+    /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
+    /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    pub const DETOKENIZE_TOKEN_COUNT: &str = "detokenize_token_count";
     /// Event loop delay canary (sleep 10ms, measure drift)
     pub const EVENT_LOOP_DELAY_SECONDS: &str = "event_loop_delay_seconds";
     /// Count of event loop stalls (delay > 5ms)
