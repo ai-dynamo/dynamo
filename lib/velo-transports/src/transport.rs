@@ -193,8 +193,8 @@ pub trait Transport: Send + Sync {
     fn send_message(
         &self,
         instance_id: InstanceId,
-        header: Vec<u8>,
-        payload: Vec<u8>,
+        header: Bytes,
+        payload: Bytes,
         message_type: MessageType,
         on_error: Arc<dyn TransportErrorHandler>,
     );

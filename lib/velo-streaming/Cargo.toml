@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "velo-streaming"
+version = "0.1.0"
+edition.workspace = true
+description = "Typed exclusive-attachment streaming abstraction over the velo transport"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+grpc = ["dep:tonic", "dep:prost", "dep:tokio-stream", "velo/grpc"]
+
+[dependencies]
+velo-common = { workspace = true }
+velo-messenger = { workspace = true }
+velo-transports = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+dashmap = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+derive_builder = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+socket2 = "0.6"
+
+# Optional dependencies for grpc feature
+tonic = { version = "0.13.1", optional = true }
+prost = { version = "0.13", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+velo = { workspace = true }
+velo-common = { workspace = true }
+velo-messenger = { workspace = true }
+velo-transports = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.13.1"
+
+[[test]]
+name = "grpc_transport"
+required-features = ["grpc"]

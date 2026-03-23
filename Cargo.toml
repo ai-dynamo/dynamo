@@ -25,6 +25,7 @@ members = [
     "lib/velo-events",
     "lib/velo-messenger",
     "lib/velo-transports",
+    "lib/velo-streaming",
 ]
 resolver = "3"
 
@@ -63,6 +64,7 @@ velo-discovery = { path = "lib/velo-discovery", version = "0.1.0" }
 velo-events = { path = "lib/velo-events", version = "0.1.0" }
 velo-messenger = { path = "lib/velo-messenger", version = "0.1.0" }
 velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
+velo-streaming = { path = "lib/velo-streaming", version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -85,6 +87,7 @@ derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
+flume = { version = "0.12.0" }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
     "tokio",

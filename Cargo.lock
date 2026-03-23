@@ -8770,6 +8770,7 @@ dependencies = [
  "velo-discovery",
  "velo-events",
  "velo-messenger",
+ "velo-streaming",
  "velo-transports",
 ]
 
@@ -8848,6 +8849,36 @@ dependencies = [
  "velo-events",
  "velo-transports",
  "xxhash-rust",
+]
+
+[[package]]
+name = "velo-streaming"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dashmap 6.1.0",
+ "derive_builder",
+ "flume",
+ "futures",
+ "prost 0.13.5",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "socket2 0.6.3",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "velo",
+ "velo-common",
+ "velo-messenger",
+ "velo-transports",
 ]
 
 [[package]]

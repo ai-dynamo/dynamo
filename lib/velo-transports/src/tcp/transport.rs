@@ -204,15 +204,11 @@ impl Transport for TcpTransport {
     fn send_message(
         &self,
         instance_id: crate::InstanceId,
-        header: Vec<u8>,
-        payload: Vec<u8>,
+        header: Bytes,
+        payload: Bytes,
         message_type: MessageType,
         on_error: std::sync::Arc<dyn TransportErrorHandler>,
     ) {
-        // Convert to Bytes (one allocation each)
-        let header = Bytes::from(header);
-        let payload = Bytes::from(payload);
-
         let send_msg = SendTask {
             msg_type: message_type,
             header,
@@ -878,8 +874,8 @@ mod tests {
         let error_handler = Arc::new(TrackingErrorHandler::new());
         transport.send_message(
             iid,
-            b"test-header".to_vec(),
-            b"test-payload".to_vec(),
+            Bytes::from_static(b"test-header"),
+            Bytes::from_static(b"test-payload"),
             MessageType::Message,
             error_handler.clone(),
         );

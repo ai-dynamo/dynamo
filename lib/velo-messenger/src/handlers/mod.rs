@@ -606,8 +606,8 @@ async fn send_ack(backend: Arc<VeloBackend>, response_id: ResponseId) -> Result<
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
-        header.to_vec(),
-        vec![],
+        header,
+        Bytes::new(),
         MessageType::Ack,
         get_ack_error_handler(),
     )?;
@@ -625,8 +625,8 @@ async fn send_nack(
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
-        header.to_vec(),
-        payload.to_vec(),
+        header,
+        payload,
         MessageType::Ack,
         get_nack_error_handler(),
     )?;
@@ -644,8 +644,8 @@ async fn send_response_ok(
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
-        header.to_vec(),
-        vec![],
+        header,
+        Bytes::new(),
         MessageType::Response,
         get_response_error_handler(),
     )?;
@@ -664,8 +664,8 @@ async fn send_response(
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
-        header.to_vec(),
-        payload.to_vec(),
+        header,
+        payload,
         MessageType::Response,
         get_response_error_handler(),
     )?;
@@ -685,8 +685,8 @@ async fn send_response_error(
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
-        header.to_vec(),
-        payload.to_vec(),
+        header,
+        payload,
         MessageType::Response,
         get_response_error_handler(),
     )?;
