@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Nsight Systems profiling wrapper for dynamo frontend.
-# Captures NVTX ranges, CPU samples, and context switches.
+# Captures NVTX ranges and CPU samples. Context switches are disabled
+# (--cpuctxsw=none) to reduce overhead.
 #
 # Prerequisites:
 #   - nsys (Nsight Systems CLI) installed
