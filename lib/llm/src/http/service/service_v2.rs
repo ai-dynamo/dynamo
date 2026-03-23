@@ -317,7 +317,9 @@ impl HttpService {
 
             tokio::select! {
                 result = server => {
-                    result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    cancel_token.cancel();
+                    result?;
                 }
                 _ = observer.cancelled() => {
                     state_cancel.cancel();
@@ -365,6 +367,7 @@ impl HttpService {
                 })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
+            cancel_token.cancel();
         }
 
         Ok(())

@@ -253,6 +253,7 @@ impl TcpConnection {
             // With TCP_NODELAY, no need for explicit flush()
             match write_half.write_all(&req.encoded_data).await {
                 Ok(()) => {
+                    TCP_BYTES_SENT_TOTAL.inc_by(req.encoded_data.len() as f64);
                     // Forward response channel to reader task (FIFO ordering)
                     if response_tx_channel.send(req.response_tx).is_err() {
                         tracing::debug!("Reader task closed, stopping writer");
@@ -512,7 +513,6 @@ impl RequestPlaneClient for TcpRequestClient {
         self.stats
             .bytes_sent
             .fetch_add(payload_len as u64, Ordering::Relaxed);
-        TCP_BYTES_SENT_TOTAL.inc_by(payload_len as f64);
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
