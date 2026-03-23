@@ -7,7 +7,8 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, device-aware-weighted, random, kv, direct).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -219,6 +220,9 @@ async def async_main():
     if config.router_mode == "kv":
         router_mode = RouterMode.KV
         kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
+    elif config.router_mode == "device-aware-weighted":
+        router_mode = RouterMode.DeviceAwareWeighted
+        kv_router_config = None
     elif config.router_mode == "random":
         router_mode = RouterMode.Random
         kv_router_config = None

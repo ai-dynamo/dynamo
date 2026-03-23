@@ -45,6 +45,7 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouterMode {
     RoundRobin,
+    DeviceAwareWeighted,
     Random,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
@@ -56,6 +57,7 @@ impl From<RouterMode> for RsRouterMode {
     fn from(mode: RouterMode) -> Self {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
+            RouterMode::DeviceAwareWeighted => Self::DeviceAwareWeighted,
             RouterMode::Random => Self::Random,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,

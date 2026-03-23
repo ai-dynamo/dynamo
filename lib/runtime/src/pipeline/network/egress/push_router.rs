@@ -15,7 +15,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     match_error_chain(err, INHIBITED, &[])
 }
 use crate::{
-    component::{Client, Endpoint},
+    component::{Client, DeviceType, Endpoint},
     engine::{AsyncEngine, Data},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
@@ -28,10 +28,12 @@ use async_trait::async_trait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
+    env,
     future::Future,
     marker::PhantomData,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -68,6 +70,9 @@ where
     /// Number of round robin requests handled. Used to decide which server is next.
     round_robin_counter: Arc<AtomicU64>,
 
+    /// Best-effort in-flight accounting per instance for hetero-policy scheduling.
+    inflight_by_instance: Arc<Mutex<HashMap<u64, usize>>>,
+
     /// The next step in the chain. PushRouter (this object) picks an instances,
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
@@ -92,6 +97,8 @@ where
 pub enum RouterMode {
     #[default]
     RoundRobin,
+    /// Device-aware weighted routing for heterogeneous workers.
+    DeviceAwareWeighted,
     Random,
     KV,
     Direct,
@@ -105,6 +112,26 @@ impl RouterMode {
     pub fn is_direct_routing(&self) -> bool {
         *self == RouterMode::Direct
     }
+}
+
+#[derive(Debug, Clone)]
+struct DeviceAwareWeightedConfig {
+    cuda_to_cpu_ratio: usize,
+}
+
+fn device_aware_weighted_config() -> DeviceAwareWeightedConfig {
+    let ratio = env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(8);
+
+    tracing::debug!(
+        ratio = ratio,
+        "Loaded DeviceAwareWeighted config"
+    );
+
+    DeviceAwareWeightedConfig { cuda_to_cpu_ratio: ratio }
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
@@ -147,6 +174,7 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
+            inflight_by_instance: Arc::new(Mutex::new(HashMap::new())),
             busy_threshold: None,
             fault_detection_enabled: false,
             _phantom: PhantomData,
@@ -172,12 +200,133 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
+            inflight_by_instance: Arc::new(Mutex::new(HashMap::new())),
             busy_threshold,
             fault_detection_enabled: true,
             _phantom: PhantomData,
         };
 
         Ok(router)
+    }
+
+    fn is_image_encode_endpoint(&self) -> bool {
+        let endpoint_id = self.client.endpoint.id();
+        endpoint_id.component == "encoder" && endpoint_id.name == "generate"
+    }
+
+    fn weight_for_instance(
+        instance_id: u64,
+        cfg: &DeviceAwareWeightedConfig,
+        device_types: &HashMap<u64, Option<DeviceType>>,
+    ) -> usize {
+        if matches!(device_types.get(&instance_id), Some(Some(DeviceType::Cpu))) {
+            1
+        } else {
+            cfg.cuda_to_cpu_ratio
+        }
+    }
+
+    fn select_device_aware_weighted_instance(&self) -> anyhow::Result<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            anyhow::bail!("no instances found for endpoint {}", self.client.endpoint.id());
+        }
+
+        // Restrict device-aware weighted behavior to image encode endpoint only.
+        if !self.is_image_encode_endpoint() {
+            let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+            tracing::trace!(
+                endpoint = %self.client.endpoint.id(),
+                selected_instance = instance_ids[counter % count],
+                "DeviceAwareWeighted bypassed (non-encoder endpoint), using round-robin"
+            );
+            return Ok(instance_ids[counter % count]);
+        }
+
+        let cfg = device_aware_weighted_config();
+        let device_types: HashMap<u64, Option<DeviceType>> = self
+            .client
+            .instances()
+            .into_iter()
+            .map(|inst| (inst.instance_id, inst.device_type))
+            .collect();
+
+        let cpu_count = instance_ids
+            .iter()
+            .filter(|id| matches!(device_types.get(id), Some(Some(DeviceType::Cpu))))
+            .count();
+
+        if cpu_count == 0 {
+            tracing::warn!(
+                endpoint = %self.client.endpoint.id(),
+                ratio = cfg.cuda_to_cpu_ratio,
+                "No CPU encode instances found from discovery metadata; DeviceAwareWeighted will treat all instances as CUDA"
+            );
+        }
+        let mut inflight = self
+            .inflight_by_instance
+            .lock()
+            .map_err(|_| anyhow::anyhow!("inflight lock poisoned"))?;
+
+        let active_set = instance_ids.iter().copied().collect::<HashSet<_>>();
+        inflight.retain(|id, _| active_set.contains(id));
+        for id in instance_ids.iter() {
+            inflight.entry(*id).or_insert(0);
+        }
+
+        let start = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize % count;
+
+        let mut best_instance = instance_ids[start];
+        let mut best_inflight = *inflight.get(&best_instance).unwrap_or(&0);
+        let mut best_weight = Self::weight_for_instance(best_instance, &cfg, &device_types);
+
+        tracing::debug!(
+            endpoint = %self.client.endpoint.id(),
+            start_index = start,
+            candidates = ?instance_ids,
+            inflight = ?*inflight,
+            device_types = ?device_types,
+            "DeviceAwareWeighted selecting instance"
+        );
+
+        for offset in 1..count {
+            let idx = (start + offset) % count;
+            let candidate = instance_ids[idx];
+            let candidate_inflight = *inflight.get(&candidate).unwrap_or(&0);
+            let candidate_weight = Self::weight_for_instance(candidate, &cfg, &device_types);
+
+            // Compare load ratios without float: inflight / weight.
+            let left = candidate_inflight.saturating_mul(best_weight);
+            let right = best_inflight.saturating_mul(candidate_weight);
+            tracing::trace!(
+                candidate_instance = candidate,
+                candidate_inflight = candidate_inflight,
+                candidate_weight = candidate_weight,
+                best_instance = best_instance,
+                best_inflight = best_inflight,
+                best_weight = best_weight,
+                left = left,
+                right = right,
+                "DeviceAwareWeighted compare candidate vs best"
+            );
+            if left < right {
+                best_instance = candidate;
+                best_inflight = candidate_inflight;
+                best_weight = candidate_weight;
+            }
+        }
+
+        *inflight.entry(best_instance).or_insert(0) += 1;
+        let selected_inflight = *inflight.get(&best_instance).unwrap_or(&0);
+        tracing::info!(
+            endpoint = %self.client.endpoint.id(),
+            selected_instance = best_instance,
+            selected_weight = best_weight,
+            selected_inflight = selected_inflight,
+            "DeviceAwareWeighted selected instance"
+        );
+        Ok(best_instance)
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -263,6 +412,10 @@ where
                 let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
                 Some(instance_ids[counter % count])
             }
+            RouterMode::DeviceAwareWeighted => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
             RouterMode::Random => {
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
@@ -290,6 +443,11 @@ where
         match self.router_mode {
             RouterMode::RoundRobin => {
                 // Just peek at the current counter value without incrementing
+                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::DeviceAwareWeighted => {
+                // Keep parity with select_next_worker until policy-aware scoring lands.
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
                 Some(instance_ids[counter % count])
             }
@@ -446,6 +604,44 @@ where
         match self.router_mode {
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
+            RouterMode::DeviceAwareWeighted => {
+                let instance_id = self.select_device_aware_weighted_instance()?;
+                let stream = self.generate_with_fault_detection(instance_id, request).await?;
+
+                // Track in-flight lifecycle only for image encode path.
+                if self.is_image_encode_endpoint() {
+                    let ctx = stream.context();
+                    let inflight_clone = self.inflight_by_instance.clone();
+
+                    let wrapped = async_stream::stream! {
+                        let mut first = true;
+                        let mut inner = stream;
+                        while let Some(item) = inner.next().await {
+                            if first {
+                                // Encoder completed and returned first response data.
+                                // Decrement inflight immediately, not waiting for downstream consumption.
+                                first = false;
+                                if let Ok(mut inflight) = inflight_clone.lock() {
+                                    let value = inflight.entry(instance_id).or_insert(0);
+                                    if *value > 0 {
+                                        *value -= 1;
+                                    }
+                                    tracing::debug!(
+                                        instance_id = instance_id,
+                                        inflight_after_decrement = *value,
+                                        "DeviceAwareWeighted inflight decremented on first encoder response"
+                                    );
+                                }
+                            }
+                            yield item;
+                        }
+                    };
+
+                    Ok(ResponseStream::new(Box::pin(wrapped), ctx))
+                } else {
+                    Ok(stream)
+                }
+            },
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }

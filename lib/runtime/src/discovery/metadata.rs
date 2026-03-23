@@ -379,6 +379,7 @@ mod tests {
             endpoint: "ep1".to_string(),
             instance_id: 123,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         });
 
         metadata.register_endpoint(instance).unwrap();
@@ -411,6 +412,7 @@ mod tests {
                         endpoint: format!("ep{}", i),
                         instance_id: i,
                         transport: TransportType::Nats("nats://localhost:4222".to_string()),
+                        device_type: None,
                     });
                     meta.register_endpoint(instance).unwrap();
                 })
@@ -439,6 +441,7 @@ mod tests {
                 endpoint: format!("ep{}", i),
                 instance_id: i,
                 transport: TransportType::Nats("nats://localhost:4222".to_string()),
+                device_type: None,
             });
             metadata.register_endpoint(instance).unwrap();
         }
@@ -526,6 +529,7 @@ mod tests {
             endpoint: "ep1".to_string(),
             instance_id: 1,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         });
         metadata.register_endpoint(endpoint).unwrap();
 
