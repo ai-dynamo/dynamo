@@ -22,6 +22,7 @@ pub use dynamo_runtime::{
 };
 
 use super::context::{Context, callable_accepts_kwarg};
+use super::Payload;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
