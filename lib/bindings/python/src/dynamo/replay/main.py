@@ -22,8 +22,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--router-config")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
-    parser.add_argument("--request-count", type=int)
+    parser.add_argument(
+        "--request-count",
+        type=int,
+        help="number of synthetic requests; when --turns-per-session > 1, this is the number of sessions",
+    )
     parser.add_argument("--arrival-interval-ms", type=float, default=1.0)
+    parser.add_argument("--turns-per-session", type=int, default=1)
+    parser.add_argument("--shared-prefix-ratio", type=float, default=0.0)
+    parser.add_argument("--num-prefix-groups", type=int, default=0)
+    parser.add_argument("--inter-turn-delay-ms", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--replay-concurrency", type=int)
     parser.add_argument(
@@ -45,7 +53,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     using_trace_file = args.trace_file is not None
     synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
-    using_synthetic = any(value is not None for value in synthetic_args)
+    using_synthetic = any(value is not None for value in synthetic_args) or any(
+        (
+            args.turns_per_session != 1,
+            args.shared_prefix_ratio != 0.0,
+            args.num_prefix_groups != 0,
+            args.inter_turn_delay_ms != 0.0,
+        )
+    )
 
     if using_trace_file == using_synthetic:
         parser.error(
@@ -91,6 +106,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
             arrival_interval_ms=args.arrival_interval_ms,
+            turns_per_session=args.turns_per_session,
+            shared_prefix_ratio=args.shared_prefix_ratio,
+            num_prefix_groups=args.num_prefix_groups,
+            inter_turn_delay_ms=args.inter_turn_delay_ms,
         )
 
     report_path = write_report_json(report, args.report_json)

@@ -125,8 +125,11 @@ python -m dynamo.mocker \
 ## Trace Replay
 
 The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
-`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, and the synthetic replay path
-directly:
+`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
+admission, and synthetic workload generation directly:
+
+The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Engine settings
+such as `block_size`, `engine_type`, and compute speedups still belong in `--extra-engine-args`.
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
@@ -154,8 +157,39 @@ python -m dynamo.replay \
     --report-json /tmp/replay-report.json
 ```
 
+Synthetic replay also supports workload-style generation for shared-prefix and multi-turn tests:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 5000 \
+    --output-tokens 500 \
+    --request-count 200 \
+    --turns-per-session 3 \
+    --shared-prefix-ratio 0.5 \
+    --num-prefix-groups 8 \
+    --inter-turn-delay-ms 250 \
+    --replay-mode offline \
+    --replay-concurrency 32 \
+    --extra-engine-args '{"block_size":512}' \
+    --report-json /tmp/replay-report.json
+```
+
+For trace files, replay also understands multi-turn sessions when records share `session_id`. The
+first turn uses `timestamp`/`created_time`; later turns can use `delay` or `delay_ms`:
+
+```json
+{"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
+{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+```
+
 The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
 report JSON to disk.
+
+Timing semantics:
+
+- trace mode honors first-turn timestamps and inter-turn delays
+- concurrency mode ignores first-turn timestamps but still enforces inter-turn delays
+- in concurrency mode, TTFT is measured from actual dispatch under the in-flight cap
 
 For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
 
