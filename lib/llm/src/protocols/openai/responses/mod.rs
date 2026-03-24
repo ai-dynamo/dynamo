@@ -3,26 +3,27 @@
 
 pub mod stream_converter;
 
+use std::collections::HashMap;
+
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
     InputParam, InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
-    ServiceTier, Status, Summary, SummaryPart, TextResponseFormatConfiguration, Tool,
+    ServiceTier, Status, SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool,
     ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
-    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartVideo,
-    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
-    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
-    FunctionName, FunctionObject, ImageDetail as ChatImageDetail, ImageUrl, ResponseFormat,
-    ServiceTier as ChatServiceTier, VideoUrl,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
+    CreateChatCompletionRequest, FunctionName, FunctionObject, ImageDetail as ChatImageDetail,
+    ImageUrl, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -145,13 +146,18 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
 // ---------------------------------------------------------------------------
 
 /// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
-fn convert_image_detail(
-    detail: &dynamo_protocols::types::responses::ImageDetail,
-) -> ChatImageDetail {
-    match detail {
-        dynamo_protocols::types::responses::ImageDetail::Auto => ChatImageDetail::Auto,
-        dynamo_protocols::types::responses::ImageDetail::Low => ChatImageDetail::Low,
-        dynamo_protocols::types::responses::ImageDetail::High => ChatImageDetail::High,
+/// The responses module re-exports an `ImageDetail` from the upstream async-openai
+/// crate which is distinct from `dynamo_protocols::types::ImageDetail` (chat).
+/// We bridge via serde to avoid direct cross-crate type dependencies.
+fn convert_image_detail_str(detail: &impl serde::Serialize) -> ChatImageDetail {
+    match serde_json::to_value(detail)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .as_deref()
+    {
+        Some("low") => ChatImageDetail::Low,
+        Some("high") => ChatImageDetail::High,
+        _ => ChatImageDetail::Auto,
     }
 }
 
@@ -186,44 +192,14 @@ fn convert_input_content_to_user_content(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: ImageUrl {
                             url,
-                            detail: Some(convert_image_detail(&img.detail)),
+                            detail: Some(convert_image_detail_str(&img.detail)),
                             uuid: None,
                         },
                     },
                 ));
-            }
-            InputContent::InputVideo(vid) => {
-                let url = url::Url::parse(&vid.video)
-                    .map_err(|e| anyhow::anyhow!("Invalid video URL '{}': {}", vid.video, e))?;
-                chat_parts.push(ChatCompletionRequestUserMessageContentPart::VideoUrl(
-                    ChatCompletionRequestMessageContentPartVideo {
-                        video_url: VideoUrl {
-                            url,
-                            detail: None,
-                            uuid: None,
-                        },
-                    },
-                ));
-            }
-            InputContent::InputAudio(_) => {
-                return Err(anyhow::anyhow!("Audio input content is not yet supported"));
             }
             InputContent::InputFile(_) => {
                 return Err(anyhow::anyhow!("File input content is not yet supported"));
-            }
-            InputContent::OutputText(t) => {
-                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText {
-                        text: t.text.clone(),
-                    },
-                ));
-            }
-            InputContent::Refusal(r) => {
-                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText {
-                        text: r.refusal.clone(),
-                    },
-                ));
             }
         }
     }
@@ -236,8 +212,6 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .iter()
         .filter_map(|p| match p {
             InputContent::InputText(t) => Some(t.text.as_str()),
-            InputContent::OutputText(t) => Some(t.text.as_str()),
-            InputContent::Refusal(r) => Some(r.refusal.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -530,7 +504,10 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
                 top_logprobs,
-                metadata: resp.inner.metadata,
+                metadata: resp
+                    .inner
+                    .metadata
+                    .map(|m| serde_json::to_value(m).unwrap_or_default()),
                 stream,
                 tools,
                 tool_choice,
@@ -669,9 +646,10 @@ pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
 /// Build an assistant text message output item.
 fn make_text_message(id: String, text: String) -> OutputItem {
     OutputItem::Message(OutputMessage {
-        id: Some(id),
+        id,
         role: AssistantRole::Assistant,
-        status: Some(OutputStatus::Completed),
+        status: OutputStatus::Completed,
+        phase: None,
         content: vec![OutputMessageContent::OutputText(OutputTextContent {
             text,
             annotations: vec![],
@@ -685,6 +663,7 @@ fn make_function_call(name: String, arguments: String) -> OutputItem {
     OutputItem::FunctionCall(FunctionToolCall {
         arguments,
         call_id: format!("call_{}", Uuid::new_v4().simple()),
+        namespace: None,
         name,
         id: Some(format!("fc_{}", Uuid::new_v4().simple())),
         status: Some(OutputStatus::Completed),
@@ -712,6 +691,7 @@ pub fn chat_completion_to_response(
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
                     arguments: tc.function.arguments.clone(),
                     call_id: tc.id.clone(),
+                    namespace: None,
                     name: tc.function.name.clone(),
                     id: Some(format!("fc_{}", Uuid::new_v4().simple())),
                     status: Some(OutputStatus::Completed),
@@ -725,7 +705,7 @@ pub fn chat_completion_to_response(
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: format!("rs_{}", Uuid::new_v4().simple()),
-                summary: vec![SummaryPart::SummaryText(Summary {
+                summary: vec![SummaryPart::SummaryText(SummaryTextContent {
                     text: reasoning_text,
                 })],
                 content: None,
@@ -807,13 +787,8 @@ pub fn chat_completion_to_response(
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
         background: Some(false),
-        frequency_penalty: Some(0.0),
-        metadata: Some(serde_json::Value::Object(Default::default())),
+        metadata: Some(HashMap::new()),
         parallel_tool_calls: Some(true),
-        presence_penalty: Some(0.0),
-        // Echo actual request values, falling back to spec defaults.
-        // store: false because this branch does not persist responses.
-        store: params.store.or(Some(false)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(params.text.clone().unwrap_or(ResponseTextParam {
             format: TextResponseFormatConfiguration::Text,
@@ -839,7 +814,6 @@ pub fn chat_completion_to_response(
         incomplete_details: None,
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
-        max_tool_calls: None,
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
@@ -877,8 +851,8 @@ pub fn chat_completion_to_response(
 mod tests {
     use dynamo_protocols::types::responses::{
         CreateResponse, FunctionCallOutput, FunctionCallOutputItemParam, FunctionTool,
-        FunctionToolCall, ImageDetail, InputContent, InputImageContent, InputItem, InputMessage,
-        InputParam, InputRole, InputTextContent, Item, MessageItem, Tool,
+        FunctionToolCall, InputContent, InputImageContent, InputItem, InputMessage, InputParam,
+        InputRole, InputTextContent, Item, MessageItem, Tool,
     };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
@@ -1006,9 +980,10 @@ mod tests {
                         status: None,
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
-                        id: Some("msg_1".into()),
+                        id: "msg_1".into(),
                         role: AssistantRole::Assistant,
-                        status: Some(OutputStatus::Completed),
+                        status: OutputStatus::Completed,
+                        phase: None,
                         content: vec![OutputMessageContent::OutputText(OutputTextContent {
                             text: "4".into(),
                             annotations: vec![],
@@ -1055,7 +1030,7 @@ mod tests {
                                 text: "What is in this image?".into(),
                             }),
                             InputContent::InputImage(InputImageContent {
-                                detail: ImageDetail::Auto,
+                                detail: Default::default(), // ImageDetail::Auto
                                 file_id: None,
                                 image_url: Some("https://example.com/cat.jpg".into()),
                             }),
@@ -1099,6 +1074,7 @@ mod tests {
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
                         arguments: r#"{"location":"SF"}"#.into(),
                         call_id: "call_123".into(),
+                        namespace: None,
                         name: "get_weather".into(),
                         id: None,
                         status: None,
@@ -1144,6 +1120,7 @@ mod tests {
                     })),
                     strict: Some(true),
                     description: Some("Get weather info".into()),
+                    defer_loading: None,
                 })]),
                 ..Default::default()
             },
@@ -1511,25 +1488,23 @@ thinking
     }
 
     #[test]
-    fn test_output_message_deserializes_without_id_and_status() {
-        use dynamo_protocols::types::responses::{InputItem, Item, MessageItem};
+    fn test_output_message_without_id_and_status_fails_to_deserialize() {
+        use dynamo_protocols::types::responses::InputItem;
 
+        // With the upstream schema, `id` (String) and `status` (OutputStatus) are
+        // required on OutputMessage. An assistant message without them can't
+        // deserialize as either OutputMessage or InputMessage (wrong role).
         let json = serde_json::json!({
             "role": "assistant",
             "content": [{"type": "output_text", "text": "Hello!", "annotations": []}],
             "type": "message"
         });
 
-        let item: InputItem = serde_json::from_value(json).unwrap();
-        match item {
-            InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
-                assert_eq!(msg.role, AssistantRole::Assistant);
-                assert_eq!(msg.content.len(), 1);
-                assert!(msg.id.is_none());
-                assert_eq!(msg.status, None);
-            }
-            other => panic!("Expected Item::Message(Output), got {:?}", other),
-        }
+        let result = serde_json::from_value::<InputItem>(json);
+        assert!(
+            result.is_err(),
+            "Expected deserialization to fail without id and status"
+        );
     }
 
     #[test]
@@ -1547,8 +1522,8 @@ thinking
         let item: InputItem = serde_json::from_value(json).unwrap();
         match item {
             InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
-                assert_eq!(msg.id.as_deref(), Some("msg_abc123"));
-                assert_eq!(msg.status, Some(OutputStatus::Completed));
+                assert_eq!(msg.id, "msg_abc123");
+                assert_eq!(msg.status, OutputStatus::Completed);
             }
             other => panic!("Expected Item::Message(Output), got {:?}", other),
         }

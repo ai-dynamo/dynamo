@@ -134,9 +134,9 @@ impl_from!(String, ModerationInput);
 impl_from!(&String, ModerationInput);
 
 // From String "family" to EmbeddingInput
-impl_from!(&str, EmbeddingInput);
-impl_from!(String, EmbeddingInput);
-impl_from!(&String, EmbeddingInput);
+// UPSTREAM: impl_from!(&str, EmbeddingInput);
+// UPSTREAM: impl_from!(String, EmbeddingInput);
+// UPSTREAM: impl_from!(&String, EmbeddingInput);
 
 /// for `impl_default!(Enum)`, implements `Default` for `Enum` as `Enum::String("")` where `Enum` has `String` variant
 macro_rules! impl_default {
@@ -151,7 +151,7 @@ macro_rules! impl_default {
 
 // Prompt is now from upstream -- Default provided there.
 impl_default!(ModerationInput);
-impl_default!(EmbeddingInput);
+// UPSTREAM: impl_default!(EmbeddingInput);
 
 impl Default for InputSource {
     fn default() -> Self {
@@ -410,7 +410,7 @@ macro_rules! impl_from_for_integer_array {
     };
 }
 
-impl_from_for_integer_array!(u32, EmbeddingInput);
+// UPSTREAM: impl_from_for_integer_array!(u32, EmbeddingInput);
 // Prompt is from upstream -- impls provided there.
 // impl_from_for_integer_array!(u32, Prompt);
 
@@ -508,7 +508,7 @@ macro_rules! impl_from_for_array_of_integer_array {
     };
 }
 
-impl_from_for_array_of_integer_array!(u32, EmbeddingInput);
+// UPSTREAM: impl_from_for_array_of_integer_array!(u32, EmbeddingInput);
 // impl_from_for_array_of_integer_array!(u32, Prompt);
 
 // UPSTREAM: impl From<&str> for ChatCompletionFunctionCall {
