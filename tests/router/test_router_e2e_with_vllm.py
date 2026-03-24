@@ -75,6 +75,7 @@ def _get_device_visibility_env_var() -> str:
         return "ZE_AFFINITY_MASK"
     return "CUDA_VISIBLE_DEVICES"
 
+
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
 VLLM_ARGS: Dict[str, Any] = {
