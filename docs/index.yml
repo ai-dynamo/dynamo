@@ -89,6 +89,8 @@ navigation:
             path: kubernetes/deployment/multinode-deployment.md
           - page: Grove
             path: kubernetes/grove.md
+          - page: Topology Aware Scheduling
+            path: kubernetes/topology-aware-scheduling.md
 
   # ==================== User Guides ====================
   - section: User Guides

@@ -14,7 +14,7 @@ kr8s==0.20.13
 kubernetes_asyncio==32.0.0
 matplotlib==3.10.7
 matplotlib-stubs
-mistral-common==1.9.1
+mistral-common>=1.10.0
 mypy==1.18.2
 # For NATS object store verification in router tests
 nats-py==2.12.0

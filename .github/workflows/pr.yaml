@@ -99,7 +99,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -187,7 +187,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -213,7 +213,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -238,7 +238,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -259,11 +259,11 @@ jobs:
     name: vllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: vllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -274,11 +274,11 @@ jobs:
     name: sglang-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: sglang
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -289,11 +289,11 @@ jobs:
     name: trtllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: trtllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -343,7 +343,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda12-amd64
+      image_suffix: vllm-runtime-cuda12
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -360,7 +360,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda12-amd64
+      image_suffix: sglang-runtime-cuda12
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -377,7 +377,7 @@ jobs:
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
-      image_suffix: trtllm-runtime-cuda13-amd64
+      image_suffix: trtllm-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
