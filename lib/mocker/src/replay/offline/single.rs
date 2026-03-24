@@ -136,7 +136,7 @@ impl SingleRuntime {
     }
 
     fn advance_to_next_trace_arrival(&mut self) -> anyhow::Result<()> {
-        let next_arrival_ms = match &self.admission {
+        let next_arrival_ms = match &mut self.admission {
             AdmissionSource::Requests(pending) => pending
                 .front()
                 .and_then(|request| request.arrival_timestamp_ms),

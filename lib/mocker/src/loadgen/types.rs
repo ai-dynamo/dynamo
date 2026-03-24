@@ -3,6 +3,7 @@
 
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, WorkerId};
+use dynamo_tokens::SequenceHash;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
@@ -82,11 +83,18 @@ pub struct RouterSequence {
     pub external_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayRequestHashes {
+    pub local_block_hashes: Vec<LocalBlockHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReadyTurn {
     pub request_uuid: Uuid,
     pub session_id: String,
     pub turn_index: usize,
     pub scheduled_ready_at_ms: f64,
+    pub replay_hashes: Option<ReplayRequestHashes>,
     pub request: DirectRequest,
 }

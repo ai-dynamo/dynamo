@@ -508,7 +508,7 @@ impl LiveRuntime {
             }
 
             let (is_drained, next_ready_ms) = {
-                let driver = workload.driver.lock().unwrap();
+                let mut driver = workload.driver.lock().unwrap();
                 (driver.is_drained(), driver.next_ready_time_ms())
             };
             if is_drained {

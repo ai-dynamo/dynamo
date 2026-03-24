@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 
 use anyhow::{Result, anyhow, bail};
 use uuid::Uuid;
@@ -17,7 +18,6 @@ enum DriverMode {
 #[derive(Debug)]
 struct SessionRuntime {
     session_id: String,
-    session_index: usize,
     turns: Vec<TurnTrace>,
     next_turn_index: usize,
     next_ready_at_ms: Option<f64>,
@@ -30,12 +30,46 @@ struct InFlightTurn {
     turn_index: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ReadySession {
+    ready_at_ms: f64,
+    session_index: usize,
+    turn_index: usize,
+}
+
+impl PartialEq for ReadySession {
+    fn eq(&self, other: &Self) -> bool {
+        self.ready_at_ms.to_bits() == other.ready_at_ms.to_bits()
+            && self.session_index == other.session_index
+            && self.turn_index == other.turn_index
+    }
+}
+
+impl Eq for ReadySession {}
+
+impl Ord for ReadySession {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .ready_at_ms
+            .total_cmp(&self.ready_at_ms)
+            .then_with(|| other.session_index.cmp(&self.session_index))
+            .then_with(|| other.turn_index.cmp(&self.turn_index))
+    }
+}
+
+impl PartialOrd for ReadySession {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkloadDriver {
     mode: DriverMode,
     block_size: usize,
     sessions: Vec<SessionRuntime>,
     in_flight: HashMap<Uuid, InFlightTurn>,
+    ready_sessions: BinaryHeap<ReadySession>,
 }
 
 impl WorkloadDriver {
@@ -48,13 +82,11 @@ impl WorkloadDriver {
     }
 
     fn new(trace: Trace, mode: DriverMode) -> Result<Self> {
-        let sessions = trace
+        let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
-            .enumerate()
-            .map(|(session_index, session)| SessionRuntime {
+            .map(|session| SessionRuntime {
                 session_id: session.session_id,
-                session_index,
                 turns: session.turns,
                 next_turn_index: 0,
                 next_ready_at_ms: Some(match mode {
@@ -65,11 +97,24 @@ impl WorkloadDriver {
             })
             .collect();
 
+        let ready_sessions = sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(session_index, session)| {
+                Some(ReadySession {
+                    ready_at_ms: session.next_ready_at_ms?,
+                    session_index,
+                    turn_index: session.next_turn_index,
+                })
+            })
+            .collect();
+
         Ok(Self {
             mode,
             block_size: trace.block_size,
             sessions,
             in_flight: HashMap::new(),
+            ready_sessions,
         })
     }
 
@@ -78,31 +123,32 @@ impl WorkloadDriver {
             return Vec::new();
         }
 
-        let mut ready_sessions = self
-            .sessions
-            .iter()
-            .filter_map(|session| {
-                let ready_at_ms = session.next_ready_at_ms?;
-                if session.in_flight.is_some() || ready_at_ms > now_ms {
-                    return None;
-                }
-                Some((ready_at_ms, session.session_index))
-            })
-            .collect::<Vec<_>>();
-        ready_sessions.sort_by(|left, right| {
-            left.0
-                .total_cmp(&right.0)
-                .then_with(|| left.1.cmp(&right.1))
-        });
-
         let mut emitted = Vec::new();
-        for (_, session_index) in ready_sessions.into_iter().take(limit) {
+        while emitted.len() < limit {
+            let Some(ready_session) = self.ready_sessions.pop() else {
+                break;
+            };
+            if ready_session.ready_at_ms > now_ms {
+                self.ready_sessions.push(ready_session);
+                break;
+            }
+
+            let session_index = ready_session.session_index;
             let session = &mut self.sessions[session_index];
+            if session.in_flight.is_some()
+                || session.next_turn_index != ready_session.turn_index
+                || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
+            {
+                continue;
+            }
             let turn_index = session.next_turn_index;
             let scheduled_ready_at_ms = session
                 .next_ready_at_ms
                 .expect("ready session must have a timestamp");
             let request_uuid = Uuid::new_v4();
+            let replay_hashes = session.turns[turn_index]
+                .to_replay_hashes(self.block_size)
+                .expect("validated trace should always synthesize replay hashes");
             let arrival_timestamp_ms = match self.mode {
                 DriverMode::Trace => Some(scheduled_ready_at_ms),
                 DriverMode::Concurrency => None,
@@ -124,6 +170,7 @@ impl WorkloadDriver {
                 session_id: session.session_id.clone(),
                 turn_index,
                 scheduled_ready_at_ms,
+                replay_hashes: Some(replay_hashes),
                 request,
             });
         }
@@ -151,19 +198,33 @@ impl WorkloadDriver {
         session.in_flight = None;
         session.next_turn_index = in_flight.turn_index + 1;
         if session.next_turn_index < session.turns.len() {
-            session.next_ready_at_ms =
-                Some(now_ms + session.turns[session.next_turn_index].delay_after_previous_ms);
+            let ready_at_ms =
+                now_ms + session.turns[session.next_turn_index].delay_after_previous_ms;
+            session.next_ready_at_ms = Some(ready_at_ms);
+            self.ready_sessions.push(ReadySession {
+                ready_at_ms,
+                session_index: in_flight.session_index,
+                turn_index: session.next_turn_index,
+            });
         } else {
             session.next_ready_at_ms = None;
         }
         Ok(())
     }
 
-    pub fn next_ready_time_ms(&self) -> Option<f64> {
-        self.sessions
-            .iter()
-            .filter_map(|session| session.next_ready_at_ms)
-            .min_by(|left, right| left.total_cmp(right))
+    pub fn next_ready_time_ms(&mut self) -> Option<f64> {
+        loop {
+            let ready_session = *self.ready_sessions.peek()?;
+            let session = &self.sessions[ready_session.session_index];
+            if session.in_flight.is_some()
+                || session.next_turn_index != ready_session.turn_index
+                || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
+            {
+                self.ready_sessions.pop();
+                continue;
+            }
+            return Some(ready_session.ready_at_ms);
+        }
     }
 
     pub fn is_drained(&self) -> bool {

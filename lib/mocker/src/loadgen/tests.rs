@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -82,6 +83,29 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
         .unwrap();
     assert_eq!(request.tokens, vec![1, 1, 1, 1, 2, 2]);
     assert_eq!(request.arrival_timestamp_ms, Some(5.0));
+}
+
+#[test]
+fn test_turn_replay_hashes_match_full_blocks_only() {
+    let turn = TurnTrace {
+        input_length: 6,
+        max_output_tokens: 3,
+        hash_ids: vec![1, 2],
+        delay_after_previous_ms: 0.0,
+    };
+
+    let request = turn
+        .to_direct_request(4, Uuid::from_u128(1), Some(5.0))
+        .unwrap();
+    let replay_hashes = turn.to_replay_hashes(4).unwrap();
+    let expected_local = compute_block_hash_for_seq(&request.tokens, 4, None, None);
+
+    assert_eq!(replay_hashes.local_block_hashes, expected_local);
+    assert_eq!(
+        replay_hashes.sequence_hashes,
+        compute_seq_hash_for_block(&expected_local)
+    );
+    assert_eq!(replay_hashes.local_block_hashes.len(), 1);
 }
 
 #[test]
@@ -184,4 +208,55 @@ fn test_driver_requires_completion_before_follow_up_turn() {
     let second = driver.pop_ready(15.0, 1);
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].turn_index, 1);
+}
+
+#[test]
+fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![
+            SessionTrace {
+                session_id: "a".to_string(),
+                first_arrival_timestamp_ms: Some(10.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![2],
+                        delay_after_previous_ms: 5.0,
+                    },
+                ],
+            },
+            SessionTrace {
+                session_id: "b".to_string(),
+                first_arrival_timestamp_ms: Some(20.0),
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![3],
+                    delay_after_previous_ms: 0.0,
+                }],
+            },
+        ],
+    };
+
+    let mut driver = trace.into_trace_driver().unwrap();
+    assert_eq!(driver.next_ready_time_ms(), Some(10.0));
+
+    let first = driver.pop_ready(10.0, 1);
+    assert_eq!(first.len(), 1);
+    assert_eq!(driver.next_ready_time_ms(), Some(20.0));
+
+    driver.on_complete(first[0].request_uuid, 25.0).unwrap();
+    assert_eq!(driver.next_ready_time_ms(), Some(20.0));
+
+    let second = driver.pop_ready(20.0, 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(driver.next_ready_time_ms(), Some(30.0));
 }

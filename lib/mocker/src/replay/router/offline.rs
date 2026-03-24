@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
     OverlapScores, RouterEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -26,6 +27,7 @@ use super::shared::{
 };
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
+use crate::loadgen::ReplayRequestHashes;
 
 type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 
@@ -45,6 +47,10 @@ impl SyncReplayIndexer {
     fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
         let sequence = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
         self.tree.find_matches(sequence, false)
+    }
+
+    fn find_matches_for_hashes(&self, local_block_hashes: Vec<LocalBlockHash>) -> OverlapScores {
+        self.tree.find_matches(local_block_hashes, false)
     }
 
     fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
@@ -120,7 +126,6 @@ impl PartialOrd for QueueEntry {
 pub(crate) struct OfflineReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
-    runtime: tokio::runtime::Runtime,
     queue_threshold: Option<f64>,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
@@ -142,10 +147,6 @@ impl OfflineReplayRouter {
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);
         let policy = replay_policy(&config, args);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| anyhow!("failed to create offline replay router runtime: {e}"))?;
         let queue_threshold = if num_workers > 1 {
             config.router_queue_threshold
         } else {
@@ -155,7 +156,6 @@ impl OfflineReplayRouter {
         Ok(Self {
             config,
             block_size: args.block_size as u32,
-            runtime,
             queue_threshold,
             workers_with_configs,
             slots,
@@ -167,12 +167,13 @@ impl OfflineReplayRouter {
         })
     }
 
-    pub(crate) fn submit_request(
+    pub(crate) fn submit_request_with_hashes(
         &mut self,
         request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
         now_ms: f64,
     ) -> Result<Option<usize>> {
-        let pending = self.build_pending_request(request)?;
+        let pending = self.build_pending_request(request, replay_hashes)?;
         let should_queue = self
             .queue_threshold
             .is_some_and(|threshold| self.all_workers_busy(threshold));
@@ -197,15 +198,15 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn mark_prefill_completed(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
-        self.runtime
-            .block_on(self.slots.mark_prefill_completed(&uuid.to_string()))
+        self.slots
+            .mark_prefill_completed_sync(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
         self.drain_pending()
     }
 
     pub(crate) fn free(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
-        self.runtime
-            .block_on(self.slots.free(&uuid.to_string()))
+        self.slots
+            .free_sync(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
         self.drain_pending()
     }
@@ -225,17 +226,44 @@ impl OfflineReplayRouter {
         )
     }
 
-    fn build_pending_request(&self, request: &DirectRequest) -> Result<PendingRequest> {
+    fn build_pending_request(
+        &self,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+    ) -> Result<PendingRequest> {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
-        let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
-        let token_seq = self.config.compute_seq_hashes_for_tracking(
-            &request.tokens,
-            self.block_size,
-            None,
-            None,
-        );
+        let (overlaps, token_seq) = match replay_hashes {
+            Some(replay_hashes) => {
+                let overlaps = self
+                    .indexer
+                    .find_matches_for_hashes(replay_hashes.local_block_hashes);
+                let token_seq = if !self.config.router_track_active_blocks {
+                    None
+                } else if self.config.router_assume_kv_reuse {
+                    Some(replay_hashes.sequence_hashes)
+                } else {
+                    self.config.compute_seq_hashes_for_tracking(
+                        &request.tokens,
+                        self.block_size,
+                        None,
+                        None,
+                    )
+                };
+                (overlaps, token_seq)
+            }
+            None => {
+                let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
+                let token_seq = self.config.compute_seq_hashes_for_tracking(
+                    &request.tokens,
+                    self.block_size,
+                    None,
+                    None,
+                );
+                (overlaps, token_seq)
+            }
+        };
 
         Ok(PendingRequest {
             uuid,
@@ -265,8 +293,8 @@ impl OfflineReplayRouter {
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let request_id = request.request_id();
 
-        self.runtime
-            .block_on(self.slots.add_request(SequenceRequest {
+        self.slots
+            .add_request_sync(SequenceRequest {
                 request_id,
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
@@ -274,7 +302,7 @@ impl OfflineReplayRouter {
                 expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: None,
-            }))
+            })
             .map_err(anyhow::Error::from)?;
 
         Ok(worker_idx)

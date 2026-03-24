@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    ArrivalSpec, DelaySpec, LengthSpec, RouterSequence, SequenceHashMode, SessionPartitionSpec,
-    SessionTrace, SyntheticTraceSpec, Trace, TurnTrace,
+    ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes, RouterSequence, SequenceHashMode,
+    SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace, TurnTrace,
 };
 use crate::common::protocols::DirectRequest;
 
@@ -45,12 +45,7 @@ struct RawMooncakeRecord {
 }
 
 impl TurnTrace {
-    pub fn to_direct_request(
-        &self,
-        block_size: usize,
-        request_uuid: Uuid,
-        arrival_timestamp_ms: Option<f64>,
-    ) -> Result<DirectRequest> {
+    fn validate_block_size_and_capacity(&self, block_size: usize) -> Result<()> {
         if block_size == 0 {
             bail!("block_size must be greater than 0");
         }
@@ -61,6 +56,16 @@ impl TurnTrace {
                 self.hash_ids.len() * block_size
             );
         }
+        Ok(())
+    }
+
+    pub fn to_direct_request(
+        &self,
+        block_size: usize,
+        request_uuid: Uuid,
+        arrival_timestamp_ms: Option<f64>,
+    ) -> Result<DirectRequest> {
+        self.validate_block_size_and_capacity(block_size)?;
 
         let mut tokens = Vec::with_capacity(self.input_length);
         for &hash_id in &self.hash_ids {
@@ -86,6 +91,24 @@ impl TurnTrace {
             uuid: Some(request_uuid),
             dp_rank: 0,
             arrival_timestamp_ms,
+        })
+    }
+
+    pub fn to_replay_hashes(&self, block_size: usize) -> Result<ReplayRequestHashes> {
+        self.validate_block_size_and_capacity(block_size)?;
+
+        let num_full_blocks = self.input_length / block_size;
+        let local_block_hashes = self
+            .hash_ids
+            .iter()
+            .take(num_full_blocks)
+            .map(|&hash_id| local_block_hash_from_id(hash_id, block_size))
+            .collect::<Vec<_>>();
+        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+        Ok(ReplayRequestHashes {
+            local_block_hashes,
+            sequence_hashes,
         })
     }
 }

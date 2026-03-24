@@ -5,7 +5,7 @@ use super::events::{SimulationEvent, SimulationEventKind};
 use super::normalize_trace_requests;
 use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
-use crate::loadgen::{Trace, WorkloadDriver};
+use crate::loadgen::{ReplayRequestHashes, Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
 use crate::replay::{ReplayRouterMode, TraceCollector, TraceSimulationReport};
 use crate::scheduler::RouterEventVisibility;
@@ -207,6 +207,7 @@ impl OfflineRuntime {
         &mut self,
         mut request: DirectRequest,
         arrival_time_ms: f64,
+        replay_hashes: Option<ReplayRequestHashes>,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -228,7 +229,8 @@ impl OfflineRuntime {
             return Ok(uuid);
         };
 
-        let maybe_worker_idx = router.submit_request(&request, self.now_ms)?;
+        let maybe_worker_idx =
+            router.submit_request_with_hashes(&request, replay_hashes, self.now_ms)?;
         self.record_router_pending();
         if let Some(worker_idx) = maybe_worker_idx {
             self.dispatch_to_worker(request, uuid, worker_idx)?;
@@ -250,15 +252,16 @@ impl OfflineRuntime {
             && self.workers.iter().all(OfflineWorkerState::is_drained)
     }
 
-    fn next_timestamp(&self) -> Option<f64> {
+    fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next_arrival_ms = match (&self.mode, &self.admission) {
+        let cluster_in_flight = self.cluster_in_flight();
+        let next_arrival_ms = match (&self.mode, &mut self.admission) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => pending
                 .front()
                 .and_then(|request| request.arrival_timestamp_ms),
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => driver.next_ready_time_ms(),
             (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Workload(driver)) => {
-                if self.cluster_in_flight() < *max_in_flight {
+                if cluster_in_flight < *max_in_flight {
                     driver.next_ready_time_ms()
                 } else {
                     None
@@ -395,21 +398,24 @@ impl OfflineRuntime {
                     let arrival_ms = request
                         .arrival_timestamp_ms
                         .expect("trace replay requests must have an arrival timestamp");
-                    ready_requests.push((request, arrival_ms));
+                    ready_requests.push((request, arrival_ms, None));
                 }
             }
             AdmissionSource::Workload(driver) => {
-                ready_requests.extend(
-                    driver
-                        .pop_ready(self.now_ms, usize::MAX)
-                        .into_iter()
-                        .map(|ready| (ready.request, ready.scheduled_ready_at_ms)),
-                );
+                ready_requests.extend(driver.pop_ready(self.now_ms, usize::MAX).into_iter().map(
+                    |ready| {
+                        (
+                            ready.request,
+                            ready.scheduled_ready_at_ms,
+                            ready.replay_hashes,
+                        )
+                    },
+                ));
             }
         }
 
-        for (request, arrival_ms) in ready_requests {
-            self.assign_request(request, arrival_ms)?;
+        for (request, arrival_ms, replay_hashes) in ready_requests {
+            self.assign_request(request, arrival_ms, replay_hashes)?;
             released_any = true;
         }
 
@@ -430,7 +436,7 @@ impl OfflineRuntime {
                     let Some(request) = pending.pop_front() else {
                         break;
                     };
-                    ready_requests.push(request);
+                    ready_requests.push((request, None));
                 }
             }
             AdmissionSource::Workload(driver) => {
@@ -438,13 +444,13 @@ impl OfflineRuntime {
                     driver
                         .pop_ready(self.now_ms, available)
                         .into_iter()
-                        .map(|ready| ready.request),
+                        .map(|ready| (ready.request, ready.replay_hashes)),
                 );
             }
         }
 
-        for request in ready_requests {
-            self.assign_request(request, self.now_ms)?;
+        for (request, replay_hashes) in ready_requests {
+            self.assign_request(request, self.now_ms, replay_hashes)?;
             released_any = true;
         }
 
@@ -879,6 +885,84 @@ mod tests {
             .map(|uuid| collector.snapshot(*uuid).unwrap().input_length)
             .collect::<Vec<_>>();
         assert_eq!(dispatch_input_lengths, vec![64, 128, 192]);
+    }
+
+    #[test]
+    fn test_trace_workload_kv_router_precomputed_hashes_match_request_fallback() {
+        let args = fast_router_args();
+        let requests = vec![
+            DirectRequest {
+                tokens: [vec![11; 64], vec![21; 32]].concat(),
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(111)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+            },
+            DirectRequest {
+                tokens: [vec![11; 64], vec![22; 32]].concat(),
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(222)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+            },
+        ];
+        let workload = Trace {
+            block_size: 64,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 96,
+                        max_output_tokens: 2,
+                        hash_ids: vec![11, 21],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(500.0),
+                    turns: vec![TurnTrace {
+                        input_length: 96,
+                        max_output_tokens: 2,
+                        hash_ids: vec![11, 22],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        };
+
+        let (request_collector, request_stats) =
+            run_trace_multi_collect_with_stats(&args, requests, 2, ReplayRouterMode::KvRouter);
+        let (workload_collector, workload_stats) = run_trace_workload_multi_collect_with_stats(
+            &args,
+            workload,
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+        let request_report = request_collector.finish();
+        let workload_report = workload_collector.finish();
+
+        assert_eq!(
+            request_stats.dispatch_history,
+            workload_stats.dispatch_history
+        );
+        assert_eq!(
+            request_report.request_counts.completed_requests,
+            workload_report.request_counts.completed_requests
+        );
+        assert_eq!(
+            request_report.request_counts.total_input_tokens,
+            workload_report.request_counts.total_input_tokens
+        );
+        assert_eq!(
+            request_report.request_counts.total_output_tokens,
+            workload_report.request_counts.total_output_tokens
+        );
+        assert_eq!(
+            request_report.prefix_cache_reused_ratio,
+            workload_report.prefix_cache_reused_ratio
+        );
     }
 
     #[test]
