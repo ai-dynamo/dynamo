@@ -268,13 +268,18 @@ impl HealthCheckManager {
         // Create DP-rank aware payload
         let mut dp_rank_aware_payload = payload.clone();
         if let Some(obj) = dp_rank_aware_payload.as_object_mut() {
-            obj.insert(
-                "bootstrap_info".to_string(),
-                serde_json::json!({
-                    "bootstrap_room": current_dp_rank
-                }),
-            );
+            let bootstrap_info = obj
+                .entry("bootstrap_info")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(bi_obj) = bootstrap_info.as_object_mut() {
+                bi_obj.insert(
+                    "bootstrap_room".to_string(),
+                    serde_json::json!(current_dp_rank),
+                );
+                bi_obj.insert("bootstrap_hcheck".to_string(), serde_json::json!(true));
+            }
         }
+
         debug!(
             "Sending health check to {} (instance_id: {}, dp_rank: {})",
             endpoint_subject, target.instance.instance_id, current_dp_rank

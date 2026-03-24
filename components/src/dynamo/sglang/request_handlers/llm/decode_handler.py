@@ -121,7 +121,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Using bootstrap_info: "
                 f"host={bootstrap_info.get('bootstrap_host')}, "
                 f"port={bootstrap_info.get('bootstrap_port')}, "
-                f"room={bootstrap_info.get('bootstrap_room')}"
+                f"room={bootstrap_info.get('bootstrap_room')}, "
+                f"health check={bootstrap_info.get('bootstrap_hcheck', False)}"
             )
 
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -179,6 +180,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
+
+            if bootstrap_info is not None and bootstrap_info.get('bootstrap_hcheck') is True:
+                dp_rank = bootstrap_info.get("bootstrap_room", dp_rank) % self.config.server_args.dp_size
 
             # 'bootstrap_room' parameter may be not None when it is going from the DP-aware health check task.
             agg = await self.engine.async_generate(
