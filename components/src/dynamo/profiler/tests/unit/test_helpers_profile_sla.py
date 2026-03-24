@@ -15,6 +15,11 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+try:
+    import pandas as pd
+except ImportError:
+    pd = None  # type: ignore[assignment]
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
@@ -32,6 +37,7 @@ try:
         _write_final_output,
     )
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
+        ParallelizationMapping,
         PickedParallelConfig,
     )
     from dynamo.profiler.utils.defaults import SearchStrategy
@@ -44,12 +50,22 @@ try:
         FeaturesSpec,
         HardwareSpec,
         MockerSpec,
+        OptimizationType,
         SLASpec,
         WorkloadSpec,
     )
     from dynamo.profiler.utils.dgdr_validate import (
         valid_dgdr_spec,
         validate_dgdr_dynamo_features,
+    )
+    from dynamo.profiler.utils.model_info import (
+        ModelInfo,
+        calculate_min_gpus_for_model,
+        get_default_parallelization_for_architecture,
+    )
+    from dynamo.profiler.utils.optimization_type import (
+        OptimizationTypeConfig,
+        resolve_optimization_type_config,
     )
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError as e:
@@ -239,10 +255,13 @@ class TestValidDgdrSpec:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_none_sla_gets_default(self):
-        """None sla is populated with a default SLASpec."""
+        """None sla defaults to optimizationType=throughput."""
         dgdr = _make_dgdr(sla=None)
         valid_dgdr_spec(dgdr)
         assert dgdr.sla is not None
+        assert dgdr.sla.optimizationType == OptimizationType.Throughput
+        assert dgdr.sla.ttft is None
+        assert dgdr.sla.itl is None
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -546,178 +565,597 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        mock_mocker.assert_called_once()
-        mock_planner.assert_called_once()
-        assert mock_planner.call_args.args[1] is mocker_base
-        assert result == [planner_cm, profile_cm, mocker_base]
+        assert result is mocker_cfg
+
+
+# ---------------------------------------------------------------------------
+# optimizationType – SLASpec validation
+# ---------------------------------------------------------------------------
+
+
+class TestOptimizationTypeSlaValidation:
+    """Validate SLASpec pydantic model_validator and dgdr_validate for
+    the ``optimizationType`` field."""
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_mocker_only_no_planner_returns_mocker_config(self, tmp_path):
-        """Mocker-only (no planner): generate_mocker_config is called,
-        add_planner_to_config is not, profile data is still attached."""
-        dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
-        ops = _make_ops(tmp_path)
-        os.makedirs(ops.output_dir, exist_ok=True)
-        dgd_config = {"kind": "DGD"}
-        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
-        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
+    def test_optimization_type_clears_ttft_itl(self):
+        """When optimizationType is set, ttft and itl are cleared by the
+        model validator (pydantic defaults would otherwise populate them)."""
+        sla = SLASpec(optimizationType=OptimizationType.Throughput)
+        assert sla.ttft is None
+        assert sla.itl is None
+        assert sla.optimizationType == OptimizationType.Throughput
 
-        with (
-            patch(
-                f"{_DGD_GEN}.generate_mocker_config",
-                return_value=mocker_base,
-            ) as mock_mocker,
-            patch(
-                f"{_DGD_GEN}.add_planner_to_config",
-            ) as mock_planner,
-            patch(
-                f"{_DGD_GEN}.add_profile_data_to_config",
-                return_value=profile_cm,
-            ) as mock_profile,
-        ):
-            result = assemble_final_config(
-                dgdr,
-                ops,
-                dgd_config,
-                PickedParallelConfig(tp=1),
-                PickedParallelConfig(tp=1),
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_with_explicit_ttft_raises(self):
+        """Cannot combine optimizationType with explicitly-set ttft/itl."""
+        with pytest.raises(ValueError, match="exactly one"):
+            SLASpec(
+                optimizationType=OptimizationType.Throughput,
+                ttft=2000.0,
+                itl=30.0,
             )
 
-        mock_mocker.assert_called_once()
-        mock_planner.assert_not_called()
-        mock_profile.assert_called_once()
-        assert result == [profile_cm, mocker_base]
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_with_e2e_raises(self):
+        """Cannot combine optimizationType with e2eLatency."""
+        with pytest.raises(ValueError, match="exactly one"):
+            SLASpec(
+                optimizationType=OptimizationType.Latency,
+                e2eLatency=5000.0,
+            )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_latency_variant(self):
+        """Latency variant also works."""
+        sla = SLASpec(optimizationType=OptimizationType.Latency)
+        assert sla.optimizationType == OptimizationType.Latency
+        assert sla.ttft is None
+        assert sla.itl is None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_dgdr_validate_optimization_type_passes(self):
+        """valid_dgdr_spec accepts optimizationType SLA without error."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+        )
+        valid_dgdr_spec(dgdr)
+        assert dgdr.sla.optimizationType == OptimizationType.Throughput
+        assert dgdr.sla.ttft is None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_none_sla_defaults_to_optimization_type_throughput(self):
+        """When sla is None, defaults to optimizationType=throughput."""
+        dgdr = _make_dgdr(sla=None)
+        valid_dgdr_spec(dgdr)
+        assert dgdr.sla.optimizationType == OptimizationType.Throughput
 
 
 # ---------------------------------------------------------------------------
-# add_profile_data_to_config — mocker_enabled guard (DYN-2409)
+# _extract_profiler_params – optimizationType
 # ---------------------------------------------------------------------------
 
 
-class TestAddProfileDataMockerGuard:
-    """Verify --planner-profile-data is only injected for mocker workers."""
+class TestExtractProfilerParamsOptimizationType:
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_throughput_sets_inf_targets(self):
+        """optimizationType=throughput produces inf for target_ttft/tpot."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+        )
+        _, _, _, _, _, _, req_lat, ttft, tpot, _, _ = _extract_profiler_params(dgdr)
+        assert req_lat is None
+        assert ttft == float("inf")
+        assert tpot == float("inf")
 
-    @staticmethod
-    def _sglang_dgd():
-        """Minimal DGD with sglang-style 'prefill' and 'decode' workers."""
-        return {
-            "spec": {
-                "services": {
-                    "Planner": {
-                        "extraPodSpec": {
-                            "mainContainer": {"args": ["--config", "{}"]},
-                        }
-                    },
-                    "prefill": {
-                        "extraPodSpec": {
-                            "mainContainer": {
-                                "args": [
-                                    "-m",
-                                    "dynamo.sglang",
-                                    "--model-path",
-                                    "Qwen/Qwen3-32B",
-                                    "--disaggregation-mode",
-                                    "prefill",
-                                ]
-                            }
-                        }
-                    },
-                    "decode": {
-                        "extraPodSpec": {
-                            "mainContainer": {
-                                "args": [
-                                    "-m",
-                                    "dynamo.sglang",
-                                    "--model-path",
-                                    "Qwen/Qwen3-32B",
-                                    "--disaggregation-mode",
-                                    "decode",
-                                ]
-                            }
-                        }
-                    },
-                }
-            }
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_latency_sets_inf_targets(self):
+        """optimizationType=latency also produces inf for target_ttft/tpot."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Latency),
+        )
+        _, _, _, _, _, _, req_lat, ttft, tpot, _, _ = _extract_profiler_params(dgdr)
+        assert req_lat is None
+        assert ttft == float("inf")
+        assert tpot == float("inf")
+
+
+# ---------------------------------------------------------------------------
+# model_info helpers – calculate_min_gpus_for_model
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateMinGpusForModel:
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_small_model_single_gpu(self):
+        """Model that fits in one GPU with overhead → 1 GPU."""
+        # 40 GB model, 80 GB VRAM → 1.5 * 40 = 60 < 80 → 1 GPU
+        assert calculate_min_gpus_for_model(40_000, 80_000) == 1
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_model_needs_two_gpus(self):
+        """Model that needs 2 GPUs."""
+        # 100 GB model, 80 GB VRAM → 1.5 * 100 = 150 → 150/80 ≈ 1.875 → next pow2 = 2
+        assert calculate_min_gpus_for_model(100_000, 80_000) == 2
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_model_needs_four_gpus(self):
+        """Model that needs 4 GPUs."""
+        # 200 GB model, 80 GB VRAM → 1.5 * 200 = 300 → 300/80 = 3.75 → next pow2 = 4
+        assert calculate_min_gpus_for_model(200_000, 80_000) == 4
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_model_needs_eight_gpus(self):
+        """Model that needs 8 GPUs."""
+        # 400 GB model, 80 GB VRAM → 1.5 * 400 = 600 → 600/80 = 7.5 → next pow2 = 8
+        assert calculate_min_gpus_for_model(400_000, 80_000) == 8
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_zero_vram_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            calculate_min_gpus_for_model(100_000, 0)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_zero_model_size_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            calculate_min_gpus_for_model(0, 80_000)
+
+
+# ---------------------------------------------------------------------------
+# model_info helpers – get_default_parallelization_for_architecture
+# ---------------------------------------------------------------------------
+
+
+class TestGetDefaultParallelizationForArchitecture:
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_dense_model_returns_tp(self):
+        """Dense (non-MoE) model returns TP mapping."""
+        prefill, decode = get_default_parallelization_for_architecture(
+            "LlamaForCausalLM", is_moe=False, num_gpus=4
+        )
+        assert prefill == {"tp": 4}
+        assert decode == {"tp": 4}
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mla_moe_throughput_returns_dep(self):
+        """MLA+MoE + throughput returns DEP."""
+        prefill, decode = get_default_parallelization_for_architecture(
+            "DeepseekV3ForCausalLM",
+            is_moe=True,
+            num_gpus=8,
+            optimization_type="throughput",
+        )
+        assert prefill == {"dep": 8}
+        assert decode == {"dep": 8}
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mla_moe_latency_returns_tep(self):
+        """MLA+MoE + latency returns TEP (not DEP)."""
+        prefill, decode = get_default_parallelization_for_architecture(
+            "DeepseekV3ForCausalLM",
+            is_moe=True,
+            num_gpus=8,
+            optimization_type="latency",
+        )
+        assert prefill == {"tep": 8}
+        assert decode == {"tep": 8}
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_gqa_moe_throughput_returns_tep(self):
+        """GQA+MoE (Qwen3MoE) + throughput returns TEP (not DEP)."""
+        prefill, decode = get_default_parallelization_for_architecture(
+            "Qwen3MoeForCausalLM",
+            is_moe=True,
+            num_gpus=8,
+            optimization_type="throughput",
+        )
+        assert prefill == {"tep": 8}
+        assert decode == {"tep": 8}
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_gqa_moe_latency_returns_tep(self):
+        """GQA+MoE + latency returns TEP."""
+        prefill, decode = get_default_parallelization_for_architecture(
+            "Qwen3MoeForCausalLM",
+            is_moe=True,
+            num_gpus=8,
+            optimization_type="latency",
+        )
+        assert prefill == {"tep": 8}
+        assert decode == {"tep": 8}
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_moe_with_none_optimization_type_returns_tep(self):
+        """MoE model with no optimization_type (SLA path) defaults to TEP."""
+        prefill, decode = get_default_parallelization_for_architecture(
+            "DeepseekV3ForCausalLM",
+            is_moe=True,
+            num_gpus=8,
+            optimization_type=None,
+        )
+        assert prefill == {"tep": 8}
+        assert decode == {"tep": 8}
+
+
+# ---------------------------------------------------------------------------
+# resolve_optimization_type_config
+# ---------------------------------------------------------------------------
+
+
+def _make_model_info(**overrides) -> ModelInfo:
+    """Build a ModelInfo with sensible dense-model defaults."""
+    base = dict(
+        model_size=40_000.0,  # 40 GB
+        architecture="LlamaForCausalLM",
+        is_moe=False,
+    )
+    base.update(overrides)
+    return ModelInfo(**base)
+
+
+class TestResolveOptimizationTypeConfig:
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_dense_throughput(self):
+        """Dense model + throughput → TP, use_max_concurrency=True."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8, vramMb=80_000,
+            ),
+        )
+        mi = _make_model_info(model_size=40_000.0)
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.prefill_mapping == ParallelizationMapping(tp=1)
+        assert cfg.decode_mapping == ParallelizationMapping(tp=1)
+        assert cfg.num_gpus == 1
+        assert cfg.use_max_concurrency is True
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_dense_latency(self):
+        """Dense model + latency → TP, use_max_concurrency=False."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Latency),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8, vramMb=80_000,
+            ),
+        )
+        mi = _make_model_info(model_size=40_000.0)
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.prefill_mapping == ParallelizationMapping(tp=1)
+        assert cfg.use_max_concurrency is False
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mla_moe_throughput_uses_dep(self):
+        """MLA+MoE + throughput → DEP mapping."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8, vramMb=80_000,
+            ),
+        )
+        mi = _make_model_info(
+            model_size=400_000.0,
+            architecture="DeepseekV3ForCausalLM",
+            is_moe=True,
+        )
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.prefill_mapping == ParallelizationMapping(dep=cfg.num_gpus)
+        assert cfg.decode_mapping == ParallelizationMapping(dep=cfg.num_gpus)
+        assert cfg.use_max_concurrency is True
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mla_moe_latency_uses_tep(self):
+        """MLA+MoE + latency → TEP mapping."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Latency),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8, vramMb=80_000,
+            ),
+        )
+        mi = _make_model_info(
+            model_size=400_000.0,
+            architecture="DeepseekV3ForCausalLM",
+            is_moe=True,
+        )
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.prefill_mapping == ParallelizationMapping(tep=cfg.num_gpus)
+        assert cfg.decode_mapping == ParallelizationMapping(tep=cfg.num_gpus)
+        assert cfg.use_max_concurrency is False
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_num_gpus_from_vram_and_model_weight(self):
+        """GPU count computed from VRAM and model weight using 1.5× rule."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8,
+                vramMb=80_000,
+            ),
+        )
+        # 200 GB model, 80 GB VRAM → 1.5 * 200 = 300 → 300/80 = 3.75 → pow2=4
+        mi = _make_model_info(model_size=200_000.0)
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.num_gpus == 4
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_num_gpus_clamped_to_total(self):
+        """GPU count is clamped to totalGpus when model is very large."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=4, numGpusPerNode=4,
+                vramMb=80_000,
+            ),
+        )
+        # Needs 8 GPUs but only 4 available
+        mi = _make_model_info(model_size=400_000.0)
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.num_gpus == 4
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_missing_vram_falls_back_to_total_gpus(self):
+        """When vramMb is not set, falls back to totalGpus."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            hardware=HardwareSpec(
+                gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8,
+                vramMb=None,
+            ),
+        )
+        mi = _make_model_info(model_size=200_000.0)
+
+        cfg = resolve_optimization_type_config(dgdr, mi)
+
+        assert cfg.num_gpus == 8
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_optimization_type_raises(self):
+        """resolve_optimization_type_config raises when optimizationType not set."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=2000.0, itl=30.0))
+        mi = _make_model_info()
+
+        with pytest.raises(ValueError, match="optimizationType"):
+            resolve_optimization_type_config(dgdr, mi)
+
+
+# ---------------------------------------------------------------------------
+# Task 3A: _pick_by_optimization_type
+# ---------------------------------------------------------------------------
+
+
+class TestPickByOptimizationType:
+    """Tests for the optimization-type picking logic in rapid.py."""
+
+    @pytest.fixture(autouse=True)
+    def _import_pick(self):
+        from dynamo.profiler.rapid import _pick_by_optimization_type
+
+        self.pick = _pick_by_optimization_type
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_throughput_picks_highest_tokens_per_gpu(self):
+        """throughput optimization picks row with highest tokens/s/gpu."""
+        df = pd.DataFrame(
+            [
+                {"tpot": 10.0, "tokens/s/gpu": 100.0, "ttft": 5.0},
+                {"tpot": 20.0, "tokens/s/gpu": 200.0, "ttft": 8.0},
+                {"tpot": 15.0, "tokens/s/gpu": 50.0, "ttft": 3.0},
+            ]
+        )
+        result = self.pick(df, OptimizationType.Throughput)
+        assert len(result) == 1
+        assert result.iloc[0]["tokens/s/gpu"] == 200.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_latency_picks_lowest_tpot(self):
+        """latency optimization picks row with lowest tpot."""
+        df = pd.DataFrame(
+            [
+                {"tpot": 10.0, "tokens/s/gpu": 100.0, "ttft": 5.0},
+                {"tpot": 20.0, "tokens/s/gpu": 200.0, "ttft": 8.0},
+                {"tpot": 5.0, "tokens/s/gpu": 50.0, "ttft": 3.0},
+            ]
+        )
+        result = self.pick(df, OptimizationType.Latency)
+        assert len(result) == 1
+        assert result.iloc[0]["tpot"] == 5.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_empty_df_returns_empty(self):
+        """Empty input returns empty DataFrame."""
+        result = self.pick(pd.DataFrame(), OptimizationType.Throughput)
+        assert result.empty
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_none_df_returns_empty(self):
+        """None input returns empty DataFrame."""
+        result = self.pick(None, OptimizationType.Latency)
+        assert result.empty
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_throughput_falls_back_to_tpot_when_no_tokens_col(self):
+        """When tokens/s/gpu column is missing, throughput falls back to tpot."""
+        df = pd.DataFrame(
+            [
+                {"tpot": 10.0, "ttft": 5.0},
+                {"tpot": 20.0, "ttft": 8.0},
+            ]
+        )
+        result = self.pick(df, OptimizationType.Throughput)
+        assert len(result) == 1
+        # Falls back to tpot ascending → picks lowest tpot
+        assert result.iloc[0]["tpot"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Task 4: _build_planner_config with optimizationType + best_latencies
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPlannerConfigOptimizationType:
+    """Tests for planner TTFT/ITL population from profiling estimates."""
+
+    @pytest.fixture(autouse=True)
+    def _import_build(self):
+        from dynamo.profiler.utils.dgd_generation import _build_planner_config
+
+        self.build = _build_planner_config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_with_estimates_uses_them(self):
+        """When profiling estimates are available, planner gets estimated TTFT/ITL."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            features=FeaturesSpec(planner=_make_planner()),
+        )
+        best_latencies = {"ttft": 150.0, "tpot": 12.0, "request_latency": 500.0}
+
+        cfg = self.build(dgdr, None, None, best_latencies=best_latencies)
+
+        assert cfg.ttft == 150.0
+        assert cfg.itl == 12.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_naive_fallback_uses_defaults(self):
+        """When best_latencies are zero (naive fallback), planner uses 2000/30 defaults."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            features=FeaturesSpec(planner=_make_planner()),
+        )
+        best_latencies = {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
+
+        cfg = self.build(dgdr, None, None, best_latencies=best_latencies)
+
+        assert cfg.ttft == 2000.0
+        assert cfg.itl == 30.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_no_latencies_uses_defaults(self):
+        """When best_latencies is None, planner uses 2000/30 defaults."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Latency),
+            features=FeaturesSpec(planner=_make_planner()),
+        )
+
+        cfg = self.build(dgdr, None, None, best_latencies=None)
+
+        assert cfg.ttft == 2000.0
+        assert cfg.itl == 30.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_explicit_sla_does_not_override_planner_ttft(self):
+        """When explicit ttft/itl SLA is used, planner keeps its own defaults."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(ttft=500.0, itl=20.0),
+            features=FeaturesSpec(planner=_make_planner()),
+        )
+        best_latencies = {"ttft": 150.0, "tpot": 12.0, "request_latency": 500.0}
+
+        cfg = self.build(dgdr, None, None, best_latencies=best_latencies)
+
+        # Should NOT use the best_latencies — explicit SLA mode, not optimizationType
+        # Planner uses its own SLAPlannerDefaults (ttft=500, itl=50)
+        assert cfg.ttft != 150.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_gpu_counts_passed_through(self):
+        """Prefill/decode GPU counts are set on planner config."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            features=FeaturesSpec(planner=_make_planner()),
+        )
+        prefill = PickedParallelConfig(tp=4)
+        decode = PickedParallelConfig(tp=2)
+
+        cfg = self.build(dgdr, prefill, decode, best_latencies=None)
+
+        assert cfg.prefill_engine_num_gpu == prefill.num_gpus
+        assert cfg.decode_engine_num_gpu == decode.num_gpus
+
+
+# ---------------------------------------------------------------------------
+# Task 4: assemble_final_config threading best_latencies
+# ---------------------------------------------------------------------------
+
+
+class TestAssembleFinalConfigOptimizationType:
+    """Verify best_latencies reaches the planner config via assemble_final_config."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_assemble_threads_best_latencies_to_planner(self, tmp_path):
+        """assemble_final_config passes best_latencies through to _build_planner_config."""
+        dgdr = _make_dgdr(
+            sla=SLASpec(optimizationType=OptimizationType.Throughput),
+            features=FeaturesSpec(planner=_make_planner()),
+        )
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "metadata": {"name": "test"},
+            "spec": {"services": {}},
         }
+        best_latencies = {"ttft": 250.0, "tpot": 18.0, "request_latency": 600.0}
 
-    @pytest.mark.pre_merge
-    @pytest.mark.gpu_0
-    def test_mocker_disabled_no_planner_profile_data_in_workers(self, tmp_path):
-        """When mocker is disabled, workers must NOT receive --planner-profile-data."""
-        dgd = self._sglang_dgd()
-        with patch(f"{_DGD_GEN}._load_profiling_data", return_value={"prefill": {}}):
-            add_profile_data_to_config(dgd, str(tmp_path), mocker_enabled=False)
-
-        for name in ("prefill", "decode"):
-            args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
-                "args"
-            ]
-            assert (
-                "--planner-profile-data" not in args
-            ), f"sglang worker '{name}' should not have --planner-profile-data"
-
-    @pytest.mark.pre_merge
-    @pytest.mark.gpu_0
-    def test_mocker_enabled_injects_planner_profile_data(self, tmp_path):
-        """When mocker is enabled, mocker workers MUST receive --planner-profile-data."""
-        dgd = self._sglang_dgd()
-        with patch(f"{_DGD_GEN}._load_profiling_data", return_value={"prefill": {}}):
-            add_profile_data_to_config(dgd, str(tmp_path), mocker_enabled=True)
-
-        for name in ("prefill", "decode"):
-            args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
-                "args"
-            ]
-            assert (
-                "--planner-profile-data" in args
-            ), f"mocker worker '{name}' should have --planner-profile-data"
-
-
-# ---------------------------------------------------------------------------
-# Regression tests: naive fallback resolved_backend propagation (bug fix)
-# ---------------------------------------------------------------------------
-
-
-class TestNaiveFallbackResolvedBackend:
-    """Regression tests for the 'auto' backend KeyError bug.
-
-    When backend='auto', _run_naive_fallback resolves it to a concrete
-    backend (e.g. 'vllm') and must expose that in the result dict so
-    run_profile() can pass the concrete name to run_interpolation().
-    """
-
-    @pytest.mark.pre_merge
-    @pytest.mark.gpu_0
-    @pytest.mark.parallel
-    def test_naive_fallback_resolved_backend_auto(self):
-        """_run_naive_fallback sets 'resolved_backend' to the concrete backend
-        when the input backend is 'auto'."""
-        try:
-            from unittest.mock import patch
-
-            from dynamo.profiler.rapid import _run_naive_fallback
-        except ImportError as e:
-            pytest.skip(f"Missing dependency: {e}")
-
-        dgdr = _make_dgdr(backend="auto")
-
-        with (
-            patch(
-                "dynamo.profiler.rapid.build_naive_generator_params",
-                return_value={},
-            ),
-            patch(
-                "dynamo.profiler.rapid.generate_backend_artifacts",
-                return_value={},
-            ),
-        ):
-            result = _run_naive_fallback(
-                dgdr,
-                model="Qwen/Qwen3-32B",
-                total_gpus=8,
-                system="h200_sxm",
-                backend="auto",
+        with patch(
+            "dynamo.profiler.utils.dgd_generation.DgdPlannerServiceConfig"
+        ) as mock_svc:
+            mock_svc.return_value.extraPodSpec.mainContainer = None
+            mock_svc.return_value.model_dump.return_value = {
+                "extraPodSpec": {"mainContainer": {"args": []}},
+            }
+            result = assemble_final_config(
+                dgdr, ops, dgd_config,
+                best_latencies=best_latencies,
             )
 
         # The resolved backend must be a concrete name, not 'auto'

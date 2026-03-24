@@ -165,6 +165,15 @@ const (
 	ProfilingReasonJobCreationFailed = "JobCreationFailed"
 )
 
+// OptimizationType specifies the profiling optimization strategy.
+// +kubebuilder:validation:Enum=latency;throughput
+type OptimizationType string
+
+const (
+	OptimizationTypeLatency    OptimizationType = "latency"
+	OptimizationTypeThroughput OptimizationType = "throughput"
+)
+
 // SearchStrategy controls the profiling search depth.
 // +kubebuilder:validation:Enum=rapid;thorough
 type SearchStrategy string
@@ -223,6 +232,12 @@ type WorkloadSpec struct {
 
 // SLASpec defines the service-level agreement targets for profiling optimization.
 type SLASpec struct {
+	// OptimizationType controls the profiling optimization strategy.
+	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
+	// Valid values: "latency", "throughput".
+	// +optional
+	OptimizationType OptimizationType `json:"optimizationType,omitempty"`
+
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
 	// +python-default=2000

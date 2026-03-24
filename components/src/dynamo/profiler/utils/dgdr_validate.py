@@ -31,6 +31,7 @@ from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
+    OptimizationType,
     SLASpec,
     WorkloadSpec,
 )
@@ -50,7 +51,10 @@ def valid_dgdr_spec(
     - ``dgdr.hardware.gpuSku`` (str, non-empty)
     - ``dgdr.hardware.numGpusPerNode`` (int > 0)
     - ``dgdr.workload.isl``, ``dgdr.workload.osl`` (int)
-    - ``dgdr.sla.ttft``, ``dgdr.sla.itl`` (float) **or** ``dgdr.sla.e2eLatency`` (float)
+    - One of:
+      - ``dgdr.sla.ttft`` and ``dgdr.sla.itl`` (float)
+      - ``dgdr.sla.e2eLatency`` (float)
+      - ``dgdr.sla.optimizationType`` (OptimizationType)
 
     without additional ``None`` guards.
 
@@ -88,7 +92,7 @@ def _validate_required_fields(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
     if dgdr.workload is None:
         dgdr.workload = WorkloadSpec()
     if dgdr.sla is None:
-        dgdr.sla = SLASpec()
+        dgdr.sla = SLASpec(optimizationType=OptimizationType.Throughput)
 
 
 def _validate_workload(workload: WorkloadSpec) -> None:
@@ -100,7 +104,13 @@ def _validate_workload(workload: WorkloadSpec) -> None:
 
 
 def _validate_sla(sla: SLASpec) -> None:
-    """Validate SLA targets and normalise e2eLatency mode."""
+    """Validate SLA targets and normalise mode.
+
+    Exactly one SLA mode must be active:
+    - ``optimizationType``: high-level objective (throughput/latency)
+    - ``e2eLatency``: single end-to-end latency target
+    - ``ttft`` + ``itl``: explicit per-phase latency targets
+    """
     for name, val in [
         ("ttft", sla.ttft),
         ("itl", sla.itl),
@@ -109,7 +119,14 @@ def _validate_sla(sla: SLASpec) -> None:
         if val is not None and val <= 0:
             raise ValueError(f"SLA '{name}' must be positive (got {val}).")
 
+    has_opt = sla.optimizationType is not None
     has_e2e = sla.e2eLatency is not None
+
+    # optimizationType mode — ttft/itl already cleared by model validator
+    if has_opt:
+        sla.ttft = None
+        sla.itl = None
+        return
 
     # When e2eLatency is provided it takes precedence — null out the per-token defaults
     if has_e2e:
@@ -120,7 +137,8 @@ def _validate_sla(sla: SLASpec) -> None:
     has_ttft_itl = sla.ttft is not None and sla.itl is not None
     if not has_ttft_itl:
         raise ValueError(
-            "Either both 'ttft' and 'itl', or 'e2eLatency', must be provided in the SLA spec."
+            "Either both 'ttft' and 'itl', 'e2eLatency', or "
+            "'optimizationType' must be provided in the SLA spec."
         )
 
 

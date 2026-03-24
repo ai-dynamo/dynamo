@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from pathlib import Path
 from typing import Optional, Union
 
@@ -38,6 +39,93 @@ MOE_ARCHITECTURES = {
 MOE_ADDITIONAL_TP_ARCHITECTURES = {
     "Qwen3MoeForCausalLM",  # GQA + MoE
 }
+# MoE architectures with Multi-Latent Attention (MLA)
+MLA_MOE_ARCHITECTURES = {
+    "DeepseekV3ForCausalLM",
+    "DeepseekV32ForCausalLM",
+}
+
+# Minimum GPU memory overhead factor: VRAM must exceed model weight by this
+# multiplier to leave room for KV cache, activations, etc.  Mirrors the 1.5×
+# rule used in AIC's ``_calculate_min_tp``.
+_VRAM_OVERHEAD_FACTOR = 1.5
+
+
+def calculate_min_gpus_for_model(
+    model_size_mb: float,
+    vram_per_gpu_mb: float,
+) -> int:
+    """Return the minimum number of GPUs needed to fit a model.
+
+    Uses the 1.5× rule: the combined VRAM of the returned GPU count must be at
+    least ``_VRAM_OVERHEAD_FACTOR`` × ``model_size_mb``.
+
+    The result is always a power of two (1, 2, 4, 8 …) so that it maps cleanly
+    to TP / TEP / DEP sizes.
+    """
+    if vram_per_gpu_mb <= 0:
+        raise ValueError(f"vram_per_gpu_mb must be positive, got {vram_per_gpu_mb}")
+    if model_size_mb <= 0:
+        raise ValueError(f"model_size_mb must be positive, got {model_size_mb}")
+
+    required_vram = model_size_mb * _VRAM_OVERHEAD_FACTOR
+    raw_gpus = required_vram / vram_per_gpu_mb
+    # Round up to the next power of two
+    if raw_gpus <= 1:
+        return 1
+    return int(2 ** math.ceil(math.log2(raw_gpus)))
+
+
+def get_default_parallelization_for_architecture(
+    architecture: str,
+    is_moe: bool,
+    num_gpus: int,
+    optimization_type: str | None = None,
+) -> tuple:
+    """Return ``(prefill_mapping, decode_mapping)`` for naive / optimization-type routes.
+
+    The mapping rules are identical for aggregated and disaggregated serving.
+    In aggregated mode the caller uses both mappings identically (single
+    engine); in disaggregated mode they map to separate prefill/decode workers.
+
+    Rules:
+        * **Dense** (``is_moe=False``): TP
+        * **MLA + MoE + throughput** (DeepSeek-V3 family): DEP
+        * **All other sparse** (MLA + MoE + latency, GQA + MoE either): TEP
+
+    Parameters
+    ----------
+    architecture:
+        HuggingFace model architecture class name.
+    is_moe:
+        Whether the model is a Mixture-of-Experts model.
+    num_gpus:
+        Number of GPUs to distribute across.
+    optimization_type:
+        ``"throughput"`` or ``"latency"`` (or *None* for the default/SLA path
+        which falls back to TEP for MoE models).
+
+    Returns
+    -------
+    tuple[dict, dict]
+        ``(prefill_mapping, decode_mapping)`` where each mapping is a dict
+        with exactly one key from ``{"tp", "tep", "dep"}``.
+    """
+    if not is_moe:
+        m = {"tp": num_gpus}
+        return m, m
+
+    # MLA + MoE + throughput → DEP (maximises concurrent KV-cache utilisation)
+    if (
+        architecture in MLA_MOE_ARCHITECTURES
+        and optimization_type == "throughput"
+    ):
+        m = {"dep": num_gpus}
+        return m, m
+
+    # All other sparse (MLA+MoE+latency, GQA+MoE either) → TEP
+    m = {"tep": num_gpus}
+    return m, m
 
 
 def get_local_model_weight_size(

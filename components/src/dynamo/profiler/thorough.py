@@ -26,7 +26,7 @@ from aiconfigurator.sdk.task import TaskConfig
 
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
 from dynamo.planner.config.defaults import SubComponentType
-from dynamo.profiler.rapid import _generate_dgd_from_pick
+from dynamo.profiler.rapid import _generate_dgd_from_pick, _pick_by_optimization_type
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,
     build_disagg_df_from_static,
@@ -44,6 +44,10 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
     ProfilingPhase,
+)
+from dynamo.profiler.utils.optimization_type import (
+    OptimizationTypeConfig,
+    resolve_optimization_type_config,
 )
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
@@ -292,7 +296,27 @@ def _pick_thorough_best_config(
     total_gpus: int,
     dgdr: DynamoGraphDeploymentRequestSpec,
 ) -> dict:
-    """Dispatch to pick_autoscale / pick_load_match / pick_default, return result dict."""
+    """Dispatch to pick_autoscale / pick_load_match / pick_default, return result dict.
+
+    When ``optimizationType`` is active, uses optimization-type picking
+    (highest throughput or lowest latency) instead of SLA-based picking.
+    """
+    # optimizationType mode — pick by throughput/latency heuristic
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
+        best_config_df = _pick_by_optimization_type(
+            disagg_df, dgdr.sla.optimizationType
+        )
+        best_latencies = {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
+        if not best_config_df.empty:
+            row = best_config_df.iloc[0]
+            best_latencies["ttft"] = float(row.get("ttft", 0.0))
+            best_latencies["tpot"] = float(row.get("tpot", 0.0))
+            best_latencies["request_latency"] = float(
+                row.get("request_latency", 0.0)
+            )
+        return {"best_config_df": best_config_df, "best_latencies": best_latencies}
+
     if picking_mode == "autoscale":
         return pick_autoscale(prefill_df, decode_df, target_ttft, target_tpot)
     elif picking_mode == "load_match":
@@ -366,6 +390,42 @@ async def run_thorough(
         len(prefill_candidates),
         len(decode_candidates),
     )
+
+    # --- optimizationType: filter to target parallelization -----------------
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        from dynamo.profiler.utils.model_info import get_model_info
+
+        model_info = get_model_info(model)
+        opt_config = resolve_optimization_type_config(dgdr, model_info)
+        target_mapping = opt_config.prefill_mapping
+
+        def _candidate_matches(c, mapping) -> bool:
+            return (
+                c.tp == mapping.tp
+                and c.pp == mapping.pp
+                and c.dp == mapping.dp
+                and getattr(c, "moe_tp", 0) == mapping.moe_tp
+                and getattr(c, "moe_ep", 0) == mapping.moe_ep
+            )
+
+        prefill_before = len(prefill_candidates)
+        decode_before = len(decode_candidates)
+        prefill_candidates = [
+            c for c in prefill_candidates if _candidate_matches(c, target_mapping)
+        ]
+        decode_candidates = [
+            c for c in decode_candidates if _candidate_matches(c, target_mapping)
+        ]
+        logger.info(
+            "optimizationType=%s: filtered candidates to %s — "
+            "prefill %d→%d, decode %d→%d",
+            dgdr.sla.optimizationType.value,
+            target_mapping.label(),
+            prefill_before,
+            len(prefill_candidates),
+            decode_before,
+            len(decode_candidates),
+        )
 
     if dgdr.overrides and dgdr.overrides.dgd:
         for candidate in prefill_candidates:

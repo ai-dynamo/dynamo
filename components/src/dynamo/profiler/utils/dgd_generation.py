@@ -64,6 +64,7 @@ def assemble_final_config(
     dgd_config: dict | None,
     best_prefill_config=None,
     best_decode_config=None,
+    best_latencies: dict | None = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
@@ -103,6 +104,7 @@ def assemble_final_config(
             base,
             best_prefill_mapping=best_prefill_config,
             best_decode_mapping=best_decode_config,
+            best_latencies=best_latencies,
         )
         config_maps.append(planner_cm)
 
@@ -161,6 +163,7 @@ def add_planner_to_config(
     config_dict: dict,
     best_prefill_mapping=None,
     best_decode_mapping=None,
+    best_latencies: dict | None = None,
 ) -> dict:
     """Add a Planner service and its planner-config ConfigMap to *config_dict*.
 
@@ -173,11 +176,14 @@ def add_planner_to_config(
         config_dict: The base DGD config (real or mocker) — mutated in place.
         best_prefill_mapping: Picked prefill parallel config.
         best_decode_mapping: Picked decode parallel config.
+        best_latencies: Profiling latency estimates (ttft, tpot, request_latency).
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
     """
-    planner_cfg = _build_planner_config(dgdr, best_prefill_mapping, best_decode_mapping)
+    planner_cfg = _build_planner_config(
+        dgdr, best_prefill_mapping, best_decode_mapping, best_latencies
+    )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
     planner_service = DgdPlannerServiceConfig()
@@ -343,8 +349,16 @@ def _build_planner_config(
     dgdr,
     best_prefill_mapping,
     best_decode_mapping,
+    best_latencies: dict | None = None,
 ) -> PlannerConfig:
-    """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
+    """Build a PlannerConfig from the DGDR spec and picked parallel configs.
+
+    When ``dgdr.sla.optimizationType`` is active the planner still needs
+    concrete TTFT / ITL targets for autoscaling decisions.  This function
+    populates them from the profiling estimates (``best_latencies``) when
+    available, or falls back to conservative defaults (2 000 ms / 30 ms)
+    for the naive-fallback path where no simulation data exists.
+    """
     if dgdr.features and dgdr.features.planner:
         planner_cfg = dgdr.features.planner.model_copy(deep=True)
     else:
@@ -355,6 +369,26 @@ def _build_planner_config(
 
     if best_decode_mapping is not None:
         planner_cfg.decode_engine_num_gpu = best_decode_mapping.num_gpus
+
+    # --- optimizationType: populate planner TTFT / ITL from estimates ------
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        if best_latencies and best_latencies.get("ttft", 0) > 0:
+            planner_cfg.ttft = best_latencies["ttft"]
+            planner_cfg.itl = best_latencies["tpot"]
+            logger.info(
+                "Planner TTFT/ITL set from profiling estimates: "
+                "ttft=%.1f ms, itl=%.1f ms",
+                planner_cfg.ttft,
+                planner_cfg.itl,
+            )
+        else:
+            # Naive fallback: no simulation estimates available
+            planner_cfg.ttft = 2000.0
+            planner_cfg.itl = 30.0
+            logger.warning(
+                "No estimated TTFT/ITL available (AIC unsupported, naive fallback). "
+                "Using defaults: ttft=2000ms, itl=30ms"
+            )
 
     return planner_cfg
 

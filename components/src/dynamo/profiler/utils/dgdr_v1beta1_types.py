@@ -96,11 +96,19 @@ class WorkloadSpec(BaseModel):
 class SLASpec(BaseModel):
     """Service-level agreement targets.
 
-    Provide one of:
+    Provide exactly one of:
 
     - ``ttft`` + ``itl``: explicit latency targets (default: 2000 ms / 30 ms)
-    - ``e2eLatency``: end-to-end latency target (mutually exclusive with ttft/itl)"""
+    - ``e2eLatency``: end-to-end latency target
+    - ``optimizationType``: high-level objective without explicit numeric targets
 
+    When the entire ``sla`` field is omitted from the DGDR spec, the profiler
+    defaults to ``optimizationType=throughput``."""
+
+    optimizationType: Optional[OptimizationType] = Field(
+        default=None,
+        description="OptimizationType controls the profiling optimization strategy. Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.",
+    )
     ttft: Optional[float] = Field(
         default=2000,
         description="TTFT is the Time To First Token target in milliseconds.",
@@ -115,19 +123,31 @@ class SLASpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
-        """Ensure e2eLatency and ttft/itl are not both provided."""
+        """Ensure at most one SLA mode is active.
+
+        When ``optimizationType`` is set, ``ttft`` and ``itl`` are cleared
+        because they are not meaningful in that mode (pydantic defaults would
+        otherwise leave them populated).
+        """
         has_e2e = self.e2eLatency is not None
+        has_opt = self.optimizationType is not None
         ttft_itl_touched = (
             "ttft" in self.model_fields_set or "itl" in self.model_fields_set
         )
-        has_ttft_itl = (
-            self.ttft is not None or self.itl is not None
-        ) and ttft_itl_touched
-        if has_e2e and has_ttft_itl:
+        has_ttft_itl = (self.ttft is not None and self.itl is not None) and (
+            ttft_itl_touched or (not has_e2e and not has_opt)
+        )
+        options_count = sum([has_ttft_itl, has_e2e, has_opt])
+        if options_count > 1:
             raise ValueError(
-                "SLA must specify either (ttft and itl) or e2eLatency, not both."
+                "SLA must specify exactly one of: (ttft and itl), e2eLatency, "
+                "or optimizationType \u2014 not multiple."
             )
-        if (self.ttft is not None) != (self.itl is not None):
+        if has_opt:
+            # optimizationType mode \u2014 clear pydantic-defaulted ttft/itl
+            self.ttft = None
+            self.itl = None
+        elif (self.ttft is not None) != (self.itl is not None):
             raise ValueError("ttft and itl must both be provided together.")
         return self
 
