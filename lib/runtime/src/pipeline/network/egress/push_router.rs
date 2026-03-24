@@ -119,7 +119,7 @@ impl RouterMode {
 
 #[derive(Debug, Clone)]
 struct DeviceAwareWeightedConfig {
-    cuda_to_cpu_ratio: usize,
+    non_cpu_to_cpu_ratio: usize,
 }
 
 fn device_aware_weighted_config() -> DeviceAwareWeightedConfig {
@@ -132,7 +132,7 @@ fn device_aware_weighted_config() -> DeviceAwareWeightedConfig {
     tracing::debug!(ratio = ratio, "Loaded DeviceAwareWeighted config");
 
     DeviceAwareWeightedConfig {
-        cuda_to_cpu_ratio: ratio,
+        non_cpu_to_cpu_ratio: ratio,
     }
 }
 
@@ -216,18 +216,6 @@ where
         endpoint_id.component == "encoder" && endpoint_id.name == "generate"
     }
 
-    fn weight_for_instance(
-        instance_id: u64,
-        cfg: &DeviceAwareWeightedConfig,
-        device_types: &HashMap<u64, Option<DeviceType>>,
-    ) -> usize {
-        if matches!(device_types.get(&instance_id), Some(Some(DeviceType::Cpu))) {
-            1
-        } else {
-            cfg.cuda_to_cpu_ratio
-        }
-    }
-
     fn select_device_aware_weighted_instance(&self) -> anyhow::Result<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -257,18 +245,6 @@ where
             .map(|inst| (inst.instance_id, inst.device_type))
             .collect();
 
-        let cpu_count = instance_ids
-            .iter()
-            .filter(|id| matches!(device_types.get(id), Some(Some(DeviceType::Cpu))))
-            .count();
-
-        if cpu_count == 0 {
-            tracing::warn!(
-                endpoint = %self.client.endpoint.id(),
-                ratio = cfg.cuda_to_cpu_ratio,
-                "No CPU encode instances found from discovery metadata; DeviceAwareWeighted will treat all instances as CUDA"
-            );
-        }
         let mut inflight = self
             .inflight_by_instance
             .lock()
@@ -280,55 +256,119 @@ where
             inflight.entry(*id).or_insert(0);
         }
 
-        let start = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize % count;
+        // Partition instances into CPU and CUDA (non-CPU) groups.
+        let cpu_ids: Vec<u64> = instance_ids
+            .iter()
+            .copied()
+            .filter(|id| matches!(device_types.get(id), Some(Some(DeviceType::Cpu))))
+            .collect();
+        let non_cpu_ids: Vec<u64> = instance_ids
+            .iter()
+            .copied()
+            .filter(|id| !matches!(device_types.get(id), Some(Some(DeviceType::Cpu))))
+            .collect();
 
-        let mut best_instance = instance_ids[start];
-        let mut best_inflight = *inflight.get(&best_instance).unwrap_or(&0);
-        let mut best_weight = Self::weight_for_instance(best_instance, &cfg, &device_types);
+        // Determine which group to route to.
+        // Falls back to the available device type when only one type is present.
+        let candidates: &[u64] = if cpu_ids.is_empty() {
+            tracing::debug!(
+                endpoint = %self.client.endpoint.id(),
+                "DeviceAwareWeighted: no CPU instances, routing to non-CPU only"
+            );
+            &non_cpu_ids
+        } else if non_cpu_ids.is_empty() {
+            tracing::debug!(
+                endpoint = %self.client.endpoint.id(),
+                "DeviceAwareWeighted: no non-CPU instances, routing to CPU only"
+            );
+            &cpu_ids
+        } else {
+            // Both types present: apply budget-based routing.
+            //
+            // allowed_cpu_inflight = floor(
+            //   total_non_cpu_inflight * cpu_instance_count
+            //   / (non_cpu_to_cpu_ratio * non_cpu_instance_count)
+            // )
+            // Route to CPU only when current cpu_inflight < allowed_cpu_inflight,
+            // otherwise route to non-CPU. Falls back to the available device type
+            // when only one type is present.
+            let total_non_cpu_inflight: usize = non_cpu_ids
+                .iter()
+                .map(|id| *inflight.get(id).unwrap_or(&0))
+                .sum();
+            let total_cpu_inflight: usize = cpu_ids
+                .iter()
+                .map(|id| *inflight.get(id).unwrap_or(&0))
+                .sum();
+            let cpu_count = cpu_ids.len();
+            let non_cpu_count = non_cpu_ids.len();
+
+            // non_cpu_count >= 1 and ratio >= 1, so this division is safe.
+            let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
+                / (cfg.non_cpu_to_cpu_ratio.saturating_mul(non_cpu_count));
+
+            tracing::debug!(
+                endpoint = %self.client.endpoint.id(),
+                total_non_cpu_inflight,
+                total_cpu_inflight,
+                cpu_count,
+                non_cpu_count,
+                ratio = cfg.non_cpu_to_cpu_ratio,
+                allowed_cpu_inflight,
+                "DeviceAwareWeighted budget calculation"
+            );
+
+            if total_cpu_inflight < allowed_cpu_inflight {
+                &cpu_ids
+            } else {
+                &non_cpu_ids
+            }
+        };
+
+        // Within the chosen group, pick the least-loaded instance,
+        // using round-robin as a tiebreaker.
+        let cand_count = candidates.len();
+        let start = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize % cand_count;
+        let mut best_instance = candidates[start];
+        let mut best_inflight_val = *inflight.get(&best_instance).unwrap_or(&0);
 
         tracing::debug!(
             endpoint = %self.client.endpoint.id(),
             start_index = start,
-            candidates = ?instance_ids,
+            candidates = ?candidates,
             inflight = ?*inflight,
             device_types = ?device_types,
             "DeviceAwareWeighted selecting instance"
         );
 
-        for offset in 1..count {
-            let idx = (start + offset) % count;
-            let candidate = instance_ids[idx];
+        for offset in 1..cand_count {
+            let idx = (start + offset) % cand_count;
+            let candidate = candidates[idx];
             let candidate_inflight = *inflight.get(&candidate).unwrap_or(&0);
-            let candidate_weight = Self::weight_for_instance(candidate, &cfg, &device_types);
-
-            // Compare load ratios without float: inflight / weight.
-            let left = candidate_inflight.saturating_mul(best_weight);
-            let right = best_inflight.saturating_mul(candidate_weight);
             tracing::trace!(
                 candidate_instance = candidate,
-                candidate_inflight = candidate_inflight,
-                candidate_weight = candidate_weight,
-                best_instance = best_instance,
-                best_inflight = best_inflight,
-                best_weight = best_weight,
-                left = left,
-                right = right,
+                candidate_inflight,
+                best_instance,
+                best_inflight = best_inflight_val,
                 "DeviceAwareWeighted compare candidate vs best"
             );
-            if left < right {
+            if candidate_inflight < best_inflight_val {
                 best_instance = candidate;
-                best_inflight = candidate_inflight;
-                best_weight = candidate_weight;
+                best_inflight_val = candidate_inflight;
             }
         }
 
         *inflight.entry(best_instance).or_insert(0) += 1;
         let selected_inflight = *inflight.get(&best_instance).unwrap_or(&0);
+        let is_cpu = matches!(
+            device_types.get(&best_instance),
+            Some(Some(DeviceType::Cpu))
+        );
         tracing::info!(
             endpoint = %self.client.endpoint.id(),
             selected_instance = best_instance,
-            selected_weight = best_weight,
-            selected_inflight = selected_inflight,
+            selected_inflight,
+            is_cpu,
             "DeviceAwareWeighted selected instance"
         );
         Ok(best_instance)
