@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::KvRouter,
+    kv_router::{KvRouter, PrefillRouter},
     model_card::ModelDeploymentCard,
     types::{
         generic::tensor::TensorStreamingEngine,
@@ -49,6 +49,10 @@ pub struct WorkerSet {
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
+    /// Prefill router for disaggregated inference (decode WorkerSets only).
+    /// Stored here so we can deactivate it when prefill workers are removed.
+    pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
+
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
@@ -68,6 +72,7 @@ impl WorkerSet {
             tensor_engine: None,
             kv_router: None,
             worker_monitor: None,
+            prefill_router: None,
             instance_count_rx: None,
         }
     }
@@ -120,6 +125,16 @@ impl WorkerSet {
             && !self.has_images_engine()
             && !self.has_videos_engine()
             && !self.has_tensor_engine()
+    }
+
+    /// Whether this WorkerSet can currently serve requests.
+    /// Returns false when the WorkerSet was part of a disaggregated deployment,
+    /// the prefill workers died, and enforce_disagg is set (no fallback allowed).
+    pub fn can_serve_requests(&self) -> bool {
+        match &self.prefill_router {
+            Some(pr) => pr.can_serve_requests(),
+            None => true,
+        }
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -228,5 +243,57 @@ mod tests {
 
         tx.send(vec![100, 200, 300]).unwrap();
         assert_eq!(ws.worker_count(), 3);
+    }
+
+    // ── can_serve_requests ────────────────────────────────────────────────────
+
+    /// A WorkerSet with no PrefillRouter (pure aggregated deployment) can always serve.
+    #[test]
+    fn test_can_serve_requests_no_prefill_router() {
+        let ws = make_worker_set("ns1", "abc");
+        assert!(
+            ws.can_serve_requests(),
+            "WorkerSet without a prefill_router must always allow serving"
+        );
+    }
+
+    /// A WorkerSet with a PrefillRouter that was never activated (purely aggregated
+    /// WorkerSet that was given a router waiting for an endpoint that never came)
+    /// must still allow serving.
+    #[test]
+    fn test_can_serve_requests_with_never_activated_router() {
+        let mut ws = make_worker_set("ns1", "abc");
+        let mm = std::sync::Arc::new(crate::discovery::ModelManager::new());
+        ws.prefill_router = Some(PrefillRouter::disabled(
+            mm,
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            true, // even with enforce_disagg, never-activated router allows serving
+        ));
+        assert!(ws.can_serve_requests());
+    }
+
+    /// When the prefill router was activated and has since been deactivated, and
+    /// enforce_disagg is true, the WorkerSet must refuse serving so the model is
+    /// hidden from /v1/models.
+    #[test]
+    fn test_can_serve_requests_deactivated_enforce_disagg() {
+        let mut ws = make_worker_set("ns1", "abc");
+        ws.prefill_router = Some(PrefillRouter::make_deactivated_for_test(true));
+        assert!(
+            !ws.can_serve_requests(),
+            "deactivated prefill + enforce_disagg must block serving"
+        );
+    }
+
+    /// When enforce_disagg is false, falling back to aggregated mode is allowed,
+    /// so even a deactivated prefill router must not block serving.
+    #[test]
+    fn test_can_serve_requests_deactivated_no_enforce() {
+        let mut ws = make_worker_set("ns1", "abc");
+        ws.prefill_router = Some(PrefillRouter::make_deactivated_for_test(false));
+        assert!(
+            ws.can_serve_requests(),
+            "deactivated prefill without enforce_disagg must allow serving (fallback)"
+        );
     }
 }
