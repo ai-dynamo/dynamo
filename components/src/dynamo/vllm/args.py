@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import ipaddress
+import json
 import logging
 import os
 import socket
