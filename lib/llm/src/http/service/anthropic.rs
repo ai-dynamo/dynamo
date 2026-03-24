@@ -30,7 +30,7 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{Endpoint, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
     service_v2,
 };
 use crate::preprocessor::OpenAIPreprocessor;
@@ -125,12 +125,22 @@ async fn handler_anthropic_messages(
 
     // Create request context
     let request_id = get_or_create_request_id(None, &headers);
+    let streaming = request.stream;
+    let cancellation_labels = CancellationLabels {
+        model: request.model.clone(),
+        endpoint: Endpoint::AnthropicMessages.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
     // Create connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     let response =
         tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())

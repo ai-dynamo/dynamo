@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
+
 use dynamo_tokens::{SequenceHash, Token};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -103,6 +105,12 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+}
+
+/// Transport abstraction for publishing batched router-visible KV cache events.
+pub trait RouterEventSink: Send + Sync {
+    fn publish_event(&self, event: &RouterEvent)
+    -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 /// A worker identifier.

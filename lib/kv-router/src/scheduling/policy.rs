@@ -43,6 +43,21 @@ impl SchedulingPolicy for FcfsPolicy {
     }
 }
 
+/// LCFS with priority bumps: key = priority_jump + arrival_offset.
+/// Later arrival or higher priority_jump produces a higher key, scheduled first.
+///
+/// This intentionally favors newer arrivals under saturation and is mainly useful
+/// for policy comparison experiments.
+pub struct LcfsPolicy;
+
+impl SchedulingPolicy for LcfsPolicy {
+    type Key = OrderedFloat<f64>;
+
+    fn enqueue_key(&self, arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
+        OrderedFloat(request.priority_jump.max(0.0) + arrival_offset.as_secs_f64())
+    }
+}
+
 /// Weighted Shortest Processing Time (Smith's rule):
 /// key = (1 + priority_jump) / new_tokens, where new_tokens estimates the
 /// actual prefill cost by subtracting the max KV cache overlap from ISL.
@@ -73,6 +88,7 @@ impl SchedulingPolicy for WsptPolicy {
 /// since the variant is fixed at queue construction time.
 pub enum RouterSchedulingPolicy {
     Fcfs(FcfsPolicy),
+    Lcfs(LcfsPolicy),
     Wspt(WsptPolicy),
 }
 
@@ -80,6 +96,7 @@ impl RouterSchedulingPolicy {
     pub fn new(kind: RouterQueuePolicy, block_size: usize) -> Self {
         match kind {
             RouterQueuePolicy::Fcfs => Self::Fcfs(FcfsPolicy),
+            RouterQueuePolicy::Lcfs => Self::Lcfs(LcfsPolicy),
             RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy { block_size }),
         }
     }
@@ -91,6 +108,7 @@ impl SchedulingPolicy for RouterSchedulingPolicy {
     fn enqueue_key(&self, arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         match self {
             Self::Fcfs(p) => p.enqueue_key(arrival_offset, request),
+            Self::Lcfs(p) => p.enqueue_key(arrival_offset, request),
             Self::Wspt(p) => p.enqueue_key(arrival_offset, request),
         }
     }
@@ -176,6 +194,42 @@ mod tests {
         let key_a = policy.enqueue_key(Duration::from_secs(0), &a);
         let key_b = policy.enqueue_key(Duration::from_secs(5), &b);
         assert!(key_b > key_a);
+    }
+
+    #[test]
+    fn lcfs_later_arrival_scheduled_first() {
+        let policy = LcfsPolicy;
+        let req = request_with(512, 0.0, OverlapScores::default());
+        let early = policy.enqueue_key(Duration::from_secs(1), &req);
+        let late = policy.enqueue_key(Duration::from_secs(10), &req);
+        assert!(late > early, "later arrival should have higher key");
+    }
+
+    #[test]
+    fn lcfs_priority_jump_promotes() {
+        let policy = LcfsPolicy;
+        let normal = request_with(512, 0.0, OverlapScores::default());
+        let boosted = request_with(512, 100.0, OverlapScores::default());
+        let t = Duration::from_secs(10);
+        let key_normal = policy.enqueue_key(t, &normal);
+        let key_boosted = policy.enqueue_key(t, &boosted);
+        assert!(
+            key_boosted > key_normal,
+            "priority_jump should produce a higher key"
+        );
+    }
+
+    #[test]
+    fn router_scheduling_policy_matches_fcfs_and_lcfs_ordering() {
+        let req = request_with(512, 0.0, OverlapScores::default());
+        let early = Duration::from_secs(1);
+        let late = Duration::from_secs(10);
+
+        let fcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Fcfs, 16);
+        assert!(fcfs.enqueue_key(early, &req) > fcfs.enqueue_key(late, &req));
+
+        let lcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Lcfs, 16);
+        assert!(lcfs.enqueue_key(late, &req) > lcfs.enqueue_key(early, &req));
     }
 
     // ---- WSPT policy tests ----
