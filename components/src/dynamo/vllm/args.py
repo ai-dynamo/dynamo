@@ -310,10 +310,6 @@ def create_kv_events_config(
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 
-    logger.info(
-        "No kv_events_config required: KV events are disabled by default unless "
-        "--kv-events-config is provided explicitly"
-    )
     return None
 
 
