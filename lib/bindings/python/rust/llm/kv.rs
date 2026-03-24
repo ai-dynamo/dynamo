@@ -1048,13 +1048,15 @@ impl KvRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None, lora_name=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
+        update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -1088,6 +1090,13 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
+
+            if update_indexer && !chooser.kv_router_config().use_kv_events {
+                chooser
+                    .record_routing_decision(token_ids.clone(), best_worker)
+                    .await
+                    .map_err(to_pyerr)?;
+            }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
         })

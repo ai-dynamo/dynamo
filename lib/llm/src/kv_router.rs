@@ -386,6 +386,17 @@ where
         &self.kv_router_config
     }
 
+    pub async fn record_routing_decision(
+        &self,
+        tokens: Vec<u32>,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens, self.block_size);
+        self.indexer
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .await
+    }
+
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking.
