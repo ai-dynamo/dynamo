@@ -3,11 +3,10 @@
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use crate::error::OpenAIError;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpToolConnectorId {
     ConnectorDropbox,
@@ -20,7 +19,7 @@ pub enum McpToolConnectorId {
     ConnectorSharepoint,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq, Default, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq, Default)]
 #[builder(
     name = "MCPToolArgs",
     pattern = "mutable",
@@ -74,7 +73,7 @@ pub struct MCPTool {
     pub server_url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum MCPToolAllowedTools {
     /// A string array of allowed tool names
@@ -83,7 +82,7 @@ pub enum MCPToolAllowedTools {
     Filter(MCPToolFilter),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MCPToolFilter {
     /// Indicates whether or not a tool modifies data or is read-only.
     /// If an MCP server is annotated with [readOnlyHint](https://modelcontextprotocol.io/specification/2025-06-18/schema#toolannotations-readonlyhint),
@@ -96,7 +95,7 @@ pub struct MCPToolFilter {
 }
 
 /// Approval policy or filter for MCP tools.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum MCPToolRequireApproval {
     /// Specify which of the MCP server's tools require approval. Can be
@@ -109,14 +108,14 @@ pub enum MCPToolRequireApproval {
     ApprovalSetting(MCPToolApprovalSetting),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum MCPToolApprovalSetting {
     Always,
     Never,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MCPToolApprovalFilter {
     /// A list of tools that always require approval.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,7 +125,7 @@ pub struct MCPToolApprovalFilter {
     pub never: Option<MCPToolFilter>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MCPListToolsTool {
     /// The JSON schema describing the tool's input.
     pub input_schema: serde_json::Value,

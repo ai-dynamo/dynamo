@@ -173,6 +173,7 @@ pub struct NvExt {
     /// the prefix on the selected worker with the given TTL.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
     pub cache_control: Option<CacheControl>,
 
     /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.

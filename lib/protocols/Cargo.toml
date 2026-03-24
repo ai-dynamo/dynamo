@@ -47,7 +47,7 @@ base64 = "0.22.1"
 reqwest-eventsource = "0.6.0"
 secrecy = { version = "0.10.3", features = ["serde"] }
 tokio-tungstenite = { version = "0.26.1", optional = true, default-features = false }
-utoipa = { version = "5.3", features = ["url", "uuid"] }
+
 
 [dev-dependencies]
 tokio-test = "0.4.4"

@@ -38,6 +38,7 @@ use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +49,7 @@ pub struct NvCreateResponse {
 pub struct NvResponse {
     /// Flattened Response fields.
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::Response,
 
     /// NVIDIA extension field for response metadata (worker IDs, etc.)

@@ -3,7 +3,6 @@
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use crate::{
     error::OpenAIError,
@@ -18,14 +17,13 @@ use crate::{
 };
 
 /// Represents a conversation object.
-#[derive(Clone, Serialize, Debug, Deserialize, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 pub struct ConversationResource {
     /// The unique ID of the conversation.
     pub id: String,
     /// The object type, which is always `conversation`.
     pub object: String,
     /// Set of 16 key-value pairs that can be attached to an object.
-    #[schema(value_type = Object)]
     pub metadata: Option<serde_json::Value>,
     /// The time at which the conversation was created, measured in seconds since the Unix epoch.
     pub created_at: u64,
@@ -33,7 +31,7 @@ pub struct ConversationResource {
 
 /// Request to create a conversation.
 /// openapi spec type: CreateConversationBody
-#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]
 #[builder(name = "CreateConversationRequestArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -42,7 +40,6 @@ pub struct ConversationResource {
 pub struct CreateConversationRequest {
     /// Set of 16 key-value pairs that can be attached to an object.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Object)]
     pub metadata: Option<serde_json::Value>,
 
     /// Initial items to include in the conversation context. You may add up to 20 items at a time.
@@ -51,7 +48,7 @@ pub struct CreateConversationRequest {
 }
 
 /// Request to update a conversation.
-#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]
 #[builder(name = "UpdateConversationRequestArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -59,12 +56,11 @@ pub struct CreateConversationRequest {
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct UpdateConversationRequest {
     /// Set of 16 key-value pairs that can be attached to an object.
-    #[schema(value_type = Object)]
     pub metadata: Option<serde_json::Value>,
 }
 
 /// Represents a deleted conversation.
-#[derive(Clone, Serialize, Debug, Deserialize, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 pub struct DeleteConversationResponse {
     /// The unique ID of the deleted conversation.
     pub id: String,
@@ -75,7 +71,7 @@ pub struct DeleteConversationResponse {
 }
 
 /// Request to create conversation items.
-#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]
 #[builder(name = "CreateConversationItemsRequestArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -87,7 +83,7 @@ pub struct CreateConversationItemsRequest {
 }
 
 /// A list of Conversation items.
-#[derive(Clone, Serialize, Debug, Deserialize, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 pub struct ConversationItemList {
     /// The type of object returned, must be `list`.
     pub object: String,
@@ -101,7 +97,7 @@ pub struct ConversationItemList {
     pub last_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
     InProgress,
@@ -109,7 +105,7 @@ pub enum MessageStatus {
     Completed,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     Unknown,
@@ -122,18 +118,18 @@ pub enum MessageRole {
     Tool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TextContent {
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SummaryTextContent {
     /// A summary of the reasoning output from the model so far.
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ComputerScreenContent {
     /// The URL of the screenshot image.
     pub image_url: Option<String>,
@@ -141,7 +137,7 @@ pub struct ComputerScreenContent {
     pub file_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageContent {
     InputText(InputTextContent),
@@ -155,7 +151,7 @@ pub enum MessageContent {
     InputFile(InputFileContent),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Message {
     /// The unique ID of the message.
     pub id: String,
@@ -169,7 +165,7 @@ pub struct Message {
     pub content: Vec<MessageContent>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationItem {
     Message(Message),
@@ -192,7 +188,7 @@ pub enum ConversationItem {
 }
 
 /// Additional fields to include in the response.
-#[derive(Clone, Serialize, Debug, Deserialize, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeParam {
     /// Include the sources of the web search tool call.
@@ -219,7 +215,7 @@ pub enum IncludeParam {
 }
 
 /// The order to return items in.
-#[derive(Clone, Serialize, Debug, Deserialize, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ListOrder {
     /// Return items in ascending order.

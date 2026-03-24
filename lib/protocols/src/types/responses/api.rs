@@ -4,12 +4,11 @@
 use crate::error::OpenAIError;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use crate::types::responses::{IncludeParam, ListOrder};
 
 /// Query parameters for listing conversation items.
-#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq, ToSchema)]
+#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]
 #[builder(name = "ListConversationItemsQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -31,7 +30,7 @@ pub struct ListConversationItemsQuery {
 }
 
 /// Query parameters for getting a response.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "GetResponseQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -53,7 +52,7 @@ pub struct GetResponseQuery {
 }
 
 /// Query parameters for listing input items.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "ListInputItemsQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -75,7 +74,7 @@ pub struct ListInputItemsQuery {
 }
 
 /// Query parameters for getting a conversation item.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "GetConversationItemQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -88,7 +87,7 @@ pub struct GetConversationItemQuery {
 }
 
 /// Query parameters for creating conversation items.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "CreateConversationItemsQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]

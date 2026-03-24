@@ -2,13 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use crate::types::responses::{OutputContent, OutputItem, Response, ResponseLogProb, SummaryPart};
 
 /// Event types for streaming responses from the Responses API
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
-#[schema(no_recursion)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 pub enum ResponseStreamEvent {
     /// An event that is emitted when a response is created.
@@ -160,51 +158,51 @@ pub enum ResponseStreamEvent {
     ResponseError(ResponseErrorEvent),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCreatedEvent {
     pub sequence_number: u64,
     pub response: Response,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseInProgressEvent {
     pub sequence_number: u64,
     pub response: Response,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCompletedEvent {
     pub sequence_number: u64,
     pub response: Response,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseFailedEvent {
     pub sequence_number: u64,
     pub response: Response,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseIncompleteEvent {
     pub sequence_number: u64,
     pub response: Response,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseOutputItemAddedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item: OutputItem,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseOutputItemDoneEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item: OutputItem,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseContentPartAddedEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -213,7 +211,7 @@ pub struct ResponseContentPartAddedEvent {
     pub part: OutputContent,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseContentPartDoneEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -222,7 +220,7 @@ pub struct ResponseContentPartDoneEvent {
     pub part: OutputContent,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseTextDeltaEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -232,7 +230,7 @@ pub struct ResponseTextDeltaEvent {
     pub logprobs: Option<Vec<ResponseLogProb>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseTextDoneEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -242,7 +240,7 @@ pub struct ResponseTextDoneEvent {
     pub logprobs: Option<Vec<ResponseLogProb>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseRefusalDeltaEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -251,7 +249,7 @@ pub struct ResponseRefusalDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseRefusalDoneEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -260,7 +258,7 @@ pub struct ResponseRefusalDoneEvent {
     pub refusal: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseFunctionCallArgumentsDeltaEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -268,7 +266,7 @@ pub struct ResponseFunctionCallArgumentsDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseFunctionCallArgumentsDoneEvent {
     /// <https://github.com/64bit/async-openai/issues/472>
     pub name: Option<String>,
@@ -278,49 +276,49 @@ pub struct ResponseFunctionCallArgumentsDoneEvent {
     pub arguments: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseFileSearchCallInProgressEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseFileSearchCallSearchingEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseFileSearchCallCompletedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseWebSearchCallInProgressEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseWebSearchCallSearchingEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseWebSearchCallCompletedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseReasoningSummaryPartAddedEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -329,7 +327,7 @@ pub struct ResponseReasoningSummaryPartAddedEvent {
     pub part: SummaryPart,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseReasoningSummaryPartDoneEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -338,7 +336,7 @@ pub struct ResponseReasoningSummaryPartDoneEvent {
     pub part: SummaryPart,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseReasoningSummaryTextDeltaEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -347,7 +345,7 @@ pub struct ResponseReasoningSummaryTextDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseReasoningSummaryTextDoneEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -356,7 +354,7 @@ pub struct ResponseReasoningSummaryTextDoneEvent {
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseReasoningTextDeltaEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -365,7 +363,7 @@ pub struct ResponseReasoningTextDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseReasoningTextDoneEvent {
     pub sequence_number: u64,
     pub item_id: String,
@@ -374,28 +372,28 @@ pub struct ResponseReasoningTextDoneEvent {
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseImageGenCallCompletedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseImageGenCallGeneratingEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseImageGenCallInProgressEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseImageGenCallPartialImageEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -404,7 +402,7 @@ pub struct ResponseImageGenCallPartialImageEvent {
     pub partial_image_b64: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPCallArgumentsDeltaEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -412,7 +410,7 @@ pub struct ResponseMCPCallArgumentsDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPCallArgumentsDoneEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -420,70 +418,70 @@ pub struct ResponseMCPCallArgumentsDoneEvent {
     pub arguments: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPCallCompletedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPCallFailedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPCallInProgressEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPListToolsCompletedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPListToolsFailedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseMCPListToolsInProgressEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCodeInterpreterCallInProgressEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCodeInterpreterCallInterpretingEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCodeInterpreterCallCompletedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
     pub item_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCodeInterpreterCallCodeDeltaEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -491,7 +489,7 @@ pub struct ResponseCodeInterpreterCallCodeDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCodeInterpreterCallCodeDoneEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -499,7 +497,7 @@ pub struct ResponseCodeInterpreterCallCodeDoneEvent {
     pub code: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseOutputTextAnnotationAddedEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -509,13 +507,13 @@ pub struct ResponseOutputTextAnnotationAddedEvent {
     pub annotation: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseQueuedEvent {
     pub sequence_number: u64,
     pub response: Response,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCustomToolCallInputDeltaEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -523,7 +521,7 @@ pub struct ResponseCustomToolCallInputDeltaEvent {
     pub delta: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseCustomToolCallInputDoneEvent {
     pub sequence_number: u64,
     pub output_index: u32,
@@ -531,7 +529,7 @@ pub struct ResponseCustomToolCallInputDoneEvent {
     pub input: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseErrorEvent {
     pub sequence_number: u64,
     pub code: Option<String>,

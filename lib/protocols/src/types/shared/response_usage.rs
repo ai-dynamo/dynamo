@@ -2,22 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
-#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputTokenDetails {
     /// The number of tokens that were retrieved from the cache.
     pub cached_tokens: u32,
 }
 
-#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OutputTokenDetails {
     /// The number of reasoning tokens.
     pub reasoning_tokens: u32,
 }
 
 /// Usage statistics for a response.
-#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ResponseUsage {
     /// The number of input tokens.
     pub input_tokens: u32,
