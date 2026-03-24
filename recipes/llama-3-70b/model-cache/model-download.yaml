@@ -14,6 +14,10 @@ spec:
         app: model-download
     spec:
       restartPolicy: Never
+      securityContext:
+        fsGroup: 0
+        runAsUser: 1000
+        runAsGroup: 0
       containers:
         - name: model-download
           image: python:3.10-slim
