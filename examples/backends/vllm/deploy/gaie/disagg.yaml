@@ -3,12 +3,9 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: llama3-70b-disagg
+  name: qwen
 spec:
   backendFramework: vllm
-  pvcs:
-    - name: model-cache
-      create: false
   services:
     Epp:
       envFromSecret: hf-token-secret
@@ -16,12 +13,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
-              value: "128"
+              value: "16"
             - name: DYN_MODEL_NAME
-              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+              value: "Qwen/Qwen3-0.6B"
             - name: DYN_ENFORCE_DISAGG
               value: "true"
       eppConfig:
@@ -69,13 +67,10 @@ spec:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
       sharedMemory:
-        size: 80Gi
+        size: 2Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: docker.io/lambda108/dynamo:post-rebase
         args:
           - -m
           - dynamo.frontend
@@ -83,10 +78,6 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -102,76 +93,67 @@ spec:
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
-              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+              value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
-              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
-            - name: HF_HOME
-              value: /opt/models
+              value: "Qwen/Qwen3-0.6B"
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{\"enable_kv_cache_events\":true}'"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-      replicas: 2
-      resources:
-        limits:
-          gpu: "2"
-        requests:
-          gpu: "2"
-    VllmDecodeWorker:
-      componentType: worker
-      subComponentType: decode
-      envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      sharedMemory:
-        size: 80Gi
-      frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
-        args:
-          - -m
-          - dynamo.frontend
-          - --router-mode
-          - direct
-        envFromSecret: hf-token-secret
-      extraPodSpec:
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
-        affinity:
-          podAffinity:
-            preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                  - key: nvidia.com/dynamo-component-type
-                    operator: In
-                    values:
-                    - worker
-                topologyKey: kubernetes.io/hostname
-        mainContainer:
-          env:
-            - name: SERVED_MODEL_NAME
-              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
-            - name: MODEL_PATH
-              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
-            - name: HF_HOME
-              value: /opt/models
-          args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{\"enable_kv_cache_events\":true}'"
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:post-rebase
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
         limits:
-          gpu: "4"
+          gpu: "1"
         requests:
-          gpu: "4"
+          gpu: "1"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 2Gi
+      frontendSidecar:
+        image: docker.io/lambda108/dynamo:post-rebase
+        args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+        envFromSecret: hf-token-secret
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: MODEL_PATH
+              value: "Qwen/Qwen3-0.6B"
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
+          command:
+          - /bin/sh
+          - -c
+          image: docker.io/lambda108/dynamo:post-rebase
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"

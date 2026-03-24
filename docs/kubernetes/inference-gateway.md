@@ -122,7 +122,11 @@ For the HttpRoute service make sure to specify the namespace where your gateway 
 ```bash
 cd <dynamo-source-root>
 # kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
+# Choose disagg or agg example
+kubectl apply -f examples/backends/vllm/deploy/gaie/disagg.yaml -n my-model
+# or
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
+# make sure to apply the route
 kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
 

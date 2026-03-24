@@ -739,21 +739,26 @@ async fn create_kv_router_from_endpoint(
             .await
             .map_err(to_pyerr)?;
 
-        let card = instances
-            .into_iter()
-            .find_map(|inst| {
-                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
-                    .ok()
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "no model card found in discovery for endpoint {}/{}/{}",
-                    endpoint_id.namespace, endpoint_id.component, endpoint_id.name
-                ))
-            })?;
+        let maybe_card = instances.into_iter().find_map(|inst| {
+            inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                .ok()
+        });
 
-        let model_name = needs_model_name.then(|| card.display_name.clone());
-        (model_name, card.runtime_config.enable_eagle)
+        match maybe_card {
+            Some(card) => {
+                let model_name = needs_model_name.then(|| card.display_name.clone());
+                (model_name, card.runtime_config.enable_eagle)
+            }
+            None => {
+                tracing::warn!(
+                    namespace = %endpoint_id.namespace,
+                    component = %endpoint_id.component,
+                    endpoint = %endpoint_id.name,
+                    "No model card found in discovery; defaulting to non-Eagle routing semantics"
+                );
+                (None, false)
+            }
+        }
     };
 
     let kv_router = model_manager
@@ -1052,13 +1057,15 @@ impl KvRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None, lora_name=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
+        update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -1085,13 +1092,29 @@ impl KvRouter {
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
-                    lora_name,
+                    lora_name.clone(),
                     0.0,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )
                 .await
                 .map_err(to_pyerr)?;
+
+            if update_indexer && !chooser.kv_router_config().use_kv_events {
+                let mut tokens_with_hashes =
+                    TokensWithHashes::new(token_ids.clone(), chooser.block_size())
+                        .with_is_eagle(chooser.is_eagle());
+                if let Some(infos) = block_mm_infos.as_ref() {
+                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+                }
+                if let Some(lora_name) = lora_name.as_ref() {
+                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                }
+                chooser
+                    .record_routing_decision(tokens_with_hashes, best_worker)
+                    .await
+                    .map_err(to_pyerr)?;
+            }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
         })

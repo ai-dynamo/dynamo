@@ -405,8 +405,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
             if let Err(e) = self
                 .chooser
-                .indexer()
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+                .record_routing_decision(tokens_with_hashes, worker)
                 .await
             {
                 tracing::warn!(

@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.mocker.args import resolve_planner_profile_data
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -71,11 +74,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
 
-    extra_engine_args = (
-        MockEngineArgs.from_json(args.extra_engine_args)
-        if args.extra_engine_args is not None
-        else None
-    )
+    # Resolve planner_profile_data directory -> NPZ before passing to Rust.
+    # Rust only accepts NPZ files; resolve_planner_profile_data handles conversion.
+    profile_data_result = None
+    if args.extra_engine_args is not None:
+        raw = json.loads(args.extra_engine_args)
+        if "planner_profile_data" in raw:
+            profile_data_result = resolve_planner_profile_data(
+                Path(raw["planner_profile_data"])
+            )
+            if profile_data_result.npz_path is not None:
+                raw["planner_profile_data"] = str(profile_data_result.npz_path)
+            else:
+                del raw["planner_profile_data"]
+            extra_engine_args = MockEngineArgs.from_json(json.dumps(raw))
+        else:
+            extra_engine_args = MockEngineArgs.from_json(args.extra_engine_args)
+    else:
+        extra_engine_args = None
     router_config = (
         KvRouterConfig.from_json(args.router_config)
         if args.router_config is not None

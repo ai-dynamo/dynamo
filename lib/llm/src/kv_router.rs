@@ -394,6 +394,16 @@ where
         self.is_eagle
     }
 
+    pub async fn record_routing_decision(
+        &self,
+        mut tokens_with_hashes: TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        self.indexer
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .await
+    }
+
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking.
