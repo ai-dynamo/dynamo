@@ -9,16 +9,11 @@ use clap::Parser;
 use common::NoopSequencePublisher;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
-use dynamo_mocker::common::protocols::{DirectRequest, KvEventPublishers, OutputSignal};
-use dynamo_mocker::scheduler::Scheduler;
-use dynamo_mocker::scheduler::SchedulerHandle;
+use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
-use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -76,163 +71,74 @@ struct SequenceTrace {
 ///    completed=true → Free
 /// 4. Collect timestamps for later replay
 async fn generate_sequence_events(
-    traces: &[Vec<MooncakeRequest>],
+    traces: &[Trace],
     num_gpu_blocks: usize,
     block_size: u32,
     trace_simulation_duration_ms: u64,
 ) -> anyhow::Result<Vec<Vec<SequenceTrace>>> {
     println!("Generating sequence events...");
-    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
+    let artifacts = generate_replay_artifacts(
+        traces,
+        num_gpu_blocks,
+        block_size,
+        trace_simulation_duration_ms,
+    )
+    .await?;
+    let mut all_traces = Vec::with_capacity(artifacts.len());
 
-    let scaled_traces: Vec<_> = traces
-        .iter()
-        .map(|worker_trace| scale_mooncake_trace(worker_trace, trace_simulation_duration_ms))
-        .collect();
-
-    let progress = make_progress_bar(Some(traces.iter().map(|w| w.len() as u64).sum::<u64>()));
-
-    let mut tasks: Vec<JoinHandle<anyhow::Result<Vec<SequenceTrace>>>> = Vec::new();
-
-    for worker_trace in scaled_traces {
-        let sched_args = sched_args.clone();
-        let progress = progress.clone();
-
-        tasks.push(tokio::spawn(async move {
-            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
-
-            // No KvCacheEventSink — we only need output signals
-            let scheduler = Scheduler::new(
-                sched_args,
-                0,
-                Some(output_tx),
-                KvEventPublishers::default(),
-                None,
-            );
-
-            // Pre-compute metadata for each request before submission
-            let mut metadata: HashMap<Uuid, RequestMetadata> = HashMap::new();
-            for req in &worker_trace {
-                let block_hashes: Vec<SequenceHash> = req
-                    .hash_ids
-                    .iter()
-                    .map(|&id| local_block_hash_from_id(id, block_size).0)
-                    .collect();
-                let isl = req.hash_ids.len() * block_size as usize;
-                metadata.insert(
-                    req.uuid,
+    for artifact in artifacts {
+        let metadata = artifact
+            .requests
+            .iter()
+            .map(|request| {
+                (
+                    request.uuid,
                     RequestMetadata {
-                        block_hashes,
-                        isl,
-                        output_length: req.output_length,
+                        block_hashes: request.replay_hashes.sequence_hashes.clone(),
+                        isl: request.input_length,
+                        output_length: request.output_length as u64,
                     },
-                );
-            }
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
-            // Spawn drain task that converts OutputSignals → SequenceTrace entries
-            let drain_handle: JoinHandle<Vec<SequenceTrace>> = tokio::spawn(async move {
-                let mut entries = Vec::new();
-                let mut seen: HashMap<Uuid, bool> = HashMap::new();
+        let mut entries = Vec::new();
+        let mut seen = HashMap::new();
 
-                while let Some(signal) = output_rx.recv().await {
-                    let request_id = signal.uuid.to_string();
+        for timed_signal in artifact.output_signals {
+            let signal = timed_signal.signal;
+            let request_id = signal.uuid.to_string();
 
-                    if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(signal.uuid) {
-                        e.insert(false);
-
-                        if let Some(meta) = metadata.get(&signal.uuid) {
-                            entries.push(SequenceTrace {
-                                entry: SequenceTraceEntry::Add {
-                                    request_id: request_id.clone(),
-                                    block_hashes: meta.block_hashes.clone(),
-                                    isl: meta.isl,
-                                    output_length: meta.output_length,
-                                },
-                                timestamp_us: 0, // rescaled later
-                            });
-                            entries.push(SequenceTrace {
-                                entry: SequenceTraceEntry::PrefillComplete {
-                                    request_id: request_id.clone(),
-                                },
-                                timestamp_us: 0,
-                            });
-                        }
-                    }
-
-                    if signal.completed {
-                        seen.insert(signal.uuid, true);
-                        entries.push(SequenceTrace {
-                            entry: SequenceTraceEntry::Free { request_id },
-                            timestamp_us: 0,
-                        });
-                    }
-                }
-
-                entries
-            });
-
-            // Submit requests at scaled timing
-            let mut i = 0;
-            let mut target = Instant::now();
-            let start = target;
-
-            while i < worker_trace.len() {
-                let prev_i = i;
-                scheduler.receive(DirectRequest {
-                    tokens: tokens_from_request(&worker_trace[i], block_size),
-                    max_output_tokens: worker_trace[i].output_length as usize,
-                    uuid: Some(worker_trace[i].uuid),
-                    dp_rank: 0,
-                    arrival_timestamp_ms: None,
-                });
-                i += 1;
-
-                while i < worker_trace.len()
-                    && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
-                {
-                    scheduler.receive(DirectRequest {
-                        tokens: tokens_from_request(&worker_trace[i], block_size),
-                        max_output_tokens: worker_trace[i].output_length as usize,
-                        uuid: Some(worker_trace[i].uuid),
-                        dp_rank: 0,
-                        arrival_timestamp_ms: None,
+            if let std::collections::hash_map::Entry::Vacant(entry) = seen.entry(signal.uuid) {
+                entry.insert(());
+                if let Some(meta) = metadata.get(&signal.uuid) {
+                    entries.push(SequenceTrace {
+                        entry: SequenceTraceEntry::Add {
+                            request_id: request_id.clone(),
+                            block_hashes: meta.block_hashes.clone(),
+                            isl: meta.isl,
+                            output_length: meta.output_length,
+                        },
+                        timestamp_us: timed_signal.timestamp_us,
                     });
-                    i += 1;
+                    entries.push(SequenceTrace {
+                        entry: SequenceTraceEntry::PrefillComplete {
+                            request_id: request_id.clone(),
+                        },
+                        timestamp_us: timed_signal.timestamp_us,
+                    });
                 }
-
-                if i < worker_trace.len() {
-                    target += Duration::from_millis(
-                        worker_trace[i].timestamp - worker_trace[i - 1].timestamp,
-                    );
-                }
-
-                tokio::time::sleep_until(target).await;
-                progress.inc((i - prev_i) as u64);
             }
 
-            // Drop scheduler → CancelGuard fires → background task exits →
-            // output_tx dropped → drain task sees None
-            drop(scheduler);
-
-            let mut entries = drain_handle.await?;
-
-            // Assign monotonically increasing timestamps based on entry order
-            let total_us = (Instant::now() - start).as_micros() as u64;
-            let num_entries = entries.len() as u64;
-            for (idx, entry) in entries.iter_mut().enumerate() {
-                entry.timestamp_us = if num_entries > 1 {
-                    idx as u64 * total_us / (num_entries - 1)
-                } else {
-                    0
-                };
+            if signal.completed {
+                entries.push(SequenceTrace {
+                    entry: SequenceTraceEntry::Free { request_id },
+                    timestamp_us: timed_signal.timestamp_us,
+                });
             }
+        }
 
-            Ok(entries)
-        }));
-    }
-
-    let mut all_traces = Vec::new();
-    for task in tasks {
-        all_traces.push(task.await??);
+        all_traces.push(entries);
     }
 
     let total_adds = all_traces
@@ -503,30 +409,44 @@ async fn run_tests() -> anyhow::Result<()> {
     ));
     {
         let mut f = File::create(&path)?;
-        for (i, (hash_ids, output_length)) in
-            [(&[0u64, 1, 2] as &[u64], 10u64), (&[0, 1, 3, 4], 10)]
-                .iter()
-                .enumerate()
-        {
-            writeln!(
-                f,
-                "{}",
-                serde_json::json!({
-                    "timestamp": i as u64,
-                    "hash_ids": hash_ids,
-                    "output_length": output_length,
-                })
-            )?;
-        }
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "session_id": "session-a",
+                "timestamp": 0,
+                "input_length": 4,
+                "hash_ids": [0u64, 1, 2, 3],
+                "output_length": 10u64,
+            })
+        )?;
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "session_id": "session-a",
+                "delay": 5.0,
+                "input_length": 4,
+                "hash_ids": [4u64, 5, 6, 7],
+                "output_length": 10u64,
+            })
+        )?;
     }
 
-    let traces = process_mooncake_trace(path.to_str().unwrap(), 1, 1, 2, 42)?;
+    let traces = process_mooncake_trace(path.to_str().unwrap(), 512, 1, 1, 1, 42)?;
     std::fs::remove_file(&path).ok();
 
     println!(
         "Loaded {} workers, {} total requests",
         traces.len(),
-        traces.iter().map(|t| t.len()).sum::<usize>()
+        traces
+            .iter()
+            .map(|trace| trace
+                .sessions
+                .iter()
+                .map(|session| session.turns.len())
+                .sum::<usize>())
+            .sum::<usize>()
     );
 
     let seq_traces = generate_sequence_events(&traces, 1048576, 512, 100).await?;
@@ -545,6 +465,29 @@ async fn run_tests() -> anyhow::Result<()> {
     assert!(total_adds > 0, "expected at least one Add event");
     assert!(total_frees > 0, "expected at least one Free event");
     assert_eq!(total_adds, total_frees, "adds and frees should match");
+    for trace in &seq_traces {
+        assert!(
+            trace
+                .windows(2)
+                .all(|window| window[1].timestamp_us >= window[0].timestamp_us)
+        );
+    }
+    let first_free_us = seq_traces[0]
+        .iter()
+        .find_map(|entry| match entry.entry {
+            SequenceTraceEntry::Free { .. } => Some(entry.timestamp_us),
+            _ => None,
+        })
+        .unwrap();
+    let second_add_us = seq_traces[0]
+        .iter()
+        .filter_map(|entry| match entry.entry {
+            SequenceTraceEntry::Add { .. } => Some(entry.timestamp_us),
+            _ => None,
+        })
+        .nth(1)
+        .unwrap();
+    assert!(second_add_us >= first_free_us);
 
     println!("All tests passed.");
     Ok(())
@@ -567,6 +510,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let traces = process_mooncake_trace(
         path,
+        args.common.block_size,
         args.common.trace_length_factor,
         args.common.trace_duplication_factor,
         args.common.num_unique_inference_workers,

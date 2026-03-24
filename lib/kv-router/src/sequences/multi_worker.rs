@@ -86,6 +86,9 @@ pub enum SequenceError {
 
     #[error("Failed to publish event: {0}")]
     PublishFailed(#[from] anyhow::Error),
+
+    #[error("Synchronous mutation requires replica_sync=false")]
+    SyncMutationRequiresNoReplicaSync,
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
@@ -364,7 +367,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+    fn ensure_sync_mutation_allowed(&self) -> Result<(), SequenceError> {
+        if self.replica_sync {
+            return Err(SequenceError::SyncMutationRequiresNoReplicaSync);
+        }
+        Ok(())
+    }
+
+    fn add_request_local(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         let SequenceRequest {
             request_id,
             token_sequence,
@@ -384,22 +394,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 request_id,
                 worker: *existing_worker,
             });
-        }
-
-        if self.replica_sync {
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::AddRequest {
-                    token_sequence: token_sequence.clone(),
-                    isl,
-                    overlap,
-                    expected_output_tokens,
-                },
-                router_id: self.router_id,
-                lora_name: lora_name.clone(),
-            };
-            self.publisher.publish_event(&event).await?;
         }
 
         self.request_to_worker.insert(request_id.clone(), worker);
@@ -434,8 +428,67 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: req.request_id.clone(),
+                worker: req.worker,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: req.token_sequence.clone(),
+                    isl: req.isl,
+                    overlap: req.overlap,
+                    expected_output_tokens: req.expected_output_tokens,
+                },
+                router_id: self.router_id,
+                lora_name: req.lora_name.clone(),
+            };
+            self.publisher.publish_event(&event).await?;
+        }
+
+        self.add_request_local(req)
+    }
+
+    pub fn add_request_sync(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        self.ensure_sync_mutation_allowed()?;
+        self.add_request_local(req)
+    }
+
     /// Send a mutation to the worker assigned to a request, optionally publishing
     /// a replica-sync event and cleaning up request mappings afterward.
+    fn mutate_request_worker_local(
+        &self,
+        request_id: &RequestId,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId),
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        {
+            let table = self.workers.read();
+            let &idx = table
+                .index
+                .get(&worker)
+                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let mut seq = table.slots[idx].1.write();
+            mutate_fn(&mut seq, request_id);
+        }
+
+        if remove_mapping {
+            self.request_to_worker.remove(request_id);
+            self.request_to_lora.remove(request_id);
+        }
+
+        self.publish_active_load_for_worker(worker);
+
+        Ok(())
+    }
+
     async fn mutate_request_worker(
         &self,
         request_id: &RequestId,
@@ -467,24 +520,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.publisher.publish_event(&event).await?;
         }
 
-        {
-            let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
-            let mut seq = table.slots[idx].1.write();
-            mutate_fn(&mut seq, request_id);
-        }
-
-        if remove_mapping {
-            self.request_to_worker.remove(request_id);
-            self.request_to_lora.remove(request_id);
-        }
-
-        self.publish_active_load_for_worker(worker);
-
-        Ok(())
+        self.mutate_request_worker_local(request_id, mutate_fn, remove_mapping)
     }
 
     /// Free all blocks associated with a request.
@@ -508,6 +544,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         .await
     }
 
+    pub fn free_sync(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        self.ensure_sync_mutation_allowed()?;
+        if !self.request_to_worker.contains_key(request_id) {
+            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
+            return Ok(());
+        }
+        self.mutate_request_worker_local(
+            request_id,
+            |seqs, rid| {
+                seqs.free(rid);
+            },
+            true,
+        )
+    }
+
     /// Mark prefill as completed for a request.
     ///
     /// Note: Calling this multiple times for the same request is allowed and will be a no-op
@@ -525,6 +576,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             false,
         )
         .await
+    }
+
+    pub fn mark_prefill_completed_sync(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        self.ensure_sync_mutation_allowed()?;
+        self.mutate_request_worker_local(
+            request_id,
+            |seqs, rid| {
+                seqs.mark_prefill_completed(rid);
+            },
+            false,
+        )
     }
 
     /// Add an output block with optional fractional decay weight.

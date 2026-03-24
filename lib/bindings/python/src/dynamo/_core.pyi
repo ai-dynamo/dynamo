@@ -1388,6 +1388,10 @@ def run_mocker_synthetic_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     arrival_interval_ms: float = 1.0,
+    turns_per_session: int = 1,
+    shared_prefix_ratio: float = 0.0,
+    num_prefix_groups: int = 0,
+    inter_turn_delay_ms: float = 0.0,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
