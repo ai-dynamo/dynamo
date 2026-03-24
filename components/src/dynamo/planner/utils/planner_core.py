@@ -434,7 +434,7 @@ class BasePlanner:
                 PrefillRegressionModel,
             )
 
-            self.fpm_subscriber: Optional[FpmEventSubscriber] = None
+            self.fpm_subscriber: "Optional[FpmEventSubscriber]" = None
 
             if self.component_type == SubComponentType.PREFILL:
                 self.ttft_regression = PrefillRegressionModel(
