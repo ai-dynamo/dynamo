@@ -583,7 +583,7 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         let message = build_message("Test multimodal content", media_chunks);
         let request = Request::from(&message, None, None, mdc.slug().to_string());
 
-        let (preprocessed, _annotations) = preprocessor
+        let (preprocessed, _annotations, _) = preprocessor
             .preprocess_request(&request, None)
             .await
             .unwrap();
@@ -694,7 +694,7 @@ mod context_length_validation {
             r#"[{"role": "user", "content": "What is deep learning?"}]"#,
             "test-model",
         );
-        let (preprocessed, _) = preprocessor
+        let (preprocessed, _, _) = preprocessor
             .preprocess_request(&request, None)
             .await
             .unwrap();

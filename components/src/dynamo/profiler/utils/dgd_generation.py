@@ -107,7 +107,7 @@ def assemble_final_config(
 
     if profile:
         output_dir = ops.output_dir if not ops.dry_run else None
-        profile_cm = add_profile_data_to_config(base, output_dir)
+        profile_cm = add_profile_data_to_config(base, output_dir, mocker_enabled=mocker)
         if profile_cm:
             config_maps.append(profile_cm)
 
@@ -231,17 +231,21 @@ def add_planner_to_config(
 def add_profile_data_to_config(
     config_dict: dict,
     output_dir: str | None,
+    mocker_enabled: bool = False,
 ) -> Optional[dict]:
     """Create a profile-data ConfigMap and mount it into consumers in *config_dict*.
 
     Consumers are auto-detected:
     - The **Planner** service (if present) gets the volume mounted.
-    - **Mocker workers** (if present) get the volume mounted and
+    - **Mocker workers** (when *mocker_enabled*) get the volume mounted and
       ``--planner-profile-data`` set.
 
     Args:
         config_dict: The DGD config dict — mutated in place.
         output_dir: Directory containing profiling interpolation NPZ files.
+        mocker_enabled: Only inject ``--planner-profile-data`` into workers
+            when the mocker backend is active.  Non-mocker backends (vllm,
+            sglang, trtllm) do not recognise this argument.
 
     Returns:
         The ``profile_data_cm`` ConfigMap dict, or ``None`` if no profiling
@@ -274,20 +278,25 @@ def add_profile_data_to_config(
             planner_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
         )
 
-    # Mount into mocker workers if they exist
-    services = config_dict.get("spec", {}).get("services", {})
-    for worker_name in _mocker_worker_names():
-        worker_svc = services.get(worker_name)
-        if worker_svc is not None:
-            main_container = worker_svc.get("extraPodSpec", {}).get("mainContainer", {})
-            args_list = main_container.get("args", [])
-            args_list = set_argument_value(
-                args_list, "--planner-profile-data", PROFILE_DATA_MOUNT
-            )
-            main_container["args"] = args_list
-            _mount_volume_into_service(
-                worker_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
-            )
+    # Mount into mocker workers only when the mocker backend is active.
+    # Non-mocker backends (vllm, sglang, trtllm) share the same service
+    # names ("prefill", "decode") but do not accept --planner-profile-data.
+    if mocker_enabled:
+        services = config_dict.get("spec", {}).get("services", {})
+        for worker_name in _mocker_worker_names():
+            worker_svc = services.get(worker_name)
+            if worker_svc is not None:
+                main_container = worker_svc.get("extraPodSpec", {}).get(
+                    "mainContainer", {}
+                )
+                args_list = main_container.get("args", [])
+                args_list = set_argument_value(
+                    args_list, "--planner-profile-data", PROFILE_DATA_MOUNT
+                )
+                main_container["args"] = args_list
+                _mount_volume_into_service(
+                    worker_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
+                )
 
     return profile_data_cm
 

@@ -5,7 +5,7 @@
 # Disaggregated prefill/decode on a SINGLE GPU.
 # Per-worker VRAM is estimated from model parameters below. Override individual
 # knobs (MAX_MODEL_LEN, MAX_CONCURRENT_SEQS) via env vars, or set
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE to bypass the calculation entirely.
+# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to bypass the calculation entirely.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-model-len 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~4.0 GiB per worker (~8.0 GiB total)
@@ -13,6 +13,9 @@
 #   fraction per worker (for 48 GiB) : 0.09
 #   The ~1.3 GiB pad comes from the overhead term (CUDA ctx + activations).
 #   Overestimating is intentional -- better to pad than OOM.
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
@@ -23,54 +26,17 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" vllm
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2)
 
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction vllm)
-fi
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $DECODE_PID 2>/dev/null || true
-    wait $DYNAMO_PID $DECODE_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Disaggregated on Same GPU (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "Max seq len: $MAX_MODEL_LEN"
-echo "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)"
-echo "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
+    "Workers:     2 (prefill + decode, fraction is per worker)"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
@@ -85,7 +51,6 @@ python3 -m dynamo.vllm \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --gpu-memory-utilization "${GPU_MEM_FRACTION}" \
   --max-model-len "$MAX_MODEL_LEN" &
-DECODE_PID=$!
 
 # Wait for decode worker to initialize before starting prefill worker
 # This prevents both workers from competing for GPU memory simultaneously, which can cause OOM.
@@ -96,7 +61,7 @@ DECODE_PID=$!
 echo "Waiting for decode worker to initialize..."
 sleep 10
 
-# run prefill worker with metrics on port 8082 (foreground)
+# run prefill worker with metrics on port 8082
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=0 \
@@ -107,4 +72,7 @@ python3 -m dynamo.vllm \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --gpu-memory-utilization "${GPU_MEM_FRACTION}" \
   --max-model-len "$MAX_MODEL_LEN" \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

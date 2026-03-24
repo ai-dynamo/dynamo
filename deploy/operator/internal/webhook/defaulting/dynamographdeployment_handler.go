@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -50,8 +51,9 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
+// On every operation: defaults nil Replicas to 1 for all services.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
-// On UPDATE: does nothing -- the origin version is immutable once set.
+// On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
 
@@ -64,6 +66,18 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	if err != nil {
 		logger.Error(err, "failed to get admission request from context, skipping defaulting")
 		return nil
+	}
+
+	// Default nil replicas to 1 for all services. The Replicas field is
+	// *int32 with omitempty, so users can legally omit it. Without this
+	// default the controller panics on a nil pointer dereference in
+	// expandRolesForService(). Apply on every operation so that services
+	// added via UPDATE also get the default.
+	for name, svc := range dgd.Spec.Services {
+		if svc != nil && svc.Replicas == nil {
+			svc.Replicas = ptr.To(int32(1))
+			logger.V(1).Info("defaulted nil replicas to 1", "service", name)
+		}
 	}
 
 	if req.Operation == admissionv1.Create {

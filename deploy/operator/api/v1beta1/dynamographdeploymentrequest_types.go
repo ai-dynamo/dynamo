@@ -165,15 +165,6 @@ const (
 	ProfilingReasonJobCreationFailed = "JobCreationFailed"
 )
 
-// OptimizationType specifies the profiling optimization strategy.
-// +kubebuilder:validation:Enum=latency;throughput
-type OptimizationType string
-
-const (
-	OptimizationTypeLatency    OptimizationType = "latency"
-	OptimizationTypeThroughput OptimizationType = "throughput"
-)
-
 // SearchStrategy controls the profiling search depth.
 // +kubebuilder:validation:Enum=rapid;thorough
 type SearchStrategy string
@@ -231,14 +222,7 @@ type WorkloadSpec struct {
 }
 
 // SLASpec defines the service-level agreement targets for profiling optimization.
-// Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 type SLASpec struct {
-	// OptimizationType controls the profiling optimization strategy.
-	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
-	// +optional
-	// +kubebuilder:validation:Enum=latency;throughput
-	OptimizationType OptimizationType `json:"optimizationType,omitempty"`
-
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
 	// +python-default=2000
@@ -515,8 +499,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
-// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1
-// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`,priority=1
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`
 // +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type DynamoGraphDeploymentRequest struct {

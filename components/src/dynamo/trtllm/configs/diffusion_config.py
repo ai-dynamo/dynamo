@@ -6,8 +6,10 @@
 This module defines the DiffusionConfig dataclass used for configuring
 video and image diffusion workers.
 
-Fields map to TensorRT-LLM's DiffusionArgs sub-configs:
-- PipelineConfig: torch_compile, CUDA graph, warmup, offloading, fuse_qkv
+Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
+- PipelineConfig: offloading, fuse_qkv, NVTX markers
+- TorchCompileConfig: torch_compile, fullgraph
+- CudaGraphConfig: CUDA graph capture
 - AttentionConfig: attention backend (VANILLA, TRTLLM)
 - ParallelConfig: dit_*_size parallelism dimensions
 - TeaCacheConfig: caching optimization
@@ -86,7 +88,7 @@ class DiffusionConfig:
     # Attention backend: "VANILLA" (PyTorch SDPA) or "TRTLLM"
     attn_backend: str = "VANILLA"
 
-    # ── Quantization config (maps to DiffusionArgs.quant_config) ──
+    # ── Quantization config (maps to VisualGenArgs.quant_config) ──
     # Quantization algorithm. Options:
     #   None (no quantization), "FP8", "FP8_BLOCK_SCALES", "NVFP4",
     #   "W4A16_AWQ", "W4A8_AWQ", "W8A8_SQ_PER_CHANNEL"

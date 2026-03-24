@@ -11,8 +11,11 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, RouterEvent, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
 };
 pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use dynamo_mocker::common::protocols::{
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+};
 use dynamo_mocker::scheduler::Scheduler;
+use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_tokens::compute_hash_v2;
 use indicatif::{ProgressBar, ProgressStyle};
 use plotters::prelude::*;
@@ -121,11 +124,7 @@ impl EventCollector {
 }
 
 impl KvCacheEventSink for EventCollector {
-    fn publish(
-        &self,
-        event: KvCacheEvent,
-        _block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()> {
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         let timestamp = Instant::now();
         if let Some(events) = self.events.lock().unwrap().as_mut() {
             events.push((event, timestamp));
@@ -360,34 +359,38 @@ pub async fn generate_kv_events(
         tasks.push(tokio::spawn(async move {
             let collector = EventCollector::new();
 
-            let scheduler = Scheduler::new(sched_args, 0, None, Some(collector.clone()), None);
+            let scheduler = Scheduler::new(
+                sched_args,
+                0,
+                None,
+                KvEventPublishers::new(Some(collector.clone()), None),
+                None,
+            );
 
             let mut i = 0;
             let mut target = Instant::now();
 
             while i < worker_trace.len() {
                 let prev_i = i;
-                scheduler
-                    .receive(DirectRequest {
-                        tokens: tokens_from_request(&worker_trace[i], block_size),
-                        max_output_tokens: worker_trace[i].output_length as usize,
-                        uuid: Some(worker_trace[i].uuid),
-                        dp_rank: 0,
-                    })
-                    .await;
+                scheduler.receive(DirectRequest {
+                    tokens: tokens_from_request(&worker_trace[i], block_size),
+                    max_output_tokens: worker_trace[i].output_length as usize,
+                    uuid: Some(worker_trace[i].uuid),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                });
                 i += 1;
 
                 while i < worker_trace.len()
                     && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
                 {
-                    scheduler
-                        .receive(DirectRequest {
-                            tokens: tokens_from_request(&worker_trace[i], block_size),
-                            max_output_tokens: worker_trace[i].output_length as usize,
-                            uuid: Some(worker_trace[i].uuid),
-                            dp_rank: 0,
-                        })
-                        .await;
+                    scheduler.receive(DirectRequest {
+                        tokens: tokens_from_request(&worker_trace[i], block_size),
+                        max_output_tokens: worker_trace[i].output_length as usize,
+                        uuid: Some(worker_trace[i].uuid),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: None,
+                    });
                     i += 1;
                 }
 
@@ -623,9 +626,9 @@ impl SequenceData {
 
     /// Convert to a store event.
     pub fn to_store_event(&self, event_id: u64) -> RouterEvent {
-        RouterEvent {
-            worker_id: self.worker_id,
-            event: KvCacheEvent {
+        RouterEvent::new(
+            self.worker_id,
+            KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
@@ -642,21 +645,21 @@ impl SequenceData {
                 }),
                 dp_rank: 0,
             },
-        }
+        )
     }
 
     /// Convert to a remove event.
     pub fn to_remove_event(&self, event_id: u64) -> RouterEvent {
-        RouterEvent {
-            worker_id: self.worker_id,
-            event: KvCacheEvent {
+        RouterEvent::new(
+            self.worker_id,
+            KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: self.external_hashes.clone(),
                 }),
                 dp_rank: 0,
             },
-        }
+        )
     }
 }
 

@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import socket
-import warnings
 from typing import Any, Dict, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
@@ -41,6 +40,9 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     event_plane: str
     enable_local_indexer: bool = True
     use_kv_events: bool
+
+    # GMS configuration
+    gms_shadow_mode: bool = False
 
     # mirror vLLM
     model: str
@@ -126,6 +128,13 @@ def cross_validate_config(
             "bypassing vLLM's OutputProcessor buffering."
         )
 
+    # Validate --gms-shadow-mode requires --load-format gms
+    if dynamo_config.gms_shadow_mode and engine_config.load_format != "gms":
+        raise ValueError(
+            "--gms-shadow-mode requires --load-format gms. "
+            "Shadow mode depends on GMS for VA-stable weight sharing."
+        )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -156,9 +165,6 @@ def update_dynamo_config_with_engine(
         dynamo_config.multimodal_worker
         and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
     ):
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
-    elif dynamo_config.omni:
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -259,6 +265,24 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
+    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None:
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            logger.info(
+                "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
+                f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
+            )
+        else:
+            logger.warning(
+                f"DYN_FORWARDPASS_METRIC_PORT is set but scheduler_cls "
+                f"is already '{existing_cls}'. InstrumentedScheduler will NOT "
+                f"be injected. To use forward pass metrics, either remove "
+                f"--scheduler-cls or subclass InstrumentedScheduler."
+            )
+
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
         if hasattr(engine_config, key):
@@ -296,28 +320,7 @@ def create_kv_events_config(
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 
-    # Create default events config for prefix caching
-    # TODO: move this to configuration system.
-    port = envs.DYN_VLLM_KV_EVENT_PORT
-    warnings.warn(
-        "Automatic KV events configuration is deprecated and will be removed in "
-        "the next release. After that, KV events will be disabled by default "
-        "(matching upstream vLLM). To preserve current behavior, pass "
-        "--kv-events-config explicitly. For example:\n"
-        f'  --kv-events-config \'{{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{port}"}}\'\n'
-        "See docs/backends/vllm/README.md for details.",
-        FutureWarning,
-        stacklevel=2,
-    )
-    logger.info(
-        f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
-    )
-    dp_rank = engine_config.data_parallel_rank or 0
-    return KVEventsConfig(
-        enable_kv_cache_events=True,
-        publisher="zmq",
-        endpoint=f"tcp://*:{port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-    )
+    return None
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:

@@ -29,6 +29,12 @@ use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::metrics::{
+    frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
+    request_plane::ensure_request_plane_metrics_registered_prometheus,
+    tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
+    transport_metrics::ensure_transport_metrics_registered_prometheus,
+};
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -153,6 +159,26 @@ impl State {
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
+    }
+
+    /// Returns true if streaming tool call dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
+    /// SSE events for each complete tool call, letting clients start processing tool calls
+    /// before `finish_reason="tool_calls"` arrives.
+    pub fn streaming_tool_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+    }
+
+    /// Returns true if streaming reasoning dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path accumulates reasoning tokens and
+    /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
+    /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
+    pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
     }
 }
 
@@ -286,9 +312,14 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             tokio::select! {
                 result = server => {
-                    result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    cancel_token.cancel();
+                    result?;
                 }
                 _ = observer.cancelled() => {
                     state_cancel.cancel();
@@ -321,6 +352,9 @@ impl HttpService {
                 }
             })?;
 
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
@@ -333,6 +367,7 @@ impl HttpService {
                 })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
+            cancel_token.cancel();
         }
 
         Ok(())
@@ -439,6 +474,19 @@ impl HttpServiceConfigBuilder {
             if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
                 tracing::warn!("Failed to register routing overhead metrics: {}", e);
             }
+        }
+
+        if let Err(e) = ensure_request_plane_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register request-plane metrics: {}", e);
+        }
+        if let Err(e) = ensure_frontend_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register frontend perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_tokio_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register tokio perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register transport metrics: {}", e);
         }
 
         let mut router = axum::Router::new();

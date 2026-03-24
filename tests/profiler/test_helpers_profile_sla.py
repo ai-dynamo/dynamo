@@ -32,7 +32,10 @@ try:
         PickedParallelConfig,
     )
     from dynamo.profiler.utils.defaults import SearchStrategy
-    from dynamo.profiler.utils.dgd_generation import assemble_final_config
+    from dynamo.profiler.utils.dgd_generation import (
+        add_profile_data_to_config,
+        assemble_final_config,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
@@ -581,6 +584,90 @@ class TestAssembleFinalConfig:
         mock_planner.assert_not_called()
         mock_profile.assert_called_once()
         assert result == [profile_cm, mocker_base]
+
+
+# ---------------------------------------------------------------------------
+# add_profile_data_to_config — mocker_enabled guard (DYN-2409)
+# ---------------------------------------------------------------------------
+
+
+class TestAddProfileDataMockerGuard:
+    """Verify --planner-profile-data is only injected for mocker workers."""
+
+    @staticmethod
+    def _sglang_dgd():
+        """Minimal DGD with sglang-style 'prefill' and 'decode' workers."""
+        return {
+            "spec": {
+                "services": {
+                    "Planner": {
+                        "extraPodSpec": {
+                            "mainContainer": {"args": ["--config", "{}"]},
+                        }
+                    },
+                    "prefill": {
+                        "extraPodSpec": {
+                            "mainContainer": {
+                                "args": [
+                                    "-m",
+                                    "dynamo.sglang",
+                                    "--model-path",
+                                    "Qwen/Qwen3-32B",
+                                    "--disaggregation-mode",
+                                    "prefill",
+                                ]
+                            }
+                        }
+                    },
+                    "decode": {
+                        "extraPodSpec": {
+                            "mainContainer": {
+                                "args": [
+                                    "-m",
+                                    "dynamo.sglang",
+                                    "--model-path",
+                                    "Qwen/Qwen3-32B",
+                                    "--disaggregation-mode",
+                                    "decode",
+                                ]
+                            }
+                        }
+                    },
+                }
+            }
+        }
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_disabled_no_planner_profile_data_in_workers(self, tmp_path):
+        """When mocker is disabled, workers must NOT receive --planner-profile-data."""
+        dgd = self._sglang_dgd()
+        with patch(f"{_DGD_GEN}._load_profiling_data", return_value={"prefill": {}}):
+            add_profile_data_to_config(dgd, str(tmp_path), mocker_enabled=False)
+
+        for name in ("prefill", "decode"):
+            args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
+                "args"
+            ]
+            assert (
+                "--planner-profile-data" not in args
+            ), f"sglang worker '{name}' should not have --planner-profile-data"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_enabled_injects_planner_profile_data(self, tmp_path):
+        """When mocker is enabled, mocker workers MUST receive --planner-profile-data."""
+        dgd = self._sglang_dgd()
+        with patch(f"{_DGD_GEN}._load_profiling_data", return_value={"prefill": {}}):
+            add_profile_data_to_config(dgd, str(tmp_path), mocker_enabled=True)
+
+        for name in ("prefill", "decode"):
+            args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
+                "args"
+            ]
+            assert (
+                "--planner-profile-data" in args
+            ), f"mocker worker '{name}' should have --planner-profile-data"
 
 
 # ---------------------------------------------------------------------------

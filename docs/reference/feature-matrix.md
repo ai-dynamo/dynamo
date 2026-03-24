@@ -6,7 +6,7 @@ title: Feature Matrix
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
-*Updated for Dynamo v0.9.0*
+*Updated for Dynamo v1.0.1*
 
 **Legend:**
 *   ✅ : Supported
@@ -108,7 +108,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 ---
 
 
-{/* Backend READMEs — paths relative to rendered URL /getting-started/feature-matrix */}
+{/* Backend READMEs — paths relative to rendered URL /resources/feature-matrix */}
 [vllm-readme]: ../backends/v-llm
 [sglang-readme]: ../backends/sg-lang
 [trtllm-readme]: ../backends/tensor-rt-llm
@@ -122,10 +122,10 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [tools]: ../user-guides/tool-calling
 
 {/* Multimodal */}
-[mm]: ../user-guides/multimodality-support
-[mm-vllm]: ../user-guides/multimodality-support/v-llm-multimodal
-[mm-trtllm]: ../user-guides/multimodality-support/tensor-rt-llm-multimodal
-[mm-sglang]: ../user-guides/multimodality-support/sg-lang-multimodal
+[mm]: ../features/multimodal/README.md
+[mm-vllm]: ../features/multimodal/multimodal-vllm.md
+[mm-trtllm]: ../features/multimodal/multimodal-trtllm.md
+[mm-sglang]: ../features/multimodal/multimodal-sglang.md
 
 {/* Feature-specific */}
 [lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
@@ -133,4 +133,4 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle
 
 {/* Dynamo Snapshot */}
-[snapshot]: ../kubernetes/snapshot/README.md
+[snapshot]: ../kubernetes-deployment/deployment-guide/snapshot

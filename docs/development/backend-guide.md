@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Writing Python Workers in Dynamo
+sidebar-title: Writing Python Workers
 subtitle: Create custom Python workers and engines for Dynamo
 ---
+
+# Writing Python Workers in Dynamo
 
 This guide explains how to create your own Python worker in Dynamo.
 
@@ -75,7 +78,7 @@ The `model_type` can be:
 
 See `examples/backends` for full code examples.
 
-## Component names
+## Component Names
 
 A worker needs three names to register itself: namespace.component.endpoint
 

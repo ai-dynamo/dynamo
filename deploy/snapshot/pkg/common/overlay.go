@@ -77,11 +77,7 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 
 // buildExclusions merges exclusion lists and normalizes paths for tar --exclude patterns.
 func buildExclusions(s types.OverlaySettings) []string {
-	total := len(s.SystemDirs) + len(s.CacheDirs) + len(s.AdditionalExclusions)
-	exclusions := make([]string, 0, total)
-	exclusions = append(exclusions, s.SystemDirs...)
-	exclusions = append(exclusions, s.CacheDirs...)
-	exclusions = append(exclusions, s.AdditionalExclusions...)
+	exclusions := append([]string(nil), s.Exclusions...)
 	for i, p := range exclusions {
 		if strings.HasPrefix(p, "*") {
 			continue
