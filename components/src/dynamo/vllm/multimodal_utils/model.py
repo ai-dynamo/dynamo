@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
+from huggingface_hub import hf_hub_download
 from transformers import AutoModel
 from vllm import LLM
 from vllm.utils.system_utils import update_environment_variables
@@ -29,28 +32,23 @@ logger = logging.getLogger(__name__)
 # should be removed once there is proper way to extract vLLM encoder.
 VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
+# HF architecture classes that use Qwen VL-style image processing
+# (grid_thw + pixel_values). Adding an entry here is sufficient to support
+# any model that shares the same vision pipeline.
+QWEN_VL_ARCHITECTURES = {
+    "Qwen2VLForConditionalGeneration",
+    "Qwen2_5_VLForConditionalGeneration",
+    "Qwen3VLForConditionalGeneration",
+    "Qwen3VLMoeForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+}
+
 
 class SupportedModels:
-    """Supported multimodal model identifiers"""
-
-    # TODO: Replace this explicit model list with dynamic detection using
-    # HF config `architectures` field or vLLM's model registry, so any
-    # vLLM-supported VLM works without maintaining entries here.
+    """Non-Qwen multimodal model identifiers that need model-specific handling."""
 
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
-    QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
-    QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
-    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
-    QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
-    QWEN_3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
-    QWEN_3_VL_30B_A3B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-    QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
-    QWEN_3_VL_8B = "Qwen/Qwen3-VL-8B-Instruct"
-    QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
-    QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
-    QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
-    QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
-    QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -123,27 +121,49 @@ def is_model_supported(model_name: str, supported_model: str) -> bool:
     return normalized_name == normalized_supported
 
 
-# List of all Qwen VL model variants for easy extension
-QWEN_VL_MODELS = [
-    SupportedModels.QWEN_2_VL_2B,
-    SupportedModels.QWEN_2_5_VL_3B,
-    SupportedModels.QWEN_2_5_VL_7B,
-    SupportedModels.QWEN_2_5_VL_32B,
-    SupportedModels.QWEN_3_VL_2B,
-    SupportedModels.QWEN_3_VL_30B_A3B,
-    SupportedModels.QWEN_3_VL_30B_A3B_FP8,
-    SupportedModels.QWEN_3_VL_8B,
-    SupportedModels.QWEN_3_VL_8B_FP8,
-    SupportedModels.QWEN_3_VL_4B,
-    SupportedModels.QWEN_3_VL_4B_FP8,
-    SupportedModels.QWEN_3_VL_32B,
-    SupportedModels.QWEN_3_VL_32B_FP8,
-]
+@lru_cache(maxsize=32)
+def _get_model_architectures(model_name: str) -> tuple[str, ...]:
+    """Get the architectures list from a model's config.json (cached).
+
+    Reads the raw JSON instead of using ``AutoConfig`` so that brand-new
+    model types work even before ``transformers`` adds native support.
+
+    Args:
+        model_name: HF model id, local path, or cache path.
+
+    Returns:
+        Tuple of architecture class names (empty if lookup fails).
+    """
+    normalized = normalize_model_name(model_name)
+    try:
+        # Local path
+        local_config = Path(normalized) / "config.json"
+        if local_config.is_file():
+            config_path = str(local_config)
+        else:
+            # Download (or resolve from HF cache) just the config file
+            config_path = hf_hub_download(normalized, "config.json")
+
+        with open(config_path) as f:
+            config = json.load(f)
+        return tuple(config.get("architectures", []))
+    except Exception:
+        logger.warning(
+            "Could not load config.json for model %s, "
+            "architecture-based detection unavailable",
+            normalized,
+        )
+        return ()
 
 
 def is_qwen_vl_model(model_name: str) -> bool:
     """
-    Check if a model is any Qwen VL variant.
+    Check if a model uses Qwen VL-style vision processing by inspecting
+    its HF config ``architectures`` field.
+
+    This replaces the previous explicit model-name list, so any Qwen VL
+    variant (including community finetunes and quantised checkpoints)
+    is recognised automatically.
 
     Args:
         model_name: The model name to check
@@ -152,7 +172,7 @@ def is_qwen_vl_model(model_name: str) -> bool:
         True if the model is a Qwen VL variant, False otherwise
     """
     return any(
-        is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS
+        arch in QWEN_VL_ARCHITECTURES for arch in _get_model_architectures(model_name)
     )
 
 
