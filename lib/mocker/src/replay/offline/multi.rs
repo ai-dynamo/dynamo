@@ -5,6 +5,7 @@ use super::events::{SimulationEvent, SimulationEventKind};
 use super::normalize_trace_requests;
 use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::loadgen::{Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
 use crate::replay::{ReplayRouterMode, TraceCollector, TraceSimulationReport};
 use crate::scheduler::RouterEventVisibility;
@@ -18,6 +19,11 @@ use uuid::Uuid;
 enum ReplayMode {
     Trace,
     Concurrency { max_in_flight: usize },
+}
+
+enum AdmissionSource {
+    Requests(VecDeque<DirectRequest>),
+    Workload(WorkloadDriver),
 }
 
 #[cfg(test)]
@@ -40,7 +46,7 @@ struct OfflineRuntime {
     now_ms: f64,
     next_worker_idx: usize,
     next_event_seq: u64,
-    pending: VecDeque<DirectRequest>,
+    admission: AdmissionSource,
     router_pending: HashMap<Uuid, DirectRequest>,
     workers: Vec<OfflineWorkerState>,
     collector: TraceCollector,
@@ -60,6 +66,42 @@ impl OfflineRuntime {
         mode: ReplayMode,
         router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
+        Self::new_with_source(
+            args,
+            router_config,
+            AdmissionSource::Requests(pending),
+            num_workers,
+            mode,
+            router_mode,
+        )
+    }
+
+    fn new_workload(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        driver: WorkloadDriver,
+        num_workers: usize,
+        mode: ReplayMode,
+        router_mode: ReplayRouterMode,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_source(
+            args,
+            router_config,
+            AdmissionSource::Workload(driver),
+            num_workers,
+            mode,
+            router_mode,
+        )
+    }
+
+    fn new_with_source(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        admission: AdmissionSource,
+        num_workers: usize,
+        mode: ReplayMode,
+        router_mode: ReplayRouterMode,
+    ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
@@ -73,7 +115,7 @@ impl OfflineRuntime {
             now_ms: 0.0,
             next_worker_idx: 0,
             next_event_seq: 0,
-            pending,
+            admission,
             router_pending: HashMap::new(),
             workers: (0..num_workers)
                 .map(|worker_idx| {
@@ -199,20 +241,30 @@ impl OfflineRuntime {
     }
 
     fn is_done(&self) -> bool {
-        self.pending.is_empty()
-            && self.events.is_empty()
+        self.events.is_empty()
             && self.cluster_in_flight() == 0
+            && match &self.admission {
+                AdmissionSource::Requests(pending) => pending.is_empty(),
+                AdmissionSource::Workload(driver) => driver.is_drained(),
+            }
             && self.workers.iter().all(OfflineWorkerState::is_drained)
     }
 
     fn next_timestamp(&self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next_arrival_ms = match self.mode {
-            ReplayMode::Trace => self
-                .pending
+        let next_arrival_ms = match (&self.mode, &self.admission) {
+            (ReplayMode::Trace, AdmissionSource::Requests(pending)) => pending
                 .front()
                 .and_then(|request| request.arrival_timestamp_ms),
-            ReplayMode::Concurrency { .. } => None,
+            (ReplayMode::Trace, AdmissionSource::Workload(driver)) => driver.next_ready_time_ms(),
+            (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Workload(driver)) => {
+                if self.cluster_in_flight() < *max_in_flight {
+                    driver.next_ready_time_ms()
+                } else {
+                    None
+                }
+            }
+            (ReplayMode::Concurrency { .. }, AdmissionSource::Requests(_)) => None,
         };
 
         match (next_arrival_ms, next_event_ms) {
@@ -258,6 +310,9 @@ impl OfflineRuntime {
                 self.record_router_pending();
             }
             self.prefill_completed.remove(&signal.uuid);
+            if let AdmissionSource::Workload(driver) = &mut self.admission {
+                driver.on_complete(signal.uuid, self.now_ms)?;
+            }
             self.dispatch_router_admissions(admissions)?;
             return Ok(());
         }
@@ -325,19 +380,35 @@ impl OfflineRuntime {
 
     fn release_trace_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
-        while self
-            .pending
-            .front()
-            .and_then(|request| request.arrival_timestamp_ms)
-            .is_some_and(|arrival_ms| arrival_ms <= self.now_ms)
-        {
-            let request = self
-                .pending
-                .pop_front()
-                .expect("front request must exist when arrival is ready");
-            let arrival_ms = request
-                .arrival_timestamp_ms
-                .expect("trace replay requests must have an arrival timestamp");
+        let mut ready_requests = Vec::new();
+
+        match &mut self.admission {
+            AdmissionSource::Requests(pending) => {
+                while pending
+                    .front()
+                    .and_then(|request| request.arrival_timestamp_ms)
+                    .is_some_and(|arrival_ms| arrival_ms <= self.now_ms)
+                {
+                    let request = pending
+                        .pop_front()
+                        .expect("front request must exist when arrival is ready");
+                    let arrival_ms = request
+                        .arrival_timestamp_ms
+                        .expect("trace replay requests must have an arrival timestamp");
+                    ready_requests.push((request, arrival_ms));
+                }
+            }
+            AdmissionSource::Workload(driver) => {
+                ready_requests.extend(
+                    driver
+                        .pop_ready(self.now_ms, usize::MAX)
+                        .into_iter()
+                        .map(|ready| (ready.request, ready.scheduled_ready_at_ms)),
+                );
+            }
+        }
+
+        for (request, arrival_ms) in ready_requests {
             self.assign_request(request, arrival_ms)?;
             released_any = true;
         }
@@ -347,10 +418,32 @@ impl OfflineRuntime {
 
     fn top_off_concurrency(&mut self, max_in_flight: usize) -> anyhow::Result<bool> {
         let mut released_any = false;
-        while self.cluster_in_flight() < max_in_flight {
-            let Some(request) = self.pending.pop_front() else {
-                break;
-            };
+        let available = max_in_flight.saturating_sub(self.cluster_in_flight());
+        if available == 0 {
+            return Ok(false);
+        }
+
+        let mut ready_requests = Vec::new();
+        match &mut self.admission {
+            AdmissionSource::Requests(pending) => {
+                for _ in 0..available {
+                    let Some(request) = pending.pop_front() else {
+                        break;
+                    };
+                    ready_requests.push(request);
+                }
+            }
+            AdmissionSource::Workload(driver) => {
+                ready_requests.extend(
+                    driver
+                        .pop_ready(self.now_ms, available)
+                        .into_iter()
+                        .map(|ready| ready.request),
+                );
+            }
+        }
+
+        for request in ready_requests {
             self.assign_request(request, self.now_ms)?;
             released_any = true;
         }
@@ -495,6 +588,49 @@ pub(crate) fn simulate_concurrency_multi(
     Ok(collector.finish())
 }
 
+pub(crate) fn simulate_trace_workload_multi(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> anyhow::Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    let driver = trace.into_trace_driver()?;
+    let (collector, _) = OfflineRuntime::new_workload(
+        &args,
+        router_config,
+        driver,
+        num_workers,
+        ReplayMode::Trace,
+        router_mode,
+    )?
+    .run()?;
+    Ok(collector.finish())
+}
+
+pub(crate) fn simulate_concurrency_workload_multi(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> anyhow::Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    let driver = trace.into_concurrency_driver()?;
+    let (collector, _) = OfflineRuntime::new_workload(
+        &args,
+        router_config,
+        driver,
+        num_workers,
+        ReplayMode::Concurrency { max_in_flight },
+        router_mode,
+    )?
+    .run()?;
+    Ok(collector.finish())
+}
+
 #[cfg(test)]
 fn run_trace_multi_collect_with_stats(
     args: &MockEngineArgs,
@@ -538,10 +674,52 @@ fn run_concurrency_multi_collect_with_stats(
 }
 
 #[cfg(test)]
+fn run_trace_workload_multi_collect_with_stats(
+    args: &MockEngineArgs,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> (TraceCollector, OfflineRuntimeStats) {
+    OfflineRuntime::new_workload(
+        args,
+        None,
+        trace.into_trace_driver().unwrap(),
+        num_workers,
+        ReplayMode::Trace,
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
+}
+
+#[cfg(test)]
+fn run_concurrency_workload_multi_collect_with_stats(
+    args: &MockEngineArgs,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> (TraceCollector, OfflineRuntimeStats) {
+    OfflineRuntime::new_workload(
+        args,
+        None,
+        trace.into_concurrency_driver().unwrap(),
+        num_workers,
+        ReplayMode::Concurrency { max_in_flight },
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::single::{run_concurrency_single_collect, run_trace_single_collect};
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
+    use crate::loadgen::{SessionTrace, TurnTrace};
     use dynamo_kv_router::config::RouterQueuePolicy;
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
@@ -595,6 +773,112 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    fn multiturn_trace() -> Trace {
+        Trace {
+            block_size: 64,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 64,
+                            max_output_tokens: 2,
+                            hash_ids: vec![11],
+                            delay_after_previous_ms: 0.0,
+                        },
+                        TurnTrace {
+                            input_length: 192,
+                            max_output_tokens: 2,
+                            hash_ids: vec![21, 22, 23],
+                            delay_after_previous_ms: 10.0,
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(5.0),
+                    turns: vec![TurnTrace {
+                        input_length: 128,
+                        max_output_tokens: 2,
+                        hash_ids: vec![31, 32],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_trace_workload_follow_up_turn_arrives_after_completion_plus_delay() {
+        let args = fast_router_args();
+        let (collector, stats) = run_trace_workload_multi_collect_with_stats(
+            &args,
+            multiturn_trace(),
+            2,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        let first_turn_uuid = *stats
+            .dispatch_order
+            .iter()
+            .find(|uuid| {
+                collector
+                    .snapshot(**uuid)
+                    .is_some_and(|stats| stats.input_length == 64)
+            })
+            .unwrap();
+        let second_turn_uuid = *stats
+            .dispatch_order
+            .iter()
+            .find(|uuid| {
+                collector
+                    .snapshot(**uuid)
+                    .is_some_and(|stats| stats.input_length == 192)
+            })
+            .unwrap();
+        let session_b_uuid = *stats
+            .dispatch_order
+            .iter()
+            .find(|uuid| {
+                collector
+                    .snapshot(**uuid)
+                    .is_some_and(|stats| stats.input_length == 128)
+            })
+            .unwrap();
+
+        let first_turn = collector.snapshot(first_turn_uuid).unwrap();
+        let second_turn = collector.snapshot(second_turn_uuid).unwrap();
+        let session_b = collector.snapshot(session_b_uuid).unwrap();
+
+        assert_eq!(first_turn.arrival_time_ms, 0.0);
+        assert_eq!(session_b.arrival_time_ms, 5.0);
+        assert!(
+            second_turn.arrival_time_ms >= first_turn.last_token_ms.unwrap() + 10.0,
+            "follow-up turn should unlock after completion plus delay"
+        );
+    }
+
+    #[test]
+    fn test_concurrency_workload_delayed_follow_up_does_not_bypass_other_ready_sessions() {
+        let args = fast_router_args();
+        let (collector, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            multiturn_trace(),
+            1,
+            2,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.max_in_flight_seen, 1);
+        let dispatch_input_lengths = stats
+            .dispatch_order
+            .iter()
+            .map(|uuid| collector.snapshot(*uuid).unwrap().input_length)
+            .collect::<Vec<_>>();
+        assert_eq!(dispatch_input_lengths, vec![64, 128, 192]);
     }
 
     #[test]

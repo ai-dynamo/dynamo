@@ -3,4 +3,7 @@
 
 mod runtime;
 
-pub(crate) use runtime::{simulate_concurrency_requests, simulate_trace_requests};
+pub(crate) use runtime::{
+    simulate_concurrency_requests, simulate_concurrency_workload, simulate_trace_requests,
+    simulate_trace_workload,
+};

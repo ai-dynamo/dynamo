@@ -14,6 +14,10 @@ pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig
 use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
 };
+use dynamo_mocker::loadgen::{
+    ArrivalSpec, DelaySpec, LengthSpec, RouterSequence, SequenceHashMode, SessionPartitionSpec,
+    SyntheticTraceSpec, Trace,
+};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_tokens::compute_hash_v2;
@@ -101,6 +105,8 @@ pub struct MooncakeRequest {
     #[serde(default = "Uuid::new_v4")]
     pub uuid: uuid::Uuid,
     pub timestamp: u64,
+    #[serde(default)]
+    pub input_length: usize,
     pub hash_ids: Vec<u64>,
     pub output_length: u64,
 }
@@ -257,11 +263,15 @@ pub fn duplicate_traces(requests: Vec<MooncakeRequest>, factor: usize) -> Vec<Mo
 /// Expand a request's block-level hash_ids into per-token IDs by repeating each
 /// hash_id `block_size` times.
 pub fn tokens_from_request(request: &MooncakeRequest, block_size: u32) -> Vec<u32> {
-    request
+    let mut tokens = request
         .hash_ids
         .iter()
         .flat_map(|id| (0..block_size).map(|_| *id as u32))
-        .collect()
+        .collect::<Vec<_>>();
+    if request.input_length > 0 && request.input_length < tokens.len() {
+        tokens.truncate(request.input_length);
+    }
+    tokens
 }
 
 /// Compute the LocalBlockHash for a block-level hash_id the same way the mock
@@ -309,10 +319,17 @@ pub fn process_mooncake_trace(
     num_workers: usize,
     seed: u64,
 ) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
-    let requests = load_mooncake_trace(path)?;
-    let requests = expand_trace_lengths(requests, trace_length_factor);
-    let requests = duplicate_traces(requests, trace_duplication_factor);
-    Ok(partition_trace(requests, num_workers, seed))
+    let trace = Trace::from_mooncake(std::path::Path::new(path), 1)?
+        .expand_hash_prefix_depth(trace_length_factor)
+        .duplicate_hash_space(trace_duplication_factor);
+    Ok(trace
+        .partition_by_session(SessionPartitionSpec::Random {
+            num_partitions: num_workers,
+            seed,
+        })
+        .into_iter()
+        .map(flatten_trace_partition)
+        .collect())
 }
 
 /// Build default MockEngineArgs suitable for event generation.
@@ -591,6 +608,16 @@ pub struct SequenceData {
     pub external_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
+impl From<RouterSequence> for SequenceData {
+    fn from(sequence: RouterSequence) -> Self {
+        Self {
+            worker_id: sequence.worker_id,
+            local_hashes: sequence.local_hashes,
+            external_hashes: sequence.external_hashes,
+        }
+    }
+}
+
 impl SequenceData {
     /// Create a new sequence with synthetic hashes based on sequence ID.
     pub fn new(seq_id: u64, worker_id: WorkerId, depth: usize) -> Self {
@@ -673,58 +700,46 @@ pub fn generate_sequences(
     seed: u64,
     use_cumulative_hash: bool,
 ) -> Vec<SequenceData> {
-    let mut sequences = Vec::with_capacity(num_sequences);
-    let prefix_length = (depth as f64 * prefix_ratio).round() as usize;
-    let mut rng: StdRng = StdRng::seed_from_u64(seed);
+    let trace = Trace::synthetic(SyntheticTraceSpec {
+        block_size: 1,
+        num_sessions: num_sequences,
+        turns_per_session: 1,
+        input_tokens: LengthSpec {
+            mean: depth,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: 1,
+            stddev: 0.0,
+        },
+        shared_prefix_ratio: prefix_ratio,
+        num_prefix_groups,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: DelaySpec::None,
+        seed,
+    })
+    .expect("sequence generation spec must be valid");
+    let hash_mode = if use_cumulative_hash {
+        SequenceHashMode::Cumulative
+    } else {
+        SequenceHashMode::Raw
+    };
 
-    for seq_id in 0..num_sequences {
-        let seq_id_u64 = seq_id as u64;
-        let worker_id = (seq_id % num_workers) as WorkerId;
-
-        let group_id = if num_prefix_groups > 0 && prefix_length > 0 {
-            Some(rng.random_range(0..num_prefix_groups) as u64)
-        } else {
-            None
-        };
-
-        let local_hashes: Vec<LocalBlockHash> = (0..depth)
-            .map(|block_idx| {
-                let block_idx_u64 = block_idx as u64;
-                if let Some(gid) = group_id
-                    && block_idx < prefix_length
-                {
-                    return LocalBlockHash(0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64);
-                }
-                LocalBlockHash((seq_id_u64 << 32) | block_idx_u64)
-            })
-            .collect();
-
-        if use_cumulative_hash {
-            sequences.push(SequenceData::from_local_hashes(worker_id, local_hashes));
-        } else {
-            let external_hashes: Vec<ExternalSequenceBlockHash> = (0..depth)
-                .map(|block_idx| {
-                    let block_idx_u64 = block_idx as u64;
-                    if let Some(gid) = group_id
-                        && block_idx < prefix_length
-                    {
-                        return ExternalSequenceBlockHash(
-                            0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64,
-                        );
-                    }
-                    ExternalSequenceBlockHash((seq_id_u64 << 32) | block_idx_u64)
-                })
-                .collect();
-
-            sequences.push(SequenceData {
-                worker_id,
-                local_hashes,
-                external_hashes,
-            });
-        }
-    }
-
-    sequences
+    trace
+        .partition_by_session(SessionPartitionSpec::RoundRobin {
+            num_partitions: num_workers,
+        })
+        .into_iter()
+        .enumerate()
+        .flat_map(|(worker_idx, partition)| {
+            partition
+                .to_router_sequences(worker_idx as WorkerId, hash_mode)
+                .expect("synthetic trace conversion must succeed")
+                .into_iter()
+                .map(SequenceData::from)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Compute median of durations.
@@ -735,4 +750,25 @@ pub fn median(durations: &[Duration]) -> Duration {
     let mut sorted = durations.to_vec();
     sorted.sort();
     sorted[sorted.len() / 2]
+}
+
+fn flatten_trace_partition(trace: Trace) -> Vec<MooncakeRequest> {
+    let mut requests = Vec::new();
+    for session in trace.sessions {
+        let mut timestamp_ms = session.first_arrival_timestamp_ms.unwrap_or(0.0);
+        for (turn_idx, turn) in session.turns.into_iter().enumerate() {
+            if turn_idx > 0 {
+                timestamp_ms += turn.delay_after_previous_ms;
+            }
+            requests.push(MooncakeRequest {
+                uuid: Uuid::new_v4(),
+                timestamp: timestamp_ms.max(0.0).round() as u64,
+                input_length: turn.input_length,
+                hash_ids: turn.hash_ids,
+                output_length: turn.max_output_tokens as u64,
+            });
+        }
+    }
+    requests.sort_by_key(|request| request.timestamp);
+    requests
 }

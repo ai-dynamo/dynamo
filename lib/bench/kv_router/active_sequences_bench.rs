@@ -117,7 +117,9 @@ async fn generate_sequence_events(
                     .iter()
                     .map(|&id| local_block_hash_from_id(id, block_size).0)
                     .collect();
-                let isl = req.hash_ids.len() * block_size as usize;
+                let isl = req
+                    .input_length
+                    .max(req.hash_ids.len() * block_size as usize);
                 metadata.insert(
                     req.uuid,
                     RequestMetadata {
@@ -513,6 +515,7 @@ async fn run_tests() -> anyhow::Result<()> {
                 "{}",
                 serde_json::json!({
                     "timestamp": i as u64,
+                    "input_length": hash_ids.len(),
                     "hash_ids": hash_ids,
                     "output_length": output_length,
                 })

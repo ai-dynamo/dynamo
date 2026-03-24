@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::loadgen::{Trace, WorkloadDriver};
 use crate::replay::router::ReplayRouter;
 use crate::replay::{
     ReplayRouterMode, TraceCollector, TraceSimulationReport, normalize_trace_requests,
@@ -245,6 +246,13 @@ struct RequestTaskContext {
     router: Arc<ReplayRouter>,
     requests: RequestRegistry,
     stats: Arc<SharedLiveRuntimeStats>,
+    workload: Option<Arc<WorkloadDispatchState>>,
+}
+
+struct WorkloadDispatchState {
+    driver: Mutex<WorkloadDriver>,
+    wakeup: Notify,
+    start: Instant,
 }
 
 async fn run_request_task(
@@ -275,6 +283,15 @@ async fn run_request_task(
     state.wait_for_completion().await;
     ctx.stats.record_completion();
     ctx.requests.remove(&uuid);
+    if let Some(workload) = ctx.workload.as_ref() {
+        let completion_ms = now_ms(workload.start);
+        workload
+            .driver
+            .lock()
+            .unwrap()
+            .on_complete(uuid, completion_ms)?;
+        workload.wakeup.notify_waiters();
+    }
     drop(permit);
     Ok(())
 }
@@ -288,10 +305,6 @@ impl LiveRuntime {
         mode: LiveReplayMode,
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
-        if pending.is_empty() {
-            bail!("online replay requires at least one request");
-        }
-
         let cancel_token = CancellationToken::new();
         let (output_tx, output_rx) = mpsc::unbounded_channel();
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
@@ -363,6 +376,7 @@ impl LiveRuntime {
             router: Arc::clone(&self.router),
             requests: Arc::clone(&requests),
             stats: Arc::clone(&stats),
+            workload: None,
         };
 
         match self.mode {
@@ -404,6 +418,154 @@ impl LiveRuntime {
         router.shutdown().await?;
         Ok((report, stats.snapshot()))
     }
+
+    async fn run_workload(
+        mut self,
+        driver: WorkloadDriver,
+        total_turns: usize,
+    ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+        let requests = Arc::new(DashMap::with_capacity(total_turns.max(1)));
+        let stats = Arc::new(SharedLiveRuntimeStats::default());
+        let (arrival_tx, arrival_rx) = mpsc::unbounded_channel();
+        let demux_requests = Arc::clone(&requests);
+        let start = self.start;
+        let router = Arc::clone(&self.router);
+        let senders = Arc::clone(&self.senders);
+        let output_rx = self.output_rx;
+        let admission_rx = self.admission_rx;
+        let demux_stats = Arc::clone(&stats);
+        let demux_router = Arc::clone(&router);
+        let demux_task = tokio::spawn(async move {
+            run_demux(
+                start,
+                arrival_rx,
+                admission_rx,
+                output_rx,
+                demux_requests,
+                demux_router,
+                demux_stats,
+            )
+            .await
+        });
+        let workload = Arc::new(WorkloadDispatchState {
+            driver: Mutex::new(driver),
+            wakeup: Notify::new(),
+            start,
+        });
+        let mut tasks = JoinSet::new();
+        let task_ctx = RequestTaskContext {
+            senders,
+            router: Arc::clone(&self.router),
+            requests: Arc::clone(&requests),
+            stats: Arc::clone(&stats),
+            workload: Some(Arc::clone(&workload)),
+        };
+        let semaphore = match self.mode {
+            LiveReplayMode::Trace => None,
+            LiveReplayMode::Concurrency { max_in_flight } => {
+                Some(Arc::new(Semaphore::new(max_in_flight)))
+            }
+        };
+
+        loop {
+            let now = now_ms(start);
+            let dispatch_limit = match &semaphore {
+                Some(semaphore) => semaphore.available_permits(),
+                None => usize::MAX,
+            };
+
+            if dispatch_limit > 0 {
+                let ready_turns = workload
+                    .driver
+                    .lock()
+                    .unwrap()
+                    .pop_ready(now, dispatch_limit);
+                if !ready_turns.is_empty() {
+                    for ready_turn in ready_turns {
+                        let permit = match &semaphore {
+                            Some(semaphore) => {
+                                Some(semaphore.clone().try_acquire_owned().map_err(|_| {
+                                    anyhow!(
+                                        "online replay concurrency semaphore unexpectedly closed"
+                                    )
+                                })?)
+                            }
+                            None => None,
+                        };
+                        let arrival_at_ms = match self.mode {
+                            LiveReplayMode::Trace => ready_turn.scheduled_ready_at_ms,
+                            LiveReplayMode::Concurrency { .. } => now_ms(start),
+                        };
+                        record_arrival(&arrival_tx, &ready_turn.request, arrival_at_ms)?;
+                        tasks.spawn(run_request_task(
+                            task_ctx.clone(),
+                            ready_turn.request,
+                            permit,
+                        ));
+                    }
+                    continue;
+                }
+            }
+
+            let (is_drained, next_ready_ms) = {
+                let driver = workload.driver.lock().unwrap();
+                (driver.is_drained(), driver.next_ready_time_ms())
+            };
+            if is_drained {
+                break;
+            }
+
+            match (self.mode, &semaphore, next_ready_ms) {
+                (LiveReplayMode::Trace, _, Some(next_ready_ms)) => {
+                    let deadline =
+                        start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => {}
+                        _ = workload.wakeup.notified() => {}
+                    }
+                }
+                (LiveReplayMode::Trace, _, None) => {
+                    workload.wakeup.notified().await;
+                }
+                (LiveReplayMode::Concurrency { .. }, Some(semaphore), Some(next_ready_ms)) => {
+                    if semaphore.available_permits() == 0 {
+                        workload.wakeup.notified().await;
+                    } else {
+                        let deadline =
+                            start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(deadline) => {}
+                            _ = workload.wakeup.notified() => {}
+                        }
+                    }
+                }
+                (LiveReplayMode::Concurrency { .. }, Some(semaphore), None) => {
+                    if semaphore.available_permits() == 0 {
+                        workload.wakeup.notified().await;
+                    } else {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                (LiveReplayMode::Concurrency { .. }, None, _) => {
+                    unreachable!("concurrency mode must have a semaphore")
+                }
+            }
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            result.map_err(|e| anyhow!("online replay request task failed: {e}"))??;
+        }
+
+        drop(arrival_tx);
+        self.cancel_token.cancel();
+        self.schedulers.clear();
+
+        let report = demux_task
+            .await
+            .map_err(|e| anyhow!("online replay demux task failed: {e}"))?;
+        router.shutdown().await?;
+        Ok((report, stats.snapshot()))
+    }
 }
 
 fn run_live_runtime(
@@ -423,6 +585,34 @@ fn run_live_runtime(
         LiveRuntime::new(args, router_config, pending, num_workers, mode, router_mode)?
             .run()
             .await
+    })
+}
+
+fn run_live_workload_runtime(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    driver: WorkloadDriver,
+    total_turns: usize,
+    num_workers: usize,
+    mode: LiveReplayMode,
+    router_mode: ReplayRouterMode,
+) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow!("failed to create online replay runtime: {e}"))?;
+
+    runtime.block_on(async move {
+        LiveRuntime::new(
+            args,
+            router_config,
+            VecDeque::new(),
+            num_workers,
+            mode,
+            router_mode,
+        )?
+        .run_workload(driver, total_turns)
+        .await
     })
 }
 
@@ -472,6 +662,57 @@ pub(crate) fn simulate_concurrency_requests(
     Ok(report)
 }
 
+pub(crate) fn simulate_trace_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    let total_turns = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns.len())
+        .sum();
+    let (report, _) = run_live_workload_runtime(
+        args,
+        router_config,
+        trace.into_trace_driver()?,
+        total_turns,
+        num_workers,
+        LiveReplayMode::Trace,
+        router_mode,
+    )?;
+    Ok(report)
+}
+
+pub(crate) fn simulate_concurrency_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    let total_turns = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns.len())
+        .sum();
+    let (report, _) = run_live_workload_runtime(
+        args,
+        router_config,
+        trace.into_concurrency_driver()?,
+        total_turns,
+        num_workers,
+        LiveReplayMode::Concurrency { max_in_flight },
+        router_mode,
+    )?;
+    Ok(report)
+}
+
 #[cfg(test)]
 fn simulate_trace_requests_with_stats(
     args: MockEngineArgs,
@@ -513,9 +754,59 @@ fn simulate_concurrency_requests_with_stats(
 }
 
 #[cfg(test)]
+fn simulate_trace_workload_with_stats(
+    args: MockEngineArgs,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    let args = args.normalized()?;
+    let total_turns = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns.len())
+        .sum();
+    run_live_workload_runtime(
+        args,
+        None,
+        trace.into_trace_driver()?,
+        total_turns,
+        num_workers,
+        LiveReplayMode::Trace,
+        router_mode,
+    )
+}
+
+#[cfg(test)]
+fn simulate_concurrency_workload_with_stats(
+    args: MockEngineArgs,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    let args = args.normalized()?;
+    let total_turns = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns.len())
+        .sum();
+    run_live_workload_runtime(
+        args,
+        None,
+        trace.into_concurrency_driver()?,
+        total_turns,
+        num_workers,
+        LiveReplayMode::Concurrency { max_in_flight },
+        router_mode,
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::protocols::{DirectRequest, EngineType, SglangArgs};
+    use crate::loadgen::{SessionTrace, TurnTrace};
 
     fn replay_args() -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -548,6 +839,42 @@ mod tests {
         }
     }
 
+    fn multiturn_trace() -> Trace {
+        Trace {
+            block_size: 1,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 4,
+                            max_output_tokens: 2,
+                            hash_ids: vec![11, 12, 13, 14],
+                            delay_after_previous_ms: 0.0,
+                        },
+                        TurnTrace {
+                            input_length: 6,
+                            max_output_tokens: 2,
+                            hash_ids: vec![21, 22, 23, 24, 25, 26],
+                            delay_after_previous_ms: 5.0,
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(1.0),
+                    turns: vec![TurnTrace {
+                        input_length: 5,
+                        max_output_tokens: 2,
+                        hash_ids: vec![31, 32, 33, 34, 35],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        }
+    }
+
     #[test]
     fn test_online_trace_replay_single_worker_completes() {
         let args = replay_args();
@@ -561,6 +888,40 @@ mod tests {
         assert_eq!(report.request_counts.completed_requests, 2);
         assert_eq!(report.request_counts.total_output_tokens, 4);
         assert!(report.throughput.wall_time_ms >= 0.0);
+    }
+
+    #[test]
+    fn test_online_trace_workload_completes_multiturn_sessions() {
+        let args = replay_args();
+        let (report, _) = simulate_trace_workload_with_stats(
+            args,
+            multiturn_trace(),
+            2,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.num_requests, 3);
+        assert_eq!(report.request_counts.completed_requests, 3);
+        assert_eq!(report.request_counts.total_input_tokens, 15);
+        assert_eq!(report.request_counts.total_output_tokens, 6);
+    }
+
+    #[test]
+    fn test_online_concurrency_workload_respects_global_cap() {
+        let args = replay_args();
+        let (report, stats) = simulate_concurrency_workload_with_stats(
+            args,
+            multiturn_trace(),
+            1,
+            2,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.num_requests, 3);
+        assert_eq!(report.request_counts.completed_requests, 3);
+        assert_eq!(stats.max_in_flight_seen, 1);
     }
 
     #[tokio::test]
@@ -604,6 +965,7 @@ mod tests {
             router: Arc::clone(&router),
             requests,
             stats,
+            workload: None,
         };
         let mut tasks = JoinSet::new();
         let mut pending = VecDeque::from(vec![

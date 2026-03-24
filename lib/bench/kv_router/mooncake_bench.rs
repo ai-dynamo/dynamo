@@ -479,6 +479,7 @@ fn run_tests() -> anyhow::Result<()> {
                 "{}",
                 serde_json::json!({
                     "timestamp": i as u64,
+                    "input_length": hash_ids.len(),
                     "hash_ids": hash_ids,
                     "output_length": output_length,
                 })
