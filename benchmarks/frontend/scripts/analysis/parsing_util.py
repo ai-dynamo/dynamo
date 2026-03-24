@@ -279,9 +279,7 @@ def parse_bpftrace_histograms(text: str) -> list[dict]:
 
         # Match bucket line: [lo, hi)  count |bars|
         # Handles optional unit suffixes: K (1024), M (1024^2)
-        bucket_m = re.match(
-            r"\s*\[(\d+)([KkMm])?\s*,\s*(\d+)([KkMm])?\)\s+(\d+)", line
-        )
+        bucket_m = re.match(r"\s*\[(\d+)([KkMm])?\s*,\s*(\d+)([KkMm])?\)\s+(\d+)", line)
         if bucket_m and current_label:
             _unit_mult = {"K": 1024, "k": 1024, "M": 1048576, "m": 1048576}
             lo = int(bucket_m.group(1)) * _unit_mult.get(bucket_m.group(2) or "", 1)

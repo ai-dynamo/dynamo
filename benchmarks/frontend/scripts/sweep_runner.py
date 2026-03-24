@@ -49,7 +49,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -193,15 +193,24 @@ def _run_single(
 
     cmd = [
         str(SCRIPT_DIR / "run_perf.sh"),
-        "--model", cfg.model,
-        "--isl", str(cfg.isl),
-        "--osl", str(cfg.osl),
-        "--concurrency", str(cfg.concurrency),
-        "--workers", str(cfg.workers),
-        "--speedup-ratio", str(cfg.speedup_ratio),
-        "--num-models", str(cfg.num_models),
-        "--aiperf-targets", cfg.aiperf_targets,
-        "--output-dir", str(run_dir),
+        "--model",
+        cfg.model,
+        "--isl",
+        str(cfg.isl),
+        "--osl",
+        str(cfg.osl),
+        "--concurrency",
+        str(cfg.concurrency),
+        "--workers",
+        str(cfg.workers),
+        "--speedup-ratio",
+        str(cfg.speedup_ratio),
+        "--num-models",
+        str(cfg.num_models),
+        "--aiperf-targets",
+        cfg.aiperf_targets,
+        "--output-dir",
+        str(run_dir),
     ]
     if cfg.benchmark_duration:
         cmd.extend(["--benchmark-duration", str(cfg.benchmark_duration)])
@@ -213,7 +222,9 @@ def _run_single(
         cmd.append("--fast-tokens")
     # TODO: when run_perf.sh gains --backend vllm support, pass it here
     if cfg.backend == "vllm":
-        print("    WARNING: vllm backend not yet supported by run_perf.sh; using mocker")
+        print(
+            "    WARNING: vllm backend not yet supported by run_perf.sh; using mocker"
+        )
 
     cmd.extend(passthrough_args)
 
@@ -253,7 +264,9 @@ def _run_single(
     aiperf_json = run_dir / "aiperf" / "profile_export_aiperf.json"
     if not aiperf_json.exists():
         # Multi-model: results are in aiperf/<model-name>/
-        for candidate in sorted((run_dir / "aiperf").glob("*/profile_export_aiperf.json")):
+        for candidate in sorted(
+            (run_dir / "aiperf").glob("*/profile_export_aiperf.json")
+        ):
             aiperf_json = candidate
             break  # Use the first model's results for the summary row
     metrics = _parse_aiperf_json(aiperf_json)
@@ -287,10 +300,23 @@ def _generate_report(run_dir: Path):
 def _write_csv(results: list[RunResult], csv_path: Path):
     """Write incremental CSV (called after each run)."""
     fieldnames = [
-        "run_id", "backend", "tokenizer", "concurrency", "isl", "osl", "workers",
-        "speedup_ratio", "status", "req_per_sec", "output_tok_per_sec",
-        "ttft_p50_ms", "ttft_p99_ms", "itl_p50_ms", "itl_p99_ms",
-        "duration_sec", "run_dir",
+        "run_id",
+        "backend",
+        "tokenizer",
+        "concurrency",
+        "isl",
+        "osl",
+        "workers",
+        "speedup_ratio",
+        "status",
+        "req_per_sec",
+        "output_tok_per_sec",
+        "ttft_p50_ms",
+        "ttft_p99_ms",
+        "itl_p50_ms",
+        "itl_p99_ms",
+        "duration_sec",
+        "run_dir",
     ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -307,7 +333,9 @@ def _write_csv(results: list[RunResult], csv_path: Path):
                 "speedup_ratio": r.config.speedup_ratio,
                 "status": r.status,
                 "req_per_sec": f"{r.req_per_sec:.2f}" if r.req_per_sec else "",
-                "output_tok_per_sec": f"{r.output_tok_per_sec:.1f}" if r.output_tok_per_sec else "",
+                "output_tok_per_sec": f"{r.output_tok_per_sec:.1f}"
+                if r.output_tok_per_sec
+                else "",
                 "ttft_p50_ms": f"{r.ttft_p50_ms:.1f}" if r.ttft_p50_ms else "",
                 "ttft_p99_ms": f"{r.ttft_p99_ms:.1f}" if r.ttft_p99_ms else "",
                 "itl_p50_ms": f"{r.itl_p50_ms:.1f}" if r.itl_p50_ms else "",
@@ -322,8 +350,12 @@ def _write_summary(results: list[RunResult], summary_path: Path):
     """Write markdown summary table."""
     lines = ["# Sweep Summary\n"]
     lines.append(f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    lines.append("| Run ID | Req/s | Tok/s | TTFT p50 | TTFT p99 | ITL p50 | Duration | Status |")
-    lines.append("|--------|------:|------:|---------:|---------:|--------:|---------:|--------|")
+    lines.append(
+        "| Run ID | Req/s | Tok/s | TTFT p50 | TTFT p99 | ITL p50 | Duration | Status |"
+    )
+    lines.append(
+        "|--------|------:|------:|---------:|---------:|--------:|---------:|--------|"
+    )
 
     for r in results:
         rps = f"{r.req_per_sec:.1f}" if r.req_per_sec else "-"
@@ -332,13 +364,17 @@ def _write_summary(results: list[RunResult], summary_path: Path):
         tp99 = f"{r.ttft_p99_ms:.1f}ms" if r.ttft_p99_ms else "-"
         ip50 = f"{r.itl_p50_ms:.1f}ms" if r.itl_p50_ms else "-"
         dur = f"{r.duration_sec:.0f}s" if r.duration_sec else "-"
-        lines.append(f"| {r.config.run_id} | {rps} | {tps} | {tp50} | {tp99} | {ip50} | {dur} | {r.status} |")
+        lines.append(
+            f"| {r.config.run_id} | {rps} | {tps} | {tp50} | {tp99} | {ip50} | {dur} | {r.status} |"
+        )
 
     lines.append("")
     ok = sum(1 for r in results if r.status == "ok")
     fail = sum(1 for r in results if r.status == "fail")
     skip = sum(1 for r in results if r.status == "skipped")
-    lines.append(f"**Totals:** {ok} passed, {fail} failed, {skip} skipped out of {len(results)}")
+    lines.append(
+        f"**Totals:** {ok} passed, {fail} failed, {skip} skipped out of {len(results)}"
+    )
 
     summary_path.write_text("\n".join(lines) + "\n")
 
@@ -346,14 +382,18 @@ def _write_summary(results: list[RunResult], summary_path: Path):
 def _print_results_table(results: list[RunResult]):
     """Print a compact results table to stdout."""
     print(f"\n{'='*90}")
-    print(f"  {'Run ID':<30} {'Req/s':>8} {'Tok/s':>8} {'TTFT p50':>10} {'TTFT p99':>10} {'Status':>8}")
+    print(
+        f"  {'Run ID':<30} {'Req/s':>8} {'Tok/s':>8} {'TTFT p50':>10} {'TTFT p99':>10} {'Status':>8}"
+    )
     print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*8}")
     for r in results:
         rps = f"{r.req_per_sec:.1f}" if r.req_per_sec else "N/A"
         tps = f"{r.output_tok_per_sec:.0f}" if r.output_tok_per_sec else "N/A"
         tp50 = f"{r.ttft_p50_ms:.1f}ms" if r.ttft_p50_ms else "N/A"
         tp99 = f"{r.ttft_p99_ms:.1f}ms" if r.ttft_p99_ms else "N/A"
-        print(f"  {r.config.run_id:<30} {rps:>8} {tps:>8} {tp50:>10} {tp99:>10} {r.status:>8}")
+        print(
+            f"  {r.config.run_id:<30} {rps:>8} {tps:>8} {tp50:>10} {tp99:>10} {r.status:>8}"
+        )
     print(f"{'='*90}")
 
 
@@ -386,28 +426,83 @@ def main():
     )
 
     parser.add_argument("--model", default=DEFAULT_MODEL, help="HF model path")
-    parser.add_argument("--backend", choices=["mocker", "vllm"], default="mocker",
-                        help="Engine backend: mocker (synthetic) or vllm (real inference)")
-    parser.add_argument("--tokenizers", default="hf,fastokens",
-                        help="Comma-separated tokenizer backends (hf, fastokens)")
-    parser.add_argument("--concurrency", default="50,100,200", help="Comma-separated concurrency levels")
-    parser.add_argument("--isl", default="512,1024,2048", help="Comma-separated ISL values")
-    parser.add_argument("--osl", type=int, default=DEFAULT_OSL, help="Output sequence length")
-    parser.add_argument("--workers", default="2", help="Comma-separated worker counts per model")
-    parser.add_argument("--num-models", type=int, default=1,
-                        help="Number of model instances (each gets --workers workers, named model-1, model-2, ...)")
-    parser.add_argument("--aiperf-targets", choices=["first", "all"], default="first",
-                        help="'first': aiperf targets model-1 only (default). 'all': run aiperf for each model.")
-    parser.add_argument("--speedup-ratio", type=float, default=DEFAULT_SPEEDUP, help="Mocker speedup (0=infinite)")
-    parser.add_argument("--benchmark-duration", type=int, default=DEFAULT_BENCHMARK_DURATION, help="aiperf duration (seconds)")
-    parser.add_argument("--num-requests", default=None, help="Comma-separated request counts (overrides --benchmark-duration)")
-    parser.add_argument("--rps", default=None, help="Comma-separated target request rates (req/s). Sweep dimension when multiple values given.")
-    parser.add_argument("--output-dir", default=None, help="Output directory (default: auto timestamped)")
-    parser.add_argument("--max-consecutive-fails", type=int, default=DEFAULT_MAX_CONSECUTIVE_FAILS)
-    parser.add_argument("--cooldown", type=int, default=DEFAULT_COOLDOWN, help="Seconds between runs")
-    parser.add_argument("--dry-run", action="store_true", help="Print plan without executing")
-    parser.add_argument("--no-report", action="store_true", help="Skip per-run report generation")
-    parser.add_argument("passthrough", nargs="*", help="Extra args passed to run_perf.sh (after --)")
+    parser.add_argument(
+        "--backend",
+        choices=["mocker", "vllm"],
+        default="mocker",
+        help="Engine backend: mocker (synthetic) or vllm (real inference)",
+    )
+    parser.add_argument(
+        "--tokenizers",
+        default="hf,fastokens",
+        help="Comma-separated tokenizer backends (hf, fastokens)",
+    )
+    parser.add_argument(
+        "--concurrency", default="50,100,200", help="Comma-separated concurrency levels"
+    )
+    parser.add_argument(
+        "--isl", default="512,1024,2048", help="Comma-separated ISL values"
+    )
+    parser.add_argument(
+        "--osl", type=int, default=DEFAULT_OSL, help="Output sequence length"
+    )
+    parser.add_argument(
+        "--workers", default="2", help="Comma-separated worker counts per model"
+    )
+    parser.add_argument(
+        "--num-models",
+        type=int,
+        default=1,
+        help="Number of model instances (each gets --workers workers, named model-1, model-2, ...)",
+    )
+    parser.add_argument(
+        "--aiperf-targets",
+        choices=["first", "all"],
+        default="first",
+        help="'first': aiperf targets model-1 only (default). 'all': run aiperf for each model.",
+    )
+    parser.add_argument(
+        "--speedup-ratio",
+        type=float,
+        default=DEFAULT_SPEEDUP,
+        help="Mocker speedup (0=infinite)",
+    )
+    parser.add_argument(
+        "--benchmark-duration",
+        type=int,
+        default=DEFAULT_BENCHMARK_DURATION,
+        help="aiperf duration (seconds)",
+    )
+    parser.add_argument(
+        "--num-requests",
+        default=None,
+        help="Comma-separated request counts (overrides --benchmark-duration)",
+    )
+    parser.add_argument(
+        "--rps",
+        default=None,
+        help="Comma-separated target request rates (req/s). Sweep dimension when multiple values given.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory (default: auto timestamped)",
+    )
+    parser.add_argument(
+        "--max-consecutive-fails", type=int, default=DEFAULT_MAX_CONSECUTIVE_FAILS
+    )
+    parser.add_argument(
+        "--cooldown", type=int, default=DEFAULT_COOLDOWN, help="Seconds between runs"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print plan without executing"
+    )
+    parser.add_argument(
+        "--no-report", action="store_true", help="Skip per-run report generation"
+    )
+    parser.add_argument(
+        "passthrough", nargs="*", help="Extra args passed to run_perf.sh (after --)"
+    )
 
     args = parser.parse_args()
 
@@ -416,7 +511,9 @@ def main():
     concurrencies = [int(c) for c in args.concurrency.split(",")]
     isls = [int(i) for i in args.isl.split(",")]
     worker_counts = [int(w) for w in args.workers.split(",")]
-    num_requests_list = [int(n) for n in args.num_requests.split(",")] if args.num_requests else [None]
+    num_requests_list = (
+        [int(n) for n in args.num_requests.split(",")] if args.num_requests else [None]
+    )
     rps_list = [int(r) for r in args.rps.split(",")] if args.rps else [None]
 
     # Build sweep grid
@@ -427,21 +524,25 @@ def main():
                 for isl in isls:
                     for nr in num_requests_list:
                         for rps in rps_list:
-                            configs.append(RunConfig(
-                                backend=args.backend,
-                                tokenizer=tokenizer,
-                                concurrency=concurrency,
-                                isl=isl,
-                                osl=args.osl,
-                                workers=workers,
-                                num_models=args.num_models,
-                                aiperf_targets=args.aiperf_targets,
-                                speedup_ratio=args.speedup_ratio,
-                                model=args.model,
-                                benchmark_duration=args.benchmark_duration if nr is None else None,
-                                num_requests=nr,
-                                request_rate=rps,
-                            ))
+                            configs.append(
+                                RunConfig(
+                                    backend=args.backend,
+                                    tokenizer=tokenizer,
+                                    concurrency=concurrency,
+                                    isl=isl,
+                                    osl=args.osl,
+                                    workers=workers,
+                                    num_models=args.num_models,
+                                    aiperf_targets=args.aiperf_targets,
+                                    speedup_ratio=args.speedup_ratio,
+                                    model=args.model,
+                                    benchmark_duration=args.benchmark_duration
+                                    if nr is None
+                                    else None,
+                                    num_requests=nr,
+                                    request_rate=rps,
+                                )
+                            )
 
     # Output directory
     if args.output_dir:
@@ -491,7 +592,9 @@ def main():
             if consecutive_fails.get(key, 0) >= args.max_consecutive_fails:
                 result = RunResult(config=cfg, status="skipped", run_dir=str(run_dir))
                 results.append(result)
-                print(f"\n  [{i}/{total}] SKIPPED {cfg.run_id} ({args.max_consecutive_fails} consecutive failures)")
+                print(
+                    f"\n  [{i}/{total}] SKIPPED {cfg.run_id} ({args.max_consecutive_fails} consecutive failures)"
+                )
                 continue
 
             print(f"\n{'='*60}")
@@ -513,7 +616,9 @@ def main():
                 print(f"    OK: {rps} req/s, TTFT p50={tp50}")
             else:
                 consecutive_fails[key] = consecutive_fails.get(key, 0) + 1
-                print(f"    FAIL (consecutive: {consecutive_fails[key]}/{args.max_consecutive_fails})")
+                print(
+                    f"    FAIL (consecutive: {consecutive_fails[key]}/{args.max_consecutive_fails})"
+                )
 
             # Generate per-run report
             if not args.no_report and result.status == "ok":

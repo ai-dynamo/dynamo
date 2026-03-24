@@ -308,9 +308,7 @@ def section_tokio(prom: Optional[PrometheusSnapshot]) -> Optional[str]:
         lines.append("| Metric | Value |")
         lines.append("|---|---|")
         lines.extend(
-            _worker_distribution(
-                prom.tokio_worker_mean_poll_time_ns, "ns", 100_000
-            )
+            _worker_distribution(prom.tokio_worker_mean_poll_time_ns, "ns", 100_000)
         )
 
     # --- Busy Ratio Summary ---
@@ -321,9 +319,7 @@ def section_tokio(prom: Optional[PrometheusSnapshot]) -> Optional[str]:
         p50_br = sorted_br[n // 2]
         p99_br = sorted_br[min(int(n * 0.99), n - 1)]
         n_saturated = sum(1 for v in prom.tokio_worker_busy_ratio if v >= 0.95)
-        n_hot = sum(
-            1 for v in prom.tokio_worker_busy_ratio if 0.5 <= v < 0.95
-        )
+        n_hot = sum(1 for v in prom.tokio_worker_busy_ratio if 0.5 <= v < 0.95)
         n_idle = sum(1 for v in prom.tokio_worker_busy_ratio if v < 0.5)
 
         lines.append(_subsection("Worker Busy Ratio"))
@@ -362,9 +358,7 @@ def section_tokio(prom: Optional[PrometheusSnapshot]) -> Optional[str]:
         if avg_br > 0.8:
             issues.append(f"High avg busy ratio: {avg_br:.3f} (threshold: 0.8)")
         if n_saturated > 0:
-            issues.append(
-                f"{n_saturated} worker(s) saturated (busy ratio >= 0.95)"
-            )
+            issues.append(f"{n_saturated} worker(s) saturated (busy ratio >= 0.95)")
     if prom.tokio_event_loop_stall_total > 0:
         issues.append(
             f"Event loop stalls detected: {prom.tokio_event_loop_stall_total:.0f}"
