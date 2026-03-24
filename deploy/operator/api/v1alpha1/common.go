@@ -85,8 +85,10 @@ type ResourceItem struct {
 	// GPU indicates the number of GPUs to request.
 	// Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
 	GPU string `json:"gpu,omitempty"`
-	// GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
-	// By default if not specified, the GPU type is "nvidia.com/gpu"
+	// GPUType can specify a custom GPU type.
+	// Supported short aliases: "xe" -> "gpu.intel.com/xe", "i915" -> "gpu.intel.com/i915".
+	// Full resource names are also accepted as-is, e.g. "gpu.intel.com/xe".
+	// By default if not specified, the GPU type is "nvidia.com/gpu".
 	GPUType string `json:"gpuType,omitempty"`
 	// Custom specifies additional custom resource requests/limits
 	Custom map[string]string `json:"custom,omitempty"`

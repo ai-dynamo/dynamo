@@ -675,6 +675,30 @@ func TestGetResourcesConfig(t *testing.T) {
 			expectedGPUValue: "8",
 			expectError:      false,
 		},
+		{
+			name: "limits.gpu defined with xe gpuType alias",
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
+					GPU:     "2",
+					GPUType: "xe",
+				},
+			},
+			expectedGPULimit: corev1.ResourceName(consts.KubeResourceGPUIntelXe),
+			expectedGPUValue: "2",
+			expectError:      false,
+		},
+		{
+			name: "limits.gpu defined with i915 gpuType alias",
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
+					GPU:     "3",
+					GPUType: "i915",
+				},
+			},
+			expectedGPULimit: corev1.ResourceName(consts.KubeResourceGPUInteli915),
+			expectedGPUValue: "3",
+			expectError:      false,
+		},
 	}
 
 	for _, tt := range tests {

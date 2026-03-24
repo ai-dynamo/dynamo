@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -588,6 +589,12 @@ func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName
 		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 	}
 	if resourceItem.GPUType != "" {
+		switch strings.ToLower(resourceItem.GPUType) {
+		case "xe":
+			return corev1.ResourceName(consts.KubeResourceGPUIntelXe)
+		case "i915":
+			return corev1.ResourceName(consts.KubeResourceGPUInteli915)
+		}
 		return corev1.ResourceName(resourceItem.GPUType)
 	}
 	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
