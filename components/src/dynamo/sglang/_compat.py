@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Compatibility shim for SGLang network utilities.
+Compatibility shim for SGLang internal APIs.
 
-SGLang >= 0.6.0 (post-0.5.9) moved network helpers from sglang.srt.utils
-to sglang.srt.utils.network and introduced the NetworkAddress dataclass.
+SGLang is pre-1.0 and routinely moves, renames, or introduces APIs between
+releases. This module is the single place where we handle those differences
+so the rest of the component can import from here without version-specific
+try/except blocks.
 
-This module provides a unified import surface that works with both old and new
-SGLang versions, falling back to a minimal NetworkAddress polyfill when the
-new module is not available.
+Policy: support current SGLang release + 1 version back (N and N-1). Each
+fallback branch must document which version it covers and when it can be
+removed. When the old version falls outside the support window, delete the
+fallback and any associated polyfills.
 """
 
 import ipaddress
