@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import ipaddress
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -10,7 +11,7 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -29,7 +30,6 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
     Properly handles IPv6 addresses by wrapping them in square brackets.
-    Uses SGLang's maybe_wrap_ipv6_address for consistent formatting.
 
     Args:
         endpoint_template: ZMQ endpoint template with wildcard (e.g., "tcp://*:5557")
@@ -44,8 +44,11 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         >>> format_zmq_endpoint("tcp://*:5557", "2a02:6b8:c46:2b4:0:74c1:75b0:0")
         'tcp://[2a02:6b8:c46:2b4:0:74c1:75b0:0]:5557'
     """
-    # Use SGLang's utility to wrap IPv6 addresses in brackets
-    formatted_ip = maybe_wrap_ipv6_address(ip_address)
+    try:
+        ipaddress.IPv6Address(ip_address)
+        formatted_ip = f"[{ip_address}]"
+    except ValueError:
+        formatted_ip = ip_address
     return endpoint_template.replace("*", formatted_ip)
 
 
