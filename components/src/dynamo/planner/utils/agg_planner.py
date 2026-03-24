@@ -3,13 +3,14 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
-from dynamo.planner.utils.fpm_regression import AggRegressionModel
 from dynamo.planner.utils.planner_config import PlannerConfig
+
+if TYPE_CHECKING:
+    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 from dynamo.planner.utils.planner_core import (
     BasePlanner,
     PlannerPrometheusMetrics,
@@ -65,6 +66,8 @@ class AggPlanner:
             start_prometheus_server=True,
             component_type=SubComponentType.DECODE,
         )
+
+        from dynamo.planner.utils.fpm_regression import AggRegressionModel
 
         self.regression = AggRegressionModel(
             window_size=config.load_learning_window,
@@ -212,7 +215,7 @@ class AggPlanner:
 
     def _prefill_scaling_decision(
         self,
-        fpm_stats: dict[tuple[str, int], ForwardPassMetrics],
+        fpm_stats: "dict[tuple[str, int], ForwardPassMetrics]",
         num_workers: int,
         max_num_batched_tokens: int,
     ) -> Optional[int]:
@@ -233,7 +236,7 @@ class AggPlanner:
 
     def _decode_scaling_decision(
         self,
-        fpm_stats: dict[tuple[str, int], ForwardPassMetrics],
+        fpm_stats: "dict[tuple[str, int], ForwardPassMetrics]",
         num_workers: int,
     ) -> Optional[int]:
         """Returns desired replica count for the decode (ITL) dimension, or None."""

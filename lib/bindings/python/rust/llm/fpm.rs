@@ -10,17 +10,17 @@
 //!   - **tracking mode**: call `start_tracking()` once, then `get_recent_stats()` to
 //!     retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use futures::StreamExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::to_pyerr;
 use crate::Endpoint;
+use crate::to_pyerr;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -101,8 +101,11 @@ fn extract_fpm_key(data: &[u8]) -> Option<(String, i64)> {
                 if pos + str_len > data.len() {
                     return None;
                 }
-                worker_id =
-                    Some(std::str::from_utf8(&data[pos..pos + str_len]).ok()?.to_owned());
+                worker_id = Some(
+                    std::str::from_utf8(&data[pos..pos + str_len])
+                        .ok()?
+                        .to_owned(),
+                );
                 cursor.set_position((pos + str_len) as u64);
             }
             "dp_rank" => {
@@ -523,15 +526,10 @@ impl FpmEventSubscriber {
                     component: component.name().to_string(),
                 };
 
-                let stream = match discovery
-                    .list_and_watch(query, Some(cancel.clone()))
-                    .await
-                {
+                let stream = match discovery.list_and_watch(query, Some(cancel.clone())).await {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::error!(
-                            "FPM tracker: failed to create discovery watch: {e}"
-                        );
+                        tracing::error!("FPM tracker: failed to create discovery watch: {e}");
                         return;
                     }
                 };

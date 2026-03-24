@@ -6,6 +6,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+try:
+    import msgspec  # noqa: F401
+except ImportError:
+    pytest.skip("msgspec required for FPM tests", allow_module_level=True)
+
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,

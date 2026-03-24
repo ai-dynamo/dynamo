@@ -6,13 +6,10 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.common.forward_pass_metrics import ForwardPassMetrics
-from dynamo.common.forward_pass_metrics import decode as decode_fpm
-from dynamo.llm import FpmEventSubscriber
 from dynamo.planner import (
     KubernetesConnector,
     SubComponentType,
@@ -22,10 +19,10 @@ from dynamo.planner import (
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.global_planner_connector import GlobalPlannerConnector
 from dynamo.planner.utils.exceptions import DeploymentValidationError
-from dynamo.planner.utils.fpm_regression import (
-    DecodeRegressionModel,
-    PrefillRegressionModel,
-)
+
+if TYPE_CHECKING:
+    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+    from dynamo.llm import FpmEventSubscriber
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -432,7 +429,12 @@ class BasePlanner:
             self.no_correction = config.no_correction
 
         if self.enable_load:
-            self.fpm_subscriber = None  # initialised in _async_init
+            from dynamo.planner.utils.fpm_regression import (
+                DecodeRegressionModel,
+                PrefillRegressionModel,
+            )
+
+            self.fpm_subscriber: Optional[FpmEventSubscriber] = None
 
             if self.component_type == SubComponentType.PREFILL:
                 self.ttft_regression = PrefillRegressionModel(
@@ -524,6 +526,8 @@ class BasePlanner:
 
     async def _init_fpm_subscriber(self) -> None:
         """Create and start the FPM subscriber for load-based scaling."""
+        from dynamo.llm import FpmEventSubscriber
+
         worker_info = (
             self.prefill_worker_info
             if self.component_type == SubComponentType.PREFILL
@@ -536,6 +540,7 @@ class BasePlanner:
             )
             return
 
+        assert self.runtime is not None
         endpoint = self.runtime.endpoint(
             f"{self.namespace}.{worker_info.component_name}.{worker_info.endpoint}"
         )
@@ -545,8 +550,10 @@ class BasePlanner:
             f"FPM tracker started for {worker_info.component_name}.{worker_info.endpoint}"
         )
 
-    def _get_fpm_stats(self) -> dict[tuple[str, int], ForwardPassMetrics]:
+    def _get_fpm_stats(self) -> "dict[tuple[str, int], ForwardPassMetrics]":
         """Get decoded FPM stats from the subscriber, keyed by (worker_id, dp_rank)."""
+        from dynamo.common.forward_pass_metrics import decode as decode_fpm
+
         if self.fpm_subscriber is None:
             return {}
         raw_stats = self.fpm_subscriber.get_recent_stats()
@@ -854,7 +861,7 @@ class BasePlanner:
 
     def observe_fpm_load_stats(
         self,
-    ) -> dict[tuple[str, int], ForwardPassMetrics]:
+    ) -> "dict[tuple[str, int], ForwardPassMetrics]":
         """Get latest FPM stats and feed observations into the regression model.
 
         Returns:
