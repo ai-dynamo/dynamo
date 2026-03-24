@@ -129,12 +129,11 @@ fn device_aware_weighted_config() -> DeviceAwareWeightedConfig {
         .filter(|v| *v >= 1)
         .unwrap_or(8);
 
-    tracing::debug!(
-        ratio = ratio,
-        "Loaded DeviceAwareWeighted config"
-    );
+    tracing::debug!(ratio = ratio, "Loaded DeviceAwareWeighted config");
 
-    DeviceAwareWeightedConfig { cuda_to_cpu_ratio: ratio }
+    DeviceAwareWeightedConfig {
+        cuda_to_cpu_ratio: ratio,
+    }
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
@@ -233,7 +232,10 @@ where
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
         if count == 0 {
-            anyhow::bail!("no instances found for endpoint {}", self.client.endpoint.id());
+            anyhow::bail!(
+                "no instances found for endpoint {}",
+                self.client.endpoint.id()
+            );
         }
 
         // Restrict device-aware weighted behavior to image encode endpoint only.
@@ -615,7 +617,9 @@ where
             RouterMode::RoundRobin => self.round_robin(request).await,
             RouterMode::DeviceAwareWeighted => {
                 let instance_id = self.select_device_aware_weighted_instance()?;
-                let stream = self.generate_with_fault_detection(instance_id, request).await?;
+                let stream = self
+                    .generate_with_fault_detection(instance_id, request)
+                    .await?;
 
                 // Track in-flight lifecycle only for image encode path.
                 if self.is_image_encode_endpoint() {
@@ -650,7 +654,7 @@ where
                 } else {
                     Ok(stream)
                 }
-            },
+            }
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
