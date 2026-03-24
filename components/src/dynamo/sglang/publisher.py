@@ -47,7 +47,9 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """
     parsed = urlparse(endpoint_template)
     if parsed.scheme != "tcp" or parsed.port is None:
-        raise ValueError(f"Expected tcp://host:port endpoint, got {endpoint_template!r}")
+        raise ValueError(
+            f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
+        )
     return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
