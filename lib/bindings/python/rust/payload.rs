@@ -7,6 +7,24 @@ use pyo3::types::{PyBytes, PyString};
 use serde::{Deserialize, Serialize};
 
 /// A type that can hold either JSON data or raw bytes.
+///
+/// This enum is used to support both Python dictionaries and Python bytes objects
+/// in Dynamo's Python bindings. When Python sends a dict, it's converted to
+/// `serde_json::Value`. When Python sends bytes, they're preserved as `Bytes`.
+///
+/// # Important
+/// - Use `Payload::Bytes` for **internal** Python-to-Python communication only
+/// - HTTP endpoints expect JSON. If you need to send binary data via HTTP,
+///   base64 encode it in your Python code.
+///
+/// # Example
+/// ```python
+/// # Internal use - bytes OK
+/// response = await client.round_robin(b"raw_data")
+///
+/// # HTTP use - must be JSON
+/// response = await client.round_robin({"data": base64.b64encode(raw_data).decode()})
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload {
     Json(serde_json::Value),
@@ -44,6 +62,12 @@ impl Payload {
         }
     }
 
+    /// Convert to JSON value.
+    ///
+    /// # Note
+    /// If this is `Payload::Bytes`, it will attempt to parse the bytes as JSON.
+    /// This will fail if the bytes are not valid JSON (e.g., raw binary data).
+    /// For HTTP endpoints, ensure your Python code returns JSON, not bytes.
     pub fn into_json(self) -> serde_json::Result<serde_json::Value> {
         match self {
             Self::Json(v) => Ok(v),
