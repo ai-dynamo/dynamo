@@ -557,6 +557,11 @@ impl PrefillRouter {
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
     }
+
+    /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).
+    pub fn enforce_disagg(&self) -> bool {
+        self.enforce_disagg
+    }
 }
 
 impl Drop for PrefillRouter {
@@ -616,6 +621,16 @@ impl
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
+
+        let preselected_decode = req.routing.as_ref().and_then(|r| r.decode_worker_id);
+        tracing::info!(
+            request_id = %request_id,
+            router_mode = ?self.router_mode,
+            preselected_prefill_worker = ?preselected_worker,
+            preselected_decode_worker = ?preselected_decode,
+            prefill_router_activated = self.prefill_router.get().is_some(),
+            "[DISAGG-DEBUG] PrefillRouter.generate: entering disaggregated flow"
+        );
 
         if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
             return Err(anyhow::anyhow!(
@@ -702,11 +717,32 @@ impl
                 let mut decode_req = req;
 
                 match outcome {
-                    PrefillOutcome::Bootstrap(info) => {
-                        decode_req.bootstrap_info = Some(info);
+                    PrefillOutcome::Bootstrap(ref info) => {
+                        tracing::info!(
+                            request_id = %request_id,
+                            bootstrap_host = %info.bootstrap_host,
+                            bootstrap_port = info.bootstrap_port,
+                            bootstrap_room = info.bootstrap_room,
+                            "[DISAGG-DEBUG] PrefillRouter: using BOOTSTRAP path (SGLang-style) - \
+                             decode worker will connect to prefill for KV transfer"
+                        );
+                        decode_req.bootstrap_info = Some(info.clone());
                     }
-                    PrefillOutcome::Completed(result) => {
-                        decode_req.prefill_result = Some(result);
+                    PrefillOutcome::Completed(ref result) => {
+                        let has_kv_params = result.disaggregated_params
+                            .get("kv_transfer_params")
+                            .map(|v| !v.is_null())
+                            .unwrap_or(false);
+                        tracing::info!(
+                            request_id = %request_id,
+                            has_kv_transfer_params = has_kv_params,
+                            disaggregated_params_keys = ?result.disaggregated_params.as_object()
+                                .map(|m| m.keys().collect::<Vec<_>>()),
+                            "[DISAGG-DEBUG] PrefillRouter: using SYNC PREFILL path (vLLM-style) - \
+                             kv_transfer_params will be injected into decode request. \
+                             RDMA transfer happens when decode worker processes kv_transfer_params via NixlConnector"
+                        );
+                        decode_req.prefill_result = Some(result.clone());
                     }
                 }
 

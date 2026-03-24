@@ -1518,9 +1518,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
-            logger.debug(
-                f"Using disaggregated params from prefill for request {request_id}"
+            logger.info(
+                f"[DISAGG-DEBUG] Decode worker: injecting kv_transfer_params into vLLM engine for request {request_id}. "
+                f"kv_params type={type(kv_params).__name__}, "
+                f"kv_params keys={list(kv_params.keys()) if isinstance(kv_params, dict) else 'not-dict'}. "
+                f"vLLM NixlConnector will use these params to initiate RDMA pull from prefill worker."
             )
+        else:
+            if prefill_result is not None:
+                logger.warning(
+                    f"[DISAGG-DEBUG] Decode worker: prefill_result present but kv_transfer_params is MISSING for request {request_id}. "
+                    f"disaggregated_params keys={list(prefill_result.get('disaggregated_params', {}).keys()) if prefill_result.get('disaggregated_params') else 'None'}. "
+                    f"KV cache transfer will NOT happen - decode will recompute from scratch!"
+                )
         prefill_prompt_tokens_details = (
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
@@ -1777,6 +1787,23 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
+
+                if res.kv_transfer_params:
+                    kv_keys = (
+                        list(res.kv_transfer_params.keys())
+                        if isinstance(res.kv_transfer_params, dict)
+                        else "not-dict"
+                    )
+                    logger.info(
+                        f"[DISAGG-DEBUG] Prefill worker: vLLM NixlConnector produced kv_transfer_params for request {request_id}. "
+                        f"kv_params keys={kv_keys}. "
+                        f"These params contain NIXL/RDMA connection metadata for the decode worker to pull KV cache."
+                    )
+                else:
+                    logger.warning(
+                        f"[DISAGG-DEBUG] Prefill worker: vLLM returned NO kv_transfer_params for request {request_id}. "
+                        f"NixlConnector may not be configured. Check --kv-transfer-config."
+                    )
 
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),

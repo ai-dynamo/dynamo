@@ -131,6 +131,10 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 		state := &PrefillEnabledState{Enabled: prefillExists}
 		cycleState.Write(PrefillEnabledStateKey, state)
 		logger.Info("DisaggProfileHandler: prefill enabled state determined", "prefillEnabled", prefillExists)
+		logger.Info("[DISAGG-DEBUG] DisaggProfileHandler: profile detection",
+			"prefillProfileExists", prefillExists,
+			"totalProfiles", len(profiles),
+			"profileNames", fmt.Sprintf("%v", func() []string { names := make([]string, 0, len(profiles)); for n := range profiles { names = append(names, n) }; return names }()))
 
 		if prefillExists {
 			// Run prefill profile first.
@@ -173,8 +177,17 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 
 // ProcessResults aggregates the profile run results and designates the primary profile.
 // The "decode" profile is always the primary (the pod that handles the request).
-func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, _ *schedtypes.LLMRequest,
+func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, req *schedtypes.LLMRequest,
 	profileResults map[string]*schedtypes.ProfileRunResult) (*schedtypes.SchedulingResult, error) {
+
+	// Fail the request if enforce_disagg=true and prefill workers are not available.
+	if req.Headers != nil && req.Headers[EnforceDisaggFailedHeader] == "true" {
+		delete(req.Headers, EnforceDisaggFailedHeader)
+		return nil, errors.New(
+			"disaggregated mode enforced (DYN_ENFORCE_DISAGG=true) but prefill workers " +
+				"are not available; request rejected. Either wait for prefill workers " +
+				"to register or set DYN_ENFORCE_DISAGG=false to allow aggregated fallback")
+	}
 
 	if len(profileResults) == 0 {
 		return nil, errors.New("disagg profile handler received no profile results")

@@ -32,6 +32,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u64>().ok());
 
     if worker_id.is_none() && prefill_id.is_none() {
+        tracing::debug!(
+            "[DISAGG-DEBUG] nvext header overrides: no routing headers found in request"
+        );
         return nvext;
     }
 
@@ -43,6 +46,12 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     if let Some(id) = prefill_id {
         ext.prefill_worker_id = Some(id);
     }
+    tracing::info!(
+        prefill_worker_id = ?ext.prefill_worker_id,
+        decode_worker_id = ?ext.decode_worker_id,
+        backend_instance_id = ?ext.backend_instance_id,
+        "[DISAGG-DEBUG] nvext header overrides applied from EPP headers"
+    );
     Some(ext)
 }
 

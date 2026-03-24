@@ -175,8 +175,14 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		} else {
 			logger.V(logutil.DEFAULT).Error(nil, "DynDecodeScorer: x-prefill-instance-id header missing — DynPrefillScorer did not set it")
 		}
+		logger.V(logutil.DEFAULT).Info("[DISAGG-DEBUG] EPP decode scorer: disagg routing active",
+			"decodeWorkerID", workerIDStr,
+			"prefillWorkerID", req.Headers[PrefillWorkerIDHeader],
+			"allHeaders", fmt.Sprintf("%v", req.Headers))
 	} else {
 		req.Headers[RoutingModeHeader] = "aggregated"
+		logger.V(logutil.DEFAULT).Info("[DISAGG-DEBUG] EPP decode scorer: aggregated routing (no prefill workers)",
+			"decodeWorkerID", workerIDStr)
 	}
 
 	// Store routing state for PreRequest bookkeeping

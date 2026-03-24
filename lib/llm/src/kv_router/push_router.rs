@@ -586,7 +586,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let worker_id = Self::get_worker_id(&request)?;
 
-        tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
+        let has_prefill_result = request.prefill_result.is_some();
+        let has_bootstrap_info = request.bootstrap_info.is_some();
+        let has_kv_params = request.prefill_result.as_ref()
+            .map(|pr| pr.disaggregated_params.get("kv_transfer_params")
+                .map(|v| !v.is_null()).unwrap_or(false))
+            .unwrap_or(false);
+
+        tracing::info!(
+            worker_id = worker_id,
+            has_prefill_result = has_prefill_result,
+            has_bootstrap_info = has_bootstrap_info,
+            has_kv_transfer_params = has_kv_params,
+            "[DISAGG-DEBUG] DirectRoutingRouter: routing decode request to worker. \
+             If has_kv_transfer_params=true, RDMA transfer will be initiated by the decode worker's NixlConnector"
+        );
 
         self.inner.direct(request, worker_id).await
     }

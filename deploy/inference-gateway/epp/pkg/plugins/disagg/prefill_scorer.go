@@ -19,6 +19,7 @@ package disagg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -110,7 +111,15 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 
 	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
 	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+		if errors.Is(err, dynscorer.ErrDisaggEnforced) {
+			logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: enforce_disagg=true but prefill workers not available")
+			if req.Headers == nil {
+				req.Headers = map[string]string{}
+			}
+			req.Headers[EnforceDisaggFailedHeader] = "true"
+		} else {
+			logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+		}
 		return uniformScores(pods, 0)
 	}
 
@@ -118,6 +127,10 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
 		"prefillWorkerID", prefillWorkerID,
 		"tokenCount", len(result.TokenData))
+	logger.V(logutil.DEFAULT).Info("[DISAGG-DEBUG] EPP prefill scorer: selected prefill worker via FFI",
+		"prefillWorkerID", prefillWorkerID,
+		"tokenCount", len(result.TokenData),
+		"willSetHeader", PrefillWorkerIDHeader)
 
 	// Set the prefill worker ID header directly on the request.
 	// The request object is shared across all profile runs in the scheduling
