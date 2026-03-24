@@ -402,6 +402,8 @@ module = [
     "gradio.*",
     "kubernetes_asyncio",
     "kubernetes_asyncio.*",
+    "ray",
+    "ray.*",
     "pydantic_core",
     "aiconfigurator",
     "aiconfigurator.*",
