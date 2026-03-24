@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from tests.serve.common import (
+    SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
@@ -280,7 +281,7 @@ trtllm_configs = {
     # Runs in the multi-GPU pre-merge CI (marker: pre_merge and trtllm and gpu_2).
     "raw_embeddings_epd": TRTLLMConfig(
         name="raw_embeddings_epd",
-        directory=trtllm_dir,
+        directory=SERVE_TEST_DIR,
         script_name="agg_raw_embeddings_llava.sh",
         marks=[
             pytest.mark.gpu_2,

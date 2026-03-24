@@ -16,13 +16,13 @@
 # safe commit (e.g. 52320fb52229).
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
+trap 'echo Cleaning up...; rm -f "${EMBEDDINGS_FILE:-/tmp/llava_embeddings.pt}" /tmp/_resolved_model_path.txt; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
+source "${DYNAMO_HOME}/examples/common/launch_utils.sh"
 export MODEL_PATH=${MODEL_PATH:-"llava-hf/llava-v1.6-mistral-7b-hf"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"llava-hf/llava-v1.6-mistral-7b-hf"}
 export MODEL_REVISION=${MODEL_REVISION:-"52320fb52229"}
