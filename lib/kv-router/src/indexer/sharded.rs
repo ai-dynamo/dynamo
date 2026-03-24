@@ -424,8 +424,10 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence =
+            compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
         self.find_matches(sequence).await
     }
 

@@ -43,7 +43,7 @@ impl SyncReplayIndexer {
     }
 
     fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
-        let sequence = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name, None);
         self.tree.find_matches(sequence, false)
     }
 
@@ -233,6 +233,7 @@ impl OfflineReplayRouter {
         let token_seq = self.config.compute_seq_hashes_for_tracking(
             &request.tokens,
             self.block_size,
+            None,
             None,
             None,
         );

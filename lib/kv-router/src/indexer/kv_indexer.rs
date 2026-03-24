@@ -449,13 +449,15 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence =
+            compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }

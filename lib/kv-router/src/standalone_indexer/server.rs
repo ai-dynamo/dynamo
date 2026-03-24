@@ -197,8 +197,13 @@ async fn query(
     let indexer = ie.indexer.clone();
     drop(ie);
 
-    let block_hashes =
-        compute_block_hash_for_seq(&req.token_ids, block_size, None, req.lora_name.as_deref());
+    let block_hashes = compute_block_hash_for_seq(
+        &req.token_ids,
+        block_size,
+        None,
+        req.lora_name.as_deref(),
+        None,
+    );
     match indexer.find_matches(block_hashes).await {
         Ok(overlap) => (
             StatusCode::OK,

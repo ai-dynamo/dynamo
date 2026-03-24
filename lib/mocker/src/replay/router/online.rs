@@ -46,11 +46,11 @@ impl ReplayIndexer {
     ) -> Result<OverlapScores> {
         match self {
             Self::Single(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name)
+                .find_matches_for_request(tokens, lora_name, None)
                 .await
                 .map_err(Into::into),
             Self::Concurrent(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name)
+                .find_matches_for_request(tokens, lora_name, None)
                 .await
                 .map_err(Into::into),
         }
@@ -186,6 +186,7 @@ impl KvReplayRouter {
         let token_seq = self.config.compute_seq_hashes_for_tracking(
             &request.tokens,
             self.block_size,
+            None,
             None,
             None,
         );
