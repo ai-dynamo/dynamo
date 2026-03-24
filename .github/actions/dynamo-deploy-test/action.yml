@@ -52,6 +52,7 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
+        set +x
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV

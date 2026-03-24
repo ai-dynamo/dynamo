@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
@@ -513,6 +514,27 @@ class WorkerFactory:
                 "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
+
+        if config.gms_shadow_mode:
+            # Shadow mode: lock-driven activation.
+            # Flow: sleep → startup probe passes → block on lock → wake → register.
+            await handler.sleep({"level": 1})
+
+            runtime.set_health_status(True)
+            logger.info(
+                "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+            )
+
+            from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+            lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            engine_id = os.environ.get("ENGINE_ID", "0")
+            lock = FlockFailoverLock(lock_path)
+            await lock.acquire(engine_id=f"engine-{engine_id}")
+            logger.info("[Shadow] Lock acquired, waking engine")
+
+            await handler.wake_up({})
+            logger.info("[Shadow] Engine awake, registering with discovery")
 
         await self.register_vllm_model(
             model_input,

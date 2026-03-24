@@ -36,7 +36,8 @@ use super::{
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{
-        Endpoint, ErrorType, EventConverter, process_response_and_observe_metrics,
+        CancellationLabels, Endpoint, ErrorType, EventConverter,
+        process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
     service_v2,
@@ -341,12 +342,22 @@ async fn handler_completions(
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let streaming = request.inner.stream.unwrap_or(false);
+    let cancellation_labels = CancellationLabels {
+        model: request.inner.model.clone(),
+        endpoint: Endpoint::Completions.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
@@ -789,12 +800,22 @@ async fn handler_chat_completions(
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let streaming = request.inner.stream.unwrap_or(false);
+    let cancellation_labels = CancellationLabels {
+        model: request.inner.model.clone(),
+        endpoint: Endpoint::ChatCompletions.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     let response =
         tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
@@ -1388,12 +1409,22 @@ async fn handler_responses(
 
     // create the context for the request
     let request_id = get_or_create_request_id(None, &headers);
+    let streaming = request.inner.stream.unwrap_or(false);
+    let cancellation_labels = CancellationLabels {
+        model: request.inner.model.clone().unwrap_or_default(),
+        endpoint: Endpoint::Responses.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     let response =
         tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
@@ -2054,8 +2085,16 @@ async fn video_stream(
     // video_stream returns the streaming body directly (graceful handler exit).
     // The stream_handle is armed below and lives inside the monitored stream so that
     // a client disconnect (body drop) signals the engine context to cancel.
-    let (mut connection_handle, mut stream_handle) =
-        create_connection_monitor(ctx.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+        ctx.clone(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Videos.to_string(),
+            request_type: "stream".to_string(),
+        },
+    )
+    .await;
     connection_handle.disarm();
 
     let mut http_queue_guard = Some(http_queue_guard);

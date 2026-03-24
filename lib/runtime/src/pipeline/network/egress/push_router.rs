@@ -16,7 +16,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 use crate::{
     component::{Client, Endpoint},
+    dynamo_nvtx_range,
     engine::{AsyncEngine, Data},
+    metrics::frontend_perf::STAGE_DURATION_SECONDS,
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
@@ -34,6 +36,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 use tokio_stream::StreamExt;
 use tracing::Instrument;
@@ -324,6 +327,7 @@ where
         instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
+        let route_start = Instant::now();
         let request_id = request.id().to_string();
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
             tracing::Span::none()
@@ -357,7 +361,7 @@ where
         }
 
         // Get the address based on discovered transport type
-        let address = {
+        let (address, _transport_kind) = {
             use crate::component::TransportType;
 
             // Get the instance and use its actual transport type
@@ -376,7 +380,7 @@ where
                         http_endpoint = %http_endpoint,
                         "Using HTTP transport for instance"
                     );
-                    http_endpoint.clone()
+                    (http_endpoint.clone(), "transport.http.request")
                 }
                 TransportType::Tcp(tcp_endpoint) => {
                     tracing::debug!(
@@ -384,7 +388,7 @@ where
                         tcp_endpoint = %tcp_endpoint,
                         "Using TCP transport for instance"
                     );
-                    tcp_endpoint.clone()
+                    (tcp_endpoint.clone(), "transport.tcp.request")
                 }
                 TransportType::Nats(subject) => {
                     tracing::debug!(
@@ -392,13 +396,18 @@ where
                         subject = %subject,
                         "Using NATS transport for instance"
                     );
-                    subject.clone()
+                    (subject.clone(), "transport.nats.request")
                 }
             }
         };
 
         let request = request.map(|req| AddressedRequest::new(req, address));
 
+        STAGE_DURATION_SECONDS
+            .with_label_values(&["route"])
+            .observe(route_start.elapsed().as_secs_f64());
+
+        let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate(request)
