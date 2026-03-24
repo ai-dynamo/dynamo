@@ -647,6 +647,7 @@ class DisaggMockerProcess:
         pytest.param("kv", True, id="kv-durable"),
         pytest.param("round-robin", False, id="roundrobin"),
         pytest.param("random", False, id="random"),
+        pytest.param("power-of-two", False, id="power-of-two"),
     ],
     indirect=["durable_kv_events"],
 )
