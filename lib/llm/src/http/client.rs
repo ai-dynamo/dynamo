@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use dynamo_protocols::{Client, config::OpenAIConfig, error::OpenAIError};
 use async_trait::async_trait;
 use derive_getters::Dissolve;
-use dynamo_protocols::{Client, config::OpenAIConfig, error::OpenAIError};
 use futures::Stream;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -433,7 +433,7 @@ impl PureOpenAIClient {
             .base
             .client()
             .chat()
-            .create_stream(request)
+            .create_stream_byot(request)
             .await
             .map_err(HttpClientError::OpenAI)?;
 
