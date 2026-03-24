@@ -417,6 +417,8 @@ The mocker is particularly useful for:
 
 ## Feature Gaps (WIP)
 
+> For the broader mocker enhancement roadmap, see [#6383](https://github.com/ai-dynamo/dynamo/issues/6383).
+
 The following features are not yet supported by the mocker:
 
 - **Multi-tier memory** - No support for offloading KV cache to CPU/disk or onboarding back to GPU; potential future integration with KVBM
