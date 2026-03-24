@@ -5,7 +5,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use dynamo_kv_router::{ConcurrentRadixTree, ThreadPoolIndexer};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, ThreadPoolIndexer,
+    approx::PruneConfig,
+    config::{KvRouterConfig, RouterConfigOverride},
+    indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
+    protocols::KV_EVENT_SUBJECT,
+    protocols::{
+        BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
+        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    },
+};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
@@ -22,22 +32,12 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use validator::Validate;
 
-// Re-export from dynamo-kv-router crate
-pub use dynamo_kv_router::approx;
-pub use dynamo_kv_router::indexer;
-pub use dynamo_kv_router::protocols;
-pub use dynamo_kv_router::scheduling;
-pub use dynamo_kv_router::selector;
-
 pub mod cache_control;
-pub mod config;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
-pub mod queue;
-pub mod recorder;
 pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;
@@ -45,22 +45,14 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use cache_control::{CacheControlClient, spawn_pin_prefix};
-pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
-        approx::PruneConfig,
-        indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
-        protocols::{
-            BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-            RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
-            compute_block_hash_for_seq,
-        },
         remote_indexer::RemoteIndexer,
-        scheduler::{KvScheduler, PotentialLoad},
+        scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -75,7 +67,6 @@ use std::collections::HashSet;
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub use dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
 // for inter-router comms
@@ -85,9 +76,6 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
-
-// for standalone indexer query — re-export from shared crate
-pub use dynamo_kv_router::indexer::KV_INDEXER_QUERY_ENDPOINT;
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
@@ -118,10 +106,6 @@ pub fn router_discovery_query(namespace: String, component: String) -> Discovery
         endpoint: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
-
-/// Concrete `WorkerSelector` bound to the runtime config type.
-pub type WorkerSelector =
-    dyn dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync;
 
 #[derive(Clone)]
 pub enum Indexer {
@@ -175,7 +159,7 @@ impl Indexer {
         // with TTL/pruning regardless of event_threads, since updates come from
         // routing decisions only, not live KV events from workers.
         if !kv_router_config.use_kv_events {
-            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+            let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
             let cancellation_token = component.drt().primary_token();
             let prune_config = Some(PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
@@ -199,7 +183,7 @@ impl Indexer {
             ))));
         }
 
-        let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+        let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
         let cancellation_token = component.drt().primary_token();
 
         Ok(Indexer::KvIndexer(KvIndexer::new_with_frequency(
@@ -307,23 +291,29 @@ impl Indexer {
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
-pub struct KvRouter {
+pub struct KvRouter<Sel = DefaultWorkerSelector>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+{
     indexer: Indexer,
-    scheduler: KvScheduler,
+    scheduler: KvScheduler<Sel>,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
 }
 
-impl KvRouter {
+impl<Sel> KvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+{
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
         mut workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
-        selector: Option<Box<WorkerSelector>>,
+        selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
         model_name: Option<String>,
@@ -337,10 +327,13 @@ impl KvRouter {
 
         if !kv_router_config.skip_initial_worker_wait {
             let _ = workers_with_configs
-                .wait_for(|m| !m.is_empty())
+                .wait_for(|m| m.len() >= kv_router_config.min_initial_workers)
                 .await
                 .map_err(|_| {
-                    anyhow::anyhow!("runtime config watch closed before any workers appeared")
+                    anyhow::anyhow!(
+                        "runtime config watch closed before {} workers appeared",
+                        kv_router_config.min_initial_workers
+                    )
                 })?;
         }
 
@@ -606,7 +599,11 @@ impl KvRouter {
 // NOTE: KVRouter works like a PushRouter,
 // but without the reverse proxy functionality, but based on contract of 3 request types
 #[async_trait]
-impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
+impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
+    for KvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+{
     async fn generate(
         &self,
         request: SingleIn<RouterRequest>,
@@ -659,7 +656,10 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
     }
 }
 
-impl Drop for KvRouter {
+impl<Sel> Drop for KvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+{
     fn drop(&mut self) {
         tracing::info!("Dropping KvRouter - cancelling background tasks");
         self.cancellation_token.cancel();

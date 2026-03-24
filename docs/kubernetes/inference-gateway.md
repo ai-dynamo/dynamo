@@ -305,7 +305,7 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model8
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -317,8 +317,9 @@ a. Query models:
 
 ```bash
 # in the second terminal where you GATEWAY_URL is set
-
 curl $GATEWAY_URL/v1/models | jq .
+# or if you added the host name to http route:
+curl -H "Host: llama3-70b-disagg.example.com" $GATEWAY_URL/v1/models | jq .
 ```
 
 Sample output:

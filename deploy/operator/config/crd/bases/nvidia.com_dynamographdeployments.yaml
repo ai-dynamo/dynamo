@@ -57,6 +57,13 @@ spec:
             spec:
               description: Spec defines the desired state for this graph deployment.
               properties:
+                annotations:
+                  additionalProperties:
+                    type: string
+                  description: |-
+                    Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+                    Service-level annotations take precedence over these values.
+                  type: object
                 backendFramework:
                   description: BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
                   enum:
@@ -213,6 +220,13 @@ spec:
                       - name
                     type: object
                   type: array
+                labels:
+                  additionalProperties:
+                    type: string
+                  description: |-
+                    Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+                    Service-level labels take precedence over these values.
+                  type: object
                 pvcs:
                   description: |-
                     PVCs defines a list of persistent volume claims that can be referenced by components.
@@ -887,8 +901,8 @@ spec:
                         properties:
                           checkpointRef:
                             description: |-
-                              CheckpointRef references an existing Checkpoint CR to use
-                              If specified, Identity is ignored and this checkpoint is used directly
+                              CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
+                              If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
                             type: string
                           enabled:
                             default: false
@@ -11420,9 +11434,27 @@ spec:
                             pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                             x-kubernetes-int-or-string: true
                         type: object
+                        x-kubernetes-validations:
+                          - message: sharedMemory.size must not be set when sharedMemory.disabled is true
+                            rule: '!(has(self.disabled) && self.disabled && has(self.size))'
                       subComponentType:
                         description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                         type: string
+                      topologyConstraint:
+                        description: |-
+                          TopologyConstraint for this service. packDomain is required.
+                          When both this and spec.topologyConstraint.packDomain are set, packDomain
+                          must be narrower than or equal to the spec-level packDomain.
+                        properties:
+                          packDomain:
+                            description: |-
+                              PackDomain is the topology domain to pack pods within. Must match a
+                              domain defined in the referenced ClusterTopology CR.
+                            pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                            type: string
+                        required:
+                          - packDomain
+                        type: object
                       volumeMounts:
                         description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
                         items:
@@ -11451,6 +11483,28 @@ spec:
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
+                topologyConstraint:
+                  description: |-
+                    TopologyConstraint is the deployment-level topology constraint.
+                    When set, topologyProfile is required and names the ClusterTopology CR to use.
+                    packDomain is optional here — it can be omitted when only services carry constraints.
+                    Services without their own topologyConstraint inherit from this value.
+                  properties:
+                    packDomain:
+                      description: |-
+                        PackDomain is the default topology domain to pack pods within.
+                        Optional — omit when only services carry constraints.
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      type: string
+                    topologyProfile:
+                      description: |-
+                        TopologyProfile is the name of the ClusterTopology CR that defines the
+                        topology hierarchy for this deployment.
+                      minLength: 1
+                      type: string
+                  required:
+                    - topologyProfile
+                  type: object
               type: object
             status:
               description: Status reflects the current observed state of this graph deployment.
@@ -11466,7 +11520,7 @@ spec:
                         description: IdentityHash is the computed hash of the checkpoint identity
                         type: string
                       ready:
-                        description: Ready indicates if the checkpoint is ready for use
+                        description: Ready indicates if the checkpoint was visible to the worker at startup
                         type: boolean
                     type: object
                   description: |-

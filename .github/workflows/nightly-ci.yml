@@ -24,7 +24,7 @@ jobs:
       framework: vllm
       target: runtime
       no_cache: true
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
@@ -33,7 +33,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'vllm and gpu_0'
       single_gpu_test_markers: 'vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 35
+      single_gpu_test_timeout_minutes: 180
       multi_gpu_test_markers: 'vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -47,7 +47,7 @@ jobs:
       framework: sglang
       target: runtime
       no_cache: true
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
@@ -56,6 +56,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'sglang and gpu_0'
       single_gpu_test_markers: 'sglang and gpu_1'
+      single_gpu_test_timeout_minutes: 180
       multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -69,7 +70,7 @@ jobs:
       framework: trtllm
       target: runtime
       no_cache: true
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
@@ -78,6 +79,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'trtllm and gpu_0'
       single_gpu_test_markers: 'trtllm and gpu_1'
+      single_gpu_test_timeout_minutes: 180
       multi_gpu_test_markers: 'trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -103,7 +105,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"

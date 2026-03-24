@@ -24,6 +24,9 @@ data:
       max_batch_size: 2
     disable_overlap_scheduler: true
     print_iter_log: false
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -49,6 +52,9 @@ data:
       max_batch_size: 512
     disable_overlap_scheduler: false
     print_iter_log: false
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -64,6 +70,7 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        tolerations: []
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -92,6 +99,7 @@ spec:
       sharedMemory:
         size: 256Gi
       extraPodSpec:
+        tolerations: []
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -147,6 +155,7 @@ spec:
       sharedMemory:
         size: 256Gi
       extraPodSpec:
+        tolerations: []
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:

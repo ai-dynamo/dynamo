@@ -11,6 +11,7 @@ pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     SequenceSubscriber,
 };
+use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
@@ -21,7 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::metrics::WORKER_LOAD_METRICS;
-use super::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 

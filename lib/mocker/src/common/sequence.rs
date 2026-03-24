@@ -8,29 +8,31 @@ use dynamo_tokens::{TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
-/// Create unique blocks from a TokenBlockSequence
-fn create_unique_blocks_from_sequence(
+/// Create unique blocks and block hashes from a TokenBlockSequence.
+fn create_sequence_cache(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> Vec<UniqueBlock> {
-    let mut unique_blocks: Vec<UniqueBlock> = tokens
-        .blocks()
-        .iter()
-        .map(|block| {
+) -> (Vec<UniqueBlock>, Vec<u64>) {
+    let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
+    let mut block_hashes = Vec::with_capacity(tokens.blocks().len());
+
+    for block in tokens.blocks() {
+        block_hashes.push(block.block_hash());
+        unique_blocks.push({
             if enable_prefix_caching {
                 UniqueBlock::FullBlock(block.sequence_hash())
             } else {
                 UniqueBlock::FullBlock(random::<u64>())
             }
-        })
-        .collect();
+        });
+    }
 
     // Only push the partial block if tokens count isn't a multiple of block_size
     if !tokens.total_tokens().is_multiple_of(block_size) {
         unique_blocks.push(UniqueBlock::default());
     }
-    unique_blocks
+    (unique_blocks, block_hashes)
 }
 
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
@@ -38,6 +40,7 @@ fn create_unique_blocks_from_sequence(
 #[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
+    block_hashes: Vec<u64>,
 
     tokens: TokenBlockSequence,
 
@@ -77,11 +80,12 @@ impl ActiveSequence {
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
-        let unique_blocks =
-            create_unique_blocks_from_sequence(&tokens, block_size, enable_prefix_caching);
+        let (unique_blocks, block_hashes) =
+            create_sequence_cache(&tokens, block_size, enable_prefix_caching);
 
         let seq = Self {
             unique_blocks,
+            block_hashes,
             tokens,
             block_size,
             max_output_tokens,
@@ -125,20 +129,17 @@ impl ActiveSequence {
         let range = prev_blocks..target_blocks;
         let blocks = self.unique_blocks[range.clone()].to_vec();
 
-        let all_hashes = self.block_hashes();
-        let num_full = all_hashes.len();
-        let hash_start = prev_blocks.min(num_full);
-        let hash_end = target_blocks.min(num_full);
-        let hashes = all_hashes[hash_start..hash_end].to_vec();
+        let hash_start = prev_blocks.min(self.block_hashes.len());
+        let hash_end = target_blocks.min(self.block_hashes.len());
+        let hashes = self.block_hashes[hash_start..hash_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
-            let all_token_ids: Vec<Vec<u32>> = self
-                .tokens
-                .blocks()
-                .iter()
-                .map(|b| b.tokens().to_vec())
-                .collect();
-            Some(all_token_ids[hash_start..hash_end].to_vec())
+            Some(
+                self.tokens.blocks()[hash_start..hash_end]
+                    .iter()
+                    .map(|b| b.tokens().to_vec())
+                    .collect(),
+            )
         } else {
             None
         };
@@ -166,14 +167,6 @@ impl ActiveSequence {
     /// Allocate all remaining blocks at once (backward compat).
     pub fn take_creation_signal(&mut self) -> Option<MoveBlock> {
         self.allocate_blocks_for_chunk(self.len())
-    }
-
-    pub fn block_hashes(&self) -> Vec<u64> {
-        self.tokens
-            .blocks()
-            .iter()
-            .map(|block| block.block_hash())
-            .collect()
     }
 
     /// Create a new ActiveSequence instance and return the creation signal
@@ -221,6 +214,7 @@ impl ActiveSequence {
             } else {
                 None
             };
+            self.block_hashes.push(last_block_hash);
             self.unique_blocks.pop();
 
             // After pop, the last element is the parent block
@@ -281,13 +275,15 @@ impl ActiveSequence {
         }
 
         // Free all blocks when we reach max tokens
-        signals.extend(self.free_signal());
+        signals.extend(self.free_signal_for_tokens(self.len()));
         signals
     }
 
-    /// Free all blocks, generating appropriate signals for each block type
-    pub fn free_signal(&self) -> Vec<MoveBlock> {
-        self.unique_blocks
+    fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
+        let active_blocks = active_tokens
+            .div_ceil(self.block_size)
+            .min(self.unique_blocks.len());
+        self.unique_blocks[..active_blocks]
             .iter()
             .rev()
             .map(|block| match block {
@@ -301,6 +297,11 @@ impl ActiveSequence {
             .collect()
     }
 
+    /// Free the currently active allocation footprint.
+    pub fn free_signal(&self) -> Vec<MoveBlock> {
+        self.free_signal_for_tokens(self.num_allocated_tokens)
+    }
+
     /// Move the request to a preempted state and return the free signals from freeing current blocks.
     /// Upon preemption, the sequence retains the tokens generated during the decode phase (if any).
     /// Resets `num_allocated_tokens` so re-admission will re-allocate from scratch.
@@ -310,7 +311,13 @@ impl ActiveSequence {
         free_signal
     }
 
-    /// Pops last token in the sequence.
+    /// Pops the last token in the sequence.
+    ///
+    /// This is only used to undo a freshly generated decode token after a failed
+    /// allocation/preemption path. Under that invariant, the token being removed
+    /// must be in the current partial block, so we only need to drop the trailing
+    /// partial `UniqueBlock` when the sequence length returns to an exact block
+    /// boundary. Using this to unwind arbitrary prompt history would be incorrect.
     pub fn pop(&mut self) {
         self.tokens.pop();
         self.generated_tokens = self.generated_tokens.saturating_sub(1);
@@ -326,157 +333,193 @@ impl ActiveSequence {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_active_sequence_push() {
-        // Create a sequence with block size 16 initialized with tokens [0..15]
-        let initial_tokens: Vec<u32> = (0..15).collect();
-        let (mut seq1, signal1) =
-            ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
-        assert_eq!(seq1.num_input_tokens(), 15);
-        assert_eq!(seq1.len(), 15);
+    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<u64> {
+        seq.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.block_hash())
+            .collect()
+    }
 
-        // Check that we got a Use signal
-        assert!(signal1.is_some());
-        match &signal1 {
-            Some(MoveBlock::Use(blocks, _hashes, ..)) => {
-                assert_eq!(blocks.len(), 1);
+    fn assert_cached_hashes_match_promoted_blocks(seq: &ActiveSequence) {
+        let num_full_unique_blocks = seq
+            .unique_blocks()
+            .iter()
+            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
+            .count();
+        assert_eq!(
+            seq.block_hashes().as_slice(),
+            &block_hashes_from_tokens(seq)[..num_full_unique_blocks],
+            "cached block hashes should match the promoted full blocks"
+        );
+    }
+
+    fn assert_use_signal(
+        signal: &MoveBlock,
+        expected_blocks: &[UniqueBlock],
+        expected_hashes: &[u64],
+    ) {
+        match signal {
+            MoveBlock::Use(blocks, hashes, ..) => {
+                assert_eq!(blocks, expected_blocks);
+                assert_eq!(hashes, expected_hashes);
             }
-            _ => panic!("Expected Use signal"),
+            _ => panic!("Expected MoveBlock::Use"),
         }
+    }
 
-        // Push token 15 which should complete the block (no signals yet)
-        let signal_15 = seq1.push(15);
+    fn assert_single_partial_use(signal: &MoveBlock) {
+        match signal {
+            MoveBlock::Use(blocks, hashes, ..) => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+                assert!(hashes.is_empty());
+            }
+            _ => panic!("Expected MoveBlock::Use with a single partial block"),
+        }
+    }
+
+    fn assert_promote_parent(signal: &MoveBlock, expected_parent: Option<u64>) {
+        match signal {
+            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
+                assert_eq!(*parent_hash, expected_parent);
+            }
+            _ => panic!("Expected MoveBlock::Promote"),
+        }
+    }
+
+    fn assert_destroy_partial(signal: &MoveBlock) {
+        match signal {
+            MoveBlock::Destroy(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+            }
+            _ => panic!("Expected MoveBlock::Destroy for partial block"),
+        }
+    }
+
+    fn assert_deref_full(signal: &MoveBlock) {
+        match signal {
+            MoveBlock::Deref(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], UniqueBlock::FullBlock(_)));
+            }
+            _ => panic!("Expected MoveBlock::Deref for full block"),
+        }
+    }
+
+    #[test]
+    fn test_new_with_signal_creates_initial_partial_block() {
+        let initial_tokens: Vec<u32> = (0..15).collect();
+        let (seq, signal) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
+
+        assert_eq!(seq.num_input_tokens(), 15);
+        assert_eq!(seq.len(), 15);
+        assert_single_partial_use(signal.as_ref().expect("Expected initial Use signal"));
+    }
+
+    #[test]
+    fn test_push_across_block_boundary_promotes_and_allocates_partial() {
+        let initial_tokens: Vec<u32> = (0..15).collect();
+        let (mut seq, _) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
+
+        let signal_15 = seq.push(15);
         assert!(
             signal_15.is_none(),
             "Completing a block should not trigger signals"
         );
 
-        // Push token 16 which should trigger both Promote and Use signals
-        let signal_16 = seq1.push(16);
-        assert!(signal_16.is_some());
-        let signal_16 = signal_16.unwrap();
+        let signal_16 = seq.push(16).expect("Expected boundary crossing signals");
         assert_eq!(signal_16.len(), 2);
+        assert_promote_parent(&signal_16[0], None);
+        assert_single_partial_use(&signal_16[1]);
 
-        // First signal should be Promote for the previous block
-        match &signal_16[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
-                assert_eq!(*parent_hash, None);
-            }
-            _ => panic!("Expected Promote signal as second signal"),
-        }
+        assert_eq!(
+            seq.unique_blocks().len(),
+            2,
+            "sequence should have one full block and one partial block"
+        );
+        assert_eq!(
+            seq.len() % seq.block_size(),
+            1,
+            "sequence should have one token in the new partial block"
+        );
+    }
 
-        // Second signal should be Use for new partial block
-        match &signal_16[1] {
-            MoveBlock::Use(blocks, _hashes, ..) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
-            }
-            _ => panic!("Expected Use signal as first signal"),
-        }
+    #[test]
+    fn test_equivalent_histories_preserve_full_block_identity() {
+        let initial_tokens: Vec<u32> = (0..15).collect();
+        let (mut seq1, _) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
+        seq1.push(15);
+        seq1.push(16);
 
-        // Verify state after pushing tokens
-        assert_eq!(seq1.unique_blocks().len(), 2); // One full block and one partial block
-        assert_eq!(seq1.len(), 17);
-        assert_eq!(seq1.len() % seq1.block_size(), 1);
-
-        // Create another sequence with block size 16 initialized with tokens [0..17]
         let extended_tokens: Vec<u32> = (0..16).collect();
         let (mut seq2, _) = ActiveSequence::new_with_signal(extended_tokens, 100, Some(16), true);
         seq2.push(16);
         seq2.pop();
         seq2.push(16);
 
-        // Simplified assertions
-        assert_eq!(
-            seq1.unique_blocks()[0],
-            seq2.unique_blocks()[0],
-            "First blocks should be the same"
-        );
+        assert_eq!(seq1.unique_blocks()[0], seq2.unique_blocks()[0]);
+        assert_ne!(seq1.unique_blocks()[1], seq2.unique_blocks()[1]);
+    }
 
-        assert_ne!(
-            seq1.unique_blocks()[1],
-            seq2.unique_blocks()[1],
-            "Second blocks should be different"
-        );
+    #[test]
+    fn test_promote_uses_previous_full_block_as_parent() {
+        let initial_tokens: Vec<u32> = (0..15).collect();
+        let (mut seq, _) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
+        seq.push(15);
+        seq.push(16);
 
-        // Reset partial block on seq1 and push back token 16
-        seq1.push(17);
-        seq1.pop();
-        seq1.pop();
-        seq1.push(16);
+        seq.push(17);
+        seq.pop();
+        seq.pop();
+        seq.push(16);
 
-        // Now push tokens 17..32 to both sequences
+        let extended_tokens: Vec<u32> = (0..16).collect();
+        let (mut seq_equiv, _) =
+            ActiveSequence::new_with_signal(extended_tokens, 100, Some(16), true);
+        seq_equiv.push(16);
+        seq_equiv.pop();
+        seq_equiv.push(16);
         for token in 17..33 {
-            seq1.push(token);
-            seq2.push(token);
+            seq.push(token);
+            seq_equiv.push(token);
         }
 
-        // Both sequences should now have 2 blocks:
-        // 1. FullBlock for tokens 0-15
-        // 2. FullBlock for tokens 16-31
-        // 3. No partial block since there are no remaining tokens
         assert_eq!(
-            seq1.unique_blocks().len(),
-            3,
-            "seq1 should have exactly 3 blocks"
-        );
-        assert_eq!(
-            seq2.unique_blocks().len(),
-            3,
-            "seq2 should have exactly 3 blocks"
-        );
-        assert_eq!(
-            seq1.len() % seq1.block_size(),
-            1,
-            "seq1 should have 1 partial token"
-        );
-        assert_eq!(
-            seq2.len() % seq2.block_size(),
-            1,
-            "seq2 should have 1 partial token"
+            &seq.unique_blocks()[0..2],
+            &seq_equiv.unique_blocks()[0..2],
+            "first two full blocks should remain identical"
         );
 
-        // Verify that both sequences have identical blocks up to the second position
-        assert_eq!(
-            &seq1.unique_blocks()[0..2],
-            &seq2.unique_blocks()[0..2],
-            "First two blocks should be identical"
-        );
-
-        // Push tokens 34..47 to seq1
         for token in 33..48 {
-            seq1.push(token);
+            seq.push(token);
         }
 
-        // Push token 48 and get the signal - this completes the block and triggers signals
-        let signal = seq1.push(48);
-        let signal = signal.unwrap();
+        let signal = seq
+            .push(48)
+            .expect("Expected promote when opening next partial");
 
-        // Check that signal[0] is promote
-        match &signal[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
-                // Check that the parent_hash matches unique_blocks[1], which should be a full block
-                if let UniqueBlock::FullBlock(expected_hash) = seq1.unique_blocks()[1] {
-                    assert_eq!(
-                        *parent_hash,
-                        Some(expected_hash),
-                        "Parent hash should match unique_blocks[1]"
-                    );
-                } else {
-                    panic!("unique_blocks[1] should be a full block");
-                }
-            }
-            _ => panic!("Expected Promote signal as first signal"),
-        }
+        let UniqueBlock::FullBlock(expected_hash) = seq.unique_blocks()[1] else {
+            panic!("unique_blocks[1] should be a full block");
+        };
+        assert_promote_parent(&signal[0], Some(expected_hash));
+        assert_single_partial_use(&signal[1]);
+    }
 
-        // Reset seq1 and check that it equals the original clone
-        let free_signals = seq1.reset_with_signal();
+    #[test]
+    fn test_reset_with_signal_frees_blocks_and_resets_allocation() {
+        let initial_tokens: Vec<u32> = (0..15).collect();
+        let (mut seq, _) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
+        seq.push(15);
+        seq.push(16);
+        seq.commit_allocation(seq.len());
 
-        // 49 - 15 generated tokens
-        assert_eq!(seq1.generated_tokens(), 34);
+        let free_signals = seq.reset_with_signal();
 
-        // Verify the reset signals include proper cleanup events
         assert!(!free_signals.is_empty());
+        assert_eq!(seq.num_allocated_tokens(), 0);
+        assert_eq!(seq.generated_tokens(), 2);
     }
 
     #[test]
@@ -486,14 +529,7 @@ mod tests {
         let (mut seq, signal) = ActiveSequence::new_with_signal(initial_tokens, 5, Some(16), true);
 
         // Initial signal - should have received a Use signal for the partial block
-        assert!(signal.is_some());
-        match signal {
-            Some(MoveBlock::Use(blocks, _hashes, ..)) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
-            }
-            _ => panic!("Expected Use signal for the initial partial block"),
-        }
+        assert_single_partial_use(signal.as_ref().expect("Expected initial Use signal"));
 
         // Generate first two tokens - should not trigger new signals
         seq.generate();
@@ -505,21 +541,10 @@ mod tests {
         assert_eq!(signals_second.len(), 2);
 
         // First signal should be Promote
-        match &signals_second[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
-                assert_eq!(*parent_hash, None);
-            }
-            _ => panic!("Expected Promote signal as first signal after second token"),
-        }
+        assert_promote_parent(&signals_second[0], None);
 
         // Second signal should be Use for new partial block
-        match &signals_second[1] {
-            MoveBlock::Use(blocks, _hashes, ..) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
-            }
-            _ => panic!("Expected Use signal as second signal after second token"),
-        }
+        assert_single_partial_use(&signals_second[1]);
 
         // Generate fourth token - should not trigger new signals as it's adding to partial block
         let signals_third = seq.generate();
@@ -530,21 +555,70 @@ mod tests {
         assert_eq!(signals_last.len(), 2);
 
         // First signal should be Destroy for the partial block
-        match &signals_last[0] {
-            MoveBlock::Destroy(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
-            }
-            _ => panic!("Expected Destroy signal for partial block after fourth token"),
-        }
+        assert_destroy_partial(&signals_last[0]);
 
         // Second signal should be Deref for the full block
-        match &signals_last[1] {
-            MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::FullBlock(_)));
-            }
-            _ => panic!("Expected Deref signal for full block after fourth token"),
-        }
+        assert_deref_full(&signals_last[1]);
+    }
+
+    #[test]
+    fn test_prepare_allocation_slices_full_and_partial_blocks() {
+        let tokens: Vec<u32> = (0..10).collect();
+        let seq = ActiveSequence::new(tokens, 4, Some(4), true, false);
+
+        let first = seq.prepare_allocation(4).unwrap();
+        assert_use_signal(
+            &first,
+            &seq.unique_blocks()[0..1],
+            &seq.block_hashes()[0..1],
+        );
+
+        let second = seq.prepare_allocation(8).unwrap();
+        assert_use_signal(
+            &second,
+            &seq.unique_blocks()[0..2],
+            &seq.block_hashes()[0..2],
+        );
+
+        let third = seq.prepare_allocation(10).unwrap();
+        assert_use_signal(
+            &third,
+            &seq.unique_blocks()[0..3],
+            &seq.block_hashes()[0..2],
+        );
+    }
+
+    #[test]
+    fn test_prepare_allocation_is_stable_until_commit() {
+        let tokens: Vec<u32> = (0..10).collect();
+        let mut seq = ActiveSequence::new(tokens, 4, Some(4), true, false);
+
+        let first = seq.prepare_allocation(4).unwrap();
+        let second = seq.prepare_allocation(4).unwrap();
+        assert_eq!(first, second);
+
+        seq.commit_allocation(4);
+        let next = seq.prepare_allocation(8).unwrap();
+        assert_use_signal(&next, &seq.unique_blocks()[1..2], &seq.block_hashes()[1..2]);
+    }
+
+    #[test]
+    fn test_block_hash_cache_stays_in_sync_after_promote_and_pop() {
+        let initial_tokens: Vec<u32> = (0..15).collect();
+        let (mut seq, _) = ActiveSequence::new_with_signal(initial_tokens, 4, Some(16), true);
+
+        assert_cached_hashes_match_promoted_blocks(&seq);
+
+        seq.push(15);
+        assert_cached_hashes_match_promoted_blocks(&seq);
+
+        let promote_signals = seq.push(16).unwrap();
+        assert_eq!(promote_signals.len(), 2);
+        assert_cached_hashes_match_promoted_blocks(&seq);
+
+        // `pop()` is only valid for undoing a freshly generated token from the
+        // current partial block; this is the replay/preemption path we rely on.
+        seq.pop();
+        assert_cached_hashes_match_promoted_blocks(&seq);
     }
 }
