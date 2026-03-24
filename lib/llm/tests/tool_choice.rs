@@ -460,8 +460,11 @@ fn test_no_tool_choice_outputs_normal_text() {
 // ---------------------------------------------------------------------------
 
 /// Build a raw streaming response chunk with arbitrary text content.
-fn make_text_chunk(text: &str, finish: bool) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
-    use dynamo_async_openai::types::{
+fn make_text_chunk(
+    text: &str,
+    finish: bool,
+) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
     };
     #[allow(deprecated)]
@@ -478,7 +481,7 @@ fn make_text_chunk(text: &str, finish: bool) -> dynamo_llm::protocols::openai::c
                 reasoning_content: None,
             },
             finish_reason: if finish {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
+                Some(dynamo_protocols::types::FinishReason::Stop)
             } else {
                 None
             },
@@ -497,7 +500,9 @@ fn make_text_chunk(text: &str, finish: bool) -> dynamo_llm::protocols::openai::c
 
 /// Apply jail with both a tool_call_parser and a named_tool_filter, returning all chunks.
 async fn apply_jail_named_with_parser(
-    chunks: Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>,
+    chunks: Vec<
+        dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    >,
     parser: &str,
     named_tool: &str,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
@@ -518,10 +523,14 @@ async fn apply_jail_named_with_parser(
         .tool_call_parser(parser)
         .named_tool_filter(named_tool)
         .build();
-
+    out.filter_map(|ann| async move { ann.data })
+        .collect()
+        .await
     let out = jail.apply_with_finish_reason(input);
     tokio::pin!(out);
-    out.filter_map(|ann| async move { ann.data }).collect().await
+    out.filter_map(|ann| async move { ann.data })
+        .collect()
+        .await
 }
 
 /// When tool_choice=named, a tool_call_parser is configured, and the model emits
@@ -529,8 +538,7 @@ async fn apply_jail_named_with_parser(
 #[tokio::test]
 async fn test_named_tool_with_parser_correct_tool_passes() {
     // Hermes format: <tool_call>{"name":"get_weather","arguments":{...}}\n</tool_call>
-    let hermes_payload =
-        "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}\n</tool_call>";
+    let hermes_payload = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}\n</tool_call>";
 
     let chunks = vec![
         make_text_chunk(hermes_payload, false),
@@ -569,8 +577,7 @@ async fn test_named_tool_with_parser_correct_tool_passes() {
 #[tokio::test]
 async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
     // Model emits "search" but we required "get_weather"
-    let hermes_wrong_tool =
-        "<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"Paris weather\"}}\n</tool_call>";
+    let hermes_wrong_tool = "<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"Paris weather\"}}\n</tool_call>";
 
     let chunks = vec![
         make_text_chunk(hermes_wrong_tool, false),

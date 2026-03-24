@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, ChatCompletionToolChoiceOption,
+    CompletionUsage, FinishReason, Role,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -3101,20 +3103,20 @@ fahrenheit
 </function>
 </tool_call>"#;
 
-        // Build jail the same way apply_tool_calling_jail would when a
-        // parser is configured together with tool_choice=required.
-        // After the fix, this uses marker-based mode (not Immediate).
-        let jail = JailedStream::builder()
-            .tool_call_parser("qwen3_coder".to_string())
-            .build();
-
         let input_chunks = vec![test_utils::create_mock_response_chunk(
             xml_output.to_string(),
             0,
         )];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("qwen3_coder".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            input_stream,
+        )
+        .collect()
+        .await;
 
         // Should have parsed a tool call, not leaked raw XML as content
         let tool_call_count: usize = results
