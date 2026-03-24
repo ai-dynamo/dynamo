@@ -181,8 +181,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            if bootstrap_info is not None and bootstrap_info.get('bootstrap_hcheck') is True:
-                dp_rank = bootstrap_info.get("bootstrap_room", dp_rank) % self.config.server_args.dp_size
+            if (
+                bootstrap_info is not None
+                and bootstrap_info.get("bootstrap_hcheck") is True
+            ):
+                dp_rank = (
+                    bootstrap_info.get("bootstrap_room", dp_rank)
+                    % self.config.server_args.dp_size
+                )
 
             # 'bootstrap_room' parameter may be not None when it is going from the DP-aware health check task.
             agg = await self.engine.async_generate(
