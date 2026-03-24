@@ -408,8 +408,9 @@ for MN in "${MODEL_NAMES[@]}"; do
             MOCKER_ARGS+=(--planner-profile-data "$PLANNER_PROFILE")
         fi
 
+        MN_SAFE="${MN//\//_}"
         HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
-            > "$OUTPUT_DIR/logs/mocker_${MN}_${i}.log" 2>&1 &
+            > "$OUTPUT_DIR/logs/mocker_${MN_SAFE}_${i}.log" 2>&1 &
         ALL_PIDS+=($!)
         echo "  Worker $WORKER_IDX ($MN #$i): PID ${ALL_PIDS[-1]}, port $WORKER_PORT"
     done
@@ -470,7 +471,7 @@ if [[ "$HAS_NSYS" == true ]]; then
     FRONTEND_PID=""
     for _try in $(seq 1 30); do
         sleep 1
-        _child=$(pgrep -P "$NSYS_WRAPPER_PID" -f "python.*dynamo.frontend" 2>/dev/null | head -1)
+        _child=$(pgrep -P "$NSYS_WRAPPER_PID" -f "python.*dynamo.frontend" 2>/dev/null | head -1 || true)
         if [[ -n "$_child" ]]; then
             FRONTEND_PID="$_child"
             break
