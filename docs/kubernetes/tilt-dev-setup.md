@@ -58,7 +58,7 @@ EOF
 tilt up
 ```
 
-Tilt opens a terminal UI and a web dashboard at <http://localhost:10350>.
+Tilt opens a terminal UI and a web dashboard at [http://localhost:10350](http://localhost:10350).
 The dashboard shows resource status, build logs, and port-forwards.
 
 Press **Space** in the terminal to open the web UI. Press **Ctrl-C** to
@@ -246,7 +246,7 @@ REGISTRY=ghcr.io/myorg tilt up
 
 ## Tilt UI
 
-The web UI at <http://localhost:10350> shows:
+The web UI at [http://localhost:10350](http://localhost:10350) shows:
 
 - **Resource status** — green/red/pending for each resource
 - **Build logs** — compilation output and errors

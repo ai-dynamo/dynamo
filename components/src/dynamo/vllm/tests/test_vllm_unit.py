@@ -332,6 +332,14 @@ def test_disaggregation_mode_default(mock_vllm_cli):
     assert config.is_decode_worker is False
 
 
+def test_kv_events_disabled_by_default_without_explicit_config(mock_vllm_cli):
+    """Test that vLLM no longer auto-creates kv_events_config."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert config.engine_args.kv_events_config is None
+    assert config.use_kv_events is False
+
+
 def test_disaggregation_mode_prefill(mock_vllm_cli):
     """Test --disaggregation-mode prefill sets correct state."""
     mock_vllm_cli(
