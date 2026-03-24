@@ -27,6 +27,7 @@ try:
 
     _SGLANG_HAS_NETWORK_MODULE = True
 except ImportError:
+    # Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+
     from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
         get_local_ip_auto,
         get_zmq_socket,

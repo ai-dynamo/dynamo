@@ -7,7 +7,7 @@ registration, request routing, metrics, and disaggregated serving.
 ## SGLang Backwards Compatibility
 
 SGLang is pre-1.0 and regularly moves/renames internal APIs between releases. We
-maintain backwards compat for at least 1 version back. The pattern:
+support the current version plus 1 version back (N and N-1). The pattern:
 
 1. **All SGLang imports that have broken (or may break) across versions go through
    `_compat.py`**, never directly from `sglang.*` in component code.
@@ -15,9 +15,12 @@ maintain backwards compat for at least 1 version back. The pattern:
 3. When SGLang introduces a new class/function that doesn't exist in older versions
    (e.g., `NetworkAddress`), add a minimal polyfill in the except branch -- just
    enough surface area to cover what Dynamo actually calls.
-4. When we drop support for an old version, delete the fallback branch and the
-   polyfill from `_compat.py`. If `_compat.py` becomes trivial re-exports, inline
-   the imports and delete the file.
+4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
+   version it supports and when it can be removed, e.g.:
+   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+5. When a new SGLang version is released and the old N-1 falls outside the support
+   window, delete the corresponding fallback branches and polyfills from `_compat.py`.
+   If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
 
 **When you encounter a new SGLang API breakage**: add the affected imports to
 `_compat.py` following the existing pattern. Do not scatter try/except blocks across
