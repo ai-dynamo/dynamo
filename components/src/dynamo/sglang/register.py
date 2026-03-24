@@ -7,7 +7,7 @@ from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities

@@ -11,7 +11,8 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto, get_zmq_socket
+
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
