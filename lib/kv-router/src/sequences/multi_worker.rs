@@ -689,6 +689,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         results
     }
 
+    /// Return true if any worker satisfies the provided predicate on active token count.
+    pub fn any_worker_matches_active_tokens(
+        &self,
+        mut predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
+    ) -> bool {
+        let table = self.workers.read();
+        for (worker, lock) in &table.slots {
+            if predicate(*worker, lock.read().active_tokens()) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for entry in self.request_to_lora.iter() {

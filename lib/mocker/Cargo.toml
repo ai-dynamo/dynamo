@@ -13,7 +13,6 @@ repository.workspace = true
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true }
-dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -41,3 +40,4 @@ tokio-timerfd = "0.2"
 
 [dev-dependencies]
 rstest = "0.18.2"
+tempfile = { workspace = true }
