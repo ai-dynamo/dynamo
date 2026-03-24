@@ -441,6 +441,29 @@ def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, repla
     )
 
 
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens", "expected_message"),
+    [
+        (0, 2, "input_tokens must be at least 1"),
+        (2, 0, "output_tokens must be at least 1"),
+    ],
+)
+def test_run_synthetic_trace_replay_workload_validates_zero_token_lengths(
+    input_tokens, output_tokens, expected_message
+):
+    with pytest.raises(Exception, match=expected_message):
+        run_synthetic_trace_replay(
+            input_tokens,
+            output_tokens,
+            2,
+            extra_engine_args=_vllm_args(),
+            num_workers=2,
+            replay_mode="offline",
+            router_mode="kv_router",
+            turns_per_session=2,
+        )
+
+
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_synthetic_concurrency_replay_counts_match(
@@ -675,6 +698,7 @@ def test_replay_cli_passes_multiturn_workload_kwargs(monkeypatch):
     assert captured["kwargs"]["inter_turn_delay_ms"] == 7.0
 
 
+@pytest.mark.timeout(30)
 def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     report_path = tmp_path / "synthetic_report.json"
 
@@ -706,6 +730,7 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     _assert_basic_report_metrics(report)
 
 
+@pytest.mark.timeout(30)
 def test_replay_cli_subprocess_synthetic_multiturn_smoke(tmp_path):
     report_path = tmp_path / "synthetic_multiturn_report.json"
 
@@ -743,6 +768,7 @@ def test_replay_cli_subprocess_synthetic_multiturn_smoke(tmp_path):
     _assert_basic_report_metrics(report)
 
 
+@pytest.mark.timeout(30)
 def test_replay_cli_subprocess_trace_smoke(tmp_path):
     trace_path = _write_cli_smoke_trace(tmp_path)
     report_path = tmp_path / "trace_report.json"
@@ -772,6 +798,7 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
     _assert_basic_report_metrics(report)
 
 
+@pytest.mark.timeout(30)
 def test_replay_cli_subprocess_multiturn_trace_smoke(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     report_path = tmp_path / "multiturn_trace_report.json"

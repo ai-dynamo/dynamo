@@ -31,6 +31,29 @@ use crate::loadgen::ReplayRequestHashes;
 
 type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OfflinePendingRequestSnapshot {
+    pub(crate) uuid: Uuid,
+    pub(crate) overlap_blocks_by_worker: Vec<(usize, u32)>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OfflineIndexerSnapshot {
+    pub(crate) total_cached_blocks: usize,
+    pub(crate) cached_blocks_by_worker: Vec<(usize, usize)>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OfflineRouterSnapshot {
+    pub(crate) pending: Vec<OfflinePendingRequestSnapshot>,
+    pub(crate) active_blocks_by_worker: Vec<(usize, usize)>,
+    pub(crate) active_tokens_by_worker: Vec<(usize, usize)>,
+    pub(crate) indexer: OfflineIndexerSnapshot,
+}
+
 struct SyncReplayIndexer {
     block_size: u32,
     tree: RadixTree,
@@ -55,6 +78,23 @@ impl SyncReplayIndexer {
 
     fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
         self.tree.apply_event(event).map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    fn debug_snapshot(&self) -> OfflineIndexerSnapshot {
+        let mut blocks_by_worker = HashMap::<usize, usize>::new();
+        for event in self.tree.dump_tree_as_events() {
+            *blocks_by_worker
+                .entry(event.worker_id as usize)
+                .or_default() += 1;
+        }
+        let mut cached_blocks_by_worker = blocks_by_worker.into_iter().collect::<Vec<_>>();
+        cached_blocks_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
+
+        OfflineIndexerSnapshot {
+            total_cached_blocks: self.tree.current_size(),
+            cached_blocks_by_worker,
+        }
     }
 }
 
@@ -214,6 +254,58 @@ impl OfflineReplayRouter {
     #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_snapshot(&self) -> OfflineRouterSnapshot {
+        let mut pending = self
+            .pending
+            .iter()
+            .map(|entry| {
+                let mut overlap_blocks_by_worker = entry
+                    .request
+                    .overlaps
+                    .scores
+                    .iter()
+                    .map(|(worker, overlap)| (worker.worker_id as usize, *overlap))
+                    .collect::<Vec<_>>();
+                overlap_blocks_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
+
+                (
+                    entry,
+                    OfflinePendingRequestSnapshot {
+                        uuid: entry.request.uuid,
+                        overlap_blocks_by_worker,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        pending.sort_unstable_by(|(left_entry, _), (right_entry, _)| {
+            left_entry.cmp(right_entry).reverse()
+        });
+
+        let mut active_blocks_by_worker = self
+            .slots
+            .active_blocks()
+            .into_iter()
+            .map(|(worker, blocks)| (worker.worker_id as usize, blocks))
+            .collect::<Vec<_>>();
+        active_blocks_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
+
+        let mut active_tokens_by_worker = self
+            .slots
+            .active_tokens()
+            .into_iter()
+            .map(|(worker, tokens)| (worker.worker_id as usize, tokens))
+            .collect::<Vec<_>>();
+        active_tokens_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
+
+        OfflineRouterSnapshot {
+            pending: pending.into_iter().map(|(_, snapshot)| snapshot).collect(),
+            active_blocks_by_worker,
+            active_tokens_by_worker,
+            indexer: self.indexer.debug_snapshot(),
+        }
     }
 
     pub(crate) fn shutdown(&mut self) {}

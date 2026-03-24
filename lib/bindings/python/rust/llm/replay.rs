@@ -595,6 +595,12 @@ fn build_synthetic_workload(
     num_prefix_groups: usize,
     inter_turn_delay_ms: f64,
 ) -> anyhow::Result<RsTrace> {
+    if input_tokens == 0 {
+        anyhow::bail!("input_tokens must be at least 1");
+    }
+    if output_tokens == 0 {
+        anyhow::bail!("output_tokens must be at least 1");
+    }
     if request_count == 0 {
         anyhow::bail!("request_count must be at least 1");
     }

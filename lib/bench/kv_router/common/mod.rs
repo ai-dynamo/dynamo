@@ -12,11 +12,11 @@ use dynamo_kv_router::protocols::{
 };
 pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use dynamo_mocker::loadgen::{
-    ArrivalSpec, DelaySpec, LengthSpec, RouterSequence, SequenceHashMode, SessionPartitionSpec,
-    SyntheticTraceSpec, Trace,
+    ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes, RouterSequence, SequenceHashMode,
+    SessionPartitionSpec, SyntheticTraceSpec, Trace,
 };
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_mocker::scheduler::SchedulerHandle;
@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -137,6 +138,35 @@ impl KvCacheEventSink for EventCollector {
         }
         Ok(())
     }
+}
+
+#[derive(Clone)]
+pub struct TimedReplayRequest {
+    pub uuid: Uuid,
+    pub timestamp_us: u64,
+    pub scheduled_ready_at_ms: f64,
+    pub input_length: usize,
+    pub output_length: usize,
+    pub replay_hashes: ReplayRequestHashes,
+}
+
+#[derive(Clone)]
+pub struct TimedOutputSignal {
+    pub signal: OutputSignal,
+    pub timestamp_us: u64,
+}
+
+#[derive(Clone)]
+pub struct TimedKvEvent {
+    pub event: KvCacheEvent,
+    pub timestamp_us: u64,
+}
+
+#[derive(Clone)]
+pub struct WorkerReplayArtifacts {
+    pub requests: Vec<TimedReplayRequest>,
+    pub output_signals: Vec<TimedOutputSignal>,
+    pub kv_events: Vec<TimedKvEvent>,
 }
 
 /// Load the mooncake trace from disk into a flat list of requests.
@@ -314,22 +344,19 @@ pub struct BenchmarkResults {
 /// Load, transform, and partition the mooncake trace into per-worker request lists.
 pub fn process_mooncake_trace(
     path: &str,
+    block_size: u32,
     trace_length_factor: usize,
     trace_duplication_factor: usize,
     num_workers: usize,
     seed: u64,
-) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
-    let trace = Trace::from_mooncake(std::path::Path::new(path), 1)?
+) -> anyhow::Result<Vec<Trace>> {
+    let trace = Trace::from_mooncake(std::path::Path::new(path), block_size as usize)?
         .expand_hash_prefix_depth(trace_length_factor)
         .duplicate_hash_space(trace_duplication_factor);
-    Ok(trace
-        .partition_by_session(SessionPartitionSpec::Random {
-            num_partitions: num_workers,
-            seed,
-        })
-        .into_iter()
-        .map(flatten_trace_partition)
-        .collect())
+    Ok(trace.partition_by_session(SessionPartitionSpec::Random {
+        num_partitions: num_workers,
+        seed,
+    }))
 }
 
 /// Build default MockEngineArgs suitable for event generation.
@@ -347,98 +374,155 @@ pub fn default_mock_engine_args(
         .build()?)
 }
 
-/// Replay each worker's request trace through a mock engine in real-time to
-/// produce the KV cache events (store/remove/clear) that the engine would emit.
-///
-/// Returns one event list per worker, each entry paired with the wall-clock
-/// instant it was produced.
-pub async fn generate_kv_events(
-    traces: &[Vec<MooncakeRequest>],
+async fn replay_worker_trace(
+    trace: Trace,
+    sched_args: MockEngineArgs,
+    trace_simulation_duration_ms: u64,
+    progress: ProgressBar,
+) -> anyhow::Result<WorkerReplayArtifacts> {
+    let total_turns = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns.len())
+        .sum::<usize>();
+    let mut driver = trace
+        .rescale_ready_span(trace_simulation_duration_ms)?
+        .into_trace_driver()?;
+    let collector = EventCollector::new();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+    let scheduler = Scheduler::new(
+        sched_args,
+        0,
+        Some(output_tx),
+        KvEventPublishers::new(Some(collector.clone()), None),
+        None,
+    );
+    let start = Instant::now();
+    let mut requests = Vec::with_capacity(total_turns);
+    let mut output_signals = Vec::new();
+    let mut completed_turns = 0usize;
+
+    while completed_turns < total_turns {
+        let now_ms = start.elapsed().as_secs_f64() * 1000.0;
+        for ready_turn in driver.pop_ready(now_ms, usize::MAX) {
+            let replay_hashes = ready_turn.replay_hashes.ok_or_else(|| {
+                anyhow::anyhow!("bench replay requires synthesized request hashes")
+            })?;
+            requests.push(TimedReplayRequest {
+                uuid: ready_turn.request_uuid,
+                timestamp_us: start.elapsed().as_micros() as u64,
+                scheduled_ready_at_ms: ready_turn.scheduled_ready_at_ms,
+                input_length: ready_turn.request.tokens.len(),
+                output_length: ready_turn.request.max_output_tokens,
+                replay_hashes,
+            });
+            scheduler.receive(ready_turn.request);
+            progress.inc(1);
+        }
+
+        if completed_turns >= total_turns {
+            break;
+        }
+
+        match driver.next_ready_time_ms() {
+            Some(next_ready_ms) => {
+                let deadline = start + Duration::from_secs_f64((next_ready_ms.max(0.0)) / 1000.0);
+                tokio::select! {
+                    maybe_signal = output_rx.recv() => {
+                        let Some(signal) = maybe_signal else {
+                            anyhow::bail!("scheduler ended before workload replay drained");
+                        };
+                        output_signals.push(TimedOutputSignal {
+                            signal: signal.clone(),
+                            timestamp_us: start.elapsed().as_micros() as u64,
+                        });
+                        if signal.completed {
+                            completed_turns += 1;
+                            driver.on_complete(signal.uuid, start.elapsed().as_secs_f64() * 1000.0)?;
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {}
+                }
+            }
+            None => {
+                let Some(signal) = output_rx.recv().await else {
+                    anyhow::bail!("scheduler ended before workload replay drained");
+                };
+                output_signals.push(TimedOutputSignal {
+                    signal: signal.clone(),
+                    timestamp_us: start.elapsed().as_micros() as u64,
+                });
+                if signal.completed {
+                    completed_turns += 1;
+                    driver.on_complete(signal.uuid, start.elapsed().as_secs_f64() * 1000.0)?;
+                }
+            }
+        }
+    }
+
+    drop(scheduler);
+
+    Ok(WorkerReplayArtifacts {
+        requests,
+        output_signals,
+        kv_events: collector
+            .get_events()
+            .into_iter()
+            .map(|(event, timestamp)| TimedKvEvent {
+                event,
+                timestamp_us: timestamp.saturating_duration_since(start).as_micros() as u64,
+            })
+            .collect(),
+    })
+}
+
+pub async fn generate_replay_artifacts(
+    traces: &[Trace],
     num_gpu_blocks: usize,
     block_size: u32,
     trace_simulation_duration_ms: u64,
-) -> anyhow::Result<Vec<Vec<(KvCacheEvent, Instant)>>> {
+) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     println!("Generating events...");
     let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
-
-    let scaled_traces = traces
-        .iter()
-        .map(|worker_trace| scale_mooncake_trace(worker_trace, trace_simulation_duration_ms));
-
     let progress = make_progress_bar(Some(
-        traces.iter().map(|worker| worker.len() as u64).sum::<u64>(),
+        traces
+            .iter()
+            .map(|trace| {
+                trace
+                    .sessions
+                    .iter()
+                    .map(|session| session.turns.len() as u64)
+                    .sum::<u64>()
+            })
+            .sum::<u64>(),
     ));
 
-    let mut tasks: Vec<JoinHandle<Vec<(KvCacheEvent, Instant)>>> = Vec::new();
-    for worker_trace in scaled_traces {
+    let mut tasks: Vec<JoinHandle<anyhow::Result<WorkerReplayArtifacts>>> = Vec::new();
+    for trace in traces.iter().cloned() {
         let sched_args = sched_args.clone();
         let progress = progress.clone();
         tasks.push(tokio::spawn(async move {
-            let collector = EventCollector::new();
-
-            let scheduler = Scheduler::new(
-                sched_args,
-                0,
-                None,
-                KvEventPublishers::new(Some(collector.clone()), None),
-                None,
-            );
-
-            let mut i = 0;
-            let mut target = Instant::now();
-
-            while i < worker_trace.len() {
-                let prev_i = i;
-                scheduler.receive(DirectRequest {
-                    tokens: tokens_from_request(&worker_trace[i], block_size),
-                    max_output_tokens: worker_trace[i].output_length as usize,
-                    uuid: Some(worker_trace[i].uuid),
-                    dp_rank: 0,
-                    arrival_timestamp_ms: None,
-                });
-                i += 1;
-
-                while i < worker_trace.len()
-                    && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
-                {
-                    scheduler.receive(DirectRequest {
-                        tokens: tokens_from_request(&worker_trace[i], block_size),
-                        max_output_tokens: worker_trace[i].output_length as usize,
-                        uuid: Some(worker_trace[i].uuid),
-                        dp_rank: 0,
-                        arrival_timestamp_ms: None,
-                    });
-                    i += 1;
-                }
-
-                if i < worker_trace.len() {
-                    target += Duration::from_millis(
-                        worker_trace[i].timestamp - worker_trace[i - 1].timestamp,
-                    );
-                }
-
-                tokio::time::sleep_until(target).await;
-                progress.inc((i - prev_i) as u64);
-            }
-
-            collector.get_events()
+            replay_worker_trace(trace, sched_args, trace_simulation_duration_ms, progress).await
         }));
     }
 
-    let mut events = Vec::new();
+    let mut artifacts = Vec::new();
     for task in tasks {
-        events.push(task.await?);
+        artifacts.push(task.await??);
     }
 
-    for worker_events in &events {
+    for worker_events in artifacts.iter().map(|artifact| &artifact.kv_events) {
         for i in 1..worker_events.len() {
-            assert!(worker_events[i].1 >= worker_events[i - 1].1);
+            assert!(worker_events[i].timestamp_us >= worker_events[i - 1].timestamp_us);
         }
     }
 
     println!(
         "Generated {} events. Processing...",
-        events.iter().map(|e| e.len()).sum::<usize>()
+        artifacts
+            .iter()
+            .map(|artifact| artifact.kv_events.len())
+            .sum::<usize>()
     );
 
     if progress.elapsed() > Duration::from_millis(trace_simulation_duration_ms * 11 / 10) {
@@ -449,8 +533,11 @@ pub async fn generate_kv_events(
 
     let mut num_stored_events = 0;
     let mut num_removed_events = 0;
-    for event in events.iter().flatten() {
-        match event.0.data {
+    for event in artifacts
+        .iter()
+        .flat_map(|artifact| artifact.kv_events.iter())
+    {
+        match event.event.data {
             KvCacheEventData::Stored(_) => num_stored_events += 1,
             KvCacheEventData::Removed(_) => num_removed_events += 1,
             _ => (),
@@ -460,7 +547,25 @@ pub async fn generate_kv_events(
     println!("Store events: {}", num_stored_events);
     println!("Remove events: {}", num_removed_events);
 
-    Ok(events)
+    Ok(artifacts)
+}
+
+pub async fn generate_kv_events(
+    traces: &[Trace],
+    num_gpu_blocks: usize,
+    block_size: u32,
+    trace_simulation_duration_ms: u64,
+) -> anyhow::Result<Vec<Vec<TimedKvEvent>>> {
+    Ok(generate_replay_artifacts(
+        traces,
+        num_gpu_blocks,
+        block_size,
+        trace_simulation_duration_ms,
+    )
+    .await?
+    .into_iter()
+    .map(|artifact| artifact.kv_events)
+    .collect())
 }
 
 pub fn plot_sweep(
@@ -752,23 +857,59 @@ pub fn median(durations: &[Duration]) -> Duration {
     sorted[sorted.len() / 2]
 }
 
-fn flatten_trace_partition(trace: Trace) -> Vec<MooncakeRequest> {
-    let mut requests = Vec::new();
-    for session in trace.sessions {
-        let mut timestamp_ms = session.first_arrival_timestamp_ms.unwrap_or(0.0);
-        for (turn_idx, turn) in session.turns.into_iter().enumerate() {
-            if turn_idx > 0 {
-                timestamp_ms += turn.delay_after_previous_ms;
-            }
-            requests.push(MooncakeRequest {
-                uuid: Uuid::new_v4(),
-                timestamp: timestamp_ms.max(0.0).round() as u64,
-                input_length: turn.input_length,
-                hash_ids: turn.hash_ids,
-                output_length: turn.max_output_tokens as u64,
-            });
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn multiturn_trace() -> Trace {
+        Trace {
+            block_size: 2,
+            sessions: vec![dynamo_mocker::loadgen::SessionTrace {
+                session_id: "session-a".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    dynamo_mocker::loadgen::TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 2,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    dynamo_mocker::loadgen::TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 2,
+                        hash_ids: vec![3, 4],
+                        delay_after_previous_ms: 5.0,
+                    },
+                ],
+            }],
         }
     }
-    requests.sort_by_key(|request| request.timestamp);
-    requests
+
+    #[tokio::test]
+    async fn test_replay_worker_trace_releases_follow_up_turn_after_completion_delay() {
+        let artifacts = replay_worker_trace(
+            multiturn_trace(),
+            default_mock_engine_args(1024, 2).unwrap(),
+            5,
+            make_progress_bar(Some(2)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(artifacts.requests.len(), 2);
+        let first_uuid = artifacts.requests[0].uuid;
+        let first_completion_ms = artifacts
+            .output_signals
+            .iter()
+            .find(|signal| signal.signal.uuid == first_uuid && signal.signal.completed)
+            .unwrap()
+            .timestamp_us as f64
+            / 1000.0;
+        assert!(
+            artifacts.requests[1].scheduled_ready_at_ms + 0.1 >= first_completion_ms + 5.0,
+            "expected follow-up turn to wait for completion plus delay, got ready_at={} completion_at={}",
+            artifacts.requests[1].scheduled_ready_at_ms,
+            first_completion_ms
+        );
+    }
 }

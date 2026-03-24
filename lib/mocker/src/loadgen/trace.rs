@@ -149,15 +149,13 @@ impl Trace {
             let session_id = raw
                 .session_id
                 .unwrap_or_else(|| format!("request_{}", line_idx + 1));
-            let input_length = raw
-                .input_length
-                .ok_or_else(|| anyhow!("trace line {} is missing input_length", line_idx + 1))?;
-            let output_length = raw
-                .output_length
-                .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
             let hash_ids = raw
                 .hash_ids
                 .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
+            let input_length = raw.input_length.unwrap_or(hash_ids.len() * block_size);
+            let output_length = raw
+                .output_length
+                .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
             let timestamp_ms = raw.timestamp.or(raw.created_time);
             let explicit_delay_ms = raw.delay.or(raw.delay_ms);
 
@@ -403,12 +401,58 @@ impl Trace {
         Ok(self)
     }
 
+    pub fn rescale_ready_span(mut self, duration_ms: u64) -> Result<Self> {
+        let Some(min_start_ms) = self
+            .sessions
+            .iter()
+            .map(|session| session.first_arrival_timestamp_ms.unwrap_or(0.0))
+            .min_by(|left, right| left.total_cmp(right))
+        else {
+            return Ok(self);
+        };
+
+        let Some(max_ready_ms) = self
+            .sessions
+            .iter()
+            .map(|session| {
+                session.first_arrival_timestamp_ms.unwrap_or(0.0)
+                    + session
+                        .turns
+                        .iter()
+                        .enumerate()
+                        .filter(|(turn_idx, _)| *turn_idx > 0)
+                        .map(|(_, turn)| turn.delay_after_previous_ms)
+                        .sum::<f64>()
+            })
+            .max_by(|left, right| left.total_cmp(right))
+        else {
+            return Ok(self);
+        };
+
+        let ratio = duration_ms as f64 / (max_ready_ms - min_start_ms).max(1.0);
+        for session in &mut self.sessions {
+            if let Some(start_ms) = session.first_arrival_timestamp_ms.as_mut() {
+                *start_ms = (*start_ms - min_start_ms) * ratio;
+            }
+            for (turn_idx, turn) in session.turns.iter_mut().enumerate() {
+                if turn_idx > 0 {
+                    turn.delay_after_previous_ms *= ratio;
+                }
+            }
+        }
+        Ok(self)
+    }
+
     pub fn expand_hash_prefix_depth(mut self, factor: usize) -> Self {
         if factor <= 1 {
             return self;
         }
         for session in &mut self.sessions {
             for turn in &mut session.turns {
+                turn.input_length = turn
+                    .input_length
+                    .checked_mul(factor)
+                    .expect("input_length expansion overflow");
                 turn.hash_ids = turn
                     .hash_ids
                     .iter()

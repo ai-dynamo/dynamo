@@ -3,10 +3,14 @@
 
 use super::events::{SimulationEvent, SimulationEventKind};
 use super::normalize_trace_requests;
+#[cfg(test)]
+use super::state::OfflineWorkerSnapshot;
 use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
+#[cfg(test)]
+use crate::replay::router::OfflineRouterSnapshot;
 use crate::replay::{ReplayRouterMode, TraceCollector, TraceSimulationReport};
 use crate::scheduler::RouterEventVisibility;
 use anyhow::bail;
@@ -38,6 +42,17 @@ struct OfflineRuntimeStats {
     max_router_pending: usize,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+struct OfflineRuntimeSnapshot {
+    now_ms: f64,
+    worker_active_requests: Vec<Vec<Uuid>>,
+    workers: Vec<OfflineWorkerSnapshot>,
+    router_pending_request_ids: Vec<Uuid>,
+    prefill_completed: Vec<Uuid>,
+    router: Option<OfflineRouterSnapshot>,
+}
+
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct OfflineRuntimeStats;
@@ -55,6 +70,10 @@ struct OfflineRuntime {
     router: Option<OfflineReplayRouter>,
     prefill_completed: HashSet<Uuid>,
     stats: OfflineRuntimeStats,
+    #[cfg(test)]
+    worker_active_requests: Vec<Vec<Uuid>>,
+    #[cfg(test)]
+    stepped: bool,
 }
 
 impl OfflineRuntime {
@@ -131,6 +150,10 @@ impl OfflineRuntime {
             stats: OfflineRuntimeStats::default(),
             #[cfg(not(test))]
             stats: OfflineRuntimeStats,
+            #[cfg(test)]
+            worker_active_requests: vec![Vec::new(); num_workers],
+            #[cfg(test)]
+            stepped: false,
         })
     }
 
@@ -190,6 +213,8 @@ impl OfflineRuntime {
         self.validate_worker_idx(worker_idx)?;
         self.workers[worker_idx].receive_request(request);
         self.record_dispatch(uuid, worker_idx);
+        #[cfg(test)]
+        self.worker_active_requests[worker_idx].push(uuid);
         Ok(())
     }
 
@@ -304,6 +329,8 @@ impl OfflineRuntime {
     fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
         let mut admissions = Vec::new();
         if signal.completed {
+            #[cfg(test)]
+            self.remove_active_request(signal.uuid);
             if let Some(router) = self.router.as_mut() {
                 admissions = router.free(signal.uuid)?;
                 #[cfg(test)]
@@ -335,6 +362,20 @@ impl OfflineRuntime {
         self.dispatch_router_admissions(admissions)?;
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn remove_active_request(&mut self, uuid: Uuid) {
+        for active_requests in &mut self.worker_active_requests {
+            let Some(position) = active_requests
+                .iter()
+                .position(|candidate| *candidate == uuid)
+            else {
+                continue;
+            };
+            active_requests.remove(position);
+            return;
+        }
     }
 
     fn process_completed_pass(
@@ -547,6 +588,55 @@ impl OfflineRuntime {
         }
 
         Ok((self.collector, self.stats))
+    }
+
+    #[cfg(test)]
+    fn advance_one_timestamp(&mut self) -> anyhow::Result<bool> {
+        if self.is_done() {
+            return Ok(false);
+        }
+
+        if !self.stepped {
+            self.stepped = true;
+            self.drain_current_timestamp()?;
+            return Ok(true);
+        }
+
+        let Some(next_timestamp_ms) = self.next_timestamp() else {
+            bail!(
+                "offline replay reached a dead end with {} in-flight requests remaining",
+                self.cluster_in_flight()
+            );
+        };
+
+        self.now_ms = next_timestamp_ms;
+        self.drain_current_timestamp()?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    fn debug_snapshot(&self) -> OfflineRuntimeSnapshot {
+        let mut router_pending_request_ids =
+            self.router_pending.keys().copied().collect::<Vec<_>>();
+        router_pending_request_ids.sort_unstable();
+        let mut prefill_completed = self.prefill_completed.iter().copied().collect::<Vec<_>>();
+        prefill_completed.sort_unstable();
+
+        OfflineRuntimeSnapshot {
+            now_ms: self.now_ms,
+            worker_active_requests: self.worker_active_requests.clone(),
+            workers: self
+                .workers
+                .iter()
+                .map(OfflineWorkerState::debug_snapshot)
+                .collect(),
+            router_pending_request_ids,
+            prefill_completed,
+            router: self
+                .router
+                .as_ref()
+                .map(OfflineReplayRouter::debug_snapshot),
+        }
     }
 }
 
@@ -943,9 +1033,15 @@ mod tests {
         let request_report = request_collector.finish();
         let workload_report = workload_collector.finish();
 
+        assert_eq!(request_stats.dispatch_history.len(), 2);
+        assert_eq!(workload_stats.dispatch_history.len(), 2);
         assert_eq!(
-            request_stats.dispatch_history,
-            workload_stats.dispatch_history
+            request_stats.dispatch_history[0],
+            request_stats.dispatch_history[1]
+        );
+        assert_eq!(
+            workload_stats.dispatch_history[0],
+            workload_stats.dispatch_history[1]
         );
         assert_eq!(
             request_report.request_counts.completed_requests,
@@ -962,6 +1058,96 @@ mod tests {
         assert_eq!(
             request_report.prefix_cache_reused_ratio,
             workload_report.prefix_cache_reused_ratio
+        );
+    }
+
+    #[test]
+    fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
+        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
+        let mut runtime = OfflineRuntime::new(
+            &args,
+            None,
+            normalize_trace_requests(
+                vec![
+                    DirectRequest {
+                        tokens: vec![11; 64],
+                        max_output_tokens: 8,
+                        uuid: Some(Uuid::from_u128(11)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.0),
+                    },
+                    DirectRequest {
+                        tokens: vec![22; 64],
+                        max_output_tokens: 8,
+                        uuid: Some(Uuid::from_u128(22)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.0),
+                    },
+                    DirectRequest {
+                        tokens: vec![11; 64],
+                        max_output_tokens: 2,
+                        uuid: Some(Uuid::from_u128(33)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.1),
+                    },
+                ],
+                1.0,
+            )
+            .unwrap(),
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        assert!(runtime.advance_one_timestamp().unwrap());
+        let initial = runtime.debug_snapshot();
+        let initial_router = initial.router.as_ref().unwrap();
+
+        assert_eq!(initial.now_ms, 0.0);
+        assert!(initial.router_pending_request_ids.is_empty());
+        assert!(initial_router.pending.is_empty());
+        assert_eq!(
+            initial
+                .worker_active_requests
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        assert!(initial_router.indexer.total_cached_blocks > 0);
+
+        assert!(runtime.advance_one_timestamp().unwrap());
+        let queued = runtime.debug_snapshot();
+        let queued_router = queued.router.as_ref().unwrap();
+
+        assert_eq!(queued.now_ms, 0.1);
+        assert_eq!(queued.router_pending_request_ids, vec![Uuid::from_u128(33)]);
+        assert_eq!(queued_router.pending.len(), 1);
+        assert_eq!(queued_router.pending[0].uuid, Uuid::from_u128(33));
+
+        let cached_workers = queued_router.pending[0]
+            .overlap_blocks_by_worker
+            .iter()
+            .filter(|(_, overlap)| *overlap > 0)
+            .map(|(worker_idx, _)| *worker_idx)
+            .collect::<Vec<_>>();
+        assert_eq!(cached_workers.len(), 1);
+        let cached_worker = cached_workers[0];
+
+        while !runtime
+            .stats
+            .assigned_worker_by_uuid
+            .contains_key(&Uuid::from_u128(33))
+        {
+            assert!(runtime.advance_one_timestamp().unwrap());
+        }
+
+        let dispatched = runtime.debug_snapshot();
+        assert!(dispatched.router_pending_request_ids.is_empty());
+        assert_eq!(
+            runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(33)],
+            cached_worker
         );
     }
 

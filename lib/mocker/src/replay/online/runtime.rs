@@ -507,6 +507,8 @@ impl LiveRuntime {
                 }
             }
 
+            let wake = workload.wakeup.notified();
+            tokio::pin!(wake);
             let (is_drained, next_ready_ms) = {
                 let mut driver = workload.driver.lock().unwrap();
                 (driver.is_drained(), driver.next_ready_time_ms())
@@ -521,27 +523,27 @@ impl LiveRuntime {
                         start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
                     tokio::select! {
                         _ = tokio::time::sleep_until(deadline) => {}
-                        _ = workload.wakeup.notified() => {}
+                        _ = &mut wake => {}
                     }
                 }
                 (LiveReplayMode::Trace, _, None) => {
-                    workload.wakeup.notified().await;
+                    (&mut wake).await;
                 }
                 (LiveReplayMode::Concurrency { .. }, Some(semaphore), Some(next_ready_ms)) => {
                     if semaphore.available_permits() == 0 {
-                        workload.wakeup.notified().await;
+                        (&mut wake).await;
                     } else {
                         let deadline =
                             start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
                         tokio::select! {
                             _ = tokio::time::sleep_until(deadline) => {}
-                            _ = workload.wakeup.notified() => {}
+                            _ = &mut wake => {}
                         }
                     }
                 }
                 (LiveReplayMode::Concurrency { .. }, Some(semaphore), None) => {
                     if semaphore.available_permits() == 0 {
-                        workload.wakeup.notified().await;
+                        (&mut wake).await;
                     } else {
                         tokio::task::yield_now().await;
                     }
@@ -1005,6 +1007,65 @@ mod tests {
 
         tasks.abort_all();
         router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_workload_wakeup_is_not_lost_when_completion_happens_before_await() {
+        let mut driver = Trace {
+            block_size: 1,
+            sessions: vec![SessionTrace {
+                session_id: "session-a".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2, 3, 4],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![5, 6, 7, 8],
+                        delay_after_previous_ms: 5.0,
+                    },
+                ],
+            }],
+        }
+        .into_trace_driver()
+        .unwrap();
+        let first = driver.pop_ready(0.0, 1);
+        assert_eq!(first.len(), 1);
+
+        let workload = WorkloadDispatchState {
+            driver: Mutex::new(driver),
+            wakeup: Notify::new(),
+            start: Instant::now(),
+        };
+
+        let wake = workload.wakeup.notified();
+        tokio::pin!(wake);
+
+        let (is_drained, next_ready_ms) = {
+            let mut driver = workload.driver.lock().unwrap();
+            (driver.is_drained(), driver.next_ready_time_ms())
+        };
+        assert!(!is_drained);
+        assert_eq!(next_ready_ms, None);
+
+        {
+            let mut driver = workload.driver.lock().unwrap();
+            driver.on_complete(first[0].request_uuid, 5.0).unwrap();
+        }
+        workload.wakeup.notify_waiters();
+
+        tokio::time::timeout(tokio::time::Duration::from_millis(50), &mut wake)
+            .await
+            .unwrap();
+        assert_eq!(
+            workload.driver.lock().unwrap().next_ready_time_ms(),
+            Some(10.0)
+        );
     }
 
     #[test]
