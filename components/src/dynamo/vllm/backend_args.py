@@ -63,16 +63,6 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
         )
 
-        add_argument(
-            g,
-            flag_name="--sleep-mode-level",
-            env_var="DYN_VLLM_SLEEP_MODE_LEVEL",
-            default=1,
-            help="Sleep mode level (1=offload to CPU, 2=discard weights, 3=discard all).",
-            choices=[1, 2, 3],
-            arg_type=int,
-        )
-
         # Multimodal
         add_negatable_bool_argument(
             g,
@@ -167,6 +157,20 @@ class DynamoVllmArgGroup(ArgGroup):
             "Required when using --load-format=mx-source or --load-format=mx-target.",
         )
 
+        # GMS (GPU Memory Service) shadow mode
+        add_negatable_bool_argument(
+            g,
+            flag_name="--gms-shadow-mode",
+            env_var="DYN_VLLM_GMS_SHADOW_MODE",
+            default=False,
+            help=(
+                "Enable GMS shadow/standby mode. Shadow engines skip KV cache "
+                "allocation at startup, automatically sleep after initialization, "
+                "and wake on demand when the active engine dies. "
+                "Requires --load-format=gms."
+            ),
+        )
+
 
 # @dataclass()
 class DynamoVllmConfig(ConfigBase):
@@ -178,7 +182,6 @@ class DynamoVllmConfig(ConfigBase):
     is_prefill_worker: bool
     is_decode_worker: bool
     use_vllm_tokenizer: bool
-    sleep_mode_level: int
 
     # Multimodal
     route_to_encoder: bool
@@ -197,6 +200,9 @@ class DynamoVllmConfig(ConfigBase):
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
+
+    # GMS shadow mode
+    gms_shadow_mode: bool = False
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""

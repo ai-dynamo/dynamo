@@ -19,7 +19,7 @@ import warnings
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -303,13 +303,15 @@ class ProphetPredictor(BasePredictor):
         model.fit(df)
 
         # Create future dataframe for next timestamp
-        next_timestamp = self.start_date + timedelta(seconds=self.curr_step)
+        next_timestamp = self.start_date + timedelta(
+            seconds=self.curr_step * self.step_size
+        )
         future_df = pd.DataFrame({"ds": [next_timestamp]})
 
         # Make prediction
         forecast = model.predict(future_df)
         yhat = float(forecast["yhat"].iloc[0])
-        return max(0.0, math.expm1(yhat)) if self._use_log1p else yhat
+        return max(0.0, math.expm1(yhat)) if self._use_log1p else max(0.0, yhat)
 
 
 class KalmanPredictor(BasePredictor):
@@ -389,7 +391,7 @@ class KalmanPredictor(BasePredictor):
         )
 
 
-LOAD_PREDICTORS = {
+LOAD_PREDICTORS: dict[str, Callable[[PlannerConfig], BasePredictor]] = {
     "constant": ConstantPredictor,
     "arima": ARIMAPredictor,
     "kalman": KalmanPredictor,

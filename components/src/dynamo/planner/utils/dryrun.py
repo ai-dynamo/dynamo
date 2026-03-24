@@ -127,6 +127,13 @@ def run_sla_planner_dryrun(
         time_series.append(time_series[-1] + interval)
 
         _est_rr, _est_isl, _est_osl = predictor_planner.predict_load()
+
+        # predict_load() returns Optional[float] values; in dryrun mode with
+        # pre-loaded data the predictors always return valid floats.
+        assert (
+            _est_rr is not None and _est_isl is not None and _est_osl is not None
+        ), "predict_load() returned None in dryrun mode"
+
         est_rr.append(_est_rr)
         est_isl.append(_est_isl)
         est_osl.append(_est_osl)
@@ -145,10 +152,12 @@ def run_sla_planner_dryrun(
         if prefill_planner is not None and decode_planner is not None:
             _num_p, _num_d = _apply_global_gpu_budget(_num_p, _num_d, config)
         elif prefill_planner is not None:
+            assert config.prefill_engine_num_gpu is not None
             _num_p = _apply_component_gpu_budget(
                 _num_p, config.prefill_engine_num_gpu, config
             )
         elif decode_planner is not None:
+            assert config.decode_engine_num_gpu is not None
             _num_d = _apply_component_gpu_budget(
                 _num_d, config.decode_engine_num_gpu, config
             )
