@@ -11,13 +11,11 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::utils::get_http_rpc_host_from_env;
 
 use crate::entrypoint::RouterConfig;
-use crate::mocker::protocols::{MockEngineArgs, WorkerType};
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
-use crate::preprocessor::media::{ImageDecoder, MediaDecoder, MediaFetcher};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -56,6 +54,7 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
+    namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
 }
@@ -83,6 +82,7 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
+            namespace_prefix: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
         }
@@ -160,6 +160,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn namespace_prefix(&mut self, namespace_prefix: Option<String>) -> &mut Self {
+        self.namespace_prefix = namespace_prefix;
+        self
+    }
+
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
         self
@@ -228,47 +233,6 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
-        // Override runtime configs with mocker engine args (applies to both paths)
-        if self.is_mocker
-            && let Some(path) = &self.extra_engine_args
-        {
-            let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                .expect("Failed to load mocker engine args for runtime config overriding.");
-            self.kv_cache_block_size = mocker_engine_args.block_size as u32;
-            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
-            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
-            self.runtime_config.max_num_batched_tokens =
-                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            // Decode workers don't create the WorkerKvQuery endpoint (scheduler_component is None),
-            // so they must not advertise enable_local_indexer=true or the router will hang
-            // trying to query them during initial recovery.
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer
-                && mocker_engine_args.worker_type != WorkerType::Decode;
-            self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
-            self.media_decoder = Some(MediaDecoder {
-                image: Some(ImageDecoder::default()),
-                #[cfg(feature = "media-ffmpeg")]
-                video: None,
-            });
-            self.media_fetcher = Some(MediaFetcher::default());
-
-            // Set bootstrap endpoint for prefill workers with bootstrap_port configured
-            if mocker_engine_args.worker_type == WorkerType::Prefill
-                && let Some(port) = mocker_engine_args.bootstrap_port
-            {
-                let host = get_http_rpc_host_from_env();
-                self.runtime_config.disaggregated_endpoint =
-                    Some(runtime_config::DisaggregatedEndpoint {
-                        bootstrap_host: Some(host),
-                        bootstrap_port: Some(port),
-                    });
-                tracing::info!(
-                    bootstrap_port = port,
-                    "Mocker prefill worker: publishing bootstrap endpoint to discovery"
-                );
-            }
-        }
-
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
             let mut card = ModelDeploymentCard::with_name_only(
@@ -294,6 +258,7 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
             });
         }
@@ -346,6 +311,7 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
         })
     }
@@ -365,6 +331,7 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    namespace_prefix: Option<String>,
     migration_limit: u32,
 }
 
@@ -435,6 +402,10 @@ impl LocalModel {
 
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
+    }
+
+    pub fn namespace_prefix(&self) -> Option<&str> {
+        self.namespace_prefix.as_deref()
     }
 
     /// An endpoint to identify this model by.

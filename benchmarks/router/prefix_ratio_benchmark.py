@@ -41,10 +41,10 @@ def get_aiperf_cmd(
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
 
-    # Build nvext JSON with optional expected_output_tokens
+    # Build nvext JSON with optional agent_hints.osl
     nvext_dict = {"ignore_eos": True}
     if use_expected_osl:
-        nvext_dict["expected_output_tokens"] = osl
+        nvext_dict["agent_hints"] = {"osl": osl}
     nvext_json = json.dumps({"nvext": nvext_dict})
 
     cmd = [

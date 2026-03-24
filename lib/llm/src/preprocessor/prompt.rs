@@ -64,6 +64,9 @@ pub trait OAIChatLikeRequest {
     fn tool_choice(&self) -> Option<Value> {
         None
     }
+    fn response_format(&self) -> Option<Value> {
+        None
+    }
 
     fn should_add_generation_prompt(&self) -> bool;
 

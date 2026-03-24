@@ -32,6 +32,11 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Name:          commonconsts.DynamoSystemPortName,
 			ContainerPort: int32(commonconsts.DynamoSystemPort),
 		},
+		{
+			Protocol:      corev1.ProtocolTCP,
+			Name:          commonconsts.DynamoNixlPortName,
+			ContainerPort: int32(commonconsts.DynamoNixlPort),
+		},
 	}
 
 	container.LivenessProbe = &corev1.Probe{
@@ -90,7 +95,28 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Name:  "DYN_HEALTH_CHECK_ENABLED",
 			Value: "false",
 		},
+		{
+			Name:  "NIXL_TELEMETRY_ENABLE",
+			Value: "n",
+		},
+		{
+			Name:  "NIXL_TELEMETRY_EXPORTER",
+			Value: "prometheus",
+		},
+		{
+			Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+			Value: fmt.Sprintf("%d", commonconsts.DynamoNixlPort),
+		},
 	}...)
+
+	if context.WorkerHashSuffix != "" {
+		container.Env = append(container.Env, []corev1.EnvVar{
+			{
+				Name:  commonconsts.DynamoNamespaceWorkerSuffixEnvVar,
+				Value: context.WorkerHashSuffix,
+			},
+		}...)
+	}
 
 	return container, nil
 }

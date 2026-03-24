@@ -1,10 +1,9 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# LoRA Adapters
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: LoRA Adapters
+subtitle: Serve fine-tuned LoRA adapters with dynamic loading and routing in Dynamo
+---
 
 LoRA (Low-Rank Adaptation) enables efficient fine-tuning and serving of specialized model variants without duplicating full model weights. Dynamo provides built-in support for dynamic LoRA adapter loading, caching, and inference routing.
 
@@ -31,31 +30,20 @@ Dynamo's LoRA implementation provides:
 
 ### Architecture
 
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        LoRA Architecture                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     │
-│  │   Frontend   │────▶│    Router    │────▶│   Workers    │     │
-│  │  /v1/models  │     │  LoRA-aware  │     │  LoRA-loaded │     │
-│  └──────────────┘     └──────────────┘     └──────────────┘     │
-│                                                   │              │
-│                                                   ▼              │
-│                              ┌─────────────────────────────────┐ │
-│                              │         LoRA Manager            │ │
-│                              │  ┌───────────┐ ┌─────────────┐  │ │
-│                              │  │ Downloader│ │    Cache    │  │ │
-│                              │  └───────────┘ └─────────────┘  │ │
-│                              └─────────────────────────────────┘ │
-│                                         │                        │
-│                     ┌───────────────────┼───────────────────┐   │
-│                     ▼                   ▼                   ▼   │
-│              ┌────────────┐      ┌────────────┐      ┌─────────┐│
-│              │  file://   │      │   s3://    │      │  hf://  ││
-│              │   Local    │      │  S3/MinIO  │      │(custom) ││
-│              └────────────┘      └────────────┘      └─────────┘│
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Frontend["Frontend"] --> Router["Router<br/>(LoRA-aware)"]
+    Router --> Workers["Workers<br/>(LoRA-loaded)"]
+    Workers --> ManagerNode["LoRA Manager"]
+
+    subgraph ManagerGroup["LoRA Manager"]
+        Downloader
+        Cache
+    end
+
+    ManagerNode --> Local["file://<br/>Local"]
+    ManagerNode --> S3["s3://<br/>S3/MinIO"]
+    ManagerNode --> HF["hf://<br/>(custom)"]
 ```
 
 The LoRA system consists of:
@@ -80,7 +68,6 @@ The LoRA system consists of:
 # Start vLLM worker with LoRA flags
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
     python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager \
-    --connector none \
     --enable-lora \
     --max-lora-rank 64
 ```
@@ -264,14 +251,14 @@ kubectl get dynamomodel customer-support-lora
 
 For complete Kubernetes deployment details, see:
 - [Managing Models with DynamoModel](../../kubernetes/deployment/dynamomodel-guide.md)
-- [Kubernetes LoRA Deployment Example](../../../examples/backends/vllm/deploy/lora/README.md)
+- [Kubernetes LoRA Deployment Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora/README.md)
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| [Local LoRA with MinIO](../../../examples/backends/vllm/launch/lora/README.md) | Local development with S3-compatible storage |
-| [Kubernetes LoRA Deployment](../../../examples/backends/vllm/deploy/lora/README.md) | Production deployment with DynamoModel CRD |
+| [Local LoRA with MinIO](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | Local development with S3-compatible storage |
+| [Kubernetes LoRA Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora/README.md) | Production deployment with DynamoModel CRD |
 
 ## Troubleshooting
 
@@ -306,9 +293,20 @@ kubectl logs deployment/my-worker | grep -i lora
 - Check that the LoRA is loaded on the worker handling your request
 - For disaggregated serving, ensure both prefill and decode workers have the LoRA
 
+## KV Cache-Aware LoRA Routing
+
+When KV-aware routing is enabled, the router automatically accounts for LoRA adapter identity when computing block hashes. This means:
+
+- **Distinct hash spaces per adapter**: Blocks cached under adapter `A` will never be confused with blocks cached under adapter `B` or the base model, even if the token sequences are identical. The adapter name is mixed into the `LocalBlockHash` computation.
+- **Automatic prefix sharing within the same adapter**: Requests targeting the same LoRA adapter benefit from KV cache prefix matching just like base model requests do.
+- **No configuration required**: The LoRA name is propagated automatically through KV events (`BlockStored`) from the engine to the router. The router uses the `lora_name` field on events to route LoRA requests to workers that have matching cached blocks.
+
+This works end-to-end across the publisher pipeline, the KV consolidator (for deduplication), and the routing query path.
+
 ## See Also
 
 - [Feature Matrix](../../reference/feature-matrix.md) - Backend compatibility overview
 - [vLLM Backend](../../backends/vllm/README.md) - vLLM-specific configuration
-- [Dynamo Operator](../../kubernetes/dynamo_operator.md) - Kubernetes operator overview
-- [KV-Aware Routing](../../components/router/router_guide.md) - LoRA-aware request routing
+- [Dynamo Operator](../../kubernetes/dynamo-operator.md) - Kubernetes operator overview
+- [KV-Aware Routing](../../components/router/router-guide.md) - LoRA-aware request routing
+- [KV Events for Custom Engines](../../integrations/kv-events-custom-engines.md) - Publishing LoRA-aware KV events

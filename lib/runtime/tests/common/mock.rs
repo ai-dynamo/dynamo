@@ -314,7 +314,7 @@ where
                     // todo(metrics): increment metric counter for bytes received
                     // todo(metrics): increment metric counter for requests received
                     let id = req.id.clone();
-                    tracing::debug!("[ingress] received request [id: {}]", id);
+                    tracing::debug!("[ingress] received request [id: {id}]");
 
                     // deserialize the request
                     let request = serde_json::from_slice::<T>(&req.request)
@@ -353,18 +353,18 @@ where
                         .await
                         .expect("failed to send handshake");
 
-                    tracing::trace!("[ingress] handshake sent [id: {}]", id);
+                    tracing::trace!("[ingress] handshake sent [id: {id}]");
 
                     if let Ok(response) = response {
                         // spawn a task to process the response stream:
                         // - serialize each response
                         // - forward the bytes to the data plane
-                        tracing::debug!("[ingress] processing response stream [id: {}]", id);
+                        tracing::debug!("[ingress] processing response stream [id: {id}]");
 
                         tokio::spawn(async move {
                             let mut response = response;
                             while let Some(resp) = response.next().await {
-                                tracing::trace!("[ingress] received response [id: {}]", id);
+                                tracing::trace!("[ingress] received response [id: {id}]");
 
                                 let resp_bytes = serde_json::to_vec(&resp)
                                     .expect("failed to serialize response");
@@ -380,10 +380,10 @@ where
                                     .await
                                     .expect("failed to send response");
 
-                                tracing::trace!("[ingress] sent response [id: {}]", id);
+                                tracing::trace!("[ingress] sent response [id: {id}]");
                             }
 
-                            tracing::debug!("response stream completed [id: {}]", id);
+                            tracing::debug!("response stream completed [id: {id}]");
                         });
                     }
                 }

@@ -20,15 +20,12 @@ dynamo-runtime = { workspace = true }
 
 # third-party
 futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
 tokio = { version = "1", features = ["full"] }
 prometheus = { version = "0.14" }
 
 [dev-dependencies]
 rand = { version = "0.9.0" }
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream", "rustls-tls"] }
-tokio-test = "0.4.4"
 
 [[test]]
 name = "integration_test"

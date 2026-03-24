@@ -24,6 +24,9 @@ const (
 	EPPGRPCPort     = 9002
 	EPPGRPCPortName = "grpc"
 
+	DynamoNixlPort     = 19090
+	DynamoNixlPortName = "nixl"
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -40,17 +43,17 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 
-	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
-	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
-	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
-	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
-	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
-	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
-	KubeLabelDynamoBaseModel            = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
-	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoDiscoveryBackend     = "nvidia.com/dynamo-discovery-backend"
-	KubeLabelDynamoDiscoveryEnabled     = "nvidia.com/dynamo-discovery-enabled"
+	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
+	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
+	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
+	KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType    = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoBaseModel           = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash       = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel      = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend    = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled    = "nvidia.com/dynamo-discovery-enabled"
+	KubeLabelDynamoWorkerHash          = "nvidia.com/dynamo-worker-hash"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -59,10 +62,12 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
-	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
-	DynamoComponentEnvVar        = "DYN_COMPONENT"
-	DynamoDiscoveryBackendEnvVar = "DYN_DISCOVERY_BACKEND"
+	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
+	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
+	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
+	DynamoComponentEnvVar             = "DYN_COMPONENT"
+	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 
@@ -80,6 +85,21 @@ const (
 	DefaultIngressSuffix = "local"
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
+
+	// Operator origin version: stamped on DGD at creation time by mutating webhook.
+	// Records which operator version created the resource, enabling version-gated behavior changes.
+	KubeAnnotationDynamoOperatorOriginVersion = "nvidia.com/dynamo-operator-origin-version"
+
+	// vLLM distributed executor backend override annotation.
+	// Users can set this on a DGD to explicitly choose "mp" or "ray" for multi-node vLLM deployments.
+	// When present, takes priority over the version-based default.
+	KubeAnnotationVLLMDistributedExecutorBackend = "nvidia.com/vllm-distributed-executor-backend"
+
+	// VLLMMpMasterPort is the default port for vLLM multiprocessing coordination between nodes.
+	VLLMMpMasterPort = "29500"
+
+	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
+	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
 
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
@@ -101,7 +121,8 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 
-	MainContainerName = "main"
+	MainContainerName            = "main"
+	FrontendSidecarContainerName = "sidecar-frontend"
 
 	RestartAnnotation = "nvidia.com/restartAt"
 
@@ -117,68 +138,32 @@ const (
 	ResourceStateReady    = "ready"
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
-	// Checkpoint related constants
-	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source"
-	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"
-	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"
 
-	// EnvCheckpointStorageType indicates the storage backend type (pvc, s3, oci)
-	EnvCheckpointStorageType = "DYN_CHECKPOINT_STORAGE_TYPE"
-	// EnvCheckpointLocation is the source location of the checkpoint
-	// For PVC: same as path (e.g., /checkpoints/{hash}.tar)
-	// For S3: s3://bucket/prefix/{hash}.tar
-	// For OCI: oci://registry/repo:{hash}
-	EnvCheckpointLocation = "DYN_CHECKPOINT_LOCATION"
-	// EnvCheckpointPath is the local path to the checkpoint tar file
-	// For PVC: same as location
-	// For S3/OCI: download destination (e.g., /tmp/{hash}.tar)
-	EnvCheckpointPath = "DYN_CHECKPOINT_PATH"
-	// EnvCheckpointHash is the identity hash (for debugging/observability)
-	EnvCheckpointHash = "DYN_CHECKPOINT_HASH"
-	// EnvCheckpointSignalFile is the full path to the signal file
-	// The DaemonSet writes this file after checkpoint is complete
-	// The checkpoint job pod waits for this file, then exits successfully
-	EnvCheckpointSignalFile = "DYN_CHECKPOINT_SIGNAL_FILE"
+	// Checkpoint/restore constants
+	// CROSS-REFERENCE: Some constants below are duplicated in the snapshot package at
+	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
 
-	// EnvCheckpointReadyFile is the full path to a file the worker creates
-	// when the model is loaded and ready for checkpointing.
-	// The readiness probe watches this file to trigger DaemonSet checkpoint.
-	EnvCheckpointReadyFile = "DYN_CHECKPOINT_READY_FILE"
+	// Kubernetes labels
+	KubeLabelIsCheckpointSource             = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash                 = "nvidia.com/snapshot-checkpoint-hash"      // Checkpoint identity hash used for lookup/reuse (may differ from DynamoCheckpoint metadata.name)
+	KubeLabelIsRestoreTarget                = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
+	KubeAnnotationCheckpointArtifactVersion = "nvidia.com/snapshot-artifact-version"     // Checkpoint artifact generation; changing it triggers a new immutable capture attempt
+	DefaultCheckpointArtifactVersion        = "1"
+	KubeAnnotationCheckpointLocation        = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
+	KubeAnnotationCheckpointStorageType     = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
 
-	// CRIU-related environment variables for restore operations
-	// EnvRestoreMarkerFile is the file created by CRIU after successful restore
-	EnvRestoreMarkerFile = "DYN_RESTORE_MARKER_FILE"
-	// EnvCRIUWorkDir is the working directory for CRIU operations
-	EnvCRIUWorkDir = "CRIU_WORK_DIR"
-	// EnvCRIULogDir is the directory where CRIU writes logs
-	EnvCRIULogDir = "CRIU_LOG_DIR"
-	// EnvCUDAPluginDir is the directory containing CRIU CUDA plugins
-	EnvCUDAPluginDir = "CUDA_PLUGIN_DIR"
-	// EnvCRIUTimeout is the timeout for CRIU operations
-	EnvCRIUTimeout = "CRIU_TIMEOUT"
+	// Environment variables injected into pods
+	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
+	// Checkpoint pod-internal constants
+	CheckpointVolumeName = "checkpoint-storage" // Pod-internal volume name for checkpoint PVC
 
-	// CheckpointReadyFilePath is the default path for the ready file
-	CheckpointReadyFilePath = "/tmp/checkpoint-ready"
-	// RestoreMarkerFilePath is the default path for the restore marker
-	RestoreMarkerFilePath = "/tmp/dynamo-restored"
-	// CRIUWorkDirPath is the default CRIU work directory
-	CRIUWorkDirPath = "/var/criu-work"
-	// CRIULogDirPath is the default CRIU log directory
-	CRIULogDirPath = "/checkpoints/restore-logs"
-	// CUDAPluginDirPath is the default CUDA plugin directory
-	CUDAPluginDirPath = "/usr/local/lib/criu"
-	// DefaultCRIUTimeout is the default CRIU timeout in seconds (6 hours)
-	DefaultCRIUTimeout = "21600"
+	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
+	// Deployed to nodes by the snapshot DaemonSet init container.
+	SeccompProfilePath = "profiles/block-iouring.json"
 
-	CheckpointVolumeName       = "checkpoint-storage"
-	CheckpointSignalVolumeName = "checkpoint-signal"
-	CheckpointBasePath         = "/checkpoints"
-	CheckpointSignalHostPath   = "/var/lib/dynamo-checkpoint/signals"
-	CheckpointSignalMountPath  = "/checkpoint-signal"
-
-	// PodInfo volume for Downward API (critical for CRIU restore)
-	// After CRIU restore, environment variables contain stale values from checkpoint pod.
-	// The Downward API files at /etc/podinfo always have current pod identity.
+	// Pod identity (Downward API) ---
+	// After CRIU restore, env vars contain stale values from the checkpoint pod.
+	// The Downward API files at /etc/podinfo always reflect the current pod.
 	PodInfoVolumeName = "podinfo"
 	PodInfoMountPath  = "/etc/podinfo"
 
@@ -187,19 +172,20 @@ const (
 	PodInfoFieldPodUID       = "metadata.uid"
 	PodInfoFieldPodNamespace = "metadata.namespace"
 
-	// Downward API file names for DGD annotations
-	PodInfoFileDynNamespace        = "dyn_namespace"
-	PodInfoFileDynComponent        = "dyn_component"
-	PodInfoFileDynParentDGDName    = "dyn_parent_dgd_name"
-	PodInfoFileDynParentDGDNS      = "dyn_parent_dgd_namespace"
-	PodInfoFileDynDiscoveryBackend = "dyn_discovery_backend"
+	// Downward API file names for restore identity
+	PodInfoFileDynNamespace             = "dyn_namespace"
+	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
+	PodInfoFileDynComponent             = "dyn_component"
+	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
+	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
-	// Annotation keys for DGD info (exposed via Downward API)
-	AnnotationDynNamespace        = "nvidia.com/dyn-namespace"
-	AnnotationDynComponent        = "nvidia.com/dyn-component"
-	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
-	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
-	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
+	// Rolling update annotations
+	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+
+	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
+	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged
+	// with this value so the existing rolling update machinery can manage the transition.
+	LegacyWorkerHash = "legacy"
 )
 
 type MultinodeDeploymentType string

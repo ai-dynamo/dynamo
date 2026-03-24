@@ -16,7 +16,7 @@ use crate::block_manager::{
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
-    offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
+    offload::{max_concurrent_transfers, max_transfer_batch_size},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
@@ -115,8 +115,8 @@ async fn perform_allocation_and_build_handler(
     let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
     let pool_config = PoolConfig {
         enable_pool: true,
-        max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-        max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+        max_concurrent_transfers: max_concurrent_transfers(),
+        max_transfer_batch_size: max_transfer_batch_size(),
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
@@ -148,7 +148,8 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id)?);
+
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?

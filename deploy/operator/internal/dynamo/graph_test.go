@@ -26,12 +26,15 @@ import (
 	"testing"
 	"time"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -520,7 +523,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment-44136fa3"}[0],
 								ComponentType:   "frontend",
 								Replicas:        &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
@@ -539,7 +542,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment-44136fa3"}[0],
 								Replicas:        &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
@@ -663,7 +666,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment-44136fa3"}[0],
 								ComponentType:   "frontend",
 								Replicas:        &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
@@ -722,7 +725,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil)
+			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil, RollingUpdateContext{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -756,7 +759,7 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil)
+	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil, RollingUpdateContext{})
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -790,7 +793,7 @@ func TestGenerateComponentContext(t *testing.T) {
 		parentGraphDeploymentName  string
 		namespace                  string
 		numberOfNodes              int32
-		discoveryBackend           string
+		discoveryBackend           configv1alpha1.DiscoveryBackend
 		expectedDynamoNamespace    string
 		expectedComponentType      string
 		expectedParentDGDName      string
@@ -806,7 +809,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "my-deployment",
 			namespace:                  "my-namespace",
 			numberOfNodes:              1,
-			discoveryBackend:           "kubernetes",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
 			expectedDynamoNamespace:    "my-namespace-my-deployment",
 			expectedComponentType:      commonconsts.ComponentTypePlanner,
 			expectedParentDGDName:      "my-deployment",
@@ -822,8 +825,8 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "vllm-disagg",
 			namespace:                  "djangoz",
 			numberOfNodes:              1,
-			discoveryBackend:           "kubernetes",
-			expectedDynamoNamespace:    "djangoz-vllm-disagg", // Should be k8s-namespace + DGD name
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
+			expectedDynamoNamespace:    "djangoz-vllm-disagg",
 			expectedComponentType:      commonconsts.ComponentTypeFrontend,
 			expectedParentDGDName:      "vllm-disagg",
 			expectedParentDGDNamespace: "djangoz",
@@ -839,8 +842,8 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "shared-frontend",
 			namespace:                  "production",
 			numberOfNodes:              2,
-			discoveryBackend:           "etcd",
-			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace, // "dynamo"
+			discoveryBackend:           configv1alpha1.DiscoveryBackendEtcd,
+			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace,
 			expectedComponentType:      commonconsts.ComponentTypeWorker,
 			expectedParentDGDName:      "shared-frontend",
 			expectedParentDGDNamespace: "production",
@@ -849,12 +852,12 @@ func TestGenerateComponentContext(t *testing.T) {
 			name: "nil dynamoNamespace field still computes correctly",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:   commonconsts.ComponentTypePlanner,
-				DynamoNamespace: nil, // Not set at all
+				DynamoNamespace: nil,
 			},
 			parentGraphDeploymentName:  "test-dgd",
 			namespace:                  "default",
 			numberOfNodes:              1,
-			discoveryBackend:           "kubernetes",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
 			expectedDynamoNamespace:    "default-test-dgd",
 			expectedComponentType:      commonconsts.ComponentTypePlanner,
 			expectedParentDGDName:      "test-dgd",
@@ -868,7 +871,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "llama-70b-prod",
 			namespace:                  "ml-inference",
 			numberOfNodes:              4,
-			discoveryBackend:           "nats",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendEtcd,
 			expectedDynamoNamespace:    "ml-inference-llama-70b-prod",
 			expectedComponentType:      commonconsts.ComponentTypeFrontend,
 			expectedParentDGDName:      "llama-70b-prod",
@@ -1216,20 +1219,11 @@ func Test_mergeEnvs(t *testing.T) {
 	}
 }
 
-func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
-	sorted := make([]corev1.EnvVar, len(envs))
-	copy(sorted, envs)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Name < sorted[j].Name
-	})
-	return sorted
-}
-
 func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
 		dynamoDeployment *v1alpha1.DynamoGraphDeployment
-		controllerConfig controller_common.Config
+		controllerConfig *configv1alpha1.OperatorConfiguration
 	}
 	tests := []struct {
 		name    string
@@ -1241,14 +1235,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			name: "test_generate_grove_pod_clique_set_single_node",
 			args: args{
 				ctx: context.Background(),
-				controllerConfig: controller_common.Config{
-					EtcdAddress:     "etcd-address",
-					NatsAddress:     "nats-address",
-					ModelExpressURL: "model-express-url",
-					Grove: controller_common.GroveConfig{
-						TerminationDelay: 15 * time.Minute,
+				controllerConfig: &configv1alpha1.OperatorConfiguration{
+					Infrastructure: configv1alpha1.InfrastructureConfiguration{
+						ETCDAddress:        "etcd-address",
+						NATSAddress:        "nats-address",
+						ModelExpressURL:    "model-express-url",
+						PrometheusEndpoint: "http://localhost:9090",
 					},
-					PrometheusEndpoint: "http://localhost:9090",
+					Orchestrators: configv1alpha1.OrchestratorConfiguration{
+						Grove: configv1alpha1.GroveConfiguration{
+							TerminationDelay: metav1.Duration{Duration: 15 * time.Minute},
+						},
+					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1545,6 +1543,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
+														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeFrontend,
 													},
@@ -1795,11 +1797,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			name: "test_generate_grove_pod_gang_set_multinode sglang",
 			args: args{
 				ctx: context.Background(),
-				controllerConfig: controller_common.Config{
-					EtcdAddress: "etcd-address",
-					NatsAddress: "nats-address",
-					Grove: controller_common.GroveConfig{
-						TerminationDelay: 15 * time.Minute,
+				controllerConfig: &configv1alpha1.OperatorConfiguration{
+					Infrastructure: configv1alpha1.InfrastructureConfiguration{
+						ETCDAddress: "etcd-address",
+						NATSAddress: "nats-address",
+					},
+					Orchestrators: configv1alpha1.OrchestratorConfiguration{
+						Grove: configv1alpha1.GroveConfiguration{
+							TerminationDelay: metav1.Duration{Duration: 15 * time.Minute},
+						},
 					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
@@ -2066,6 +2072,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2111,6 +2122,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2259,6 +2282,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2304,6 +2332,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2462,6 +2502,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
@@ -2722,11 +2766,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			name: "test_generate_grove_pod_gang_set_multinode vllm",
 			args: args{
 				ctx: context.Background(),
-				controllerConfig: controller_common.Config{
-					EtcdAddress: "etcd-address",
-					NatsAddress: "nats-address",
-					Grove: controller_common.GroveConfig{
-						TerminationDelay: 15 * time.Minute,
+				controllerConfig: &configv1alpha1.OperatorConfiguration{
+					Infrastructure: configv1alpha1.InfrastructureConfiguration{
+						ETCDAddress: "etcd-address",
+						NATSAddress: "nats-address",
+					},
+					Orchestrators: configv1alpha1.OrchestratorConfiguration{
+						Grove: configv1alpha1.GroveConfiguration{
+							TerminationDelay: metav1.Duration{Duration: 15 * time.Minute},
+						},
 					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
@@ -3023,6 +3071,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3068,6 +3121,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3203,6 +3268,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3248,6 +3318,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3406,6 +3488,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
@@ -3665,7 +3751,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3696,6 +3782,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 }
 
+func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+	sorted := make([]corev1.EnvVar, len(envs))
+	copy(sorted, envs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Name < sorted[j].Name
+	})
+	return sorted
+}
+
 func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3717,7 +3812,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -3788,7 +3883,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name              string
@@ -3935,7 +4030,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name              string
@@ -4088,7 +4183,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
@@ -4150,14 +4245,14 @@ func TestExpandRolesForService(t *testing.T) {
 		name            string
 		serviceName     string
 		numberOfNodes   int32
-		serviceReplicas int32
+		serviceReplicas *int32
 		expected        []ServiceRole
 	}{
 		{
 			name:            "single node",
 			serviceName:     "test-service",
 			numberOfNodes:   1,
-			serviceReplicas: 2,
+			serviceReplicas: ptr.To(int32(2)),
 			expected: []ServiceRole{
 				{Name: "test-service", Role: RoleMain, Replicas: 2},
 			},
@@ -4184,16 +4279,33 @@ func TestExpandRolesForService(t *testing.T) {
 			name:            "zero nodes should return main",
 			serviceName:     "test-service",
 			numberOfNodes:   0,
-			serviceReplicas: 1,
+			serviceReplicas: ptr.To(int32(1)),
 			expected: []ServiceRole{
 				{Name: "test-service", Role: RoleMain, Replicas: 1},
+			},
+		},
+		{
+			name:          "nil replicas defaults to 1",
+			serviceName:   "test-service",
+			numberOfNodes: 1,
+			expected: []ServiceRole{
+				{Name: "test-service", Role: RoleMain, Replicas: 1},
+			},
+		},
+		{
+			name:            "zero replicas preserved",
+			serviceName:     "test-service",
+			numberOfNodes:   1,
+			serviceReplicas: ptr.To(int32(0)),
+			expected: []ServiceRole{
+				{Name: "test-service", Role: RoleMain, Replicas: 0},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := expandRolesForService(tt.serviceName, &tt.serviceReplicas, tt.numberOfNodes)
+			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes)
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("expandRolesForService() = %v, want %v", result, tt.expected)
 			}
@@ -4798,12 +4910,14 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				},
 			}
 
-			controllerConfig := controller_common.Config{
-				EtcdAddress: "etcd-av1alpha1",
-				NatsAddress: "nats-address",
+			controllerConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					ETCDAddress: "etcd-av1alpha1",
+					NATSAddress: "nats-address",
+				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -4856,7 +4970,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 
 func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-deployment",
@@ -4952,7 +5066,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 
 func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name               string
@@ -5098,7 +5212,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controllerConfig := controller_common.Config{}
+			controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 			podSpec, err := GenerateBasePodSpec(
 				tt.component,
@@ -5131,7 +5245,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 	tests := []struct {
 		name             string
 		component        *v1alpha1.DynamoComponentDeploymentSharedSpec
-		controllerConfig controller_common.Config
+		controllerConfig *configv1alpha1.OperatorConfiguration
 		wantEnvVar       string
 	}{
 		{
@@ -5141,15 +5255,18 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
 				},
 			},
-			wantEnvVar: "kubernetes",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{},
+			wantEnvVar:       "kubernetes",
 		},
 		{
 			name: "Kubernetes discovery from controller config should set env var to kubernetes",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "kubernetes",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "kubernetes",
+				},
 			},
 			wantEnvVar: "kubernetes",
 		},
@@ -5160,8 +5277,10 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
 				},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "kubernetes",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "kubernetes",
+				},
 			},
 			wantEnvVar: "", // etcd is the runtime default, no env var needed
 		},
@@ -5170,8 +5289,10 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "etcd",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "etcd",
+				},
 			},
 			wantEnvVar: "", // etcd is the runtime default, no env var needed
 		},
@@ -5182,15 +5303,18 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "",
 				},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "",
+				},
 			},
 			wantEnvVar: "kubernetes", // empty defaults to kubernetes
 		},
 		{
-			name:       "Discovery backend not set defaults to kubernetes",
-			component:  &v1alpha1.DynamoComponentDeploymentSharedSpec{},
-			wantEnvVar: "kubernetes", // not set defaults to kubernetes
+			name:             "Discovery backend not set defaults to kubernetes",
+			component:        &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			controllerConfig: &configv1alpha1.OperatorConfiguration{},
+			wantEnvVar:       "kubernetes", // not set defaults to kubernetes
 		},
 	}
 	secretsRetriever := &mockSecretsRetriever{}
@@ -5227,7 +5351,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 
 func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name            string
@@ -5235,12 +5359,13 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 		expectedPodSpec *corev1.PodSpec
 	}{
 		{
-			name: "Planner component should have planner service account",
+			name: "Worker component with DynamoNamespace set",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Envs: []corev1.EnvVar{
 					{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 				},
-				ComponentType: commonconsts.ComponentTypeWorker,
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				DynamoNamespace: ptr.To("default-test-deployment"), // Namespace set by caller
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
 						Command: []string{"python3"},
@@ -5269,6 +5394,9 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+							{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+							{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+							{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 							{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{
 									FieldPath: "metadata.name",
@@ -5330,6 +5458,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 								ContainerPort: int32(commonconsts.DynamoSystemPort),
 								Protocol:      corev1.ProtocolTCP,
 							},
+							{
+								Name:          commonconsts.DynamoNixlPortName,
+								ContainerPort: int32(commonconsts.DynamoNixlPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
 						},
 					},
 				},
@@ -5385,7 +5518,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 
 func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name           string
@@ -5520,7 +5653,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 
 func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name                   string
@@ -5780,7 +5913,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 
 func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name             string
@@ -5966,7 +6099,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 
 func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name                    string
@@ -6312,6 +6445,25 @@ func TestDetermineGroveRestartState(t *testing.T) {
 			wantSvcs:      []string{"Frontend", "Worker"},
 			wantTimestamp: ptr.To(restartID),
 		},
+		{
+			name: "superseded restart returns nil - preserves existing annotations via fallback",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+			wantNil: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -6588,12 +6740,14 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				},
 			}
 
-			controllerConfig := controller_common.Config{
-				EtcdAddress: "etcd-address",
-				NatsAddress: "nats-address",
+			controllerConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					ETCDAddress: "etcd-address",
+					NATSAddress: "nats-address",
+				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -6657,6 +6811,847 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 						t.Errorf("Clique %q: preserved annotation %q = %q, want %q",
 							cliqueName, key, actualValue, expectedValue)
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				"user-label":                          "keep",
+				commonconsts.KubeLabelIsRestoreTarget: commonconsts.KubeLabelValueTrue,
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					"extra-label":                        "keep-too",
+					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+	)
+	require.NoError(t, err)
+	annotations := map[string]string{}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
+		Enabled: true,
+		Ready:   false,
+		Hash:    "resolved-hash",
+	})
+	assert.Equal(t, "keep", labels["user-label"])
+	assert.Equal(t, "keep-too", labels["extra-label"])
+	_, hasRestoreTarget := labels[commonconsts.KubeLabelIsRestoreTarget]
+	_, hasCheckpointHash := labels[commonconsts.KubeLabelCheckpointHash]
+	assert.False(t, hasRestoreTarget)
+	assert.False(t, hasCheckpointHash)
+}
+
+func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelIsRestoreTarget: "false",
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+	)
+	require.NoError(t, err)
+	annotations := map[string]string{}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
+		Enabled: true,
+		Ready:   true,
+		Hash:    "resolved-hash",
+	})
+	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[commonconsts.KubeLabelIsRestoreTarget])
+	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointHash])
+}
+
+func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
+	labels, err := generateLabels(
+		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:   commonconsts.ComponentTypeWorker,
+			DynamoNamespace: ptr.To("default-test-dgd"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace:           "wrong-from-labels",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-labels",
+				commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
+			},
+			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoNamespace:           "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+					commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoWorkerHash:          "wrong-from-extra-metadata",
+				},
+			},
+		},
+		&v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
+		},
+		"Worker",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
+	assert.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
+	assert.Equal(t, "test-dgd", labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "workerhash", labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
+func TestIsWorkerComponent(t *testing.T) {
+	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
+	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}
+
+	for _, ct := range workers {
+		assert.True(t, IsWorkerComponent(ct), "%s should be a worker", ct)
+	}
+	for _, ct := range nonWorkers {
+		assert.False(t, IsWorkerComponent(ct), "%s should not be a worker", ct)
+	}
+}
+
+func TestRollingUpdateContext_InProgress(t *testing.T) {
+	assert.False(t, RollingUpdateContext{}.InProgress())
+	assert.False(t, RollingUpdateContext{NewWorkerHash: "abc"}.InProgress())
+	assert.True(t, RollingUpdateContext{OldWorkerReplicas: map[string]int32{"w": 1}}.InProgress())
+}
+
+func TestGetDCDResourceName(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: commonconsts.ComponentTypePrefill},
+				"decode":   {ComponentType: commonconsts.ComponentTypeDecode},
+				"worker":   {ComponentType: commonconsts.ComponentTypeWorker},
+				"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+			},
+		},
+	}
+
+	// Workers get hash suffix
+	assert.Equal(t, "my-dgd-prefill-abc12345", GetDCDResourceName(dgd, "prefill", "abc12345"))
+	assert.Equal(t, "my-dgd-decode-abc12345", GetDCDResourceName(dgd, "decode", "abc12345"))
+	assert.Equal(t, "my-dgd-worker-abc12345", GetDCDResourceName(dgd, "worker", "abc12345"))
+
+	// Non-workers never get hash suffix
+	assert.Equal(t, "my-dgd-frontend", GetDCDResourceName(dgd, "frontend", "abc12345"))
+
+	// Empty hash — workers don't get suffix
+	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(dgd, "prefill", ""))
+}
+
+func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(4))},
+				"frontend": {ComponentType: commonconsts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	ruCtx := RollingUpdateContext{
+		NewWorkerHash:     "aabb1122",
+		OldWorkerReplicas: map[string]int32{"prefill": 2},
+		NewWorkerReplicas: map[string]int32{"prefill": 2},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(ctx, dgd, nil, &RestartState{}, nil, ruCtx)
+	assert.NoError(t, err)
+
+	// Worker DCD: hash suffix in name, hash label, replica override
+	prefillDCD := dcds["prefill"]
+	assert.Equal(t, "my-dgd-prefill-aabb1122", prefillDCD.Name)
+	assert.Equal(t, "aabb1122", prefillDCD.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(2), *prefillDCD.Spec.Replicas)
+
+	// Non-worker DCD: no hash suffix, no hash label, original replicas
+	frontendDCD := dcds["frontend"]
+	assert.Equal(t, "my-dgd-frontend", frontendDCD.Name)
+	assert.Empty(t, frontendDCD.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
+}
+
+func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(3))},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, RollingUpdateContext{})
+	assert.NoError(t, err)
+
+	dcd := dcds["worker"]
+	assert.Equal(t, "my-dgd-worker", dcd.Name)
+	assert.Empty(t, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(3), *dcd.Spec.Replicas)
+}
+
+func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
+	// Worker with hash label gets WorkerHashSuffix
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+	}
+	compCtx := generateComponentContext(component, "dgd", "ns", 1, "kubernetes")
+	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
+
+	// Worker without hash label
+	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+	}
+	compCtx2 := generateComponentContext(component2, "dgd", "ns", 1, "kubernetes")
+	assert.Empty(t, compCtx2.WorkerHashSuffix)
+
+	// Frontend never gets WorkerHashSuffix, even with the label
+	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+	}
+	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, "kubernetes")
+	assert.Empty(t, compCtx3.WorkerHashSuffix)
+}
+
+func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
+	w := NewWorkerDefaults()
+
+	// With suffix
+	container, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace:  "ns-dgd",
+		ComponentType:    commonconsts.ComponentTypeWorker,
+		WorkerHashSuffix: "abc123",
+	})
+	assert.NoError(t, err)
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespaceWorkerSuffixEnvVar {
+			assert.Equal(t, "abc123", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_WORKER_SUFFIX should be set")
+
+	// Without suffix — env var should NOT be present
+	container2, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+	})
+	assert.NoError(t, err)
+	for _, env := range container2.Env {
+		assert.NotEqual(t, commonconsts.DynamoNamespaceWorkerSuffixEnvVar, env.Name,
+			"DYN_NAMESPACE_WORKER_SUFFIX should not be set when suffix is empty")
+	}
+}
+
+func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
+	f := NewFrontendDefaults()
+	container, err := f.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "myns-mydgd",
+		ComponentType:   commonconsts.ComponentTypeFrontend,
+	})
+	assert.NoError(t, err)
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespacePrefixEnvVar {
+			assert.Equal(t, "myns-mydgd", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
+}
+
+func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	envFromSecret := "hf-token-secret"
+
+	tests := []struct {
+		name               string
+		component          *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentDGDName      string
+		namespace          string
+		wantSidecarCount   int
+		wantSidecarName    string
+		wantSidecarImage   string
+		wantSidecarArgs    []string
+		wantSidecarEnvVars map[string]string
+		wantSidecarEnvFrom int
+		wantSidecarProbes  bool
+		wantSidecarPorts   bool
+		wantErr            bool
+	}{
+		{
+			name: "worker without frontendSidecar has no sidecar",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 1, // only main container
+		},
+		{
+			name: "worker with frontendSidecar gets auto-generated sidecar",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+					Args:  []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarArgs:  []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
+			wantSidecarEnvVars: map[string]string{
+				"DYN_NAMESPACE":                "test-ns-test-dgd",
+				"DYN_COMPONENT":                commonconsts.ComponentTypeFrontend,
+				"DYN_DISCOVERY_BACKEND":        "kubernetes",
+				"DYN_HTTP_PORT":                fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+				"DYN_PARENT_DGD_K8S_NAME":      "test-dgd",
+				"DYN_PARENT_DGD_K8S_NAMESPACE": "test-ns",
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar with envFromSecret",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image:         "my-frontend:latest",
+					EnvFromSecret: &envFromSecret,
+				},
+			},
+			parentDGDName:      "test-dgd",
+			namespace:          "test-ns",
+			wantSidecarCount:   2,
+			wantSidecarName:    commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage:   "my-frontend:latest",
+			wantSidecarArgs:    []string{"-m", "dynamo.frontend"},
+			wantSidecarEnvFrom: 1,
+			wantSidecarProbes:  true,
+			wantSidecarPorts:   true,
+		},
+		{
+			name: "frontendSidecar with custom env vars",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+					Envs: []corev1.EnvVar{
+						{Name: "CUSTOM_VAR", Value: "custom_value"},
+					},
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarEnvVars: map[string]string{
+				"CUSTOM_VAR": "custom_value",
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkVLLM,
+				secretsRetriever,
+				tt.parentDGDName,
+				tt.namespace,
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+				nil,
+			)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GenerateBasePodSpec() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			assert.Equal(t, tt.wantSidecarCount, len(podSpec.Containers),
+				"expected %d containers, got %d", tt.wantSidecarCount, len(podSpec.Containers))
+
+			if tt.wantSidecarCount <= 1 {
+				return
+			}
+
+			// The frontend sidecar is the last container
+			sidecar := podSpec.Containers[len(podSpec.Containers)-1]
+
+			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
+			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
+
+			if tt.wantSidecarArgs != nil {
+				assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
+			}
+
+			assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
+
+			if tt.wantSidecarEnvVars != nil {
+				envVars := make(map[string]string)
+				for _, env := range sidecar.Env {
+					envVars[env.Name] = env.Value
+				}
+				for k, v := range tt.wantSidecarEnvVars {
+					assert.Equal(t, v, envVars[k], "sidecar env var %s", k)
+				}
+			}
+
+			if tt.wantSidecarEnvFrom > 0 {
+				assert.Equal(t, tt.wantSidecarEnvFrom, len(sidecar.EnvFrom), "sidecar envFrom count")
+				assert.Equal(t, envFromSecret, sidecar.EnvFrom[0].SecretRef.Name, "sidecar envFromSecret name")
+			}
+
+			if tt.wantSidecarProbes {
+				assert.NotNil(t, sidecar.LivenessProbe, "sidecar should have liveness probe")
+				assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
+				assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
+				assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
+			}
+
+			if tt.wantSidecarPorts {
+				assert.NotEmpty(t, sidecar.Ports, "sidecar should have ports")
+				assert.Equal(t, int32(commonconsts.DynamoServicePort), sidecar.Ports[0].ContainerPort)
+			}
+
+			// Verify POD_NAME/POD_NAMESPACE/POD_UID are set via downward API
+			hasDownwardAPI := map[string]bool{"POD_NAME": false, "POD_NAMESPACE": false, "POD_UID": false}
+			for _, env := range sidecar.Env {
+				if _, ok := hasDownwardAPI[env.Name]; ok && env.ValueFrom != nil && env.ValueFrom.FieldRef != nil {
+					hasDownwardAPI[env.Name] = true
+				}
+			}
+			for name, found := range hasDownwardAPI {
+				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			}
+		})
+	}
+}
+
+func TestPropagateDGDAnnotations(t *testing.T) {
+	tests := []struct {
+		name               string
+		dgdAnnotations     map[string]string
+		serviceAnnotations map[string]string
+		expectedAnnotation map[string]string
+	}{
+		{
+			name: "DGD annotation propagates to empty service annotations",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		{
+			name: "service-level annotation takes precedence over DGD",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+		},
+		{
+			name:               "no DGD annotation, no service annotation",
+			dgdAnnotations:     nil,
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+		{
+			name: "origin version also propagates",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "unrelated DGD annotations are not propagated",
+			dgdAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.serviceAnnotations,
+			}
+			propagateDGDAnnotations(tt.dgdAnnotations, component)
+
+			if tt.expectedAnnotation == nil {
+				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
+					"expected no annotations, got %v", component.Annotations)
+			} else {
+				for k, v := range tt.expectedAnnotation {
+					assert.Equal(t, v, component.Annotations[k], "annotation %s mismatch", k)
+				}
+			}
+		})
+	}
+}
+
+func TestPropagateDGDSpecMetadata(t *testing.T) {
+	tests := []struct {
+		name                string
+		dgdAnnotations      map[string]string
+		dgdLabels           map[string]string
+		serviceAnnotations  map[string]string
+		serviceLabels       map[string]string
+		expectedAnnotations map[string]string
+		expectedLabels      map[string]string
+	}{
+		{
+			name:                "nil metadata is a no-op",
+			dgdAnnotations:      nil,
+			dgdLabels:           nil,
+			serviceAnnotations:  map[string]string{"existing": "value"},
+			expectedAnnotations: map[string]string{"existing": "value"},
+			expectedLabels:      nil,
+		},
+		{
+			name:                "annotations and labels propagate to empty component",
+			dgdAnnotations:      map[string]string{"team/cost-center": "abc"},
+			dgdLabels:           map[string]string{"env": "prod"},
+			expectedAnnotations: map[string]string{"team/cost-center": "abc"},
+			expectedLabels:      map[string]string{"env": "prod"},
+		},
+		{
+			name:                "service-level annotations take precedence",
+			dgdAnnotations:      map[string]string{"shared": "from-dgd", "dgd-only": "val"},
+			serviceAnnotations:  map[string]string{"shared": "from-service"},
+			expectedAnnotations: map[string]string{"shared": "from-service", "dgd-only": "val"},
+		},
+		{
+			name:           "service-level labels take precedence",
+			dgdLabels:      map[string]string{"shared": "from-dgd", "dgd-only": "val"},
+			serviceLabels:  map[string]string{"shared": "from-service"},
+			expectedLabels: map[string]string{"shared": "from-service", "dgd-only": "val"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.serviceAnnotations,
+				Labels:      tt.serviceLabels,
+			}
+			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, component)
+
+			if tt.expectedAnnotations == nil {
+				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
+					"expected no annotations, got %v", component.Annotations)
+			} else {
+				assert.Equal(t, tt.expectedAnnotations, component.Annotations)
+			}
+			if tt.expectedLabels == nil {
+				assert.True(t, len(component.Labels) == 0 || component.Labels == nil,
+					"expected no labels, got %v", component.Labels)
+			} else {
+				assert.Equal(t, tt.expectedLabels, component.Labels)
+			}
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"team/cost-center": "abc"},
+			Labels:      map[string]string{"env": "prod"},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+					Annotations:   map[string]string{"team/cost-center": "svc-override"},
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	// PCS object-level metadata
+	assert.Equal(t, "abc", pcs.Annotations["team/cost-center"])
+	assert.Equal(t, "prod", pcs.Labels["env"])
+
+	// Clique-level: service annotation takes precedence
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	clique := pcs.Spec.Template.Cliques[0]
+	assert.Equal(t, "svc-override", clique.Annotations["team/cost-center"],
+		"service-level annotation should take precedence over spec.metadata")
+}
+
+func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"team/cost-center": "abc", "shared": "dgd"},
+			Labels:      map[string]string{"env": "prod", "shared-label": "dgd"},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+					Annotations:   map[string]string{"shared": "svc"},
+					Labels:        map[string]string{"shared-label": "svc", "svc-only": "val"},
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, &v1alpha1.IngressSpec{}, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	dcd := dcds["frontend"]
+	require.NotNil(t, dcd)
+
+	// Annotations: service-level takes precedence over DGD-level
+	assert.Equal(t, "abc", dcd.Spec.Annotations["team/cost-center"])
+	assert.Equal(t, "svc", dcd.Spec.Annotations["shared"],
+		"service-level annotation should take precedence over DGD annotation")
+
+	// Labels: service-level survives and takes precedence over DGD-level
+	assert.Equal(t, "svc", dcd.Spec.Labels["shared-label"],
+		"service-level label should take precedence over DGD label")
+	assert.Equal(t, "val", dcd.Spec.Labels["svc-only"],
+		"service-only label should be preserved")
+	assert.Equal(t, "prod", dcd.Spec.Labels["env"],
+		"DGD-level label should propagate when no service override")
+
+	// Controller labels must always be present
+	assert.Equal(t, "frontend", dcd.Spec.Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.Equal(t, dgd.Name, dcd.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+}
+
+func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+
+	tests := []struct {
+		name              string
+		deployment        *v1alpha1.DynamoGraphDeployment
+		wantPCSTemplateTC *grovev1alpha1.TopologyConstraint
+		wantCliqueTC      map[string]*grovev1alpha1.TopologyConstraint // clique name -> expected TC
+		wantPCSGTC        map[string]*grovev1alpha1.TopologyConstraint // pcsg name -> expected TC
+		wantPCSGCount     int
+	}{
+		{
+			name: "no topology constraints - PCS has no TC, cliques have no TC",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC:      map[string]*grovev1alpha1.TopologyConstraint{"worker": nil},
+			wantPCSGCount:     0,
+		},
+		{
+			name: "single-node service with topology constraints - TC on PCS template and clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+						PackDomain:      v1alpha1.TopologyDomain("zone"),
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
+				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+			},
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+			},
+			wantPCSGCount: 0,
+		},
+		{
+			name: "multinode service with topology constraints - TC on PCS template and PCSG, not clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+						PackDomain:      v1alpha1.TopologyDomain("zone"),
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							Multinode: &v1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("block"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
+				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+			},
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker-ldr": nil,
+				"worker-wkr": nil,
+			},
+			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
+			},
+			wantPCSGCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pcs, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				tt.deployment,
+				operatorConfig,
+				&controller_common.RuntimeConfig{},
+				secretsRetriever,
+				&RestartState{},
+				nil,
+				nil,
+			)
+			assert.NoError(t, err)
+			assert.NotNil(t, pcs)
+
+			// Verify PCS template-level TopologyConstraint
+			if tt.wantPCSTemplateTC == nil {
+				assert.Nil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be nil")
+			} else {
+				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
+				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+			}
+
+			// Verify clique-level TopologyConstraints (exhaustive)
+			assert.Equal(t, len(tt.wantCliqueTC), len(pcs.Spec.Template.Cliques), "clique count mismatch")
+			actualCliqueNames := make(map[string]struct{}, len(pcs.Spec.Template.Cliques))
+			for _, clique := range pcs.Spec.Template.Cliques {
+				actualCliqueNames[clique.Name] = struct{}{}
+				expectedTC, ok := tt.wantCliqueTC[clique.Name]
+				if !ok {
+					t.Errorf("unexpected clique %q in PCS", clique.Name)
+					continue
+				}
+				if expectedTC == nil {
+					assert.Nil(t, clique.TopologyConstraint, "clique %q: expected nil TopologyConstraint", clique.Name)
+				} else {
+					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
+					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+				}
+			}
+			for expectedName := range tt.wantCliqueTC {
+				if _, found := actualCliqueNames[expectedName]; !found {
+					t.Errorf("expected clique %q not found in PCS", expectedName)
+				}
+			}
+
+			// Verify PCSG-level TopologyConstraints (exhaustive)
+			assert.Equal(t, tt.wantPCSGCount, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs), "PCSG count mismatch")
+			actualPCSGNames := make(map[string]struct{}, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs))
+			for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+				actualPCSGNames[pcsg.Name] = struct{}{}
+				if tt.wantPCSGTC != nil {
+					expectedTC, ok := tt.wantPCSGTC[pcsg.Name]
+					if !ok {
+						t.Errorf("unexpected PCSG %q in PCS", pcsg.Name)
+						continue
+					}
+					if expectedTC == nil {
+						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
+					} else {
+						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
+						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+					}
+				}
+			}
+			for expectedName := range tt.wantPCSGTC {
+				if _, found := actualPCSGNames[expectedName]; !found {
+					t.Errorf("expected PCSG %q not found in PCS", expectedName)
 				}
 			}
 		})

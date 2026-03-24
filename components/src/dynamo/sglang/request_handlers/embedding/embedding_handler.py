@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -16,20 +18,22 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 class EmbeddingWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(component, engine, config, publisher)
+        super().__init__(engine, config, publisher, None, shutdown_event)
         logging.info("Embedding worker handler initialized")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Generate embeddings for the given input.
 
@@ -43,6 +47,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         embedding_request = EmbeddingRequest(**request)
 
         # Handle different input types
+        prompt: str | list[Any]
         if isinstance(embedding_request.input, str):
             prompt = embedding_request.input
         elif isinstance(embedding_request.input, list):

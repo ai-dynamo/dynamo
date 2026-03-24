@@ -1,0 +1,140 @@
+# Kimi-K2.5 nvidia/Kimi-K2.5-NVFP4 — Aggregated Deployments on Kubernetes
+
+> Upstream TensorRT-LLM does not yet include native support for Kimi K2.5. This recipe works around that limitation by directly patching the container image with an append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path. See [`patch/`](patch/) for the patch script and full instructions.
+
+> **Note**: The two standard deployment (`deploy.yaml` and `deploy-kvbm.yaml`) for nvidia/Kimi-K2.5-NVFP4 model requires a patched TensorRT-LLM container image because upstream TRT-LLM support for Kimi K2.5 has not yet been released. You must build the patched image before deploying either configuration below. See patch/ for the script and instructions. **`deploy-specdec.yaml` speculative decoding recipe doesn't need the image patch**.
+
+> **Text only:** Current upstream TensorRT-LLM supports Kimi-K2.5 models by loading the DeepSeek-V3
+> text backbone (`text_config`) only. The vision encoder is not loaded, so image inputs are not
+> processed. Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
+
+This directory contains three aggregated deployment configurations for the `nvidia/Kimi-K2.5-NVFP4` model.
+
+| Deployment | Manifest | Description | Hardware Requirement
+|-----------|----------|-------------|----|
+| **Standard Aggregated** | [`deploy.yaml`](deploy.yaml) | Basic aggregated serving with KV-aware routing | 1x8 B200 node |
+| **Aggregated + KVBM** | [`deploy-kvbm.yaml`](deploy-kvbm.yaml) | Aggregated serving with CPU-offloaded KV cache (KV Block Manager) | 1x8 B200 node |
+| **Aggregated + EAGLE SpecDec** | [`deploy-specdec.yaml`](deploy-specdec.yaml) | Performant aggregated deployment with EAGLE speculative decoding and KV-aware routing | 8x4 GB200 nodes |
+
+## Prerequisites
+
+- A Kubernetes cluster with the [Dynamo Operator](https://docs.nvidia.com/dynamo/) installed
+- 1x8 B200 GPUs or 8x4 GB200 GPUs
+- A `hf-token-secret` Secret containing your Hugging Face token
+- A pre-existing `model-cache` PVC
+- `deploy.yaml` and `deploy-kvbm.yaml` require a patched image tag such as `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched`. You must build a patched image and update the `image:` fields before deploying. See [patch instructions](patch/) for details.
+- `deploy-specdec.yaml` uses `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag` and works with a current top-of-tree Dynamo TRT-LLM image
+
+---
+
+## Standard Aggregated Deployment
+
+Uses [`deploy.yaml`](deploy.yaml). This is the simpler configuration -- aggregated serving with KV-aware routing, no CPU-offloaded KV cache.
+
+```bash
+# Update the image in deploy.yaml to your patched image, then:
+kubectl apply -f deploy.yaml -n ${NAMESPACE}
+```
+
+This creates:
+- A **ConfigMap** (`llm-config`) with TRT-LLM engine parameters (TP=8, EP=8, FP8 KV-cache).
+- A **DynamoGraphDeployment** (`kimi-k25-agg`) with a Frontend (KV-router mode) and a TrtllmWorker serving `nvidia/Kimi-K2.5-NVFP4`.
+
+---
+
+## Aggregated Deployment with KVBM
+
+Uses [`deploy-kvbm.yaml`](deploy-kvbm.yaml). This configuration adds CPU-offloaded KV cache via the KV Block Manager (KVBM), which allows larger effective context by spilling KV cache to host memory.
+
+```bash
+# Update the image in deploy-kvbm.yaml to your patched image, then:
+kubectl apply -f deploy-kvbm.yaml -n ${NAMESPACE}
+```
+
+This creates:
+- A **ConfigMap** (`llm-config-kimi-agg-kvbm`) with TRT-LLM engine parameters (TP=8, EP=8, FP8 KV-cache, KVBM connector).
+- A **DynamoGraphDeployment** (`kimi-k25-agg-kvbm`) with a Frontend (KV-router mode) and a TrtllmWorker serving `nvidia/Kimi-K2.5-NVFP4`.
+
+### KVBM Configuration
+
+Key environment variables on the worker:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DYN_KVBM_CPU_CACHE_GB` | `10` | CPU cache size in GB for KVBM |
+| `DYN_KVBM_METRICS` | `true` | Enable Prometheus metrics endpoint |
+| `DYN_KVBM_METRICS_PORT` | `6880` | Port for the metrics endpoint |
+
+### Enable Prometheus Metrics Scraping
+
+If you have the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) installed, apply the PodMonitor:
+
+```bash
+kubectl apply -f podmonitor-kvbm.yaml -n monitoring
+```
+
+This scrapes `/metrics` on port `6880` (named `kvbm`) every 5 seconds from worker pods labeled with:
+- `nvidia.com/dynamo-component-type: worker`
+- `nvidia.com/metrics-enabled: "true"`
+
+> **Note:** If your Prometheus Operator watches a namespace other than `monitoring` for PodMonitors, change `metadata.namespace` in `podmonitor-kvbm.yaml` accordingly.
+
+---
+
+## Aggregated Deployment with EAGLE Speculative Decoding and KV-aware routing
+
+Uses [`deploy-specdec.yaml`](deploy-specdec.yaml). This performant configuration runs KV-aware aggregated serving with EAGLE speculative decoding on GB200 and does not require the patched image used by the standard and KVBM manifests.
+
+### Speculative Decoding Prerequisites
+
+- 8 GB200 nodes, each having 4 GPUs per node
+- Update the placeholder image tag `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag` in [`deploy-specdec.yaml`](deploy-specdec.yaml) before deploying.
+
+### Additional Model Assets
+
+This deployment needs both the base Kimi weights and the Eagle draft model on the `model-cache` PVC.
+
+Download the base model:
+
+```bash
+kubectl apply -f ../../../model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f ../../../model-cache/nvidia/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
+```
+
+Download the Eagle draft model:
+
+```bash
+kubectl apply -f ../../../model-cache/nvidia/eagle-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/eagle-download -n ${NAMESPACE} --timeout=6000s
+```
+
+The worker config loads the draft model from:
+
+```yaml
+speculative_config:
+  decoding_type: Eagle
+  max_draft_len: 3
+  speculative_model_dir: /opt/models/hub/models--nvidia--Kimi-K2.5-Thinking-Eagle3/snapshots/0b0c6ac039089ad2c2418c91c039553381a302d9
+```
+
+### Speculative Decoding Deployment Topology
+
+The manifest runs one aggregated frontend and four aggregated worker replicas. Each worker spans two nodes:
+
+- `multinode.nodeCount: 2`
+- `resources.limits.gpu: "4"` per node
+- `tensor_parallel_size: 8`
+- `moe_expert_parallel_size: 8`
+
+This is an 8-node deployment in total for the workers.
+
+### Deployment
+
+```bash
+kubectl apply -f deploy-specdec.yaml -n ${NAMESPACE}
+```
+
+This creates:
+- A **ConfigMap** (`llm-config-specdec`) with the TRT-LLM speculative decoding config
+- A **DynamoGraphDeployment** (`kimi-k25-agg-specdec`) with a KV-aware router frontend and four multinode TRT-LLM worker replicas serving `nvidia/Kimi-K2.5-NVFP4`

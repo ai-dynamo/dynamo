@@ -17,9 +17,11 @@ from .llm import DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandl
 from .multimodal import (
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
-    MultimodalProcessorHandler,
     MultimodalWorkerHandler,
 )
+
+# Video generation handlers
+from .video_generation import VideoGenerationWorkerHandler
 
 __all__ = [
     # Base handlers
@@ -33,9 +35,10 @@ __all__ = [
     "EmbeddingWorkerHandler",
     # Image diffusion handlers
     "ImageDiffusionWorkerHandler",
+    # Video generation handlers
+    "VideoGenerationWorkerHandler",
     # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",
-    "MultimodalProcessorHandler",
     "MultimodalWorkerHandler",
 ]

@@ -22,6 +22,8 @@ from tests.fault_tolerance.cancellation.utils import (
     poll_for_pattern,
     read_streaming_responses,
     send_cancellable_request,
+    verify_frontend_cancellation_metrics,
+    verify_runtime_cancellation_metrics,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -31,11 +33,12 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
     pytest.mark.xfail(reason="Cancellation is temporarily disabled", strict=True),
 ]
@@ -186,8 +189,7 @@ def test_request_cancellation_trtllm_aggregated(
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start an aggregated worker
-        # Step 2: Start a single worker (allocates its own system_port)
+        # Step 2: Start an aggregated worker (allocates its own system_port)
         with DynamoWorkerProcess(
             request, frontend.frontend_port, mode="prefill_and_decode"
         ) as worker:
@@ -208,7 +210,7 @@ def test_request_cancellation_trtllm_aggregated(
                 ),
             ]
 
-            for request_type, description in test_scenarios:
+            for idx, (request_type, description) in enumerate(test_scenarios):
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
@@ -216,10 +218,10 @@ def test_request_cancellation_trtllm_aggregated(
                     frontend.frontend_port, request_type
                 )
 
-                # Poll for "New Request ID" pattern
+                # Poll for "AggregatedHandler Request ID" pattern
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
-                    pattern="New Request ID: ",
+                    pattern="AggregatedHandler Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
                 )
@@ -247,6 +249,18 @@ def test_request_cancellation_trtllm_aggregated(
                 )
 
                 logger.info(f"{description} detected successfully")
+
+                # Verify cancellation metrics after each scenario
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type=request_type,
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=worker.system_port,
+                    expected_count=idx + 1,
+                    component="tensorrt_llm",
+                )
 
 
 @pytest.mark.timeout(195)  # 3x average
@@ -330,6 +344,23 @@ def test_request_cancellation_trtllm_decode_cancel(
 
                 logger.info(
                     "Chat completion stream cancellation in decode phase detected successfully"
+                )
+
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="chat_completion_stream",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                    component="tensorrt_llm",
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
                 )
 
 
@@ -422,6 +453,23 @@ def test_request_cancellation_trtllm_prefill_cancel(
 
                 logger.info(
                     "Completion request cancellation during prefill phase detected successfully"
+                )
+
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=0,
+                    component="tensorrt_llm",
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=1,
+                    component="prefill",
                 )
 
 
@@ -522,4 +570,21 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
 
                 logger.info(
                     "Workers are functional after cancellation during KV transfer"
+                )
+
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                    component="tensorrt_llm",
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
                 )

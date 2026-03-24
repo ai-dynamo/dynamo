@@ -4,11 +4,11 @@
 """
 Async Encoder Cache
 
-Async wrapper over EncoderCacheManager with request coalescing.
+Async wrapper over MultimodalEmbeddingCacheManager with request coalescing.
 Prevents duplicate encoding when multiple requests arrive for the same content.
 
 Usage:
-    cache = EncoderCacheManager(capacity_bytes=4 * 1024**3)
+    cache = MultimodalEmbeddingCacheManager(capacity_bytes=4 * 1024**3)
     async_cache = AsyncEncoderCache(cache)
 
     # Get from cache or compute with coalescing
@@ -19,9 +19,10 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Dict, Optional
 
-import torch
-
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
+    MultimodalEmbeddingCacheManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def _suppress_unhandled_future_exception(future: asyncio.Future) -> None:
 
 class AsyncEncoderCache:
     """
-    Async wrapper with request coalescing over EncoderCacheManager.
+    Async wrapper with request coalescing over MultimodalEmbeddingCacheManager.
 
     Provides async get_or_compute that deduplicates concurrent requests
     for the same key, ensuring only one encoding runs at a time per key.
@@ -53,17 +54,17 @@ class AsyncEncoderCache:
         asyncio event loop. All access must be from the same thread.
     """
 
-    def __init__(self, cache: EncoderCacheManager):
+    def __init__(self, cache: MultimodalEmbeddingCacheManager):
         """
         Initialize the async encoder cache.
 
         Args:
-            cache: Underlying EncoderCacheManager for storage.
+            cache: Underlying MultimodalEmbeddingCacheManager for storage.
         """
         self._cache = cache
-        self._in_flight: Dict[str, asyncio.Future[torch.Tensor]] = {}
+        self._in_flight: Dict[str, asyncio.Future[CachedEmbedding]] = {}
 
-    def get(self, key: str) -> Optional[torch.Tensor]:
+    def get(self, key: str) -> Optional[CachedEmbedding]:
         """
         Synchronous get from underlying cache.
 
@@ -71,15 +72,15 @@ class AsyncEncoderCache:
             key: Cache key.
 
         Returns:
-            Cached tensor or None if not found.
+            Cached embedding or None if not found.
         """
         return self._cache.get(key)
 
     async def get_or_compute(
         self,
         key: str,
-        compute_fn: Callable[[], Awaitable[torch.Tensor]],
-    ) -> torch.Tensor:
+        compute_fn: Callable[[], Awaitable[CachedEmbedding]],
+    ) -> CachedEmbedding:
         """
         Get from cache or compute with request coalescing.
 
@@ -89,10 +90,10 @@ class AsyncEncoderCache:
 
         Args:
             key: Cache key (typically content hash).
-            compute_fn: Async function to compute the tensor if not cached.
+            compute_fn: Async function to compute the embedding if not cached.
 
         Returns:
-            The cached or computed tensor.
+            The cached or computed embedding.
 
         Raises:
             Exception: Re-raises any exception from compute_fn.
@@ -108,14 +109,14 @@ class AsyncEncoderCache:
             return await self._in_flight[key]
 
         # Compute with coalescing
-        future: asyncio.Future[torch.Tensor] = asyncio.Future()
+        future: asyncio.Future[CachedEmbedding] = asyncio.Future()
         future.add_done_callback(_suppress_unhandled_future_exception)
         self._in_flight[key] = future
         try:
-            tensor = await compute_fn()
-            self._cache.set(key, tensor)
-            future.set_result(tensor)
-            return tensor
+            embedding = await compute_fn()
+            self._cache.set(key, embedding)
+            future.set_result(embedding)
+            return embedding
         except Exception as e:
             future.set_exception(e)
             raise

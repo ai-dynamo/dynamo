@@ -114,7 +114,7 @@ def tester(llm_server_kvbm):  # noqa: F811
 
 # Tests
 @pytest.mark.parametrize("llm_server_kvbm", [{"model": KVBM_TEST_MODEL}], indirect=True)
-@pytest.mark.timeout(110)  # 3x measured time (36.31s), rounded up
+@pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
     Test offload → cache reset → onboard cycle with determinism verification.
@@ -181,7 +181,7 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
     indirect=True,
 )
-@pytest.mark.timeout(190)  # 3x measured time (63.39s), rounded up
+@pytest.mark.timeout(170)  # 4x measured (~42s), rounded up
 def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     """
     Test GPU cache eviction mechanics.
@@ -256,7 +256,7 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
     indirect=True,
 )
-@pytest.mark.timeout(107)  # 3x measured time (35.40s), rounded up
+@pytest.mark.timeout(160)  # 4x measured (~39s), rounded up
 def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     """
     Test onboarding determinism under eviction scenario.

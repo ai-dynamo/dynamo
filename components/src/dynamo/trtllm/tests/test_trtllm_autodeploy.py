@@ -8,6 +8,14 @@ from unittest import mock
 
 import pydantic
 import pytest
+import torch
+
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
 from tensorrt_llm._torch.auto_deploy import LlmArgs as ADLlmArgs
 
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine

@@ -51,6 +51,7 @@ fn generate_openapi() -> anyhow::Result<()> {
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .enable_responses_endpoints(true)
+        .enable_anthropic_endpoints(true)
         .build()
         .context("failed to build HttpService for OpenAPI generation")?;
 

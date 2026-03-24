@@ -8,7 +8,11 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::{
         common::{self, timing::RequestTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        openai::{
+            convert_backend_top_logprobs,
+            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+            token_to_utf8_bytes,
+        },
     },
     types::TokenIdType,
 };
@@ -211,33 +215,12 @@ impl DeltaGenerator {
                 .zip(tok_lps)
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
-                    let mut found_selected_token = false;
-                    let mut converted_top_lps = top_lps
-                        .iter()
-                        .map(|top_lp| {
-                            let top_t = top_lp.token.clone().unwrap_or_default();
-                            let top_tid = top_lp.token_id;
-                            found_selected_token = found_selected_token || top_tid == *tid;
-                            dynamo_async_openai::types::TopLogprobs {
-                                token: top_t,
-                                logprob: top_lp.logprob as f32,
-                                bytes: None,
-                            }
-                        })
-                        .collect::<Vec<dynamo_async_openai::types::TopLogprobs>>();
-                    if !found_selected_token {
-                        // If the selected token is not in the top logprobs, add it
-                        converted_top_lps.push(dynamo_async_openai::types::TopLogprobs {
-                            token: t.clone(),
-                            logprob: lp,
-                            bytes: None,
-                        });
-                    }
+                    let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
                     dynamo_async_openai::types::ChatCompletionTokenLogprob {
                         token: t.clone(),
                         logprob: lp,
-                        bytes: None,
-                        top_logprobs: converted_top_lps,
+                        bytes: token_to_utf8_bytes(t),
+                        top_logprobs: converted,
                     }
                 })
                 .collect()
@@ -270,7 +253,7 @@ impl DeltaGenerator {
         stop_reason: Option<dynamo_async_openai::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text,
+            content: text.map(dynamo_async_openai::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
@@ -429,11 +412,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             delta.stop_reason,
         );
 
-        // Record first token time (only succeeds on first call due to OnceLock)
-        if let Some(ref tracker) = self.tracker {
-            tracker.record_first_token();
-        }
-
         // Get worker_id info from tracker (set by KvPushRouter based on phase)
         let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
 
@@ -442,6 +420,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             .as_ref()
             .and_then(|params| params.get("token_ids"))
             .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
+        let routed_experts = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("routed_experts"))
+            .cloned();
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
@@ -453,12 +436,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None
         };
 
-        // Inject nvext if we have worker_id, token_ids, or timing
-        if worker_id_info.is_some() || token_ids.is_some() || timing_info.is_some() {
+        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        if worker_id_info.is_some()
+            || token_ids.is_some()
+            || timing_info.is_some()
+            || routed_experts.is_some()
+        {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
                 token_ids: token_ids.clone(),
+                routed_experts,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {

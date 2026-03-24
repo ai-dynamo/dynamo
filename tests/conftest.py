@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import logging
 import os
 import shutil
@@ -20,52 +21,9 @@ from tests.utils.port_utils import (
     deallocate_port,
     deallocate_ports,
 )
+from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
-
-
-def pytest_configure(config):
-    # Defining markers to avoid `<marker> not found in 'markers' configuration option`
-    # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
-    # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
-    # in pyproject.toml. If you add or remove markers there, mirror the change here.
-    markers = [
-        "pre_merge: marks tests to run before merging",
-        "post_merge: marks tests to run after merge",
-        "parallel: marks tests that can run in parallel with pytest-xdist",
-        "nightly: marks tests to run nightly",
-        "weekly: marks tests to run weekly",
-        "gpu_0: marks tests that don't require GPU",
-        "gpu_1: marks tests to run on GPU",
-        "gpu_2: marks tests to run on 2GPUs",
-        "gpu_4: marks tests to run on 4GPUs",
-        "gpu_8: marks tests to run on 8GPUs",
-        "e2e: marks tests as end-to-end tests",
-        "integration: marks tests as integration tests",
-        "unit: marks tests as unit tests",
-        "stress: marks tests as stress tests",
-        "performance: marks tests as performance tests",
-        "vllm: marks tests as requiring vllm",
-        "trtllm: marks tests as requiring trtllm",
-        "sglang: marks tests as requiring sglang",
-        "multimodal: marks tests as multimodal (image/video) tests",
-        "slow: marks tests as known to be slow",
-        "h100: marks tests to run on H100",
-        "router: marks tests for router component",
-        "planner: marks tests for planner component",
-        "kvbm: marks tests for KV behavior and model determinism",
-        "kvbm_v2: marks tests using KVBM V2",
-        "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
-        "model: model id used by a test or parameter",
-        "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
-        "k8s: marks tests as requiring Kubernetes",
-        "fault_tolerance: marks tests as fault tolerance tests",
-        "deploy: marks tests as deployment tests",
-        # Third-party plugin markers
-        "timeout: test timeout in seconds (pytest-timeout plugin)",
-    ]
-    for marker in markers:
-        config.addinivalue_line("markers", marker)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -97,6 +55,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Skip restarting NATS and etcd services before deployment. "
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
     )
+    parser.addoption(
+        "--max-vram-gib",
+        type=float,
+        default=None,
+        help="Skip tests whose @pytest.mark.max_vram_gib(N) exceeds this value (GiB).",
+    )
+    parser.addoption(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Show which tests would run vs skip based on --max-vram-gib, then exit.",
+    )
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -119,7 +89,11 @@ def set_ucx_tls_no_mm():
     #   (uct_mem.c:482: mem.memh != UCT_MEM_HANDLE_NULL) when two workers
     #   start on the same node (maybe a shared-memory segment collision/limits).
     # - Mitigation: disable UCX "mm" shared-memory transport globally for tests
-    mp.setenv("UCX_TLS", "^mm")
+    #
+    # Also exclude gdr_copy transport to prevent GDRCopy driver initialization
+    # failures (driverInitFileInfo result=11) that can abort the process when
+    # the gdrdrv kernel module is not loaded.
+    mp.setenv("UCX_TLS", "^mm,gdr_copy")
     yield
     mp.undo()
 
@@ -135,7 +109,7 @@ def download_models(model_list=None, ignore_weights=False):
         model_list = TEST_MODELS
 
     # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
     if hf_token:
         logging.info("HF_TOKEN found in environment")
     else:
@@ -147,46 +121,129 @@ def download_models(model_list=None, ignore_weights=False):
 
     try:
         from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to pre-download models for tests"
+        ) from exc
 
-        for model_id in model_list:
-            logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
-            )
-
-            try:
-                if ignore_weights:
-                    # Weight file patterns to exclude (based on hub.rs implementation)
-                    weight_patterns = [
-                        "*.bin",
-                        "*.safetensors",
-                        "*.h5",
-                        "*.msgpack",
-                        "*.ckpt.index",
-                    ]
-
-                    # Download everything except weight files
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                        ignore_patterns=weight_patterns,
-                    )
-                else:
-                    # Download the full model snapshot (includes all files)
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                    )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
-
-            except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
-                # Don't fail the fixture - let individual tests handle missing models
-
-    except ImportError:
-        logging.warning(
-            "huggingface_hub not installed. "
-            "Models will be downloaded during test execution."
+    failures = []
+    for model_id in model_list:
+        logging.info(
+            f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )
+
+        try:
+            if ignore_weights:
+                # Weight file patterns to exclude (based on hub.rs implementation)
+                weight_patterns = [
+                    "*.bin",
+                    "*.safetensors",
+                    "*.h5",
+                    "*.msgpack",
+                    "*.ckpt.index",
+                ]
+
+                # Download everything except weight files
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                    ignore_patterns=weight_patterns,
+                )
+            else:
+                # Download the full model snapshot (includes all files)
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                )
+            logging.info(f"Successfully pre-downloaded: {model_id}")
+
+        except Exception as exc:
+            logging.error(f"Failed to pre-download {model_id}: {exc}")
+            failures.append(f"{model_id}: {exc}")
+
+    if failures:
+        raise RuntimeError(
+            "Failed to pre-download required Hugging Face models:\n"
+            + "\n".join(failures)
+        )
+
+
+def _enable_offline_with_mistral_patch():
+    """Set HF_HUB_OFFLINE=1 and work around a transformers 4.57.3 regression.
+
+    transformers 4.57.3 (PR #42389) introduced _patch_mistral_regex which calls
+    huggingface_hub.model_info() unconditionally for every tokenizer load — even
+    non-Mistral models with fully cached weights. This API call fails when
+    HF_HUB_OFFLINE=1.
+
+    Since tests launch TRT-LLM workers as subprocesses that inherit env vars but
+    not in-process monkey-patches, we inject the fix via a sitecustomize.py on
+    PYTHONPATH so every subprocess auto-applies it at startup.
+
+    Upstream bug: https://github.com/huggingface/transformers/issues/44843
+
+    TODO: Remove this workaround once transformers ships a fix and TRT-LLM (or
+    any other dependency) upgrades to that fixed version.
+    """
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    # Apply the patch in this process
+    try:
+        from huggingface_hub.errors import OfflineModeIsEnabled
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+        original = PreTrainedTokenizerBase._patch_mistral_regex
+
+        @classmethod  # type: ignore[misc]
+        def _safe_patch(cls, tokenizer, *args, **kwargs):
+            try:
+                return original.__func__(cls, tokenizer, *args, **kwargs)
+            except OfflineModeIsEnabled:
+                return tokenizer
+
+        PreTrainedTokenizerBase._patch_mistral_regex = _safe_patch
+    except (ImportError, AttributeError):
+        return  # transformers version without _patch_mistral_regex — nothing to do
+
+    # Write a sitecustomize.py so subprocesses also get the patch
+    patch_dir = os.path.join(tempfile.gettempdir(), "dynamo_test_hf_patch")
+    os.makedirs(patch_dir, exist_ok=True)
+    with open(os.path.join(patch_dir, "sitecustomize.py"), "w") as f:
+        f.write(
+            "import os\n"
+            "if os.environ.get('HF_HUB_OFFLINE') == '1':\n"
+            "    try:\n"
+            "        from transformers.tokenization_utils_base import"
+            " PreTrainedTokenizerBase as _T\n"
+            "        from huggingface_hub.errors import"
+            " OfflineModeIsEnabled as _E\n"
+            "        _orig = _T._patch_mistral_regex\n"
+            "        @classmethod\n"
+            "        def _safe(cls, tokenizer, *a, **kw):\n"
+            "            try:\n"
+            "                return _orig.__func__(cls, tokenizer, *a, **kw)\n"
+            "            except _E:\n"
+            "                return tokenizer\n"
+            "        _T._patch_mistral_regex = _safe\n"
+            "    except (ImportError, AttributeError):\n"
+            "        pass\n"
+        )
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
+    logging.info(
+        "Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround "
+        "(see https://github.com/huggingface/transformers/issues/44843)"
+    )
+
+
+def _disable_offline_with_mistral_patch():
+    """Undo _enable_offline_with_mistral_patch."""
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    patch_dir = os.path.join(tempfile.gettempdir(), "dynamo_test_hf_patch")
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = pythonpath.replace(f"{patch_dir}:", "").replace(
+        patch_dir, ""
+    )
 
 
 @pytest.fixture(scope="session")
@@ -203,9 +260,9 @@ def predownload_models(pytestconfig):
         # Fallback to original behavior if extraction failed
         download_models()
 
-    os.environ["HF_HUB_OFFLINE"] = "1"
+    _enable_offline_with_mistral_patch()
     yield
-    os.environ.pop("HF_HUB_OFFLINE", None)
+    _disable_offline_with_mistral_patch()
 
 
 @pytest.fixture(scope="session")
@@ -225,17 +282,18 @@ def predownload_tokenizers(pytestconfig):
     # Skip redundant HuggingFace API calls in worker subprocesses since
     # tokenizers are already cached. This avoids flaky timeouts from slow
     # HF API responses (the RepoInfo fetch still happens even for cached models).
-    os.environ["HF_HUB_OFFLINE"] = "1"
+    _enable_offline_with_mistral_patch()
     yield
-    os.environ.pop("HF_HUB_OFFLINE", None)
+    _disable_offline_with_mistral_patch()
 
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name, "test.log.txt")
+    log_dir = resolve_test_output_path(request.node.name)
+    log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(request.node.name, ignore_errors=True)
-    os.makedirs(request.node.name, exist_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    os.makedirs(log_dir, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)
@@ -245,11 +303,105 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+def _item_has_marker(item, marker_name):
+    """Check if a test item has a marker, including module-level pytestmark."""
+    if item.get_closest_marker(marker_name):
+        return True
+    module = getattr(item, "module", None)
+    if module is not None:
+        marks = getattr(module, "pytestmark", [])
+        if not isinstance(marks, list):
+            marks = [marks]
+        if any(getattr(m, "name", "") == marker_name for m in marks):
+            return True
+    return False
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Auto-skip tests marked with a framework marker when the framework is not installed
+    framework_markers = {
+        "trtllm": "tensorrt_llm",
+        "vllm": "vllm",
+        "sglang": "sglang",
+        "kvbm": "kvbm",
+        "lmcache": "lmcache",
+    }
+    for marker_name, module_name in framework_markers.items():
+        if importlib.util.find_spec(module_name) is None:
+            skip = pytest.mark.skip(reason=f"{module_name} is not installed")
+            for item in items:
+                if _item_has_marker(item, marker_name):
+                    item.add_marker(skip)
+
+    # Skip tests that exceed --max-vram-gib
+    vram_limit = config.getoption("--max-vram-gib", default=None)
+    if vram_limit is not None:
+        skip_vram = pytest.mark.skip(
+            reason=f"requires more than {vram_limit} GiB VRAM (--max-vram-gib={vram_limit})"
+        )
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram_gib")
+            if vram_mark and vram_mark.args and vram_mark.args[0] > vram_limit:
+                item.add_marker(skip_vram)
+
+    # --dry-run: print run/skip breakdown and exit without executing tests
+    if config.getoption("--dry-run", default=False):
+        would_run = []
+        would_skip = []
+        unmarked = []
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram_gib")
+            vram_val = vram_mark.args[0] if vram_mark and vram_mark.args else None
+            name = item.nodeid.split("::", 1)[1] if "::" in item.nodeid else item.nodeid
+
+            skip_reasons = []
+            for marker in item.iter_markers("skip"):
+                reason = marker.kwargs.get("reason", "")
+                if not reason and marker.args:
+                    reason = marker.args[0]
+                skip_reasons.append(reason or "no reason given")
+
+            vram_skipped = (
+                vram_limit is not None
+                and vram_val is not None
+                and vram_val > vram_limit
+            )
+            if vram_skipped:
+                skip_reasons.insert(0, f"{vram_val} GiB > {vram_limit} GiB VRAM limit")
+
+            if skip_reasons:
+                would_skip.append((name, vram_val, skip_reasons))
+            elif vram_val is not None:
+                would_run.append((name, vram_val))
+            else:
+                unmarked.append(name)
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"--max-vram-gib={vram_limit or 'not set'}  |  {len(items)} tests selected"
+        )
+        print(f"{'=' * 60}")
+        if would_run:
+            print(f"\nWould RUN ({len(would_run)}):")
+            for name, gib in would_run:
+                print(f"  {name}  ({gib} GiB)")
+        if would_skip:
+            print(f"\nWould SKIP ({len(would_skip)}):")
+            for name, vram_val, reasons in would_skip:
+                vram_str = f"  ({vram_val} GiB)" if vram_val is not None else ""
+                print(f"  {name}{vram_str}  -- {'; '.join(reasons)}")
+        if unmarked:
+            print(f"\nNo VRAM marker — always run ({len(unmarked)}):")
+            for name in unmarked:
+                print(f"  {name}")
+        print()
+        items.clear()
+        return
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
@@ -422,14 +574,7 @@ class NatsServer(ManagedProcess):
     def stop(self):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
-        self._terminate_process_group()
-        proc = self.proc  # type: ignore[has-type]
-        if proc is not None:
-            try:
-                proc.wait(timeout=10)
-            except Exception as e:
-                _logger.warning(f"Error waiting for NATS process to stop: {e}")
-            self.proc = None
+        self._stop_started_processes()
 
     def start(self):
         """Restart a stopped NATS server with fresh state."""
@@ -593,12 +738,12 @@ class SharedNatsServer(SharedManagedProcess):
 
 
 @pytest.fixture
-def store_kv(request):
+def discovery_backend(request):
     """
-    KV store for runtime. Defaults to "etcd".
+    Discovery backend for runtime. Defaults to "etcd".
 
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
         def test_example(runtime_services):
             ...
     """
@@ -640,24 +785,24 @@ def durable_kv_events(request):
 
 
 @pytest.fixture()
-def runtime_services(request, store_kv, request_plane):
+def runtime_services(request, discovery_backend, request_plane):
     """
-    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+    Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:
             yield nats_process, None
-    elif store_kv == "etcd":
+    elif discovery_backend == "etcd":
         with EtcdServer(request) as etcd_process:
             yield None, etcd_process
     else:
@@ -665,7 +810,9 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_events):
+def runtime_services_dynamic_ports(
+    request, discovery_backend, request_plane, durable_kv_events
+):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -677,7 +824,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_
     - Each pytest-xdist worker runs tests in a separate process, so env vars do not
       leak across workers.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
     - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
@@ -689,7 +836,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
     # When durable_kv_events=False (default), disable JetStream for faster startup
-    if store_kv == "etcd":
+    if discovery_backend == "etcd":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
@@ -798,11 +945,17 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
     frontend_port = allocate_port(DefaultPort.FRONTEND.value)
     system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list]
+    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list, kv_event_port]
     try:
-        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+        yield ServicePorts(
+            frontend_port=frontend_port,
+            system_ports=system_port_list,
+            kv_event_port=kv_event_port,
+        )
     finally:
         deallocate_ports(all_ports)

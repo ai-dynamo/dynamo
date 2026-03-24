@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 set -ex
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 HEAD_NODE=0
 MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
@@ -47,13 +50,21 @@ done
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+if [[ $HEAD_NODE -eq 1 ]]; then
+    print_launch_banner --multimodal "Launching Disaggregated Multimodal Llama 4 (Multi-Node)" "$MODEL_NAME" "$HTTP_PORT"
+else
+    print_launch_banner --no-curl "Launching Disaggregated Multimodal Llama 4 (Multi-Node)" "$MODEL_NAME" "$HTTP_PORT"
+fi
+
 # Use TCP transport to avoid NATS payload limits for multimodal
 export DYN_REQUEST_PLANE=tcp
 
 # Configure model-specific args
+GPU_MEM=${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-0.80}
 MODEL_SPECIFIC_ARGS=""
 if [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
-    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80"
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization $GPU_MEM"
 fi
 
 if [[ $HEAD_NODE -eq 1 ]]; then
@@ -63,7 +74,7 @@ if [[ $HEAD_NODE -eq 1 ]]; then
 
     # run processor (CPU-only to avoid competing for GPU memory with workers)
     CUDA_VISIBLE_DEVICES="" \
-    python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME &
+    python -m dynamo.vllm --route-to-encoder --enable-multimodal --model $MODEL_NAME &
 
     # Prefill worker handles prompt processing and image encoding
     # Uses all 8 GPUs for tensor-parallel
@@ -72,7 +83,8 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
-        --is-prefill-worker \
+        --disaggregation-mode prefill \
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
         $MODEL_SPECIFIC_ARGS \
         --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' \
         "${EXTRA_ARGS[@]}" &
@@ -84,10 +96,11 @@ else
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
         $MODEL_SPECIFIC_ARGS \
         --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' \
         "${EXTRA_ARGS[@]}" &
 fi
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

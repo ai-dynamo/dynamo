@@ -1,14 +1,12 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Dynamo Feature Compatibility Matrices
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Feature Matrix
+---
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
-*Updated for Dynamo v0.9.0*
+*Updated for Dynamo v1.0.1*
 
 **Legend:**
 *   ✅ : Supported
@@ -16,20 +14,21 @@ This document provides a comprehensive compatibility matrix for key Dynamo featu
 
 ## Quick Comparison
 
-| Feature | vLLM | TensorRT-LLM | SGLang | Source |
+| Feature | SGLang | TensorRT-LLM | vLLM | Source |
 | :--- | :---: | :---: | :---: | :--- |
 | **Disaggregated Serving** | ✅ | ✅ | ✅ | [Design Doc][disagg] |
 | **KV-Aware Routing** | ✅ | ✅ | ✅ | [Router Doc][kv-routing] |
 | **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
-| **KV Block Manager** | ✅ | ✅ | 🚧 | [KVBM Doc][kvbm] |
+| **KV Block Manager** | 🚧 | ✅ | ✅ | [KVBM Doc][kvbm] |
 | **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
-| **Multimodal (Video)** | ✅ | | | [Multimodal Doc][mm] |
-| **Multimodal (Audio)** | 🚧 | | | [Multimodal Doc][mm] |
+| **Multimodal (Video)** | | | ✅ | [Multimodal Doc][mm] |
+| **Multimodal (Audio)** | | | 🚧 | [Multimodal Doc][mm] |
 | **Request Migration** | ✅ | 🚧 | ✅ | [Migration Doc][migration] |
-| **Request Cancellation** | ✅ | ✅ | 🚧 | Backend READMEs |
-| **LoRA** | ✅ | | | [K8s Guide][lora] |
+| **Request Cancellation** | 🚧 | ✅ | ✅ | Backend READMEs |
+| **LoRA** | | | ✅ | [K8s Guide][lora] |
 | **Tool Calling** | ✅ | ✅ | ✅ | [Tool Calling Doc][tools] |
-| **Speculative Decoding** | ✅ | ✅ | 🚧 | Backend READMEs |
+| **Speculative Decoding** | 🚧 | ✅ | ✅ | Backend READMEs |
+| **Dynamo Snapshot** | ✅ | | ✅ | [Snapshot Docs][snapshot] |
 
 ## 1. vLLM Backend
 
@@ -108,28 +107,30 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 ---
 
-## Source References
 
-<!-- Backend READMEs -->
-[vllm-readme]: docs/backends/vllm/README.md
-[sglang-readme]: docs/backends/sglang/README.md
-[trtllm-readme]: docs/backends/trtllm/README.md
+{/* Backend READMEs — paths relative to rendered URL /resources/feature-matrix */}
+[vllm-readme]: ../backends/v-llm
+[sglang-readme]: ../backends/sg-lang
+[trtllm-readme]: ../backends/tensor-rt-llm
 
-<!-- Design Docs -->
-[disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/components/router/router_guide.md
-[planner]: docs/components/planner/README.md
-[kvbm]: docs/components/kvbm/README.md
-[migration]: docs/fault_tolerance/request_migration.md
-[tools]: docs/agents/tool-calling.md
+{/* Design Docs */}
+[disagg]: ../design-docs/disaggregated-serving
+[kv-routing]: ../components/router/router-guide
+[planner]: ../components/planner
+[kvbm]: ../components/kvbm
+[migration]: ../user-guides/fault-tolerance/request-migration
+[tools]: ../user-guides/tool-calling
 
-<!-- Multimodal -->
-[mm]: docs/features/multimodal/README.md
-[mm-vllm]: docs/features/multimodal/multimodal_vllm.md
-[mm-trtllm]: docs/features/multimodal/multimodal_trtllm.md
-[mm-sglang]: docs/features/multimodal/multimodal_sglang.md
+{/* Multimodal */}
+[mm]: ../features/multimodal/README.md
+[mm-vllm]: ../features/multimodal/multimodal-vllm.md
+[mm-trtllm]: ../features/multimodal/multimodal-trtllm.md
+[mm-sglang]: ../features/multimodal/multimodal-sglang.md
 
-<!-- Feature-specific -->
-[lora]: docs/kubernetes/deployment/dynamomodel-guide.md
-[vllm-spec]: docs/features/speculative_decoding/speculative_decoding_vllm.md
-[trtllm-eagle]: docs/backends/trtllm/llama4_plus_eagle.md
+{/* Feature-specific */}
+[lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
+[vllm-spec]: ../additional-resources/speculative-decoding/speculative-decoding-with-v-llm
+[trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle
+
+{/* Dynamo Snapshot */}
+[snapshot]: ../kubernetes-deployment/deployment-guide/snapshot

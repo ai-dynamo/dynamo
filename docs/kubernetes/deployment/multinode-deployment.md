@@ -1,4 +1,8 @@
-# Multinode Deployment Guide
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Multinode Deployments
+---
 
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
 
@@ -34,6 +38,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Multi-level horizontal auto-scaling
 - Custom startup ordering for components
 - Resource-aware rolling updates
+- [Topology Aware Scheduling](../topology-aware-scheduling.md) — pack pods within a rack, block, or other topology domain for lower latency
 
 
 [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is a Kubernetes native scheduler optimized for AI workloads at large scale.
@@ -206,7 +211,9 @@ The operator uses Ray for multi-node tensor/pipeline parallel deployments. Ray p
 - **Behavior**: Joins Ray cluster and blocks; vLLM on leader spawns Ray actors to these workers
 - **Probes**: All probes (liveness, readiness, startup) are automatically removed
 
-> **Note**: vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
+<Note>
+vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
+</Note>
 
 **2. Data Parallel Mode (Multiple model instances across nodes)**
 - **When used**: When `world_size × data_parallel_size > GPUs_per_node`
@@ -282,8 +289,7 @@ For TensorRT-LLM multinode deployments, the operator configures MPI-based commun
 #### Additional Configuration
 - **Environment Variable**: `OMPI_MCA_orte_keep_fqdn_hostnames=1` is added to all nodes
 - **SSH Volume**: Automatically mounts the SSH keypair secret (typically named `mpirun-ssh-key-<deployment-name>`)
-
-**Important:** TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
+- **Automatic SSH key generation**: The operator automatically generates the SSH keypair secret when it detects a multi-node `DynamoGraphDeployment`. No manual secret creation is required.
 
 ### Compilation Cache Configuration
 
@@ -301,14 +307,8 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/)
-- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/)
-- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/)
+- **SGLang**: [examples/backends/sglang/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)
+- **vLLM**: [examples/backends/vllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.
-
-```{toctree}
-:hidden:
-
-Grove <../grove>
-```

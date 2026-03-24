@@ -1,8 +1,8 @@
 ---
-orphan: true
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Templates
 ---
-
-# Documentation Templates
 
 Templates for creating consistent Dynamo documentation.
 
@@ -30,7 +30,7 @@ Templates for creating consistent Dynamo documentation.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Backends (vLLM, SGLang, TRT-LLM)
+### Backends (SGLang, TRT-LLM, vLLM)
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -65,9 +65,9 @@ Templates for creating consistent Dynamo documentation.
 ┌─────────────────────────────────────────────────────┐
 │ Tier 2: docs/features/<feature>/                    │ ← User docs
 │   • README.md ← feature_readme.md                   │
-│   • <feature>_vllm.md ← feature_backend.md          │
 │   • <feature>_sglang.md ← feature_backend.md        │
 │   • <feature>_trtllm.md ← feature_backend.md        │
+│   • <feature>_vllm.md ← feature_backend.md          │
 └─────────────────────┬───────────────────────────────┘
                       ▼
 ┌─────────────────────────────────────────────────────┐
@@ -142,9 +142,9 @@ Templates for creating consistent Dynamo documentation.
 
 | Tier | Purpose | Audience | Location |
 |------|---------|----------|----------|
-| **Tier 1** | Redirect stub (5 lines) | Developers browsing code | `components/src/dynamo/<name>/README.md` |
-| **Tier 2** | User documentation | Users, operators | `docs/<category>/<name>/` (e.g., `docs/components/router/`) |
-| **Tier 3** | Design documentation | Contributors | `docs/design_docs/<name>_design.md` |
+| **Tier 1** | Redirect stub (5 lines) | Developers browsing code | `components/src/dynamo/`\<name>`/README.md` |
+| **Tier 2** | User documentation | Users, operators | `docs/`\<category>`/`\<name>`/` (e.g., `docs/components/router/`) |
+| **Tier 3** | Design documentation | Contributors | `docs/design_docs/`\<name>`_design.md` |
 
 ## Template Selection
 
@@ -165,7 +165,7 @@ Templates for creating consistent Dynamo documentation.
 2. Create the directory structure shown above
 3. Copy templates to the correct locations with correct filenames
 4. Replace all `<placeholders>` with actual values
-5. Replace `<!-- comments -->` with actual content
+5. Replace `{/* comments */}` with actual content
 6. Remove sections that don't apply
 
 ## Updating Navigation
@@ -175,4 +175,4 @@ After adding new documentation:
 1. **Sphinx (current):** Update `docs/index.rst` or the appropriate `_sections/*.rst` file to include your new docs in the navigation
 2. **Fern (future):** Update `fern/docs.yml` with your new pages
 
-See [docs/README.md](../README.md) for documentation build instructions.
+See [docs/README.md](../../README.md) for documentation build instructions.

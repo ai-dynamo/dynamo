@@ -21,13 +21,16 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -157,7 +160,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -181,7 +184,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-removed",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -230,7 +233,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -342,6 +345,314 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 	}
 }
 
+func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-worker-checkpoint",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "keep-existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(existing).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+	}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: string(commonconsts.ComponentTypeWorker),
+		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    v1alpha1.CheckpointModeAuto,
+			Identity: &v1alpha1.DynamoCheckpointIdentity{
+				Model:                identity.Model,
+				BackendFramework:     identity.BackendFramework,
+				TensorParallelSize:   1,
+				PipelineParallelSize: 1,
+				ExtraParameters:      map[string]string{},
+			},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Name:  "main",
+				Image: "new-writer:latest",
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	if err != nil {
+		t.Fatalf("createCheckpointCR() error = %v", err)
+	}
+	if ckpt.Name != "existing-worker-checkpoint" {
+		t.Fatalf("createCheckpointCR() returned checkpoint %s, want existing-worker-checkpoint", ckpt.Name)
+	}
+
+	updated := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "existing-worker-checkpoint", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+	if len(updated.Spec.Job.PodTemplateSpec.Spec.Containers) != 1 {
+		t.Fatalf("expected one job container, got %d", len(updated.Spec.Job.PodTemplateSpec.Spec.Containers))
+	}
+	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
+		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "friendly-checkpoint",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "keep-existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeAuto,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	}
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info, ok := checkpointInfos["worker"]
+	if !ok {
+		t.Fatalf("expected checkpoint info for worker service")
+	}
+	if info.Ready {
+		t.Fatalf("expected referenced checkpoint to remain not ready")
+	}
+	if !info.Exists {
+		t.Fatalf("expected referenced checkpoint to exist")
+	}
+	if info.Hash != hash {
+		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	}
+	if checkpointStatuses["worker"].CheckpointName != "friendly-checkpoint" {
+		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	}
+
+	checkpoints := &v1alpha1.DynamoCheckpointList{}
+	if err := reconciler.List(ctx, checkpoints, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list checkpoints: %v", err)
+	}
+	if len(checkpoints.Items) != 1 {
+		t.Fatalf("expected only the referenced checkpoint to exist, found %d", len(checkpoints.Items))
+	}
+	if checkpoints.Items[0].Name != "friendly-checkpoint" {
+		t.Fatalf("unexpected checkpoint %s", checkpoints.Items[0].Name)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-worker-checkpoint",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "keep-existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(existing).
+			WithStatusSubresource(existing).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled: true,
+						Mode:    v1alpha1.CheckpointModeAuto,
+						Identity: &v1alpha1.DynamoCheckpointIdentity{
+							Model:            identity.Model,
+							BackendFramework: identity.BackendFramework,
+						},
+					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Name:  "main",
+							Image: "new-writer:latest",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info, ok := checkpointInfos["worker"]
+	if !ok {
+		t.Fatalf("expected checkpoint info for worker service")
+	}
+	if info.Ready {
+		t.Fatalf("expected existing checkpoint to remain not ready")
+	}
+	if !info.Exists {
+		t.Fatalf("expected existing checkpoint to be detected")
+	}
+	if info.Hash != hash {
+		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	}
+	if checkpointStatuses["worker"].CheckpointName != "existing-worker-checkpoint" {
+		t.Fatalf("checkpoint status name = %s, want existing-worker-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	}
+
+	updated := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "existing-worker-checkpoint", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+	if len(updated.Spec.Job.PodTemplateSpec.Spec.Containers) != 1 {
+		t.Fatalf("expected one job container, got %d", len(updated.Spec.Job.PodTemplateSpec.Spec.Containers))
+	}
+	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
+		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
+	}
+}
+
 // mockScaleClient implements scale.ScalesGetter for testing
 type mockScaleClient struct{}
 
@@ -405,13 +716,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        2,
 						UpdatedReplicas: 2,
 						ReadyReplicas:   ptr.To(int32(2)),
@@ -467,13 +779,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -481,6 +794,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"decode": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-decode",
+						ComponentNames:  []string{"test-dgd-0-decode"},
 						Replicas:        2,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -542,13 +856,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-decode",
+						ComponentNames:    []string{"test-dgd-0-decode"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -556,6 +871,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-prefill",
+						ComponentNames:    []string{"test-dgd-0-prefill"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -614,13 +930,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -628,6 +945,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"aggregated": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-aggregated",
+						ComponentNames:    []string{"test-dgd-0-aggregated"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -667,10 +985,11 @@ func Test_reconcileGroveResources(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				ScaleClient: &mockScaleClient{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1336,6 +1655,114 @@ func Test_computeRestartStatus(t *testing.T) {
 				InProgress: []string{"frontend"}, // Reset to FIRST service
 			},
 		},
+		{
+			name: "rolling update in progress + new restart request - superseded",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhaseInProgress,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "rolling update pending + restart already in progress - superseded",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhasePending,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "rolling update completed + restart request - normal processing",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhaseCompleted,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "restart already processed as superseded - returns existing status",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseSuperseded,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "no restart requested but has superseded status - preserves status",
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseSuperseded,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: oldID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1371,10 +1798,9 @@ func Test_computeRestartStatus(t *testing.T) {
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
-				Config: controller_common.Config{
-					Grove: controller_common.GroveConfig{
-						Enabled: tt.groveEnabled,
-					},
+				Config:   &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{
+					GroveEnabled: tt.groveEnabled,
 				},
 			}
 
@@ -1445,7 +1871,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1505,7 +1931,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1577,7 +2003,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode",
+						Name:      "test-dgd-decode-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1596,7 +2022,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-deployment",
+							ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
@@ -1606,7 +2032,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill",
+						Name:      "test-dgd-prefill-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1625,7 +2051,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-prefill-deployment",
+							ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -1635,7 +2061,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1649,7 +2075,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-deployment",
+						ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
@@ -1657,7 +2083,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-prefill-deployment",
+						ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -1723,7 +2149,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode",
+						Name:      "test-dgd-decode-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1742,7 +2168,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-deployment",
+							ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1752,7 +2178,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill",
+						Name:      "test-dgd-prefill-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1771,7 +2197,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-prefill-deployment",
+							ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -1781,9 +2207,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-e1f2a6fe: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
@@ -1795,7 +2221,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-deployment",
+						ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -1803,7 +2229,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-prefill-deployment",
+						ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -1863,7 +2289,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode",
+						Name:      "test-dgd-decode-5f3d46ba",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1882,7 +2308,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-deployment",
+							ComponentName:     "test-dgd-decode-5f3d46ba-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1892,9 +2318,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
@@ -1906,7 +2332,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-deployment",
+						ComponentName:     "test-dgd-decode-5f3d46ba-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -1945,15 +2371,243 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   controller_common.Config{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
 			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+		})
+	}
+}
+
+func TestPropagateTopologyCondition(t *testing.T) {
+	tests := []struct {
+		name           string
+		dgd            *v1alpha1.DynamoGraphDeployment
+		pcs            *grovev1alpha1.PodCliqueSet
+		groveEnabled   bool
+		wantCondition  bool
+		wantStatus     metav1.ConditionStatus
+		wantReason     string
+		wantEventCount int
+	}{
+		{
+			name: "no topology constraints - no condition added",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+				},
+			},
+			groveEnabled:  true,
+			wantCondition: false,
+		},
+		{
+			name: "topology set but Grove not enabled - no condition added",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test", Namespace: "default",
+					Annotations: map[string]string{commonconsts.KubeAnnotationEnableGrove: "false"},
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+				},
+			},
+			groveEnabled:  false,
+			wantCondition: false,
+		},
+		{
+			name: "topology set, PCS has no topology condition - unknown",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status:     grovev1alpha1.PodCliqueSetStatus{},
+			},
+			groveEnabled:  true,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionUnknown,
+			wantReason:    v1alpha1.ConditionReasonTopologyConditionPending,
+		},
+		{
+			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyLevelsUnavailable",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+							Status:  metav1.ConditionTrue,
+							Reason:  groveconstants.ConditionReasonTopologyLevelsUnavailable,
+							Message: "Topology level 'rack' is no longer available",
+						},
+					},
+				},
+			},
+			groveEnabled:   true,
+			wantCondition:  true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     v1alpha1.ConditionReasonTopologyLevelsUnavailable,
+			wantEventCount: 1,
+		},
+		{
+			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyNotFound",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+							Status:  metav1.ConditionTrue,
+							Reason:  groveconstants.ConditionReasonClusterTopologyNotFound,
+							Message: "ClusterTopology 'default' not found",
+						},
+					},
+				},
+			},
+			groveEnabled:   true,
+			wantCondition:  true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     v1alpha1.ConditionReasonTopologyDefinitionNotFound,
+			wantEventCount: 1,
+		},
+		{
+			name: "PCS reports TopologyLevelsUnavailable=False - all levels available",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+							Status:  metav1.ConditionFalse,
+							Reason:  groveconstants.ConditionReasonAllTopologyLevelsAvailable,
+							Message: "All topology levels available",
+						},
+					},
+				},
+			},
+			groveEnabled:  true,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+		},
+		{
+			name: "service-only topology constraint triggers condition propagation",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology"},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomain("rack")},
+						},
+					},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status:     grovev1alpha1.PodCliqueSetStatus{},
+			},
+			groveEnabled:  true,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionUnknown,
+			wantReason:    v1alpha1.ConditionReasonTopologyConditionPending,
+		},
+		{
+			name: "PCS not found yet - no condition added",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
+				},
+			},
+			pcs:           nil,
+			groveEnabled:  true,
+			wantCondition: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = grovev1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			objs := []client.Object{}
+			if tt.pcs != nil {
+				objs = append(objs, tt.pcs)
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+			recorder := record.NewFakeRecorder(10)
+
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:   fakeClient,
+				Recorder: recorder,
+				RuntimeConfig: &controller_common.RuntimeConfig{
+					GroveEnabled: tt.groveEnabled,
+				},
+			}
+
+			ctx := context.Background()
+			reconciler.propagateTopologyCondition(ctx, tt.dgd)
+
+			var topoCond *metav1.Condition
+			for i := range tt.dgd.Status.Conditions {
+				if tt.dgd.Status.Conditions[i].Type == v1alpha1.ConditionTypeTopologyLevelsAvailable {
+					topoCond = &tt.dgd.Status.Conditions[i]
+					break
+				}
+			}
+
+			if !tt.wantCondition {
+				g.Expect(topoCond).To(gomega.BeNil(), "expected no TopologyLevelsAvailable condition")
+				return
+			}
+
+			g.Expect(topoCond).NotTo(gomega.BeNil(), "expected TopologyLevelsAvailable condition to be set")
+			g.Expect(topoCond.Status).To(gomega.Equal(tt.wantStatus))
+			g.Expect(topoCond.Reason).To(gomega.Equal(tt.wantReason))
+
+			close(recorder.Events)
+			eventCount := 0
+			for range recorder.Events {
+				eventCount++
+			}
+			g.Expect(eventCount).To(gomega.Equal(tt.wantEventCount))
 		})
 	}
 }

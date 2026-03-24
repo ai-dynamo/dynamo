@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Set deterministic hash for KV event IDs
 export PYTHONHASHSEED=0
 
@@ -16,13 +19,17 @@ PT_HPU_LAZY_MODE=0
 NIXL_BUFFER_DEVICE=cpu
 VLLM_NIXL_BACKEND=UCX
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+
+print_launch_banner "Launching Disaggregated + KV Routing on Gaudi (4 HPUs)" "$MODEL" "$HTTP_PORT"
+
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # edit --router-mode to random / round-robin / kv
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
+    --http-port "$HTTP_PORT" \
     --router-reset-states &
 
 # two decode workers
@@ -32,27 +39,24 @@ HABANA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
-    --connector none \
-    --is-decode-worker &
+    --disaggregation-mode decode &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 HABANA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
-    --connector none \
-    --is-decode-worker &
+    --disaggregation-mode decode &
 
 # two prefill workers
-# When registered with --is-prefill-worker, these workers are automatically detected
+# When registered with --disaggregation-mode prefill, these workers are automatically detected
 # by the frontend, which activates an internal prefill router for KV-aware prefill routing
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 HABANA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
-    --connector none \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558", "enable_kv_cache_events":true}'&
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
@@ -60,6 +64,8 @@ HABANA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
-    --connector none \
-    --is-prefill-worker \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559", "enable_kv_cache_events":true}'
+    --disaggregation-mode prefill \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559", "enable_kv_cache_events":true}' &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

@@ -9,6 +9,25 @@ inputs:
   namespace:
     description: 'Kubernetes namespace for deployment'
     required: true
+  registry:
+    description: 'Container registry hostname'
+    required: true
+  operator_tag:
+    description: 'Operator image tag (default: main-operator)'
+    required: false
+    default: 'main-operator'
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+  dockerhub_username:
+    description: 'Docker Hub username for image pull secrets. Required for rerun self-bootstrap if private images are used.'
+    required: false
+    default: ''
+  dockerhub_password:
+    description: 'Docker Hub password for image pull secrets. Required for rerun self-bootstrap if private images are used.'
+    required: false
+    default: ''
 
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
@@ -30,13 +49,16 @@ runs:
     - name: Setup Kubeconfig
       id: setup-kubeconfig
       shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
       run: |
+        set +x
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
 
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-        kubectl config set-context --current --namespace=${{ inputs.namespace }}
+        kubectl config set-context --current --namespace=${NAMESPACE}
         kubectl config get-contexts
 
     - name: Set up Python
@@ -73,12 +95,13 @@ runs:
           --log-cli-level=INFO
 
     - name: Cleanup Deployment
-      if: always() && inputs.skip_cleanup != 'true'
+      if: always()
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
+        echo "::group::Cleanup Deployment"
         set -x
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
 
@@ -93,8 +116,13 @@ runs:
               kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
           done || true
 
-        echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
-        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s || true
+        if kubectl get dynamographdeployments "${GRAPH_NAME}" -n $NAMESPACE &>/dev/null; then
+          echo "DGD ${GRAPH_NAME} still exists after test, deleting..."
+          kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s
+        else
+          echo "DGD ${GRAPH_NAME} already cleaned up by test"
+        fi
+        echo "::endgroup::"
 
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6

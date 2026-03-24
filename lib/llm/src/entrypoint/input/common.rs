@@ -9,9 +9,12 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
+    namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -82,8 +85,14 @@ pub async fn prepare_engine(
                 )
                 .await?;
             let inner_watch_obj = watch_obj.clone();
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                local_model.namespace(),
+                local_model.namespace_prefix(),
+            );
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(discovery_stream, None).await;
+                inner_watch_obj
+                    .watch(discovery_stream, namespace_filter)
+                    .await;
             });
             tracing::info!("Waiting for remote model..");
 
@@ -122,7 +131,7 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer_hf()?)
+            >(model.card(), inner_engine, model.card().tokenizer()?)
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -141,7 +150,7 @@ pub async fn prepare_engine(
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -156,9 +165,9 @@ where
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
             .into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
     Ok(frontend
@@ -178,7 +187,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
@@ -197,7 +206,7 @@ where
     let PromptFormatter::OAI(formatter) =
         PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
             .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
@@ -207,7 +216,7 @@ where
         worker_monitor,
         chooser,
         preprocessor,
-        hf_tokenizer,
+        tokenizer,
         prefill_chooser,
         enforce_disagg,
         migration_limit,
@@ -225,7 +234,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
@@ -243,7 +252,7 @@ where
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
@@ -273,19 +282,24 @@ where
         )
         .await?;
 
+    // Eagerly register router request metrics so they appear as zeros even in
+    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
+    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
+    // OnceLock), which covers the standalone router path as well.
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
     let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-            // Non-KV routing: use PushRouter directly.
-            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
-            // available in KV routing mode where the router has actual bookkeeping.
+        RouterMode::Direct => {
+            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
+        }
+        RouterMode::Random | RouterMode::RoundRobin => {
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
-            ServiceBackend::from_engine(Arc::new(kv_push_router))
+            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
         }
     };
 

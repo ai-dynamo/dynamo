@@ -16,6 +16,11 @@ from tests.utils.payloads import check_models_api, completions_response_handler
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.vllm,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
@@ -38,6 +43,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # TODO: Replace hardcoded port with allocate_ports() for xdist-safe parallel execution
         env["DYN_SYSTEM_PORT"] = "9345"
 
         # TODO: Have the managed process take a command name explicitly to distinguish
@@ -123,7 +129,6 @@ def send_completion_request(
         raise
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -181,7 +186,6 @@ def test_vllm_health_check_active(request, runtime_services):
                 )
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)

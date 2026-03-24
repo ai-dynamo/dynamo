@@ -33,9 +33,6 @@ use super::{
 };
 use ingress::push_handler::WorkHandlerMetrics;
 
-// Define stream error message constant
-pub const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-
 // Add Prometheus metrics types
 use crate::metrics::MetricsHierarchy;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
@@ -166,8 +163,12 @@ impl StreamSender {
 
     #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        if let Some(prologue) = self.prologue.take() {
-            let prologue = ResponseStreamPrologue { error, ..prologue };
+        // leaving the original logic in place for now
+        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
+        // so the second argument can never be used, and the value of error passed by the caller would always be used
+        if let Some(_prologue) = self.prologue.take() {
+            // let prologue = ResponseStreamPrologue { error, ..prologue };
+            let prologue = ResponseStreamPrologue { error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
                 Err(err) => {
@@ -277,6 +278,11 @@ struct RequestControlMessage {
     request_type: RequestType,
     response_type: ResponseType,
     connection_info: ConnectionInfo,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frontend_send_ts_ns: Option<u64>,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
@@ -308,6 +314,11 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     ) -> Result<()> {
         let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
+
+        // Register global transport breakdown metrics (idempotent)
+        crate::metrics::work_handler_perf::ensure_work_handler_perf_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
 
         self.metrics
             .set(Arc::new(metrics))

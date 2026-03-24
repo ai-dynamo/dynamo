@@ -18,6 +18,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -69,6 +71,7 @@ type Autoscaling struct {
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.disabled) && self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
 type SharedMemorySpec struct {
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
@@ -124,6 +127,34 @@ type ExtraPodSpec struct {
 	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
 }
 
+// MarshalJSON implements json.Marshaler for ExtraPodSpec.
+//
+// corev1.PodSpec.Containers is declared without omitempty, so a nil slice
+// serializes as "containers": null.  The CRD structural schema defines
+// containers as type: array and rejects null.  This custom marshaller shadows
+// the Containers field with an omitempty-tagged copy so that nil/empty
+// Containers are omitted from the JSON output entirely.
+func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
+	// Type alias strips methods from corev1.PodSpec, preventing infinite
+	// recursion through any MarshalJSON defined on PodSpec.
+	type PodSpecAlias corev1.PodSpec
+
+	aux := struct {
+		*PodSpecAlias `json:",inline"`
+		Containers    []corev1.Container `json:"containers,omitempty"`
+		MainContainer *corev1.Container  `json:"mainContainer,omitempty"`
+	}{}
+
+	if e.PodSpec != nil {
+		a := PodSpecAlias(*e.PodSpec)
+		aux.PodSpecAlias = &a
+		aux.Containers = e.PodSpec.Containers
+	}
+	aux.MainContainer = e.MainContainer
+
+	return json.Marshal(aux)
+}
+
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
@@ -162,8 +193,8 @@ type ServiceCheckpointConfig struct {
 	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
 
-	// CheckpointRef references an existing Checkpoint CR to use
-	// If specified, Identity is ignored and this checkpoint is used directly
+	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
+	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 

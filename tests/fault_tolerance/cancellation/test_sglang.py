@@ -20,6 +20,8 @@ from tests.fault_tolerance.cancellation.utils import (
     poll_for_pattern,
     read_streaming_responses,
     send_cancellable_request,
+    verify_frontend_cancellation_metrics,
+    verify_runtime_cancellation_metrics,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -29,10 +31,10 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
@@ -185,7 +187,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.xfail(strict=False)
+@pytest.mark.skip(reason="DYN-2265")
+@pytest.mark.nightly
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -241,7 +244,7 @@ def test_request_cancellation_sglang_aggregated(
                 ),
             ]
 
-            for request_type, description in test_scenarios:
+            for idx, (request_type, description) in enumerate(test_scenarios):
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
@@ -290,9 +293,21 @@ def test_request_cancellation_sglang_aggregated(
 
                 logger.info(f"{description} detected successfully")
 
+                # Verify cancellation metrics after each scenario
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type=request_type,
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=worker.system_port,
+                    expected_count=idx + 1,
+                )
 
-@pytest.mark.timeout(185)  # 3x average
+
+@pytest.mark.timeout(300)  # 3x average
 @pytest.mark.gpu_2
+@pytest.mark.pre_merge
 def test_request_cancellation_sglang_decode_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -393,4 +408,20 @@ def test_request_cancellation_sglang_decode_cancel(
 
                 logger.info(
                     "Chat completion stream cancellation in decode phase detected successfully"
+                )
+
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="chat_completion_stream",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
                 )

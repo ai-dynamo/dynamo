@@ -31,12 +31,7 @@ async def worker(runtime: DistributedRuntime):
     - `frontend` call `middle` which calls `backend`
     - each component transforms the request before passing it to the backend
     """
-    pipeline = (
-        await runtime.namespace("examples/pipeline")
-        .component("frontend")
-        .endpoint("generate")
-        .client()
-    )
+    pipeline = await runtime.endpoint("examples/pipeline.frontend.generate").client()
 
     async for char in await pipeline.round_robin("hello from"):
         print(char)
