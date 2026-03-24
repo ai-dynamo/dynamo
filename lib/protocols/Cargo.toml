@@ -40,6 +40,12 @@ uuid = { workspace = true }
 derive_builder = { workspace = true }
 bytes = { workspace = true }
 
+async-openai = { version = "0.34", default-features = false, features = [
+    "chat-completion-types",
+    "response-types",
+    "completion-types",
+    "embedding-types",
+] }
 eventsource-stream = "0.2.3"
 async-openai-macros = "0.1.0"
 backoff = { version = "0.4.0", features = ["tokio"] }

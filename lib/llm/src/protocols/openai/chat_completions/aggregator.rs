@@ -75,11 +75,10 @@ fn convert_tool_chunk_to_message_tool_call(
     chunk: &dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
 ) -> Option<dynamo_protocols::types::ChatCompletionMessageToolCall> {
     // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
-    if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
+    if let (Some(id), Some(function)) = (&chunk.id, &chunk.function) {
         if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
             Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
                 id: id.clone(),
-                r#type: r#type.clone(),
                 function: dynamo_protocols::types::FunctionCall {
                     name: name.clone(),
                     arguments: arguments.clone(),
@@ -405,7 +404,7 @@ mod tests {
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
-                    r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                    r#type: Some(dynamo_protocols::types::FunctionType::Function),
                     function: Some(dynamo_protocols::types::FunctionCallStream {
                         name: tool_calls["name"].as_str().map(|s| s.to_string()),
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),

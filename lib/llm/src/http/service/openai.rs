@@ -3024,8 +3024,7 @@ mod tests {
 
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-        ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
-        FunctionCallStream,
+        CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, FunctionType,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -3178,7 +3177,7 @@ mod tests {
         let tool_call = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: id.map(|s| s.to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: name.map(|s| s.to_string()),
                 arguments: arguments.map(|s| s.to_string()),
@@ -3271,7 +3270,7 @@ mod tests {
         let tc1 = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_1".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
@@ -3280,7 +3279,7 @@ mod tests {
         let tc2 = ChatCompletionMessageToolCallChunk {
             index: 1,
             id: Some("call_2".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_time".to_string()),
                 arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
@@ -3343,7 +3342,7 @@ mod tests {
         let complete = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_complete".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
@@ -3352,7 +3351,7 @@ mod tests {
         let incomplete = ChatCompletionMessageToolCallChunk {
             index: 1,
             id: Some("call_partial".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("search".to_string()),
                 arguments: None, // still streaming
@@ -3392,7 +3391,7 @@ mod tests {
         let tool_call = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_999".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: None,
         };
         #[allow(deprecated)]

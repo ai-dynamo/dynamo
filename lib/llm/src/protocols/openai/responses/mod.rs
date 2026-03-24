@@ -317,7 +317,6 @@ fn convert_input_items_to_messages(
                             audio: None,
                             tool_calls: Some(vec![ChatCompletionMessageToolCall {
                                 id: fc.call_id.clone(),
-                                r#type: ChatCompletionToolType::Function,
                                 function: dynamo_protocols::types::FunctionCall {
                                     name: fc.name.clone(),
                                     arguments: fc.arguments.clone(),
@@ -1227,7 +1226,6 @@ mod tests {
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionMessageToolCall {
                             id: "call_abc".into(),
-                            r#type: ChatCompletionToolType::Function,
                             function: dynamo_protocols::types::FunctionCall {
                                 name: "get_weather".into(),
                                 arguments: r#"{"location":"SF"}"#.into(),

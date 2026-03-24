@@ -656,7 +656,7 @@ mod tests {
     use super::*;
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
+        ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
     };
 
     fn default_params() -> ResponseParams {
@@ -695,7 +695,7 @@ mod tests {
                         tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
                             index: tc_index,
                             id: id.map(String::from),
-                            r#type: Some(ChatCompletionToolType::Function),
+                            r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
                                 name: name.map(String::from),
                                 arguments: args.map(String::from),

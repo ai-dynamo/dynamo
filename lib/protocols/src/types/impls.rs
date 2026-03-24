@@ -125,15 +125,8 @@ macro_rules! impl_from {
     };
 }
 
-// From String "family" to Prompt
-impl_from!(&str, Prompt);
-impl_from!(String, Prompt);
-impl_from!(&String, Prompt);
-
-// From String "family" to Stop
-impl_from!(&str, Stop);
-impl_from!(String, Stop);
-impl_from!(&String, Stop);
+// Prompt and Stop are now re-exported from upstream async-openai.
+// Convenience From impls are provided by upstream.
 
 // From String "family" to ModerationInput
 impl_from!(&str, ModerationInput);
@@ -156,7 +149,7 @@ macro_rules! impl_default {
     };
 }
 
-impl_default!(Prompt);
+// Prompt is now from upstream -- Default provided there.
 impl_default!(ModerationInput);
 impl_default!(EmbeddingInput);
 
@@ -293,21 +286,21 @@ impl Display for TimestampGranularity {
     }
 }
 
-impl Display for Role {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Role::User => "user",
-                Role::System => "system",
-                Role::Assistant => "assistant",
-                Role::Function => "function",
-                Role::Tool => "tool",
-            }
-        )
-    }
-}
+// UPSTREAM: impl Display for Role {
+// UPSTREAM:     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+// UPSTREAM:         write!(
+// UPSTREAM:             f,
+// UPSTREAM:             "{}",
+// UPSTREAM:             match self {
+// UPSTREAM:                 Role::User => "user",
+// UPSTREAM:                 Role::System => "system",
+// UPSTREAM:                 Role::Assistant => "assistant",
+// UPSTREAM:                 Role::Function => "function",
+// UPSTREAM:                 Role::Tool => "tool",
+// UPSTREAM:             }
+// UPSTREAM:         )
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl Display for FilePurpose {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -418,7 +411,8 @@ macro_rules! impl_from_for_integer_array {
 }
 
 impl_from_for_integer_array!(u32, EmbeddingInput);
-impl_from_for_integer_array!(u32, Prompt);
+// Prompt is from upstream -- impls provided there.
+// impl_from_for_integer_array!(u32, Prompt);
 
 macro_rules! impl_from_for_array_of_integer_array {
     ($from_typ:ty, $to_typ:ty) => {
@@ -515,17 +509,17 @@ macro_rules! impl_from_for_array_of_integer_array {
 }
 
 impl_from_for_array_of_integer_array!(u32, EmbeddingInput);
-impl_from_for_array_of_integer_array!(u32, Prompt);
+// impl_from_for_array_of_integer_array!(u32, Prompt);
 
-impl From<&str> for ChatCompletionFunctionCall {
-    fn from(value: &str) -> Self {
-        match value {
-            "auto" => Self::Auto,
-            "none" => Self::None,
-            _ => Self::Function { name: value.into() },
-        }
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionFunctionCall {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         match value {
+// UPSTREAM:             "auto" => Self::Auto,
+// UPSTREAM:             "none" => Self::None,
+// UPSTREAM:             _ => Self::Function { name: value.into() },
+// UPSTREAM:         }
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl From<&str> for FunctionName {
     fn from(value: &str) -> Self {
@@ -577,15 +571,15 @@ impl From<String> for ChatCompletionToolChoiceOption {
     }
 }
 
-impl From<(String, serde_json::Value)> for ChatCompletionFunctions {
-    fn from(value: (String, serde_json::Value)) -> Self {
-        Self {
-            name: value.0,
-            description: None,
-            parameters: value.1,
-        }
-    }
-}
+// UPSTREAM: impl From<(String, serde_json::Value)> for ChatCompletionFunctions {
+// UPSTREAM:     fn from(value: (String, serde_json::Value)) -> Self {
+// UPSTREAM:         Self {
+// UPSTREAM:             name: value.0,
+// UPSTREAM:             description: None,
+// UPSTREAM:             parameters: value.1,
+// UPSTREAM:         }
+// UPSTREAM:     }
+// UPSTREAM: }
 
 // todo: write macro for bunch of same looking From trait implementations below
 
@@ -625,32 +619,32 @@ impl From<ChatCompletionRequestToolMessage> for ChatCompletionRequestMessage {
     }
 }
 
-impl From<ChatCompletionRequestUserMessageContent> for ChatCompletionRequestUserMessage {
-    fn from(value: ChatCompletionRequestUserMessageContent) -> Self {
-        Self {
-            content: value,
-            name: None,
-        }
-    }
-}
+// UPSTREAM: impl From<ChatCompletionRequestUserMessageContent> for ChatCompletionRequestUserMessage {
+// UPSTREAM:     fn from(value: ChatCompletionRequestUserMessageContent) -> Self {
+// UPSTREAM:         Self {
+// UPSTREAM:             content: value,
+// UPSTREAM:             name: None,
+// UPSTREAM:         }
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<ChatCompletionRequestSystemMessageContent> for ChatCompletionRequestSystemMessage {
-    fn from(value: ChatCompletionRequestSystemMessageContent) -> Self {
-        Self {
-            content: value,
-            name: None,
-        }
-    }
-}
+// UPSTREAM: impl From<ChatCompletionRequestSystemMessageContent> for ChatCompletionRequestSystemMessage {
+// UPSTREAM:     fn from(value: ChatCompletionRequestSystemMessageContent) -> Self {
+// UPSTREAM:         Self {
+// UPSTREAM:             content: value,
+// UPSTREAM:             name: None,
+// UPSTREAM:         }
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<ChatCompletionRequestDeveloperMessageContent> for ChatCompletionRequestDeveloperMessage {
-    fn from(value: ChatCompletionRequestDeveloperMessageContent) -> Self {
-        Self {
-            content: value,
-            name: None,
-        }
-    }
-}
+// UPSTREAM: impl From<ChatCompletionRequestDeveloperMessageContent> for ChatCompletionRequestDeveloperMessage {
+// UPSTREAM:     fn from(value: ChatCompletionRequestDeveloperMessageContent) -> Self {
+// UPSTREAM:         Self {
+// UPSTREAM:             content: value,
+// UPSTREAM:             name: None,
+// UPSTREAM:         }
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl From<ChatCompletionRequestAssistantMessageContent> for ChatCompletionRequestAssistantMessage {
     fn from(value: ChatCompletionRequestAssistantMessageContent) -> Self {
@@ -661,101 +655,101 @@ impl From<ChatCompletionRequestAssistantMessageContent> for ChatCompletionReques
     }
 }
 
-impl From<&str> for ChatCompletionRequestUserMessageContent {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestUserMessageContent::Text(value.into())
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestUserMessageContent {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestUserMessageContent::Text(value.into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestUserMessageContent {
-    fn from(value: String) -> Self {
-        ChatCompletionRequestUserMessageContent::Text(value)
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestUserMessageContent {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         ChatCompletionRequestUserMessageContent::Text(value)
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestSystemMessageContent {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestSystemMessageContent::Text(value.into())
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestSystemMessageContent {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestSystemMessageContent::Text(value.into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestSystemMessageContent {
-    fn from(value: String) -> Self {
-        ChatCompletionRequestSystemMessageContent::Text(value)
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestSystemMessageContent {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         ChatCompletionRequestSystemMessageContent::Text(value)
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestDeveloperMessageContent {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestDeveloperMessageContent::Text(value.into())
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestDeveloperMessageContent {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestDeveloperMessageContent::Text(value.into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestDeveloperMessageContent {
-    fn from(value: String) -> Self {
-        ChatCompletionRequestDeveloperMessageContent::Text(value)
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestDeveloperMessageContent {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         ChatCompletionRequestDeveloperMessageContent::Text(value)
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestAssistantMessageContent {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestAssistantMessageContent::Text(value.into())
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestAssistantMessageContent {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestAssistantMessageContent::Text(value.into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestAssistantMessageContent {
-    fn from(value: String) -> Self {
-        ChatCompletionRequestAssistantMessageContent::Text(value)
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestAssistantMessageContent {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         ChatCompletionRequestAssistantMessageContent::Text(value)
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestToolMessageContent {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestToolMessageContent::Text(value.into())
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestToolMessageContent {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestToolMessageContent::Text(value.into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestToolMessageContent {
-    fn from(value: String) -> Self {
-        ChatCompletionRequestToolMessageContent::Text(value)
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestToolMessageContent {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         ChatCompletionRequestToolMessageContent::Text(value)
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestUserMessage {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestUserMessageContent::Text(value.into()).into()
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestUserMessage {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestUserMessageContent::Text(value.into()).into()
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestUserMessage {
-    fn from(value: String) -> Self {
-        value.as_str().into()
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestUserMessage {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         value.as_str().into()
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestSystemMessage {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestSystemMessageContent::Text(value.into()).into()
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestSystemMessage {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestSystemMessageContent::Text(value.into()).into()
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<&str> for ChatCompletionRequestDeveloperMessage {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestDeveloperMessageContent::Text(value.into()).into()
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestDeveloperMessage {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestDeveloperMessageContent::Text(value.into()).into()
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestSystemMessage {
-    fn from(value: String) -> Self {
-        value.as_str().into()
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestSystemMessage {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         value.as_str().into()
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestDeveloperMessage {
-    fn from(value: String) -> Self {
-        value.as_str().into()
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestDeveloperMessage {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         value.as_str().into()
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl From<&str> for ChatCompletionRequestAssistantMessage {
     fn from(value: &str) -> Self {
@@ -769,13 +763,13 @@ impl From<String> for ChatCompletionRequestAssistantMessage {
     }
 }
 
-impl From<Vec<ChatCompletionRequestUserMessageContentPart>>
-    for ChatCompletionRequestUserMessageContent
-{
-    fn from(value: Vec<ChatCompletionRequestUserMessageContentPart>) -> Self {
-        ChatCompletionRequestUserMessageContent::Array(value)
-    }
-}
+// UPSTREAM: impl From<Vec<ChatCompletionRequestUserMessageContentPart>>
+// UPSTREAM:     for ChatCompletionRequestUserMessageContent
+// UPSTREAM: {
+// UPSTREAM:     fn from(value: Vec<ChatCompletionRequestUserMessageContentPart>) -> Self {
+// UPSTREAM:         ChatCompletionRequestUserMessageContent::Array(value)
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl From<ChatCompletionRequestMessageContentPartText>
     for ChatCompletionRequestUserMessageContentPart
@@ -817,17 +811,17 @@ impl From<ChatCompletionRequestMessageContentPartAudioUrl>
     }
 }
 
-impl From<&str> for ChatCompletionRequestMessageContentPartText {
-    fn from(value: &str) -> Self {
-        ChatCompletionRequestMessageContentPartText { text: value.into() }
-    }
-}
+// UPSTREAM: impl From<&str> for ChatCompletionRequestMessageContentPartText {
+// UPSTREAM:     fn from(value: &str) -> Self {
+// UPSTREAM:         ChatCompletionRequestMessageContentPartText { text: value.into() }
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl From<String> for ChatCompletionRequestMessageContentPartText {
-    fn from(value: String) -> Self {
-        ChatCompletionRequestMessageContentPartText { text: value }
-    }
-}
+// UPSTREAM: impl From<String> for ChatCompletionRequestMessageContentPartText {
+// UPSTREAM:     fn from(value: String) -> Self {
+// UPSTREAM:         ChatCompletionRequestMessageContentPartText { text: value }
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl From<&str> for ImageUrl {
     fn from(value: &str) -> Self {
@@ -899,11 +893,11 @@ impl From<&str> for CreateMessageRequestContent {
     }
 }
 
-impl Default for ChatCompletionRequestUserMessageContent {
-    fn default() -> Self {
-        ChatCompletionRequestUserMessageContent::Text("".into())
-    }
-}
+// UPSTREAM: impl Default for ChatCompletionRequestUserMessageContent {
+// UPSTREAM:     fn default() -> Self {
+// UPSTREAM:         ChatCompletionRequestUserMessageContent::Text("".into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
 impl Default for CreateMessageRequestContent {
     fn default() -> Self {
@@ -911,23 +905,23 @@ impl Default for CreateMessageRequestContent {
     }
 }
 
-impl Default for ChatCompletionRequestDeveloperMessageContent {
-    fn default() -> Self {
-        ChatCompletionRequestDeveloperMessageContent::Text("".into())
-    }
-}
+// UPSTREAM: impl Default for ChatCompletionRequestDeveloperMessageContent {
+// UPSTREAM:     fn default() -> Self {
+// UPSTREAM:         ChatCompletionRequestDeveloperMessageContent::Text("".into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl Default for ChatCompletionRequestSystemMessageContent {
-    fn default() -> Self {
-        ChatCompletionRequestSystemMessageContent::Text("".into())
-    }
-}
+// UPSTREAM: impl Default for ChatCompletionRequestSystemMessageContent {
+// UPSTREAM:     fn default() -> Self {
+// UPSTREAM:         ChatCompletionRequestSystemMessageContent::Text("".into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
-impl Default for ChatCompletionRequestToolMessageContent {
-    fn default() -> Self {
-        ChatCompletionRequestToolMessageContent::Text("".into())
-    }
-}
+// UPSTREAM: impl Default for ChatCompletionRequestToolMessageContent {
+// UPSTREAM:     fn default() -> Self {
+// UPSTREAM:         ChatCompletionRequestToolMessageContent::Text("".into())
+// UPSTREAM:     }
+// UPSTREAM: }
 
 // start: types to multipart from
 

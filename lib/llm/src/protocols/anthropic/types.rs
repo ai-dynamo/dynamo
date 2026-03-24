@@ -331,7 +331,6 @@ fn convert_assistant_blocks(
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
-                    r#type: ChatCompletionToolType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
