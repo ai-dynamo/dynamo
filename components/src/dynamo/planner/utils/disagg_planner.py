@@ -47,9 +47,6 @@ class DisaggPlanner:
             prometheus_traffic_client=getattr(
                 self.prefill_planner, "prometheus_traffic_client", None
             ),
-            prometheus_engine_client=getattr(
-                self.prefill_planner, "prometheus_engine_client", None
-            ),
             connector=getattr(self.prefill_planner, "connector", None),
             start_prometheus_server=False,
         )
@@ -99,22 +96,23 @@ class DisaggPlanner:
         self.decode_planner.decode_worker_info = self.prefill_planner.decode_worker_info
         self.decode_planner.model_name = self.prefill_planner.model_name
 
+        # Start FPM tracking for the decode planner (prefill's was started
+        # in its own _async_init -> _init_fpm_subscriber).
+        if self.enable_load and self.decode_planner.runtime is not None:
+            await self.decode_planner._init_fpm_subscriber()
+
     async def run(self):
         """Main scaling loop. Call _async_init() before this."""
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_load_adjustment_time = time.time()
 
+        # FPM tracking (started in _async_init) replaces the former
+        # DirectRouterMetricsClient.run_sampling_loop().
         loops = []
         if self.enable_throughput:
             loops.append(self._throughput_loop())
         if self.enable_load:
             loops.append(self._load_loop())
-            loops.append(
-                self.prefill_planner.prometheus_engine_client.run_sampling_loop(
-                    self.config.load_metric_samples,
-                    self.config.load_adjustment_interval,
-                )
-            )
 
         await asyncio.gather(*loops)
 
@@ -177,34 +175,36 @@ class DisaggPlanner:
             await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
 
     async def _load_loop(self) -> None:
-        """Load-based scaling loop for disagg mode at shorter interval."""
+        """FPM-driven load-based scaling loop for disagg mode."""
         while True:
             await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New load-based adjustment interval started!")
 
-            # Query DGD for fresh worker counts
             num_p, num_d, _ = await self.prefill_planner.get_workers_info(
                 require_prefill=True, require_decode=True
             )
             self.shared_state.num_p_workers = num_p
             self.shared_state.num_d_workers = num_d
 
-            # Observe per-worker metrics from router
-            await self.prefill_planner.observe_engine_load_stats()
-            await self.decode_planner.observe_engine_load_stats()
+            # Observe FPM stats and feed into regression models
+            p_stats = self.prefill_planner.observe_fpm_load_stats()
+            d_stats = self.decode_planner.observe_fpm_load_stats()
 
-            # Reconcile DGD worker counts with router Prometheus counts
-            p_prom_count = len(self.prefill_planner.cached_load_metrics.recent)
-            d_prom_count = len(self.decode_planner.cached_load_metrics.recent)
-            if p_prom_count != num_p or d_prom_count != num_d:
+            if not p_stats and not d_stats:
+                logger.warning("No FPM data for either prefill or decode, skipping")
+                continue
+
+            # Reconcile DGD worker counts with FPM engine counts
+            p_fpm_count = len({wid for (wid, _) in p_stats}) if p_stats else 0
+            d_fpm_count = len({wid for (wid, _) in d_stats}) if d_stats else 0
+            if p_fpm_count != num_p or d_fpm_count != num_d:
                 logger.warning(
                     f"Worker count mismatch: DGD reports P={num_p}, D={num_d}; "
-                    f"router metrics reports P={p_prom_count}, D={d_prom_count}. "
-                    "Skipping load-based scaling adjustment."
+                    f"FPM reports P={p_fpm_count}, D={d_fpm_count}. "
+                    "Skipping load-based scaling."
                 )
                 continue
 
-            # Scale prefill and decode independently
             p_desired = self.prefill_planner.load_plan_adjustment()
             d_desired = self.decode_planner.load_plan_adjustment()
 

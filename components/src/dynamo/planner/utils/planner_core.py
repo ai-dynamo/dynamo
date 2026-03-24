@@ -10,6 +10,9 @@ from typing import Optional, Union
 
 from prometheus_client import Gauge, start_http_server
 
+from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+from dynamo.common.forward_pass_metrics import decode as decode_fpm
+from dynamo.llm import FpmEventSubscriber
 from dynamo.planner import (
     KubernetesConnector,
     SubComponentType,
@@ -19,6 +22,10 @@ from dynamo.planner import (
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.global_planner_connector import GlobalPlannerConnector
 from dynamo.planner.utils.exceptions import DeploymentValidationError
+from dynamo.planner.utils.fpm_regression import (
+    DecodeRegressionModel,
+    PrefillRegressionModel,
+)
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -26,12 +33,7 @@ from dynamo.planner.utils.perf_interpolation import (
 )
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
-from dynamo.planner.utils.prometheus import (
-    CachedLoadMetrics,
-    DirectRouterMetricsClient,
-    Metrics,
-    PrometheusAPIClient,
-)
+from dynamo.planner.utils.prometheus import Metrics, PrometheusAPIClient
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.planner.worker_info import WorkerInfo, resolve_worker_info
 from dynamo.runtime import DistributedRuntime
@@ -258,7 +260,6 @@ class BasePlanner:
         shared_state: Optional[PlannerSharedState] = None,
         prometheus_metrics: Optional[PlannerPrometheusMetrics] = None,
         prometheus_traffic_client: Optional[PrometheusAPIClient] = None,
-        prometheus_engine_client: Optional[DirectRouterMetricsClient] = None,
         connector: Optional[ConnectorType] = None,
         start_prometheus_server: bool = True,
         component_type: Optional[SubComponentType] = None,
@@ -431,47 +432,15 @@ class BasePlanner:
             self.no_correction = config.no_correction
 
         if self.enable_load:
-            if prometheus_engine_client is not None:
-                self.prometheus_engine_client = prometheus_engine_client
-            else:
-                # Auto-discover frontend metrics URL in Kubernetes mode
-                connector = getattr(self, "connector", None)
-                if not config.load_router_metrics_url and isinstance(
-                    connector, KubernetesConnector
-                ):
-                    config.load_router_metrics_url = (
-                        connector.get_frontend_metrics_url()
-                    )
-                    if not config.load_router_metrics_url:
-                        raise ValueError(
-                            "Could not auto-discover frontend metrics URL from DGD. "
-                            "No service with componentType 'frontend' found. "
-                            "Please set load_router_metrics_url in the config."
-                        )
-                    else:
-                        logger.info(
-                            f"Auto-discovered frontend metrics URL: {config.load_router_metrics_url}"
-                        )
-
-                assert (
-                    config.load_router_metrics_url is not None
-                ), "load_router_metrics_url must be set when load-based scaling is enabled"
-                self.prometheus_engine_client = DirectRouterMetricsClient(
-                    config.load_router_metrics_url, config.namespace
-                )
-            self.cached_load_metrics = CachedLoadMetrics()
-
-            from dynamo.planner.utils.load_based_regression import (
-                LoadBasedRegressionModel,
-            )
+            self.fpm_subscriber = None  # initialised in _async_init
 
             if self.component_type == SubComponentType.PREFILL:
-                self.ttft_regression = LoadBasedRegressionModel(
+                self.ttft_regression = PrefillRegressionModel(
                     window_size=self.config.load_learning_window,
                     min_observations=self.config.load_min_observations,
                 )
             elif self.component_type == SubComponentType.DECODE:
-                self.itl_regression = LoadBasedRegressionModel(
+                self.itl_regression = DecodeRegressionModel(
                     window_size=self.config.load_learning_window,
                     min_observations=self.config.load_min_observations,
                 )
@@ -547,6 +516,46 @@ class BasePlanner:
             require_prefill=require_prefill,
             require_decode=require_decode,
         )
+
+        # Start FPM tracking if load-based scaling is enabled.
+        # The subscriber auto-discovers FPM publishers for this component.
+        if self.enable_load and self.runtime is not None:
+            await self._init_fpm_subscriber()
+
+    async def _init_fpm_subscriber(self) -> None:
+        """Create and start the FPM subscriber for load-based scaling."""
+        worker_info = (
+            self.prefill_worker_info
+            if self.component_type == SubComponentType.PREFILL
+            else self.decode_worker_info
+        )
+        if not worker_info.component_name or not worker_info.endpoint:
+            logger.warning(
+                "WorkerInfo missing component_name or endpoint, "
+                "cannot create FPM subscriber"
+            )
+            return
+
+        endpoint = self.runtime.endpoint(
+            f"{self.namespace}.{worker_info.component_name}.{worker_info.endpoint}"
+        )
+        self.fpm_subscriber = FpmEventSubscriber(endpoint)
+        self.fpm_subscriber.start_tracking()
+        logger.info(
+            f"FPM tracker started for {worker_info.component_name}.{worker_info.endpoint}"
+        )
+
+    def _get_fpm_stats(self) -> dict[tuple[str, int], ForwardPassMetrics]:
+        """Get decoded FPM stats from the subscriber, keyed by (worker_id, dp_rank)."""
+        if self.fpm_subscriber is None:
+            return {}
+        raw_stats = self.fpm_subscriber.get_recent_stats()
+        result = {}
+        for key, raw_bytes in raw_stats.items():
+            fpm = decode_fpm(raw_bytes)
+            if fpm is not None:
+                result[key] = fpm
+        return result
 
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         """Create a client for the given component and endpoint, with a brief sleep for state sync."""
@@ -843,51 +852,85 @@ class BasePlanner:
         ]
         await self.connector.set_component_replicas(target_replicas, blocking=True)
 
-    async def observe_engine_load_stats(self) -> None:
-        """Query DirectRouterMetricsClient for per-worker metrics, update regression."""
-        worker_type = self.component_type.value  # "prefill" or "decode"
-        result = self.prometheus_engine_client.get_recent_and_averaged_metrics(
-            worker_type
-        )
-        if result is None:
+    def observe_fpm_load_stats(
+        self,
+    ) -> dict[tuple[str, int], ForwardPassMetrics]:
+        """Get latest FPM stats and feed observations into the regression model.
+
+        Returns:
+            The decoded FPM stats dict for use by load_plan_adjustment().
+        """
+        fpm_stats = self._get_fpm_stats()
+        if not fpm_stats:
             logger.warning(
-                f"No per-worker metrics available yet for {worker_type} (buffer empty)"
+                f"No FPM data available for {self.component_type.value} (tracker empty)"
             )
-            return
+            return {}
 
-        recent, per_worker_averaged, cluster_averaged = result
-        self.cached_load_metrics = CachedLoadMetrics(
-            recent=recent,
-            per_worker_averaged=per_worker_averaged,
-            cluster_averaged=cluster_averaged,
+        for key, fpm in fpm_stats.items():
+            if self.component_type == SubComponentType.PREFILL:
+                self.ttft_regression.add_observation(fpm)
+            elif self.component_type == SubComponentType.DECODE:
+                self.itl_regression.add_observation(fpm)
+
+        logger.info(
+            f"FPM load stats: {len(fpm_stats)} engines observed for "
+            f"{self.component_type.value}"
+        )
+        return fpm_stats
+
+    def _load_based_scaling_decision_from_estimates(
+        self,
+        estimates: list[float],
+        sla: float,
+        num_workers: int,
+        label: str,
+    ) -> Optional[int]:
+        """Shared scale-up/down logic from per-engine latency estimates (ms).
+
+        Args:
+            estimates: per-engine estimated latencies in ms.
+            sla: target SLA in ms (e.g. config.ttft or config.itl).
+            num_workers: current worker count for this component.
+            label: human-readable label for log messages (e.g. "prefill TTFT").
+
+        Returns:
+            Desired replica count, or None if no scaling action needed.
+        """
+        if not estimates:
+            return None
+
+        sensitivity = self.config.load_scaling_down_sensitivity / 100.0
+
+        logger.info(
+            f"Load-based {label}: workers={num_workers}, sla={sla:.1f}ms, "
+            f"estimates={[f'{t:.1f}' for t in estimates]}"
         )
 
-        if self.component_type == SubComponentType.PREFILL:
-            for wid, m in recent.items():
-                active_prefill = m.get("active_prefill_tokens", 0.0)
-                last_isl = m.get("last_isl", 0.0)
-                last_ttft = m.get("last_ttft", 0.0)
-                if last_ttft > 0 and last_isl > 0:
-                    x = active_prefill + last_isl
-                    # last_ttft is in seconds from Prometheus, convert to ms
-                    y = last_ttft * 1000
-                    logger.info(
-                        f"{SubComponentType.PREFILL.value} Worker {wid} observed status: TTFT {y:.2f}ms @ prefill tokens {x:.2f}"
-                    )
-                    self.ttft_regression.add_observation(x, y)
+        if all(t > sla for t in estimates):
+            logger.info(
+                f"Load-based {label}: ALL engines above SLA ({sla:.1f}ms), "
+                f"scaling up to {num_workers + 1}"
+            )
+            return num_workers + 1
 
-        elif self.component_type == SubComponentType.DECODE:
-            for wid, m in recent.items():
-                active_decode = m.get("active_decode_blocks", 0.0)
-                last_itl = m.get("last_itl", 0.0)
-                if last_itl > 0 and active_decode > 0:
-                    x = active_decode
-                    # last_itl is in seconds from Prometheus, convert to ms
-                    y = last_itl * 1000
+        if num_workers > 1:
+            threshold = sla * sensitivity
+            if all(t < threshold for t in estimates):
+                desired = max(num_workers - 1, self.config.min_endpoint)
+                if desired == num_workers:
                     logger.info(
-                        f"{SubComponentType.DECODE.value} Worker {wid} observed status: ITL {y:.2f}ms @ decode blocks {x:.2f}"
+                        f"Load-based {label}: ALL engines below threshold "
+                        f"({threshold:.1f}ms), but at min_endpoint ({self.config.min_endpoint})"
                     )
-                    self.itl_regression.add_observation(x, y)
+                else:
+                    logger.info(
+                        f"Load-based {label}: ALL engines below threshold "
+                        f"({threshold:.1f}ms), scaling down to {desired}"
+                    )
+                return desired
+
+        return None
 
     def load_plan_adjustment(self) -> Optional[int]:
         """Load-based scaling decision. Override in subclasses."""
@@ -936,7 +979,11 @@ class BasePlanner:
             await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
 
     async def _load_loop(self, require_prefill: bool, require_decode: bool) -> None:
-        """Load-based scaling loop at shorter interval."""
+        """Load-based scaling loop at shorter interval.
+
+        Uses FPM stats from the event plane (via FpmEventSubscriber) instead
+        of scraping the router's /metrics endpoint.
+        """
         while True:
             await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New load-based adjustment interval started!")
@@ -948,19 +995,21 @@ class BasePlanner:
             self.shared_state.num_p_workers = num_p
             self.shared_state.num_d_workers = num_d
 
-            # Observe per-worker metrics from router
-            await self.observe_engine_load_stats()
+            # Observe FPM stats and feed into regression model
+            fpm_stats = self.observe_fpm_load_stats()
+            if not fpm_stats:
+                continue
 
-            # Reconcile DGD worker count with router Prometheus count
-            prom_count = len(self.cached_load_metrics.recent)
+            # Reconcile DGD worker count with FPM engine count
+            fpm_worker_count = len({wid for (wid, _) in fpm_stats})
             dgd_count = (
                 num_p if self.component_type == SubComponentType.PREFILL else num_d
             )
-            if prom_count != dgd_count:
+            if fpm_worker_count != dgd_count:
                 logger.warning(
-                    f"Worker count mismatch: DGD reports {dgd_count} workers, "
-                    f"router metrics reports {prom_count} workers. "
-                    "Skipping load-based scaling adjustment."
+                    f"Worker count mismatch: DGD reports {dgd_count}, "
+                    f"FPM reports {fpm_worker_count} engines for "
+                    f"{self.component_type.value}. Skipping scaling."
                 )
                 continue
 
@@ -976,9 +1025,6 @@ class BasePlanner:
                     desired_replicas = max(desired_replicas, lower_bound)
                 desired_replicas = self.apply_component_budget(desired_replicas)
                 self.update_predicted_replicas_metric(desired_replicas)
-                # Load-based planner needs blocking scaling because it only checks
-                # the current status of the engine, not the predicted load.
-                # We need to wait for the deployment to be steady before making another one.
                 await self._apply_scaling_blocking(desired_replicas)
 
     async def run(self):
@@ -989,17 +1035,13 @@ class BasePlanner:
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_load_adjustment_time = time.time()
 
-        # Build list of concurrent loops based on enabled scaling modes
+        # Build list of concurrent loops based on enabled scaling modes.
+        # FPM tracking (started in _async_init) replaces the former
+        # DirectRouterMetricsClient.run_sampling_loop().
         loops = []
         if self.enable_throughput:
             loops.append(self._throughput_loop(require_prefill, require_decode))
         if self.enable_load:
             loops.append(self._load_loop(require_prefill, require_decode))
-            loops.append(
-                self.prometheus_engine_client.run_sampling_loop(
-                    self.config.load_metric_samples,
-                    self.config.load_adjustment_interval,
-                )
-            )
 
         await asyncio.gather(*loops)
