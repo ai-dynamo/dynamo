@@ -18,7 +18,6 @@ Worker dispatch (main.py:60-132):
   --image-diffusion-worker    -> init_diffusion.init_image_diffusion()
   --video-generation-worker   -> init_diffusion.init_video_diffusion()
   --embedding-worker          -> init_embedding.init_embedding()
-  --multimodal-processor      -> init_multimodal.init_multimodal_processor()
   --multimodal-encode-worker  -> init_multimodal.init_multimodal_encode_worker()
   --multimodal-worker         -> init_multimodal.init_multimodal_worker() or _prefill_worker()
   --dllm-algorithm <algo>     -> init_diffusion.init_llm_diffusion()
@@ -43,7 +42,7 @@ Worker dispatch (main.py:60-132):
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
-flags like `--multimodal-processor`, `--embedding-worker`).
+flags like `--multimodal-encode-worker`, `--embedding-worker`).
 
 Key gotcha: `--output-modalities` defaults to `["text"]` globally. Image/video diffusion
 workers override this in their init functions to `["image"]`/`["video"]` to ensure correct
@@ -80,11 +79,10 @@ BaseGenerativeHandler (handler_base.py)
     MultimodalPrefillWorkerHandler (multimodal/worker_handler.py)
       Multimodal prefill phase. Yields bootstrap info.
 
-    MultimodalProcessorHandler (multimodal/processor_handler.py)
-      Front-facing. No engine. Routes to encode worker.
-
     MultimodalEncodeWorkerHandler (multimodal/encode_worker_handler.py)
-      No engine. Uses MMEncoder from SGLang. NIXL for embeddings transfer.
+      Front-facing. No engine. Uses MMEncoder from SGLang. Receives
+      pre-tokenized requests (ModelInput.Tokens) from Rust frontend,
+      encodes images, NIXL for embeddings transfer.
 ```
 
 ## Engine Types by Worker
@@ -93,8 +91,7 @@ BaseGenerativeHandler (handler_base.py)
 |--------|--------|-------|
 | decode, prefill, dllm, embedding | `sgl.Engine` | Full SGLang inference engine |
 | multimodal-worker, multimodal-prefill | `sgl.Engine` | Plus EmbeddingsProcessor |
-| multimodal-processor | None | Tokenizer only, routes to encoder |
-| multimodal-encode-worker | None | `MMEncoder` from SGLang |
+| multimodal-encode-worker | None | `MMEncoder` from SGLang, pre-tokenized input |
 | image-diffusion-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 | video-generation-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 
@@ -218,7 +215,7 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 
 - **SimpleNamespace vs ServerArgs**: Image/video diffusion workers use SimpleNamespace
   stubs. Always use `getattr(server_args, field, default)` for fields that may not exist.
-- **engine=None**: Multimodal processor and encode worker pass `engine=None` to
+- **engine=None**: Multimodal encode worker passes `engine=None` to
   BaseWorkerHandler. Any code in the base class that touches engine must guard with
   `if engine is not None`.
 - **GenerationResult is a dataclass**: SGLang 0.5.9 changed `DiffGenerator.generate()`
@@ -264,7 +261,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
 - **SimpleNamespace stubs**: When touching args.py or code that reads server_args, always
   use `getattr(server_args, field, default)` -- image/video workers don't have full ServerArgs.
-- **engine can be None**: Encode-only workers (multimodal-processor, multimodal-encode-worker)
+- **engine can be None**: Encode-only workers (multimodal-encode-worker)
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`
@@ -281,7 +278,7 @@ sglang/
   backend_args.py          # Dynamo-specific SGLang CLI flags
   init_llm.py              # init_decode(), init_prefill()
   init_diffusion.py        # init_llm_diffusion(), init_image_diffusion(), init_video_diffusion()
-  init_multimodal.py       # init_multimodal_{processor,encode_worker,worker,prefill_worker}()
+  init_multimodal.py       # init_multimodal_{encode_worker,worker,prefill_worker}()
   init_embedding.py        # init_embedding()
   register.py              # Model registration (LLM, image, video)
   publisher.py             # Metrics + KV event publishing
@@ -301,7 +298,6 @@ sglang/
     video_generation/
       video_generation_handler.py # VideoGenerationWorkerHandler (DiffGenerator)
     multimodal/
-      processor_handler.py       # MultimodalProcessorHandler (no engine)
-      encode_worker_handler.py   # MultimodalEncodeWorkerHandler (MMEncoder)
+      encode_worker_handler.py   # MultimodalEncodeWorkerHandler (MMEncoder, front-facing)
       worker_handler.py          # MultimodalWorkerHandler + PrefillWorkerHandler
 ```

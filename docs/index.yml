@@ -42,6 +42,8 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - page: Glossary
+        path: reference/glossary.md
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
@@ -67,6 +69,8 @@ navigation:
             path: kubernetes/autoscaling.md
           - page: Rolling Update
             path: kubernetes/rolling-update.md
+          - page: Developing with Tilt
+            path: kubernetes/tilt-dev-setup.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - page: Snapshot
@@ -85,6 +89,8 @@ navigation:
             path: kubernetes/deployment/multinode-deployment.md
           - page: Grove
             path: kubernetes/grove.md
+          - page: Topology Aware Scheduling
+            path: kubernetes/topology-aware-scheduling.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -97,6 +103,8 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - page: Mocker Offline Trace Replay
+        path: benchmarks/mocker-trace-replay.md
       - section: Testing
         contents:
           - page: Mocker
@@ -342,8 +350,6 @@ navigation:
       - page: Model Caching with Fluid
         path: kubernetes/model-caching-with-fluid.md
       # -- Reference --
-      - page: Glossary
-        path: reference/glossary.md
       - page: Tuning Disaggregated Performance
         path: performance/tuning.md
       # -- Frontend (hidden sub-pages) --

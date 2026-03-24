@@ -31,7 +31,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
-from dynamo._core import Context
+from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -65,9 +65,9 @@ class RequestHandlerConfig:
 
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
-    publisher: Publisher
+    publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
-    encode_client: Optional[object] = None
+    encode_client: Optional[Client] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
     ] = None  # for multimodal support
@@ -558,11 +558,11 @@ class HandlerBase(BaseGenerativeHandler):
 
         # PREFILL/ENCODE/AGGREGATED: Process multimodal content if available
         if self.multimodal_processor:
-            processed_input = await self.multimodal_processor.process_openai_request(
+            mm_result = await self.multimodal_processor.process_openai_request(
                 request, embeddings, ep_disaggregated_params
             )
-            if processed_input:
-                return processed_input
+            if mm_result:
+                return mm_result
 
             # If multimodal processing returned None but request has multimodal data,
             # this is an error (not a text-only request). Raise instead of falling back.
