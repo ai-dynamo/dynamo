@@ -151,6 +151,8 @@ class DecodeInterpolator:
         self.resolution = resolution
         self.xi = np.linspace(0, 1, resolution)
         self.yi = np.linspace(0, max(self.y_context_length), resolution)
+        self.X: np.ndarray
+        self.Y: np.ndarray
         self.X, self.Y = np.meshgrid(self.xi, self.yi)
 
         # Lazy import scipy only when interpolation is actually needed

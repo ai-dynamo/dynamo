@@ -69,11 +69,7 @@ class TestHandles:
             disaggregation_mode=DisaggregationMode.PREFILL,
             route_to_encoder=route_to_encode,
         )
-        # [gluo NOTE] due to current limitation, see 'WorkerFactory._validate_config()'.
-        if route_to_encode:
-            assert not WorkerFactory.handles(config)
-        else:
-            assert WorkerFactory.handles(config)
+        assert WorkerFactory.handles(config)
 
     @pytest.mark.parametrize("route_to_encode", [True, False])
     def test_decode(self, route_to_encode: bool) -> None:

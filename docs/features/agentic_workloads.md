@@ -34,8 +34,7 @@ The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.c
 
 | Hint | Description |
 |------|-------------|
-| `latency_sensitivity` | Router queue priority (requires `--router-queue-threshold`). Higher values shift the request earlier in the queue so user-facing turns run before background work. |
-| `priority` | Engine queue ordering and KV cache eviction. Forwarded to the backend for scheduling and priority-based eviction. |
+| `priority` | Unified request priority. Higher values move the request earlier in the router queue and are forwarded to the backend for scheduling and priority-based eviction. |
 | `osl` | Expected output sequence length (tokens). Used by the router for output block tracking and load-balancing accuracy when `--router-track-output-blocks` is enabled. |
 | `speculative_prefill` | When true, after the assistant turn completes the system prefills the predicted next-turn prefix (conversation history + assistant text, e.g. thinking stripped) to warm the KV cache for the next request. |
 | `program_id` | (Planned) Identifies the agentic program for program-level metrics and cache affinity. |
@@ -53,7 +52,7 @@ The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.c
 | Cache prefetching | | 🚧 | |
 | Subagent / thinking-aware cache eviction | | 🚧 | |
 | Speculative prefill | ✅ | ✅ | ✅ |
-| Latency-sensitivity–aware routing | ✅ | ✅ | ✅ |
+| Priority-aware routing | ✅ | ✅ | ✅ |
 
 🚧 = Work in progress or experimental.
 
@@ -80,9 +79,9 @@ Dynamo is now supported directly in LangChain using the [NVIDIA AI Endpoints int
 
 After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/src/bin/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
 
-### Latency-sensitivity–aware routing
+### Priority-aware routing
 
-When `--router-queue-threshold` is set, the router maintains a priority queue. Requests with higher `latency_sensitivity` are treated as if they arrived earlier, so they are scheduled ahead of bulk or background work. Under load, this keeps median latency low for user-facing agent turns while background work can tolerate higher latency. For a runnable demo and results, see [NeMo Agent Toolkit latency sensitivity demo](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration/latency_sensitivity_demo).
+When `--router-queue-threshold` is set, the router maintains a priority queue. Requests with higher `priority` are treated as if they arrived earlier, so they are scheduled ahead of bulk or background work. Under load, this keeps median latency low for user-facing agent turns while background work can tolerate higher latency. For a runnable demo and results, see [NeMo Agent Toolkit priority demo](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration/latency_sensitivity_demo).
 
 ---
 

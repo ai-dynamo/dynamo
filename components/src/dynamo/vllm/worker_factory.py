@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
@@ -64,7 +65,7 @@ class WorkerFactory:
             WorkerFactory._validate_config(config)
             return True
         except (ValueError, NotImplementedError) as e:
-            logger.debug(
+            logger.error(
                 f"WorkerFactory cannot handle config: {e}, provided config: {WorkerFactory._config_str(config)}"
             )
             return False
@@ -115,21 +116,6 @@ class WorkerFactory:
                 raise ValueError(
                     "Multimodal worker with DECODE disaggregation mode is not supported."
                 )
-        # [gluo FIXME]
-        # 'route_to_encoder' hints standalone encode worker is used
-        # 'legacy_multimodal_llm_worker == False' hints Dynamo runtime will orchestrate
-        # P/D disagg and base P/D worker class should be used.
-        # In such a case, we can't use factory for P/D disaggregation modes because
-        # the current Dynamo runtime orchestrator is not aware of the extra mm data
-        # passing between P and D, P/D classes can't consume it properly untill
-        # the protocol is updated.
-        elif (
-            config.route_to_encoder
-            and config.disaggregation_mode == DisaggregationMode.PREFILL
-        ):
-            raise NotImplementedError(
-                "Dynamo orchestrated disaggregated prefill worker, combined with remote encode worker is not supported."
-            )
 
     async def create(
         self,
@@ -140,6 +126,7 @@ class WorkerFactory:
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+        WorkerFactory._validate_config(config)
 
         # Standalone encode worker
         if config.multimodal_encode_worker:
@@ -262,6 +249,7 @@ class WorkerFactory:
             logger.info("Connected to decode worker for disaggregated mode")
 
         # Choose handler based on worker type
+        handler: MultimodalDecodeWorkerHandler | MultimodalPDWorkerHandler
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
                 runtime,
@@ -289,7 +277,7 @@ class WorkerFactory:
             config, generate_endpoint, vllm_config
         )
         if kv_publisher:
-            handler.kv_publisher = kv_publisher
+            handler.kv_publisher = kv_publisher  # type: ignore[attr-defined, union-attr]
 
         if not config.multimodal_decode_worker:
             model_type = parse_endpoint_types(config.endpoint_types)
@@ -357,7 +345,7 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(
-            config.engine_args, config.embedding_transfer_mode
+            config.engine_args, config.embedding_transfer_mode  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
         logger.info("Starting to serve the encode worker endpoint...")
@@ -462,12 +450,12 @@ class WorkerFactory:
 
         handler = DecodeWorkerHandler(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -526,6 +514,27 @@ class WorkerFactory:
                 "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
+
+        if config.gms_shadow_mode:
+            # Shadow mode: lock-driven activation.
+            # Flow: sleep → startup probe passes → block on lock → wake → register.
+            await handler.sleep({"level": 1})
+
+            runtime.set_health_status(True)
+            logger.info(
+                "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+            )
+
+            from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+            lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            engine_id = os.environ.get("ENGINE_ID", "0")
+            lock = FlockFailoverLock(lock_path)
+            await lock.acquire(engine_id=f"engine-{engine_id}")
+            logger.info("[Shadow] Lock acquired, waking engine")
+
+            await handler.wake_up({})
+            logger.info("[Shadow] Engine awake, registering with discovery")
 
         await self.register_vllm_model(
             model_input,
@@ -645,12 +654,12 @@ class WorkerFactory:
 
         handler = PrefillWorkerHandler(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,

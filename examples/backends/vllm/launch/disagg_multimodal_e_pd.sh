@@ -75,20 +75,14 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 
-# Embedding transfer:
-#   "local" = local file (safetensors),
-#   "nixl-write" = NIXL WRITE transfer
-#   "nixl-read" = NIXL READ transfer (default: "local")
-export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
-
 # GPU assignments (override via environment variables)
 # TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
-    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
+    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
@@ -112,7 +106,6 @@ echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)...
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
-  --multimodal-worker \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \

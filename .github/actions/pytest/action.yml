@@ -28,10 +28,6 @@ inputs:
     description: 'Start MinIO service for LoRA tests (true/false)'
     required: false
     default: 'true'
-  enable_mypy:
-    description: 'Enable mypy type checking during test run (true/false)'
-    required: false
-    default: 'false'
   hf_token:
     required: false
   parallel_mode:
@@ -125,12 +121,7 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          MYPY_FLAG=""
-          if [[ "${{ inputs.enable_mypy }}" == "true" ]]; then
-            echo "🔍 Mypy type checking enabled"
-            MYPY_FLAG="--mypy"
-          fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -154,6 +145,7 @@ runs:
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
+          --shm-size=200m \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
@@ -189,9 +181,13 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # Define common docker flags for stability (Shared memory & limits)
-        # --ipc=host is critical for parallel pytest workers to communicate fast
-        DOCKER_OPTS="--ipc=host --ulimit memlock=-1 --ulimit stack=67108864"
+        # /dev/shm sizing: NIXL uses UCX which allocates shared memory segments in /dev/shm
+        # via shm_open(). Each NIXL agent with num_threads=8 creates 9 UCX workers, each needing
+        # ~4.8MB of shm. Disaggregated tests use up to 3 agents (encode+prefill+decode) = ~130MB.
+        # Docker's default is 64MB, which is insufficient and causes segfaults.
+        # Do NOT use --ipc=host here — it overrides --shm-size with the host's /dev/shm
+        # (64MB in K8s pods by default), silently ignoring the size we set.
+        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
@@ -200,12 +196,6 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          MYPY_FLAG=""
-          if [[ "${{ inputs.enable_mypy }}" == "true" ]]; then
-            echo "🔍 Mypy type checking enabled"
-            MYPY_FLAG="--mypy"
-          fi
-
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
           # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
@@ -234,7 +224,7 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
