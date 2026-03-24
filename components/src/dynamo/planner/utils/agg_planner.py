@@ -116,6 +116,7 @@ class AggPlanner:
 
     async def _load_loop(self) -> None:
         """FPM-driven load-based scaling loop for aggregated mode."""
+        pending_desired: Optional[int] = None
         while True:
             await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New agg load-based adjustment interval started!")
@@ -126,10 +127,29 @@ class AggPlanner:
             self.shared_state.num_d_workers = num_d
             num_workers = num_d
 
+            # Always observe FPM stats and update regression, even during scaling.
             fpm_stats = self.planner._get_fpm_stats()
             if not fpm_stats:
                 logger.warning("No FPM data available for agg engines")
                 continue
+
+            for (wid, dp), fpm in fpm_stats.items():
+                BasePlanner._log_fpm(wid, dp, fpm, "agg")
+                self.regression.add_observation(fpm)
+
+            # If a previous scaling action is still in progress, skip decisions.
+            if pending_desired is not None:
+                if num_workers == pending_desired:
+                    logger.info(
+                        f"Scaling to {pending_desired} complete, resuming decisions"
+                    )
+                    pending_desired = None
+                else:
+                    logger.info(
+                        f"Scaling in progress ({num_workers} -> {pending_desired}), "
+                        "observing only"
+                    )
+                    continue
 
             # Reconcile DGD worker count with FPM engine count
             fpm_worker_count = len({wid for (wid, _) in fpm_stats})
@@ -139,9 +159,6 @@ class AggPlanner:
                     f"FPM reports {fpm_worker_count} engines. Skipping scaling."
                 )
                 continue
-
-            for key, fpm in fpm_stats.items():
-                self.regression.add_observation(fpm)
 
             if not self.regression.has_sufficient_data():
                 logger.info(
@@ -202,6 +219,7 @@ class AggPlanner:
                 self.planner.prometheus_metrics.predicted_num_d.set(desired)
 
             if not self.config.no_operation:
+                pending_desired = desired
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,
@@ -210,7 +228,7 @@ class AggPlanner:
                     )
                 ]
                 await self.planner.connector.set_component_replicas(
-                    target_replicas, blocking=True
+                    target_replicas, blocking=False
                 )
 
     def _prefill_scaling_decision(

@@ -853,7 +853,7 @@ class BasePlanner:
         await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def _apply_scaling_blocking(self, desired_replicas: int) -> None:
-        """Apply scaling with blocking=True (wait for deployment ready)."""
+        """Apply scaling without blocking so the loop continues observing metrics."""
         if self.config.no_operation:
             return
         target_replicas = [
@@ -863,7 +863,24 @@ class BasePlanner:
                 desired_replicas=desired_replicas,
             )
         ]
-        await self.connector.set_component_replicas(target_replicas, blocking=True)
+        await self.connector.set_component_replicas(target_replicas, blocking=False)
+
+    @staticmethod
+    def _log_fpm(
+        wid: str, dp: int, fpm: "ForwardPassMetrics", label: str
+    ) -> None:
+        sched = fpm.scheduled_requests
+        queued = fpm.queued_requests
+        logger.info(
+            f"FPM {label} engine {wid}:dp{dp}: "
+            f"wall_time={fpm.wall_time:.4f}s, "
+            f"sched(prefill_tok={sched.sum_prefill_tokens}, "
+            f"prefill_req={sched.num_prefill_requests}, "
+            f"decode_kv={sched.sum_decode_kv_tokens}, "
+            f"decode_req={sched.num_decode_requests}), "
+            f"queued(prefill_tok={queued.sum_prefill_tokens}, "
+            f"decode_kv={queued.sum_decode_kv_tokens})"
+        )
 
     def observe_fpm_load_stats(
         self,
@@ -880,7 +897,8 @@ class BasePlanner:
             )
             return {}
 
-        for key, fpm in fpm_stats.items():
+        for (wid, dp), fpm in fpm_stats.items():
+            self._log_fpm(wid, dp, fpm, self.component_type.value)
             if self.component_type == SubComponentType.PREFILL:
                 self.ttft_regression.add_observation(fpm)
             elif self.component_type == SubComponentType.DECODE:
@@ -997,21 +1015,41 @@ class BasePlanner:
         Uses FPM stats from the event plane (via FpmEventSubscriber) instead
         of scraping the router's /metrics endpoint.
         """
+        pending_desired: Optional[int] = None
         while True:
             await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New load-based adjustment interval started!")
 
             # Query DGD for fresh worker counts
-            num_p, num_d, _ = await self.get_workers_info(
+            num_p, num_d, is_stable = await self.get_workers_info(
                 require_prefill=require_prefill, require_decode=require_decode
             )
             self.shared_state.num_p_workers = num_p
             self.shared_state.num_d_workers = num_d
 
-            # Observe FPM stats and feed into regression model
+            # Always observe FPM stats and update regression, even during scaling.
             fpm_stats = self.observe_fpm_load_stats()
             if not fpm_stats:
                 continue
+
+            # If a previous scaling action is still in progress, skip decisions.
+            if pending_desired is not None:
+                dgd_count = (
+                    num_p
+                    if self.component_type == SubComponentType.PREFILL
+                    else num_d
+                )
+                if dgd_count == pending_desired:
+                    logger.info(
+                        f"Scaling to {pending_desired} complete, resuming decisions"
+                    )
+                    pending_desired = None
+                else:
+                    logger.info(
+                        f"Scaling in progress ({dgd_count} -> {pending_desired}), "
+                        "observing only"
+                    )
+                    continue
 
             # Reconcile DGD worker count with FPM engine count
             fpm_worker_count = len({wid for (wid, _) in fpm_stats})
@@ -1038,6 +1076,7 @@ class BasePlanner:
                     desired_replicas = max(desired_replicas, lower_bound)
                 desired_replicas = self.apply_component_budget(desired_replicas)
                 self.update_predicted_replicas_metric(desired_replicas)
+                pending_desired = desired_replicas
                 await self._apply_scaling_blocking(desired_replicas)
 
     async def run(self):
