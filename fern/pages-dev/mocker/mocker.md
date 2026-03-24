@@ -234,6 +234,15 @@ python -m dynamo.mocker \
 
 The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
 
+When using `python -m dynamo.replay`, there are no dedicated AIC flags. Pass the equivalent fields directly via `--extra-engine-args`:
+
+```bash
+python -m dynamo.replay /path/to/trace.jsonl \
+    --extra-engine-args '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
+```
+
+The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
+
 Example `--reasoning` configuration:
 
 ```bash
