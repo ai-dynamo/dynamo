@@ -1124,7 +1124,11 @@ impl OpenAIPreprocessor {
                 if let Some(parser) = tool_call_parser {
                     // Parser-aware path: use marker-based jail so the parser
                     // handles format-specific output (XML, pythonic, etc.).
-                    builder = builder.tool_call_parser(parser);
+                    // Also install a named-tool filter so that if the model emits
+                    // the wrong tool, the parsed call is rejected before emission.
+                    builder = builder
+                        .tool_call_parser(parser)
+                        .named_tool_filter(named.function.name.clone());
                 } else {
                     // No parser: fall back to Immediate JSON jail mode.
                     builder = builder.tool_choice_named(named.function.name.clone());
