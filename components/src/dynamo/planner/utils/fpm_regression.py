@@ -297,9 +297,7 @@ class AggRegressionModel(_BaseRegressionModel):
         remaining = total_tokens
         for _ in range(num_iterations):
             chunk = min(remaining, max_num_batched_tokens)
-            total_time += max(
-                0.0, self._predict_2d(chunk, float(current_decode_kv))
-            )
+            total_time += max(0.0, self._predict_2d(chunk, float(current_decode_kv)))
             remaining -= chunk
         return total_time
 
@@ -323,6 +321,4 @@ class AggRegressionModel(_BaseRegressionModel):
         if not self._ensure_fitted():
             return None
         total_kv = scheduled_decode_kv + queued_decode_kv + self._avg_decode_len.value
-        return max(
-            0.0, self._predict_2d(self._avg_prefill_tokens.value, total_kv)
-        )
+        return max(0.0, self._predict_2d(self._avg_prefill_tokens.value, total_kv))

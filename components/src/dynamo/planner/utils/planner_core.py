@@ -866,9 +866,7 @@ class BasePlanner:
         await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     @staticmethod
-    def _log_fpm(
-        wid: str, dp: int, fpm: "ForwardPassMetrics", label: str
-    ) -> None:
+    def _log_fpm(wid: str, dp: int, fpm: "ForwardPassMetrics", label: str) -> None:
         sched = fpm.scheduled_requests
         queued = fpm.queued_requests
         logger.info(
@@ -1035,9 +1033,7 @@ class BasePlanner:
             # If a previous scaling action is still in progress, skip decisions.
             if pending_desired is not None:
                 dgd_count = (
-                    num_p
-                    if self.component_type == SubComponentType.PREFILL
-                    else num_d
+                    num_p if self.component_type == SubComponentType.PREFILL else num_d
                 )
                 if dgd_count == pending_desired:
                     logger.info(
