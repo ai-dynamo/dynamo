@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,14 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
 
-from .model import SupportedModels, is_model_supported
+from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
+
+# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
+# should be removed once there is proper way to extract vLLM encoder.
+VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
+
+
+def get_embedding_hash(key: str) -> str:
+    """
+    Generate a unique hash key for storing/retrieving image embeddings.
+
+    Args:
+        key: The base key string (e.g., image URL or identifier)
+    Returns:
+        A unique hash string for the given key.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def get_qwen_image_features(
@@ -39,6 +57,16 @@ def get_qwen_image_features(
     Raises:
         ValueError: If grid_thw is not provided for Qwen model
     """
+    logger.debug(f"Encoding image of shape: {image_embeds['pixel_values'].shape}")
+    if VLLM_ENCODER:
+        pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
+        grid_thw = image_embeds.get("image_grid_thw")
+        if grid_thw is None:
+            raise ValueError("grid_thw is not provided")
+        grid_thw = grid_thw.tolist()
+        image_features = vision_encoder(pixel_values, grid_thw=grid_thw)
+        return image_features
+
     pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
 
     grid_thw = image_embeds.get("image_grid_thw", None)
@@ -88,7 +116,7 @@ def encode_image_embeddings(
 
             embeddings = projector(vision_outputs.last_hidden_state)
 
-        elif is_model_supported(model_name, SupportedModels.QWEN_2_5_VL_7B):
+        elif is_qwen_vl_model(model_name):
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
         else:
@@ -99,7 +127,7 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
-        return embeddings
+    return embeddings
 
 
 def get_encoder_components(
@@ -123,7 +151,7 @@ def get_encoder_components(
         projector = getattr(vision_model, "multi_modal_projector", None)
         return vision_encoder, projector
 
-    elif is_model_supported(model_name, SupportedModels.QWEN_2_5_VL_7B):
+    elif is_qwen_vl_model(model_name):
         vision_encoder = vision_model
         projector = None
         return vision_encoder, projector

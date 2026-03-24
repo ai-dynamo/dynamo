@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Distributed read-write lock implementation using etcd atomic transactions
@@ -222,7 +222,7 @@ impl DistributedRWLock {
             // Execute the atomic transaction
             match etcd_client.etcd_client().kv_client().txn(txn).await {
                 Ok(response) if response.succeeded() => {
-                    tracing::debug!("Acquired read lock for reader {}", reader_id);
+                    tracing::debug!("Acquired read lock for reader {reader_id}");
                     return Ok(ReadLockGuard {
                         rwlock: self,
                         etcd_client,

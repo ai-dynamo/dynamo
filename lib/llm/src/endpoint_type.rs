@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,16 @@ pub enum EndpointType {
     Completion,
     /// Embeddings API
     Embedding,
+    /// Images API (Diffusion/DALL-E)
+    Images,
+    /// Audios API (speech/audio generation)
+    Audios,
+    /// Videos API (video generation)
+    Videos,
     /// Responses API
     Responses,
+    /// Anthropic Messages API
+    AnthropicMessages,
 }
 
 impl EndpointType {
@@ -22,7 +30,11 @@ impl EndpointType {
             Self::Chat => "chat",
             Self::Completion => "completion",
             Self::Embedding => "embedding",
+            Self::Images => "images",
+            Self::Audios => "audios",
+            Self::Videos => "videos",
             Self::Responses => "responses",
+            Self::AnthropicMessages => "anthropic_messages",
         }
     }
 
@@ -31,7 +43,11 @@ impl EndpointType {
             Self::Chat,
             Self::Completion,
             Self::Embedding,
+            Self::Images,
+            Self::Audios,
+            Self::Videos,
             Self::Responses,
+            Self::AnthropicMessages,
         ]
     }
 }

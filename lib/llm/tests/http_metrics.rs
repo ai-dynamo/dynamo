@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Error;
@@ -52,7 +52,7 @@ impl
 
             // Generate 5 response chunks
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
                 yield Annotated::from_data(output);
             }
         };
@@ -295,7 +295,7 @@ mod integration_tests {
     use super::*;
     use dynamo_llm::{
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
-        local_model::LocalModelBuilder,
+        local_model::LocalModelBuilder, namespace::NamespaceFilter,
     };
     use dynamo_runtime::DistributedRuntime;
     use dynamo_runtime::discovery::DiscoveryQuery;
@@ -339,6 +339,9 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
+            0, // migration_limit
+            None,
+            service.state().metrics_clone(),
         );
         // Start watching for model registrations via discovery interface
         let discovery = distributed_runtime.discovery();
@@ -352,7 +355,9 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher.watch(discovery_stream, None).await;
+            model_watcher
+                .watch(discovery_stream, NamespaceFilter::Global)
+                .await;
         });
 
         let EngineConfig::InProcessText { engine, model, .. } = engine_config else {
@@ -510,6 +515,9 @@ mod integration_tests {
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
                 dynamo_llm::entrypoint::RouterConfig::default(),
+                0, // migration_limit
+                None,
+                service.state().metrics_clone(),
             );
 
             // Get all model entries for our test model
@@ -547,13 +555,8 @@ mod integration_tests {
                     if let Some(key) = key {
                         // Remove from ModelManager first (this returns the ModelEntry)
                         if let Some(_removed_card) = manager.remove_model_card(&key) {
-                            // Remove engines (following ModelWatcher::handle_delete pattern)
-                            manager
-                                .remove_chat_completions_model(&model_entry.name)
-                                .ok();
-                            manager.remove_completions_model(&model_entry.name).ok();
-                            manager.remove_embeddings_model(&model_entry.name).ok();
-                            manager.remove_tensor_model(&model_entry.name).ok();
+                            // Remove entire model (following ModelWatcher::handle_delete pattern)
+                            manager.remove_model(&model_entry.name);
 
                             // Then delete from etcd
                             etcd_client.kv_delete(key.as_str(), None).await.unwrap();

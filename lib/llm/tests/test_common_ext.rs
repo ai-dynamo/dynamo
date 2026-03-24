@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::protocols::{
@@ -68,6 +68,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
             .unwrap(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     };
 
@@ -297,6 +298,7 @@ fn test_serialization_preserves_structure() {
             ..Default::default()
         }),
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     };
 
@@ -348,6 +350,7 @@ fn test_sampling_parameters_extraction() {
             .unwrap(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     };
 

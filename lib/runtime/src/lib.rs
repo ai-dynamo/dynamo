@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Dynamo
@@ -25,6 +25,7 @@ pub mod compute;
 pub mod discovery;
 pub mod engine;
 pub mod engine_routes;
+pub mod error;
 pub mod health_check;
 pub mod local_endpoint_registry;
 pub mod system_status_server;
@@ -33,6 +34,7 @@ pub mod distributed;
 pub mod instances;
 pub mod logging;
 pub mod metrics;
+pub mod nvtx;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;

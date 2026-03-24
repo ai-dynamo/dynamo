@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import uvloop
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
@@ -271,19 +271,16 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         args.downstream_endpoint
     )
-    pd_worker_client = (
-        await runtime.namespace(parsed_namespace)
-        .component(parsed_component_name)
-        .endpoint(parsed_endpoint_name)
-        .client()
-    )
+    pd_worker_client = await runtime.endpoint(
+        f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+    ).client()
 
     handler = VllmEncodeWorker(args, config.engine_args, pd_worker_client)
     await handler.async_init(runtime)

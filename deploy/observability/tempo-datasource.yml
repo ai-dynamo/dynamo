@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: 1
@@ -15,6 +15,14 @@ datasources:
       httpMethod: GET
       serviceMap:
         datasourceUid: tempo
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{service_name=~".+"} | trace_id = "$${__trace.traceId}"'
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
       search:
         hide: false
       nodeGraph:

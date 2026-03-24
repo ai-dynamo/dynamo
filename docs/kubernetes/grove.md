@@ -1,4 +1,8 @@
-# Grove Deployment Guide
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Grove
+---
 
 Grove is a Kubernetes API specifically designed to address the orchestration challenges of modern AI workloads, particularly disaggregated inference systems. Grove provides seamless integration with NVIDIA Dynamo for comprehensive AI infrastructure management.
 
@@ -45,7 +49,7 @@ PodCliques and PodCliqueScalingGroups allow users to specify flexible gang-sched
 Supports pluggable horizontal auto-scaling solutions to scale PodCliqueSet, PodClique, and PodCliqueScalingGroup custom resources independently based on their specific metrics and requirements.
 
 ### Network Topology-Aware Scheduling
-Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication.
+Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication. Dynamo exposes this capability through the `topologyConstraint` field on DynamoGraphDeployment resources, so users can opt in to topology-aware placement without interacting with Grove internals. See the [Topology Aware Scheduling guide](./topology-aware-scheduling.md) for configuration details and examples.
 
 ### Custom Startup Dependencies
 Prescribes the order in which PodCliques must start in a declarative specification, with pod startup decoupled from pod creation or scheduling. This ensures proper initialization order for disaggregated components.
@@ -97,4 +101,4 @@ For practical examples of Grove-based multinode deployments in action, see the [
 
 For the latest updates on Grove, refer to the [official project on GitHub](https://github.com/NVIDIA/grove).
 
-Dynamo Cloud also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Cloud Deployment Installation Guide](./installation_guide.md) for more details.
+Dynamo Kubernetes Platform also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Kubernetes Platform Deployment Installation Guide](./installation-guide.md) for more details.

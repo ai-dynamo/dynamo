@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,6 @@ import os
 from typing import Optional
 
 import numpy as np
-import scipy
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -30,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 MISSING_PROFILING_DATA_ERROR_MESSAGE = (
     "SLA-Planner requires pre-deployment profiling results to run.\n"
-    "Please follow /docs/benchmarks/sla_driven_profiling.md to run the profiling first,\n"
+    "Please follow /docs/components/profiler/profiler-guide.md to run the profiling first,\n"
     "and make sure the profiling results are present in --profile-results-dir."
 )
 
@@ -79,6 +78,9 @@ class PrefillInterpolator:
 
         self.min_isl = min(self.prefill_isl)
         self.max_isl = max(self.prefill_isl)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 1d interpolation
         self.ttft_interpolator = scipy.interpolate.interp1d(
@@ -149,7 +151,12 @@ class DecodeInterpolator:
         self.resolution = resolution
         self.xi = np.linspace(0, 1, resolution)
         self.yi = np.linspace(0, max(self.y_context_length), resolution)
+        self.X: np.ndarray
+        self.Y: np.ndarray
         self.X, self.Y = np.meshgrid(self.xi, self.yi)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 2d interpolation with fallback for NaN values
         self.itl_interpolator = scipy.interpolate.griddata(

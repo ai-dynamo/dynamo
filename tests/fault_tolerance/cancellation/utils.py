@@ -1,58 +1,42 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import os
 import re
-import shutil
 import socket
 import threading
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, cast
 
 import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
+from tests.utils.managed_process import (
+    DynamoFrontendProcess as BaseDynamoFrontendProcess,
+)
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
+class DynamoFrontendProcess(BaseDynamoFrontendProcess):
+    """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
     def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend"]
-
-        # Set debug logging environment
-        env = os.environ.copy()
-        env["DYN_LOG"] = "debug"
-        # Disable canary health check - these tests expect full control over requests
-        # sent to the workers where canary health check intermittently sends dummy
-        # requests to workers interfering with the test process which may cause
-        # intermittent failures
-        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
+        extra_env = {
+            "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
+            "DYN_LOG": "debug",
+            # These tests expect full control over requests sent to workers. The canary
+            # health check can inject extra requests and cause intermittent failures.
+            "DYN_HEALTH_CHECK_ENABLED": "false",
+        }
         super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
-            terminate_existing=True,
-            log_dir=log_dir,
+            request,
+            frontend_port=0,  # allocate a free port (xdist-safe)
+            router_mode="round-robin",
+            extra_env=extra_env,
+            terminate_all_matching_process_names=False,
         )
 
 
@@ -174,12 +158,15 @@ class CancellableRequest:
         return self.response
 
 
-def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
+def send_completion_request(
+    prompt: str, max_tokens: int, frontend_port: int
+) -> CancellableRequest:
     """Send a completion request to the frontend
 
     Args:
         prompt: The prompt for completion
         max_tokens: Maximum tokens to generate
+        frontend_port: Port where the frontend is running
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled
@@ -199,7 +186,7 @@ def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
     # Return a cancellable request object
     cancellable_req = CancellableRequest()
     cancellable_req.post(
-        f"http://localhost:{FRONTEND_PORT}/v1/completions",
+        f"http://localhost:{frontend_port}/v1/completions",
         headers=headers,
         json=payload,
     )
@@ -207,13 +194,14 @@ def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, stream: bool = False
+    prompt: str, max_tokens: int, frontend_port: int, stream: bool = False
 ) -> CancellableRequest:
     """Send a chat completion request to the frontend
 
     Args:
         prompt: The prompt for chat completion
         max_tokens: Maximum tokens to generate
+        frontend_port: Port where the frontend is running
         stream: Whether to stream the response
 
     Returns:
@@ -235,7 +223,7 @@ def send_chat_completion_request(
     # Return a cancellable request object
     cancellable_req = CancellableRequest()
     cancellable_req.post(
-        f"http://localhost:{FRONTEND_PORT}/v1/chat/completions",
+        f"http://localhost:{frontend_port}/v1/chat/completions",
         headers=headers,
         json=payload,
         stream=stream,
@@ -244,12 +232,14 @@ def send_chat_completion_request(
 
 
 def send_cancellable_request(
+    frontend_port: int,
     request_type: str = "completion",
     use_long_prompt: bool = False,
 ) -> CancellableRequest:
     """Send a request that can be manually cancelled.
 
     Args:
+        frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
 
@@ -261,11 +251,11 @@ def send_cancellable_request(
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 16384)
+        return send_completion_request(prompt, 16384, frontend_port)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 16384, stream=False)
+        return send_chat_completion_request(prompt, 16384, frontend_port, stream=False)
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 16384, stream=True)
+        return send_chat_completion_request(prompt, 16384, frontend_port, stream=True)
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -283,12 +273,15 @@ def read_streaming_responses(
     Raises:
         pytest.fail if stream ends before expected_count responses
     """
-    response = cancellable_req.get_response()
-    if not response or response.status_code != 200:
+    response_raw = cancellable_req.get_response()
+    if response_raw is None:
+        pytest.fail("Failed to get streaming response: response is None")
+    if response_raw.status_code != 200:
         pytest.fail(
-            f"Failed to get streaming response: status_code={response.status_code if response else 'None'}"
+            f"Failed to get streaming response: status_code={response_raw.status_code}"
         )
 
+    response = cast(requests.Response, response_raw)  # Type narrowing after checks
     response_count = 0
     for line in response.iter_lines():
         response_count += 1
@@ -302,6 +295,170 @@ def read_streaming_responses(
     # If we get here, stream ended too early
     pytest.fail(
         f"Stream ended after only {response_count} lines - expected to read at least {expected_count}"
+    )
+
+
+def _parse_frontend_cancellation_metric(
+    metrics_text: str, model_name: str, endpoint: str, request_type: str
+) -> int:
+    """
+    Parse the frontend cancellation metric from Prometheus metrics text.
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+        model_name: The model name label value
+        endpoint: The endpoint label value (e.g. "completions", "chat_completions")
+        request_type: The request_type label value ("stream" or "unary")
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    for line in metrics_text.splitlines():
+        if not line.startswith("dynamo_frontend_model_cancellation_total{"):
+            continue
+        if (
+            f'endpoint="{endpoint}"' in line
+            and f'model="{model_name}"' in line
+            and f'request_type="{request_type}"' in line
+        ):
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    return int(float(parts[1]))
+                except ValueError:
+                    pass
+
+    return 0
+
+
+def _parse_runtime_cancellation_metric(
+    metrics_text: str,
+    namespace: str = "dynamo",
+    component: str = "backend",
+    endpoint: str = "generate",
+) -> int:
+    """
+    Parse the runtime cancellation metric from Prometheus metrics text.
+
+    The metric is dynamo_component_cancellation_total with auto-injected
+    labels (dynamo_namespace, dynamo_component, dynamo_endpoint).
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+        namespace: Expected dynamo_namespace label value
+        component: Expected dynamo_component label value
+        endpoint: Expected dynamo_endpoint label value
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    for line in metrics_text.splitlines():
+        if not line.startswith("dynamo_component_cancellation_total{"):
+            continue
+        if (
+            f'dynamo_namespace="{namespace}"' in line
+            and f'dynamo_component="{component}"' in line
+            and f'dynamo_endpoint="{endpoint}"' in line
+        ):
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    return int(float(parts[1]))
+                except ValueError:
+                    pass
+
+    return 0
+
+
+def _resolve_cancellation_labels(request_type: str) -> tuple[str, str]:
+    """
+    Map a test request type to frontend metric labels.
+
+    Args:
+        request_type: One of "completion", "chat_completion", "chat_completion_stream"
+
+    Returns:
+        (endpoint, request_type_label) tuple
+    """
+    mapping = {
+        "completion": ("completions", "unary"),
+        "chat_completion": ("chat_completions", "unary"),
+        "chat_completion_stream": ("chat_completions", "stream"),
+    }
+    if request_type not in mapping:
+        pytest.fail(f"Unknown request type: {request_type}")
+    return mapping[request_type]
+
+
+def verify_frontend_cancellation_metrics(
+    frontend_port: int,
+    request_type: str,
+    expected_count: int = 0,
+) -> None:
+    """
+    Verify frontend cancellation metrics.
+
+    Args:
+        frontend_port: Port where the frontend /metrics is served
+        request_type: The test request type ("completion", "chat_completion", "chat_completion_stream")
+        expected_count: Expected cancellation count for this request type
+    """
+    endpoint, req_type_label = _resolve_cancellation_labels(request_type)
+
+    frontend_metrics_url = f"http://localhost:{frontend_port}/metrics"
+    try:
+        response = requests.get(frontend_metrics_url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        pytest.fail(
+            f"Failed to fetch frontend metrics from {frontend_metrics_url}: {e}"
+        )
+
+    frontend_text = response.text
+    count = _parse_frontend_cancellation_metric(
+        frontend_text, FAULT_TOLERANCE_MODEL_NAME, endpoint, req_type_label
+    )
+
+    logger.info(
+        f"Frontend cancellation metrics - endpoint={endpoint}, "
+        f"request_type={req_type_label}: {count}"
+    )
+
+    assert count == expected_count, (
+        f"Frontend: expected {expected_count} cancellations "
+        f"for endpoint={endpoint}, request_type={req_type_label}, "
+        f"but got {count}"
+    )
+
+
+def verify_runtime_cancellation_metrics(
+    worker_system_port: int,
+    expected_count: int = 0,
+    component: str = "backend",
+) -> None:
+    """
+    Verify runtime (worker) cancellation metrics.
+
+    Args:
+        worker_system_port: Port where the worker /metrics is served
+        expected_count: Expected cumulative cancellation count
+        component: The dynamo_component label value (e.g. "backend", "prefill")
+    """
+    worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
+    try:
+        response = requests.get(worker_metrics_url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        pytest.fail(f"Failed to fetch worker metrics from {worker_metrics_url}: {e}")
+
+    worker_text = response.text
+    count = _parse_runtime_cancellation_metric(worker_text, component=component)
+
+    logger.info(f"Runtime cancellation metrics (component={component}): {count}")
+
+    assert count == expected_count, (
+        f"Runtime (component={component}): expected {expected_count} cancellations, "
+        f"but got {count}"
     )
 
 

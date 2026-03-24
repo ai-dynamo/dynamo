@@ -1,8 +1,12 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+
 use crate::metrics::prometheus_names::work_handler;
+use crate::metrics::work_handler_perf::{
+    WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
+};
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
@@ -20,6 +24,7 @@ pub struct WorkHandlerMetrics {
     pub request_bytes: IntCounter,
     pub response_bytes: IntCounter,
     pub error_counter: IntCounterVec,
+    pub cancellation_total: IntCounter,
 }
 
 impl WorkHandlerMetrics {
@@ -30,6 +35,7 @@ impl WorkHandlerMetrics {
         request_bytes: IntCounter,
         response_bytes: IntCounter,
         error_counter: IntCounterVec,
+        cancellation_total: IntCounter,
     ) -> Self {
         Self {
             request_counter,
@@ -38,6 +44,7 @@ impl WorkHandlerMetrics {
             request_bytes,
             response_bytes,
             error_counter,
+            cancellation_total,
         }
     }
 
@@ -86,6 +93,12 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        let cancellation_total = metrics.create_intcounter(
+            work_handler::CANCELLATION_TOTAL,
+            "Total number of requests cancelled by work handler",
+            metrics_labels,
+        )?;
+
         Ok(Self::new(
             request_counter,
             request_duration,
@@ -93,6 +106,7 @@ impl WorkHandlerMetrics {
             request_bytes,
             response_bytes,
             error_counter,
+            cancellation_total,
         ))
     }
 }
@@ -136,6 +150,10 @@ where
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
+        let t2_wallclock_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         let start_time = std::time::Instant::now();
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
@@ -193,6 +211,12 @@ where
             }
         };
 
+        // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
+        if let Some(t1_ns) = control_msg.frontend_send_ts_ns {
+            let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
+            WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
+        }
+
         // extend request with context
         tracing::trace!("received control message: {:?}", control_msg);
         tracing::trace!("received request: {:?}", request);
@@ -204,6 +228,7 @@ where
         let mut publisher = tcp::client::TcpClient::create_response_stream(
             request.context(),
             control_msg.connection_info,
+            self.metrics().map(|m| m.cancellation_total.clone()),
         )
         .await
         .map_err(|e| {
@@ -237,6 +262,8 @@ where
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
                 let _result = publisher.send_prologue(None).await;
+                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
+                    .observe(start_time.elapsed().as_secs_f64());
                 stream
             }
             Err(e) => {
@@ -251,7 +278,7 @@ where
                 }
                 #[cfg(not(debug_assertions))]
                 {
-                    tracing::error!("Failed to generate response stream: {}", error_string);
+                    tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
                 let _result = publisher.send_prologue(Some(error_string)).await;
@@ -265,13 +292,6 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err()
-                && format!("{:?}", err) == STREAM_ERR_MSG
-            {
-                tracing::warn!(STREAM_ERR_MSG);
-                send_complete_final = false;
-                break;
-            }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,
@@ -282,9 +302,24 @@ where
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!("Failed to publish response for stream {}", context.id());
-                context.stop_generating();
                 send_complete_final = false;
+                if context.is_stopped() {
+                    // Say there are 2 threads accessing `context`, the sequence can be either:
+                    // 1. context.stop_generating (other) -> publisher.send failure (this)
+                    //    -> context.is_stopped (this)
+                    // 2. publisher.send failure (this) -> context.stop_generating (other)
+                    //    -> context.is_stopped (this)
+                    // Case 1 can happen when client closed the connection after receiving the
+                    // complete response from frontend. Hence, send failure can be expected in this
+                    // case.
+                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                } else {
+                    // Otherwise, this is an error.
+                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    context.stop_generating();
+                }
+                // Account errors in all cases, including cancellation. Therefore this metric can be
+                // inflated.
                 if let Some(m) = self.metrics() {
                     m.error_counter
                         .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])

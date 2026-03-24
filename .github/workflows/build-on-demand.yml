@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build On Demand
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_vllm:
+        description: 'Build and push vllm image, tagged with branch name'
+        type: boolean
+        default: false
+      build_sglang:
+        description: 'Build and push sglang image, tagged with branch name'
+        type: boolean
+        default: false
+      build_trtllm:
+        description: 'Build and push trtllm image, tagged with branch name'
+        type: boolean
+        default: false
+      build_operator:
+        description: 'Build and push operator image, tagged with branch name'
+        type: boolean
+        default: false
+
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+
+  init:
+    runs-on: ubuntu-slim
+    outputs:
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+      sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
+    steps:
+      - name: Export builder name
+        id: export-builder-name
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+      - name: Sanitize ref name for container tags
+        id: sanitize-ref
+        shell: bash
+        run: |
+          sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
+          echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
+
+  # ============================================================================
+  # FRAMEWORK PIPELINES (build-only)
+  # ============================================================================
+
+  vllm-pipeline:
+    needs: [init]
+    if: inputs.build_vllm
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: vllm
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
+    secrets: inherit
+
+  sglang-pipeline:
+    needs: [init]
+    if: inputs.build_sglang
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: sglang
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
+    secrets: inherit
+
+  trtllm-pipeline:
+    needs: [init]
+    if: inputs.build_trtllm
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
+    secrets: inherit
+
+  # ============================================================================
+  # OPERATOR (build-only)
+  # ============================================================================
+
+  operator:
+    needs: [init]
+    if: inputs.build_operator
+    name: Operator
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: 'linux/amd64,linux/arm64'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push Container
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          DEFAULT_TAG="${{ github.sha }}-operator"
+          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
+          IMAGE_URIS=(
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
+            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
+          )
+
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+
+          docker buildx build --push \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
+  # ============================================================================
+  # CLEANUP
+  # ============================================================================
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ needs.init.outputs.builder_name }}
+        buildkit_worker_addresses: ''
+        skip_bootstrap: true
+    - name: Builder Cleanup in case of k8s builder
+      shell: bash
+      run: |
+        docker buildx rm ${{ needs.init.outputs.builder_name }} || true

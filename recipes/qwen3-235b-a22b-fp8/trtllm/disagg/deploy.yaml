@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: v1
 kind: ConfigMap
@@ -13,10 +13,6 @@ data:
     moe_expert_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: false
-    build_config:
-      max_batch_size: 2
-      max_num_tokens: 8192
-      max_seq_len: 8192
     kv_cache_config:
       enable_block_reuse: true
       free_gpu_memory_fraction: 0.7
@@ -28,6 +24,9 @@ data:
       max_batch_size: 2
     disable_overlap_scheduler: true
     print_iter_log: false
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -42,10 +41,6 @@ data:
     moe_tensor_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: false
-    build_config:
-      max_batch_size: 512
-      max_num_tokens: 1024
-      max_seq_len: 8192
     kv_cache_config:
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.95
@@ -57,6 +52,9 @@ data:
       max_batch_size: 512
     disable_overlap_scheduler: false
     print_iter_log: false
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -70,9 +68,9 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-235b-a22b-disagg
       replicas: 1
       extraPodSpec:
+        tolerations: []
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -84,7 +82,7 @@ spec:
                     - qwen3-235b-a22b-disagg-frontend
               topologyKey: kubernetes.io/hostname
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           command:
@@ -93,7 +91,6 @@ spec:
     TRTLLMPrefillWorker:
       componentType: worker
       subComponentType: prefill
-      dynamoNamespace: qwen3-235b-a22b-disagg
       envFromSecret: hf-token-secret
       replicas: 6
       resources:
@@ -102,6 +99,7 @@ spec:
       sharedMemory:
         size: 256Gi
       extraPodSpec:
+        tolerations: []
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -114,10 +112,12 @@ spec:
         mainContainer:
           env:
             - name: MODEL_PATH
-              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
+              value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/prefill.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
@@ -127,9 +127,11 @@ spec:
               python3 -m dynamo.trtllm \
                 --model-path "${MODEL_PATH}" \
                 --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+                --max-batch-size 2 \
+                --max-num-tokens 8192 \
+                --max-seq-len 8192 \
                 --extra-engine-args "${ENGINE_ARGS}" \
-                --disaggregation-mode prefill \
-                --disaggregation-strategy prefill_first
+                --disaggregation-mode prefill
           volumeMounts:
             - name: prefill-config
               mountPath: /engine_configs
@@ -145,7 +147,6 @@ spec:
     TRTLLMDecodeWorker:
       componentType: worker
       subComponentType: decode
-      dynamoNamespace: qwen3-235b-a22b-disagg
       envFromSecret: hf-token-secret
       replicas: 1
       resources:
@@ -154,6 +155,7 @@ spec:
       sharedMemory:
         size: 256Gi
       extraPodSpec:
+        tolerations: []
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -166,10 +168,12 @@ spec:
         mainContainer:
           env:
             - name: MODEL_PATH
-              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
+              value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/decode.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
@@ -179,9 +183,11 @@ spec:
               python3 -m dynamo.trtllm \
                 --model-path "${MODEL_PATH}" \
                 --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+                --max-batch-size 512 \
+                --max-num-tokens 1024 \
+                --max-seq-len 8192 \
                 --extra-engine-args "${ENGINE_ARGS}" \
-                --disaggregation-mode decode \
-                --disaggregation-strategy prefill_first
+                --disaggregation-mode decode
           volumeMounts:
             - name: decode-config
               mountPath: /engine_configs

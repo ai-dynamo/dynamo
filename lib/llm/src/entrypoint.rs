@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The entrypoint module provides tools to build a Dynamo runner.
@@ -8,20 +8,36 @@
 pub mod input;
 pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
-    backend::ExecutionContext, engines::StreamingEngine, kv_router::KvRouterConfig,
-    local_model::LocalModel,
+    backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
+    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
+
+/// Callback type for chat engine factory (async)
+pub type ChatEngineFactoryCallback = Arc<
+    dyn Fn(
+            ModelCardInstanceId,
+            ModelDeploymentCard,
+        ) -> Pin<
+            Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone, Default)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    pub busy_threshold: Option<f64>,
+    /// Load threshold configuration for busy detection
+    pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
 }
 
@@ -30,13 +46,13 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
-            busy_threshold: None,
+            load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
         }
     }
 
-    pub fn with_busy_threshold(mut self, threshold: Option<f64>) -> Self {
-        self.busy_threshold = threshold;
+    pub fn with_load_threshold_config(mut self, config: LoadThresholdConfig) -> Self {
+        self.load_threshold_config = config;
         self
     }
 
@@ -49,7 +65,10 @@ impl RouterConfig {
 #[derive(Clone)]
 pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
-    Dynamic(Box<LocalModel>),
+    Dynamic {
+        model: Box<LocalModel>,
+        chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.
     InProcessText {
@@ -66,12 +85,22 @@ pub enum EngineConfig {
 }
 
 impl EngineConfig {
-    fn local_model(&self) -> &LocalModel {
+    pub fn local_model(&self) -> &LocalModel {
         use EngineConfig::*;
         match self {
-            Dynamic(lm) => lm,
+            Dynamic { model, .. } => model,
             InProcessText { model, .. } => model,
             InProcessTokens { model, .. } => model,
+        }
+    }
+
+    pub fn chat_engine_factory(&self) -> Option<&ChatEngineFactoryCallback> {
+        match self {
+            EngineConfig::Dynamic {
+                chat_engine_factory,
+                ..
+            } => chat_engine_factory.as_ref(),
+            _ => None,
         }
     }
 }

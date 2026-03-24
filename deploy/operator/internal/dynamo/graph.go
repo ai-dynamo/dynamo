@@ -1,0 +1,1776 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package dynamo
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"regexp"
+	"sort"
+	"strings"
+
+	istioNetworking "istio.io/api/networking/v1beta1"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/imdario/mergo"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+)
+
+// RestartState holds the restart state for DGD services.
+type RestartState struct {
+	// Timestamp is the restart timestamp to apply as the annotation value.
+	// Format: RFC3339
+	Timestamp string
+	// ServicesToAnnotate is the set of service names that should have the restart annotation.
+	ServicesToAnnotate map[string]bool
+}
+
+// ShouldAnnotateService returns true if the given service should have a restart annotation.
+func (s *RestartState) ShouldAnnotateService(serviceName string) bool {
+	if s == nil || s.ServicesToAnnotate == nil {
+		return false
+	}
+	return s.ServicesToAnnotate[serviceName]
+}
+
+// DetermineRestartState computes the restart state for DGD services.
+func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v1alpha1.RestartStatus) *RestartState {
+	if restartStatus == nil {
+		return nil
+	}
+
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
+		// Check if there's a completed restart we need to preserve
+		if restartStatus.ObservedID != "" {
+			return &RestartState{
+				Timestamp:          restartStatus.ObservedID,
+				ServicesToAnnotate: getAllServiceNames(dgd),
+			}
+		}
+		return nil
+	}
+
+	specID := dgd.Spec.Restart.ID
+
+	isNewRestart := restartStatus.ObservedID == "" ||
+		dgd.Spec.Restart.ID != restartStatus.ObservedID
+
+	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseSuperseded {
+		// Superseded: don't push any new annotations. Existing annotations
+		// are preserved via the existingRestartAnnotations fallback path.
+		return nil
+	}
+
+	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseCompleted {
+		return &RestartState{
+			Timestamp:          specID,
+			ServicesToAnnotate: getAllServiceNames(dgd),
+		}
+	}
+
+	if IsParallelRestart(dgd) {
+		return &RestartState{
+			Timestamp:          specID,
+			ServicesToAnnotate: getAllServiceNames(dgd),
+		}
+	}
+
+	// Sequential restart (default or specified)
+	return &RestartState{
+		Timestamp:          specID,
+		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, restartStatus),
+	}
+}
+
+// getAllServiceNames returns a map of all service names in the DGD.
+func getAllServiceNames(dgd *v1alpha1.DynamoGraphDeployment) map[string]bool {
+	services := make(map[string]bool, len(dgd.Spec.Services))
+	for serviceName := range dgd.Spec.Services {
+		services[serviceName] = true
+	}
+	return services
+}
+
+// IsParallelRestart returns true if the restart strategy is parallel.
+func IsParallelRestart(dgd *v1alpha1.DynamoGraphDeployment) bool {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.Strategy == nil {
+		return false // Default is sequential
+	}
+	return dgd.Spec.Restart.Strategy.Type == v1alpha1.RestartStrategyTypeParallel
+}
+
+// getServicesToAnnotateForSequentialRestart determines which services should be annotated
+// for a sequential restart in progress.
+func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment, status *v1alpha1.RestartStatus) map[string]bool {
+	services := make(map[string]bool)
+
+	order := GetRestartOrder(dgd)
+	if len(order) == 0 {
+		return services
+	}
+
+	// New restart or Pending phase - only first service needs to be annotated
+	if status == nil ||
+		status.Phase == v1alpha1.RestartPhasePending ||
+		len(status.InProgress) == 0 {
+		services[order[0]] = true
+		return services
+	}
+
+	// Find the max index among in-progress services
+	inProgress := make(map[string]bool)
+	for _, svc := range status.InProgress {
+		inProgress[svc] = true
+	}
+
+	maxIndex := -1
+	for i, svc := range order {
+		if inProgress[svc] {
+			if i > maxIndex {
+				maxIndex = i
+			}
+		}
+	}
+
+	// Add all services up to and including maxIndex
+	// Services before the in-progress one have completed and need their annotation preserved
+	if maxIndex >= 0 {
+		for i := 0; i <= maxIndex; i++ {
+			services[order[i]] = true
+		}
+	}
+
+	return services
+}
+
+// GetRestartOrder returns the order of services for sequential restart.
+// If not specified, returns a deterministic alphabetical order.
+func GetRestartOrder(dgd *v1alpha1.DynamoGraphDeployment) []string {
+	if dgd.Spec.Restart != nil && dgd.Spec.Restart.Strategy != nil && len(dgd.Spec.Restart.Strategy.Order) > 0 {
+		return dgd.Spec.Restart.Strategy.Order
+	}
+
+	order := make([]string, 0, len(dgd.Spec.Services))
+	for serviceName := range dgd.Spec.Services {
+		order = append(order, serviceName)
+	}
+	sort.Strings(order)
+	return order
+}
+
+// ServiceConfig represents the YAML configuration structure for a service
+type DynamoConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Namespace     string `yaml:"namespace"`
+	Name          string `yaml:"name"`
+	ComponentType string `yaml:"component_type,omitempty"`
+}
+
+type Traffic struct {
+	Timeout int `yaml:"timeout"`
+}
+
+type Autoscaling struct {
+	MinReplicas int `yaml:"min_replicas"`
+	MaxReplicas int `yaml:"max_replicas"`
+}
+
+type Config struct {
+	Dynamo       *DynamoConfig          `yaml:"dynamo,omitempty"`
+	Resources    *Resources             `yaml:"resources,omitempty"`
+	Traffic      *Traffic               `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling           `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool                   `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string               `yaml:"api_endpoints,omitempty"`
+	Workers      *int32                 `yaml:"workers,omitempty"`
+	TotalGpus    *int32                 `yaml:"total_gpus,omitempty"`
+	ExtraPodSpec *v1alpha1.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
+}
+
+type ServiceConfig struct {
+	Name         string              `yaml:"name"`
+	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
+	Config       Config              `yaml:"config"`
+}
+
+type Resources struct {
+	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
+	GPU    *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Custom map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
+}
+
+type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig
+
+// ServiceConfig represents the configuration for a specific service
+type DynDeploymentServiceConfig struct {
+	ServiceArgs *ServiceArgs `json:"ServiceArgs,omitempty"`
+}
+
+// ServiceArgs represents the arguments that can be passed to any service
+type ServiceArgs struct {
+	Workers   *int32     `json:"workers,omitempty"`
+	Resources *Resources `json:"resources,omitempty"`
+}
+
+func (s ServiceConfig) GetNamespace() *string {
+	if s.Config.Dynamo == nil || s.Config.Dynamo.Namespace == "" {
+		return nil
+	}
+	return &s.Config.Dynamo.Namespace
+}
+
+func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
+	var config DynDeploymentConfig
+	err := json.Unmarshal(jsonContent, &config)
+	return config, err
+}
+
+func (r RollingUpdateContext) InProgress() bool {
+	return len(r.OldWorkerReplicas) > 0
+}
+
+// RollingUpdateContext provides information about an in-progress rolling update.
+type RollingUpdateContext struct {
+	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
+	NewWorkerHash string
+	// OldWorkerReplicas maps service name to the desired replica count for old workers.
+	// Used by the controller to patch old worker DCDs directly.
+	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
+	OldWorkerReplicas map[string]int32
+	// NewWorkerReplicas maps service name to the desired replica count for new workers.
+	// Calculated as: min(desiredReplicas, newReadyReplicas + 1) to gradually scale up.
+	NewWorkerReplicas map[string]int32
+}
+
+// GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
+// The map key is a unique identifier for each DCD (serviceName).
+func GenerateDynamoComponentsDeployments(
+	ctx context.Context,
+	parentDGD *v1alpha1.DynamoGraphDeployment,
+	defaultIngressSpec *v1alpha1.IngressSpec,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
+) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
+
+	// Generate DCDs for each service
+	for componentName, component := range parentDGD.Spec.Services {
+		dynamoNamespace := parentDGD.GetDynamoNamespaceForService(component)
+		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations, rollingUpdateCtx)
+		if err != nil {
+			return nil, err
+		}
+		deployments[componentName] = dcd
+	}
+
+	return deployments, nil
+}
+
+func GetDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	return v1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
+}
+
+// generateSingleDCD creates a DynamoComponentDeployment for a single service.
+func generateSingleDCD(
+	ctx context.Context,
+	parentDGD *v1alpha1.DynamoGraphDeployment,
+	componentName string,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoNamespace string,
+	defaultIngressSpec *v1alpha1.IngressSpec,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
+) (*v1alpha1.DynamoComponentDeployment, error) {
+	deployment := &v1alpha1.DynamoComponentDeployment{}
+	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
+	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
+	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
+	deployment.Namespace = parentDGD.Namespace
+	deployment.Spec.ServiceName = componentName
+	deployment.Spec.DynamoNamespace = &dynamoNamespace
+
+	labels := make(map[string]string)
+	maps.Copy(labels, component.Labels)
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
+	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+	deployment.Spec.Labels = labels
+	deployment.Labels = labels
+
+	// only label worker DCDs with their hash for cleanup during rolling updates
+	if IsWorkerComponent(component.ComponentType) {
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+	}
+
+	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+	propagateDGDSpecMetadata(parentDGD.Spec.Annotations, parentDGD.Spec.Labels, &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+
+	// Apply restart annotation if this service should be restarted.
+	if restartState.ShouldAnnotateService(componentName) {
+		if deployment.Spec.Annotations == nil {
+			deployment.Spec.Annotations = make(map[string]string)
+		}
+		deployment.Spec.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+	} else if existingRestartAnnotations != nil {
+		if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+		}
+	}
+
+	if component.ComponentType == commonconsts.ComponentTypePlanner {
+		if deployment.Spec.ExtraPodSpec == nil {
+			deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
+		}
+		if deployment.Spec.ExtraPodSpec.PodSpec == nil {
+			deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
+		}
+		deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
+	}
+
+	if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+		deployment.Spec.Ingress = defaultIngressSpec
+	}
+
+	if len(parentDGD.Spec.Envs) > 0 {
+		deployment.Spec.Envs = MergeEnvs(parentDGD.Spec.Envs, deployment.Spec.Envs)
+	}
+
+	if err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
+		return nil, err
+	}
+	if err := overrideWithDynDeploymentConfig(ctx, deployment); err != nil {
+		return nil, err
+	}
+
+	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
+	if rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && rollingUpdateCtx.NewWorkerReplicas[componentName] != 0 {
+		deployment.Spec.Replicas = ptr.To(rollingUpdateCtx.NewWorkerReplicas[componentName])
+	} else if component.Replicas != nil {
+		deployment.Spec.Replicas = component.Replicas
+	}
+
+	return deployment, nil
+}
+
+// updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
+// It updates the port for the given service (if it is the main component)
+func updateDynDeploymentConfig(dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment, newPort int) error {
+	if dynamoDeploymentComponent.IsFrontendComponent() {
+		dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
+		if dynamoDeploymentConfig != nil {
+			var config map[string]any
+			if err := json.Unmarshal(dynamoDeploymentConfig, &config); err != nil {
+				return fmt.Errorf("failed to unmarshal %v: %w", commonconsts.DynamoDeploymentConfigEnvVar, err)
+			}
+			// Safely navigate and update the config
+			if serviceConfig, ok := config[dynamoDeploymentComponent.Spec.ServiceName].(map[string]any); ok {
+				serviceConfig["port"] = newPort
+			}
+			// Marshal back to JSON string
+			updated, err := json.Marshal(config)
+			if err != nil {
+				return fmt.Errorf("failed to marshal updated config: %w", err)
+			}
+			dynamoDeploymentComponent.SetDynamoDeploymentConfig(updated)
+		}
+	}
+	return nil
+}
+
+func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment) error {
+	dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
+	if dynamoDeploymentConfig == nil {
+		return nil
+	}
+	dynDeploymentConfig, err := ParseDynDeploymentConfig(ctx, dynamoDeploymentConfig)
+	if err != nil {
+		return fmt.Errorf("failed to parse %v: %w", commonconsts.DynamoDeploymentConfigEnvVar, err)
+	}
+	componentDynConfig := dynDeploymentConfig[dynamoDeploymentComponent.Spec.ServiceName]
+	if componentDynConfig != nil {
+		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Workers != nil {
+			dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
+		}
+		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
+			requests := &v1alpha1.ResourceItem{}
+			limits := &v1alpha1.ResourceItem{}
+			if dynamoDeploymentComponent.Spec.Resources == nil {
+				dynamoDeploymentComponent.Spec.Resources = &v1alpha1.Resources{
+					Requests: requests,
+					Limits:   limits,
+				}
+			} else {
+				if dynamoDeploymentComponent.Spec.Resources.Requests != nil {
+					requests = dynamoDeploymentComponent.Spec.Resources.Requests
+				} else {
+					dynamoDeploymentComponent.Spec.Resources.Requests = requests
+				}
+				if dynamoDeploymentComponent.Spec.Resources.Limits != nil {
+					limits = dynamoDeploymentComponent.Spec.Resources.Limits
+				} else {
+					dynamoDeploymentComponent.Spec.Resources.Limits = limits
+				}
+			}
+			if componentDynConfig.ServiceArgs.Resources.GPU != nil {
+				requests.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+				limits.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+			}
+			if componentDynConfig.ServiceArgs.Resources.CPU != nil {
+				requests.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+				limits.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+			}
+			if componentDynConfig.ServiceArgs.Resources.Memory != nil {
+				requests.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+				limits.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+			}
+			if componentDynConfig.ServiceArgs.Resources.Custom != nil {
+				requests.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+				limits.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+			}
+		}
+	}
+	return nil
+}
+
+func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+	envMap := make(map[string]corev1.EnvVar)
+
+	// Add all common environment variables.
+	for _, env := range common {
+		envMap[env.Name] = env
+	}
+
+	// Override or add with service-specific environment variables.
+	for _, env := range specific {
+		envMap[env.Name] = env
+	}
+
+	// Convert the map back to a slice.
+	merged := make([]corev1.EnvVar, 0, len(envMap))
+	for _, env := range envMap {
+		merged = append(merged, env)
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Name < merged[j].Name
+	})
+	return merged
+}
+
+// GetDCDResourceName returns the Kubernetes resource name for a DynamoComponentDeployment.
+// If using for a non DCD resource (i.e. Ingress or VirtualService), use the empty string for the workerSuffix.
+// For DCD Resources, Worker components include the workerSuffix; for non-workers, workerSuffix is ignored
+func GetDCDResourceName(dgd *v1alpha1.DynamoGraphDeployment, serviceName string, workerSuffix string) string {
+	baseName := fmt.Sprintf("%s-%s", dgd.Name, strings.ToLower(serviceName))
+	if spec := dgd.Spec.Services[serviceName]; spec != nil && IsWorkerComponent(spec.ComponentType) && workerSuffix != "" {
+		return baseName + "-" + workerSuffix
+	}
+	return baseName
+}
+
+type SecretsRetriever interface {
+	GetSecrets(namespace, registry string) ([]string, error)
+}
+
+func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string) []corev1.LocalObjectReference {
+	names, err := retriever.GetSecrets(namespace, image)
+	if err != nil {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
+}
+
+// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
+// based on the backend framework and multinode deployment patterns.
+//
+// Rules:
+// - For VLLM and SGLang: worker cliques start after leader clique
+// - For TRTLLM: leader clique starts after worker cliques
+// - Only applies to multinode deployments (numberOfNodes > 1)
+// - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
+func applyCliqueStartupDependencies(
+	gangSet *grovev1alpha1.PodCliqueSet,
+	roles []ServiceRole,
+	backendFramework BackendFramework,
+	numberOfNodes int32,
+) {
+	// enabled for TRTLLM multinode deployments only
+	// TODO: reactivate for all backends when we have a better way to handle the readiness probe for the leader.
+	enabled := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
+
+	if !enabled {
+		return // No dependencies for single-node deployments
+	}
+
+	// Build maps of leader and worker clique names
+	var leaderCliqueName string
+	var workerCliqueNames []string
+
+	for _, r := range roles {
+		cliqueName := strings.ToLower(r.Name)
+		switch r.Role {
+		case RoleLeader:
+			leaderCliqueName = cliqueName
+		case RoleWorker:
+			workerCliqueNames = append(workerCliqueNames, cliqueName)
+		}
+	}
+
+	// Apply dependencies to cliques
+	hasDependencies := false
+	for _, clique := range gangSet.Spec.Template.Cliques {
+		// Find the corresponding role for this clique
+		var cliqueRole Role
+		for _, r := range roles {
+			if strings.ToLower(r.Name) == clique.Name {
+				cliqueRole = r.Role
+				break
+			}
+		}
+
+		// Determine dependencies for this clique
+		startsAfter := getCliqueStartupDependencies(cliqueRole, backendFramework, leaderCliqueName, workerCliqueNames)
+		if len(startsAfter) > 0 {
+			clique.Spec.StartsAfter = startsAfter
+			hasDependencies = true
+		}
+	}
+
+	// Set explicit startup type if we have any dependencies
+	if hasDependencies {
+		explicitStartupType := grovev1alpha1.CliqueStartupTypeExplicit
+		gangSet.Spec.Template.StartupType = &explicitStartupType
+	}
+}
+
+// getCliqueStartupDependencies determines the StartsAfter dependencies for a clique
+// based on its role, backend framework, and available leader/worker clique names.
+//
+// Rules:
+// - For VLLM and SGLang: worker cliques start after leader clique
+// - For TRTLLM: leader clique starts after worker cliques
+// - For other backends or single-node deployments: no dependencies
+func getCliqueStartupDependencies(
+	role Role,
+	backendFramework BackendFramework,
+	leaderCliqueName string,
+	workerCliqueNames []string,
+) []string {
+	switch backendFramework {
+	case BackendFrameworkVLLM, BackendFrameworkSGLang:
+		// For vllm and sglang: worker cliques start after leader clique
+		if role == RoleWorker && leaderCliqueName != "" {
+			return []string{leaderCliqueName}
+		}
+	case BackendFrameworkTRTLLM:
+		// For trtllm: leader clique starts after worker cliques
+		if role == RoleLeader && len(workerCliqueNames) > 0 {
+			return workerCliqueNames
+		}
+	}
+
+	// No dependencies for other cases
+	return nil
+}
+
+// ComponentServiceParams contains all the fields needed to generate a Kubernetes
+// Service for a Dynamo component, independent of whether the caller is the DGD
+// (Grove) or DCD controller.
+type ComponentServiceParams struct {
+	ServiceName     string
+	Namespace       string
+	ComponentType   string
+	DynamoNamespace string
+	ComponentName   string // original user-provided name, used in selector
+	Labels          map[string]string
+	Annotations     map[string]string
+	IsK8sDiscovery  bool
+}
+
+func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
+	var servicePort corev1.ServicePort
+	switch params.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoServicePortName,
+			Port:       commonconsts.DynamoServicePort,
+			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	case commonconsts.ComponentTypeEPP:
+		servicePort = corev1.ServicePort{
+			Name:        commonconsts.EPPGRPCPortName,
+			Port:        commonconsts.EPPGRPCPort,
+			TargetPort:  intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:    corev1.ProtocolTCP,
+			AppProtocol: ptr.To("http2"),
+		}
+	default:
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	}
+
+	labels := make(map[string]string)
+	for k, v := range params.Labels {
+		labels[k] = v
+	}
+	if params.IsK8sDiscovery {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
+	selector := map[string]string{
+		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
+		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
+	}
+
+	annotations := make(map[string]string)
+	for k, v := range params.Annotations {
+		annotations[k] = v
+	}
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			// Service names must be DNS-1035 labels (no dots). Replace dots with
+			// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
+			Name:        strings.ReplaceAll(params.ServiceName, ".", "-"),
+			Namespace:   params.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: selector,
+			Ports:    []corev1.ServicePort{servicePort},
+		},
+	}
+	return service, nil
+}
+
+func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec v1alpha1.IngressSpec) *networkingv1.Ingress {
+	resourceName := componentName
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName,
+			Namespace: componentNamespace,
+		},
+	}
+	host := getIngressHost(ingressSpec)
+	ingress.Spec = networkingv1.IngressSpec{
+		IngressClassName: ingressSpec.IngressControllerClassName,
+		Rules: []networkingv1.IngressRule{
+			{
+				Host: host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: resourceName,
+										Port: networkingv1.ServiceBackendPort{
+											Number: commonconsts.DynamoServicePort,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if ingressSpec.TLS != nil {
+		ingress.Spec.TLS = []networkingv1.IngressTLS{
+			{
+				Hosts:      []string{host},
+				SecretName: ingressSpec.TLS.SecretName,
+			},
+		}
+	}
+	return ingress
+}
+
+func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
+	host := ingressSpec.Host
+	if ingressSpec.HostPrefix != nil {
+		host = *ingressSpec.HostPrefix + host
+	}
+	ingressSuffix := commonconsts.DefaultIngressSuffix
+	if ingressSpec.HostSuffix != nil {
+		ingressSuffix = *ingressSpec.HostSuffix
+	}
+	return fmt.Sprintf("%s.%s", host, ingressSuffix)
+}
+
+func GenerateComponentVirtualService(ctx context.Context, componentName, componentNamespace string, ingressSpec v1alpha1.IngressSpec) *networkingv1beta1.VirtualService {
+	vs := &networkingv1beta1.VirtualService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      componentName,
+			Namespace: componentNamespace,
+		},
+	}
+	if ingressSpec.IsVirtualServiceEnabled() {
+		vs.Spec = istioNetworking.VirtualService{
+			Hosts: []string{
+				getIngressHost(ingressSpec),
+			},
+			Gateways: []string{*ingressSpec.VirtualServiceGateway},
+			Http: []*istioNetworking.HTTPRoute{
+				{
+					Match: []*istioNetworking.HTTPMatchRequest{
+						{
+							Uri: &istioNetworking.StringMatch{
+								MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
+							},
+						},
+					},
+					Route: []*istioNetworking.HTTPRouteDestination{
+						{
+							Destination: &istioNetworking.Destination{
+								Host: componentName,
+								Port: &istioNetworking.PortSelector{
+									Number: commonconsts.DynamoServicePort,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	return vs
+}
+
+func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment, ingressConfig configv1alpha1.IngressConfiguration) v1alpha1.IngressSpec {
+	res := v1alpha1.IngressSpec{
+		Enabled:           ingressConfig.VirtualServiceGateway != "" || ingressConfig.ControllerClassName != "",
+		Host:              dynamoDeployment.Name,
+		UseVirtualService: ingressConfig.VirtualServiceGateway != "",
+	}
+	if ingressConfig.ControllerClassName != "" {
+		res.IngressControllerClassName = &ingressConfig.ControllerClassName
+	}
+	if ingressConfig.ControllerTLSSecretName != "" {
+		res.TLS = &v1alpha1.IngressTLSSpec{
+			SecretName: ingressConfig.ControllerTLSSecretName,
+		}
+	}
+	if ingressConfig.HostSuffix != "" {
+		res.HostSuffix = &ingressConfig.HostSuffix
+	}
+	if ingressConfig.VirtualServiceGateway != "" {
+		res.VirtualServiceGateway = &ingressConfig.VirtualServiceGateway
+	}
+	return res
+}
+
+// Define Role enum for leader/worker/main
+// Use this type everywhere instead of string for role
+
+type Role string
+
+const (
+	RoleLeader     Role = "leader"
+	RoleWorker     Role = "worker"
+	RoleMain       Role = "main"
+	RoleCheckpoint Role = "checkpoint"
+)
+
+// Update ServiceRole struct for expandRolesForService
+
+type ServiceRole struct {
+	Name     string
+	Role     Role
+	Replicas int32
+}
+
+// Update expandRolesForService to use Role
+func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32) []ServiceRole {
+	var roles []ServiceRole
+	if numberOfNodes > 1 {
+		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1})
+		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1})
+	} else {
+		replicas := int32(1)
+		if serviceReplicas != nil {
+			replicas = *serviceReplicas
+		}
+		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: replicas})
+	}
+	return roles
+}
+
+// Define BackendFramework enum for sglang, vllm, trtllm
+
+type BackendFramework string
+
+const (
+	BackendFrameworkSGLang BackendFramework = "sglang"
+	BackendFrameworkVLLM   BackendFramework = "vllm"
+	BackendFrameworkTRTLLM BackendFramework = "trtllm"
+	BackendFrameworkNoop   BackendFramework = "noop"
+)
+
+// ParseBackendFramework converts a string to BackendFramework type.
+// Returns an error if the framework string is not recognized.
+func ParseBackendFramework(framework string) (BackendFramework, error) {
+	bf := BackendFramework(framework)
+	switch bf {
+	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
+		return bf, nil
+	default:
+		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm)", framework)
+	}
+}
+
+// Backend interface for modular backend logic
+// Each backend (SGLang, VLLM, etc.) implements this interface
+type Backend interface {
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+}
+
+// NoopBackend does no processing - used for non-worker components like frontend, planner, router
+type NoopBackend struct{}
+
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+}
+
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+}
+
+type MultinodeDeployer interface {
+	GetLeaderHostname(serviceName string) string
+	GetHostNames(serviceName string, numberOfNodes int32) []string
+	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
+}
+
+// BackendFactory creates backend instances based on the framework type
+func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration) Backend {
+	switch backendFramework {
+	case BackendFrameworkSGLang:
+		return &SGLangBackend{}
+	case BackendFrameworkVLLM:
+		return &VLLMBackend{}
+	case BackendFrameworkTRTLLM:
+		return &TRTLLMBackend{
+			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,
+		}
+	case BackendFrameworkNoop:
+		return &NoopBackend{}
+	default:
+		return nil
+	}
+}
+
+func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDeploymentType) MultinodeDeployer {
+	switch multinodeDeploymentType {
+	case commonconsts.MultinodeDeploymentTypeGrove:
+		return &GroveMultinodeDeployer{}
+	case commonconsts.MultinodeDeploymentTypeLWS:
+		return &LWSMultinodeDeployer{}
+	default:
+		return nil
+	}
+}
+
+// IsWorkerComponent checks if a component is a worker that needs backend framework detection
+func IsWorkerComponent(componentType string) bool {
+	return componentType == commonconsts.ComponentTypeWorker ||
+		componentType == commonconsts.ComponentTypePrefill ||
+		componentType == commonconsts.ComponentTypeDecode
+}
+
+// AddStandardEnvVars adds the standard environment variables that are common to
+// both checkpoint jobs and generated worker pods.
+func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
+	standardEnvVars := []corev1.EnvVar{}
+	if operatorConfig.Infrastructure.NATSAddress != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "NATS_SERVER",
+			Value: operatorConfig.Infrastructure.NATSAddress,
+		})
+	}
+
+	if operatorConfig.Infrastructure.ETCDAddress != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "ETCD_ENDPOINTS",
+			Value: operatorConfig.Infrastructure.ETCDAddress,
+		})
+	}
+
+	if operatorConfig.Infrastructure.ModelExpressURL != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "MODEL_EXPRESS_URL",
+			Value: operatorConfig.Infrastructure.ModelExpressURL,
+		})
+	}
+	if operatorConfig.Infrastructure.PrometheusEndpoint != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "PROMETHEUS_ENDPOINT",
+			Value: operatorConfig.Infrastructure.PrometheusEndpoint,
+		})
+	}
+	// merge the env vars to allow users to override the standard env vars
+	container.Env = MergeEnvs(standardEnvVars, container.Env)
+}
+
+// applyDefaultSecurityContext sets secure defaults for pod security context.
+// Currently only sets fsGroup to solve volume permission issues.
+// Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
+// with images that may expect to run as root.
+// User-provided security context values (via extraPodSpec) will override these defaults.
+func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
+	// Initialize SecurityContext if not present
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+
+	// Only set fsGroup by default
+	// This fixes volume permission issues without forcing a specific UID/GID
+	// which maintains compatibility with both root and non-root images
+	if podSpec.SecurityContext.FSGroup == nil {
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
+	}
+}
+
+// GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
+// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
+// Deployment-specific environment merging should be handled by the caller
+//
+//nolint:gocyclo
+func GenerateBasePodSpec(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	parentGraphDeploymentName string,
+	namespace string,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
+) (*corev1.PodSpec, error) {
+	// Start with base container generated per component type
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, component.Annotations))
+	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
+	container, err := componentDefaults.GetBaseContainer(componentContext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get base container: %w", err)
+	}
+
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		main := component.ExtraPodSpec.MainContainer.DeepCopy()
+		if main != nil {
+			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
+			containerEnvs := container.Env
+			err = mergo.Merge(&container, *main, mergo.WithOverride)
+			if err != nil {
+				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+			}
+
+			// main container fields that require special handling
+			container.Env = MergeEnvs(containerEnvs, container.Env)
+			// Note: startup probe does not have its own top level field so it must be passed in extraPodSpec.MainContainer
+			// We want to overwrite entirely if provided rather than merge
+			if main.StartupProbe != nil {
+				container.StartupProbe = main.StartupProbe
+			}
+		}
+	}
+	container.Env = MergeEnvs(container.Env, component.Envs)
+
+	// Merge probes entirely if they are passed (no partial merge)
+	if component.LivenessProbe != nil {
+		container.LivenessProbe = component.LivenessProbe.DeepCopy()
+	}
+	if component.ReadinessProbe != nil {
+		container.ReadinessProbe = component.ReadinessProbe.DeepCopy()
+	}
+
+	overrideResources, err := controller_common.GetResourcesConfig(component.Resources)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get resources config: %w", err)
+	}
+	// Requests
+	if overrideResources != nil && len(overrideResources.Requests) > 0 {
+		if container.Resources.Requests == nil {
+			container.Resources.Requests = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Requests, overrideResources.Requests)
+	}
+
+	// Limits
+	if overrideResources != nil && len(overrideResources.Limits) > 0 {
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Limits, overrideResources.Limits)
+	}
+
+	// Claims
+	if overrideResources != nil && len(overrideResources.Claims) > 0 {
+		if container.Resources.Claims == nil {
+			container.Resources.Claims = []corev1.ResourceClaim{}
+		}
+		container.Resources.Claims = append(container.Resources.Claims, overrideResources.Claims...)
+	}
+
+	shouldDisableImagePullSecret := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
+
+	imagePullSecrets := []corev1.LocalObjectReference{}
+	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
+		imagePullSecrets = resolveImagePullSecrets(secretsRetriever, namespace, component.ExtraPodSpec.MainContainer.Image)
+	}
+	if component.EnvFromSecret != nil {
+		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: *component.EnvFromSecret},
+			},
+		})
+	}
+
+	AddStandardEnvVars(&container, operatorConfig)
+
+	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.Name == "" {
+			return nil, fmt.Errorf("volumeMount.name is required when volumeMounts is set")
+		}
+
+		// Determine mount point
+		mountPoint := volumeMount.MountPoint
+		if volumeMount.UseAsCompilationCache && mountPoint == "" {
+			// Use backend-specific default for compilation cache
+			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
+			if defaultMountPoint == "" {
+				return nil, fmt.Errorf("volumeMount with useAsCompilationCache=true requires an explicit mountPoint for backend framework %s (no default available)", backendFramework)
+			}
+			mountPoint = defaultMountPoint
+		} else if !volumeMount.UseAsCompilationCache && mountPoint == "" {
+			return nil, fmt.Errorf("volumeMount.mountPoint is required when useAsCompilationCache is false")
+		}
+
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeMount.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: volumeMount.Name,
+				},
+			},
+		})
+
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      volumeMount.Name,
+			MountPath: mountPoint,
+		})
+	}
+	// Apply backend-specific container modifications
+	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
+	if multinodeDeployer == nil {
+		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
+	}
+	backend := BackendFactory(backendFramework, operatorConfig)
+	if backend == nil {
+		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
+	}
+	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
+
+	// get base podspec from component
+	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get base podspec: %w", err)
+	}
+
+	// Check if user provided their own security context before merging
+	userProvidedSecurityContext := component.ExtraPodSpec != nil &&
+		component.ExtraPodSpec.PodSpec != nil &&
+		component.ExtraPodSpec.PodSpec.SecurityContext != nil
+
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
+		// merge extraPodSpec PodSpec with base podspec
+		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+		}
+	}
+
+	// Apply default security context ONLY if user didn't provide any security context
+	// If user provides ANY securityContext (even partial), they get full control with no defaults injected
+	// This allows users to intentionally set fields to nil (e.g., to run as root)
+	if !userProvidedSecurityContext {
+		applyDefaultSecurityContext(&podSpec)
+	}
+
+	if controller_common.IsK8sDiscoveryEnabled(operatorConfig.Discovery.Backend, component.Annotations) {
+		if podSpec.ServiceAccountName == "" {
+			podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		}
+	}
+
+	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
+	podSpec.Containers = append(podSpec.Containers, container)
+	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
+
+	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+
+	// Inject checkpoint configuration if enabled
+	// This handles ALL checkpoint-related modifications:
+	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
+	// - Security context (hostIPC, privileged mode)
+	// - Restore/checkpoint pod metadata (labels/annotations)
+	// - Storage configuration (volumes, mounts)
+	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
+	// Checkpoint config comes from the operator's controller config (Helm values)
+	var checkpointConfig *configv1alpha1.CheckpointConfiguration
+	if operatorConfig.Checkpoint.Enabled {
+		checkpointConfig = &operatorConfig.Checkpoint
+	}
+	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, checkpointConfig); err != nil {
+		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
+	}
+
+	// Inject auto-generated frontend sidecar if configured
+	if component.FrontendSidecar != nil {
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
+		}
+		podSpec.Containers = append(podSpec.Containers, sidecar)
+
+		if !shouldDisableImagePullSecret && secretsRetriever != nil {
+			podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(
+				podSpec.ImagePullSecrets,
+				resolveImagePullSecrets(secretsRetriever, namespace, component.FrontendSidecar.Image),
+			)
+		}
+	}
+
+	return &podSpec, nil
+}
+
+func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
+	// Convert user-provided metrics annotation into controller-managed label
+	// By default (no annotation), metrics are enabled
+	if metricsAnnotationValue, ok := dynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; ok && metricsAnnotationValue == commonconsts.KubeLabelValueFalse {
+		// Explicitly disabled, don't add the label
+		return
+	}
+	// Any other value (including empty) enables metrics
+	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+}
+
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
+	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
+	var workerHashSuffix string
+	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
+		workerHashSuffix = component.Labels[commonconsts.KubeLabelDynamoWorkerHash]
+	}
+
+	componentContext := ComponentContext{
+		numberOfNodes:                  numberOfNodes,
+		ComponentType:                  component.ComponentType,
+		ParentGraphDeploymentName:      parentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: namespace,
+		DiscoveryBackend:               discoveryBackend,
+		DynamoNamespace:                dynamoNamespace,
+		EPPConfig:                      component.EPPConfig,
+		WorkerHashSuffix:               workerHashSuffix,
+	}
+	return componentContext
+}
+
+// generateFrontendSidecar builds a fully configured frontend sidecar container
+// using the same FrontendDefaults logic as standalone frontend services.
+// This eliminates the need for users to manually specify Dynamo env vars, probes,
+// and ports when running the frontend as a sidecar (e.g., GAIE deployments).
+func generateFrontendSidecar(
+	spec *v1alpha1.FrontendSidecarSpec,
+	parentContext ComponentContext,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+) (corev1.Container, error) {
+	frontendContext := ComponentContext{
+		numberOfNodes:                  1,
+		ComponentType:                  commonconsts.ComponentTypeFrontend,
+		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
+		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		DynamoNamespace:                parentContext.DynamoNamespace,
+	}
+
+	frontendDefaults := NewFrontendDefaults()
+	container, err := frontendDefaults.GetBaseContainer(frontendContext)
+	if err != nil {
+		return corev1.Container{}, fmt.Errorf("failed to get frontend base container: %w", err)
+	}
+
+	container.Name = commonconsts.FrontendSidecarContainerName
+	container.Image = spec.Image
+
+	if len(spec.Args) > 0 {
+		container.Args = spec.Args
+	}
+
+	if spec.EnvFromSecret != nil {
+		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: *spec.EnvFromSecret},
+			},
+		})
+	}
+
+	if len(spec.Envs) > 0 {
+		container.Env = MergeEnvs(container.Env, spec.Envs)
+	}
+
+	AddStandardEnvVars(&container, operatorConfig)
+
+	return container, nil
+}
+
+// GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
+func GeneratePodSpecForComponent(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info
+) (*corev1.PodSpec, error) {
+	if len(dynamoDeployment.Spec.Envs) > 0 {
+		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
+	}
+
+	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
+
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
+	if err != nil {
+		return nil, err
+	}
+	return podSpec, nil
+}
+
+// dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
+// to component-level annotations (for both the DCD/controller and Grove paths).
+// Service-level annotations take precedence (are never overwritten).
+var dgdPropagatedAnnotationKeys = []string{
+	commonconsts.KubeAnnotationEnableMetrics,
+	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
+	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
+}
+
+// propagateDGDAnnotations copies DGD-level annotations into the component
+// annotations so that downstream logic can read them uniformly.
+// Service-level annotations take precedence (are never overwritten).
+func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for _, key := range dgdPropagatedAnnotationKeys {
+		if val, exists := dgdAnnotations[key]; exists {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			if _, serviceHas := component.Annotations[key]; !serviceHas {
+				component.Annotations[key] = val
+			}
+		}
+	}
+}
+
+// propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
+// the component as a low-priority base. Service-level values take precedence.
+func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for k, v := range annotations {
+		if component.Annotations == nil {
+			component.Annotations = make(map[string]string)
+		}
+		if _, exists := component.Annotations[k]; !exists {
+			component.Annotations[k] = v
+		}
+	}
+	for k, v := range labels {
+		if component.Labels == nil {
+			component.Labels = make(map[string]string)
+		}
+		if _, exists := component.Labels[k]; !exists {
+			component.Labels[k] = v
+		}
+	}
+}
+
+// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+func GenerateGrovePodCliqueSet(
+	ctx context.Context,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *controller_common.RuntimeConfig,
+	secretsRetriever SecretsRetriever,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
+) (*grovev1alpha1.PodCliqueSet, error) {
+	gangSet := &grovev1alpha1.PodCliqueSet{}
+	gangSet.Name = dynamoDeployment.Name
+	gangSet.Namespace = dynamoDeployment.Namespace
+	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
+	gangSet.Spec.Replicas = 1
+	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
+		PublishNotReadyAddresses: true,
+	}
+	gangSet.Spec.Template.StartupType = ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder)
+	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
+		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
+	}
+
+	// Inject deployment-level topology constraint (PCS template).
+	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
+	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
+
+	// Validate kai-scheduler queue once if kai-scheduler is enabled
+	var validatedQueueName string
+	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
+		var err error
+		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+		}
+	}
+
+	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
+
+	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
+		component.DynamoNamespace = &dynamoNamespace
+		// Determine backend framework using hybrid approach
+		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
+		}
+
+		if discoveryBackend != "" {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(discoveryBackend)
+		}
+
+		// Get checkpoint info for this service if available
+		var checkpointInfo *checkpoint.CheckpointInfo
+		if checkpointInfoByService != nil {
+			checkpointInfo = checkpointInfoByService[serviceName]
+		}
+
+		numberOfNodes := component.GetNumberOfNodes()
+		isMultinode := numberOfNodes > 1
+		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
+		var cliqueNames []string
+
+		for _, r := range roles {
+			podSpec, err := GeneratePodSpecForComponent(
+				component,
+				backendFramework,
+				secretsRetriever,
+				dynamoDeployment,
+				r.Role,
+				numberOfNodes,
+				operatorConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				serviceName,
+				checkpointInfo,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
+			}
+
+			clique := &grovev1alpha1.PodCliqueTemplateSpec{
+				Name: strings.ToLower(r.Name),
+				Spec: grovev1alpha1.PodCliqueSpec{
+					RoleName:     strings.ToLower(r.Name),
+					Replicas:     r.Replicas,
+					MinAvailable: ptr.To(int32(1)),
+					PodSpec:      *podSpec,
+				},
+			}
+
+			// For single-node services, set topology constraint directly on the clique.
+			// For multinode services, the constraint goes on the PCSG instead;
+			// child cliques inherit from PCSG and should NOT have explicit constraints.
+			if !isMultinode {
+				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
+			}
+			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate labels: %w", err)
+			}
+			clique.Labels = labels
+			annotations, err := generateAnnotations(component)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate annotations: %w", err)
+			}
+			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
+
+			// Apply restart annotation if this service should be restarted.
+			// For services not in the current restart order, preserve their existing annotation
+			// to avoid triggering unwanted rollouts when a new restart begins.
+			if restartState.ShouldAnnotateService(serviceName) {
+				if annotations == nil {
+					annotations = make(map[string]string)
+				}
+				annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+			} else if existingRestartAnnotations != nil {
+				if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
+					if annotations == nil {
+						annotations = make(map[string]string)
+					}
+					annotations[commonconsts.RestartAnnotation] = existingTimestamp
+				}
+			}
+			clique.Annotations = annotations
+
+			// Inject kai-scheduler settings if enabled
+			injectKaiSchedulerIfEnabled(clique, runtimeConfig, validatedQueueName)
+
+			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
+			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
+		}
+
+		// Apply startup dependencies for this service
+		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes)
+
+		if isMultinode {
+			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
+				Name:               strings.ToLower(serviceName),
+				CliqueNames:        cliqueNames,
+				Replicas:           component.Replicas,
+				MinAvailable:       ptr.To(int32(1)),
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
+			})
+		}
+	}
+	if len(scalingGroups) > 0 {
+		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
+	}
+
+	return gangSet, nil
+}
+
+func generateLabels(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	componentName string,
+) (map[string]string, error) {
+	labels := make(map[string]string)
+	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
+	if component.ComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
+	if component.SubComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
+	}
+	// Add base model label if modelRef is specified
+	AddBaseModelLabel(labels, component.ModelRef)
+	// Merge user-supplied labels first so they cannot overwrite checkpoint labels.
+	setMetricsLabels(labels, dynamoDeployment)
+	if component.Labels != nil {
+		if err := mergo.Merge(&labels, component.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge labels: %w", err)
+		}
+	}
+	if component.ExtraPodMetadata != nil {
+		if err := mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
+		}
+	}
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.ComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
+	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	return labels, nil
+}
+
+func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (map[string]string, error) {
+	annotations := make(map[string]string)
+	if component.Annotations != nil {
+		err := mergo.Merge(&annotations, component.Annotations, mergo.WithOverride)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge annotations: %w", err)
+		}
+	}
+	if component.ExtraPodMetadata != nil {
+		err := mergo.Merge(&annotations, component.ExtraPodMetadata.Annotations, mergo.WithOverride)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge extraPodMetadata annotations: %w", err)
+		}
+	}
+	return annotations, nil
+}
+
+// detectBackendFrameworkFromArgs detects the backend framework from command/args
+func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
+	// Combine command and args to search through all parts
+	allParts := append(command, args...)
+	fullCommand := strings.Join(allParts, " ")
+
+	// Pattern to match python -m dynamo.{backend}.something
+	patterns := map[BackendFramework]*regexp.Regexp{
+		BackendFrameworkVLLM:   regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
+		BackendFrameworkSGLang: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
+		BackendFrameworkTRTLLM: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.trtllm[^|&;]*`),
+	}
+
+	var detected []BackendFramework
+	for framework, pattern := range patterns {
+		if pattern.MatchString(fullCommand) {
+			detected = append(detected, framework)
+		}
+	}
+
+	if len(detected) == 0 {
+		return BackendFrameworkNoop, nil
+	}
+
+	if len(detected) > 1 {
+		return "", fmt.Errorf("multiple backend frameworks detected from command: %v in %q", detected, fullCommand)
+	}
+
+	return detected[0], nil
+}
+
+// determineBackendFramework is the core logic for hybrid backend framework detection
+// Takes extracted parameters and applies the detection logic
+func determineBackendFramework(
+	componentType string,
+	command []string,
+	args []string,
+	explicitBackendFramework string,
+) (BackendFramework, error) {
+	// Check if this is a worker component - if not, use noop backend
+	if !IsWorkerComponent(componentType) {
+		return BackendFrameworkNoop, nil
+	}
+
+	// Worker component - apply backend framework detection
+	var detectedFramework BackendFramework
+	var detectionError error
+
+	// Try to detect from command/args
+	if len(command) > 0 || len(args) > 0 {
+		detected, err := detectBackendFrameworkFromArgs(command, args)
+		if err == nil {
+			detectedFramework = detected
+		} else {
+			detectionError = err
+		}
+	}
+
+	// Get explicit framework
+	var explicitFramework BackendFramework
+	if explicitBackendFramework != "" {
+		explicitFramework = BackendFramework(explicitBackendFramework)
+	}
+
+	// Validate consistency if both detected and explicit exist
+	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop && explicitFramework != "" && detectedFramework != explicitFramework {
+		return "", fmt.Errorf("backend framework mismatch: detected %q from command but explicitly configured as %q",
+			detectedFramework, explicitFramework)
+	}
+
+	// Return in order of preference: detected > explicit > error
+	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop {
+		return detectedFramework, nil
+	}
+
+	if explicitFramework != "" {
+		return explicitFramework, nil
+	}
+
+	// If we couldn't detect and no explicit config, return error
+	if detectionError != nil {
+		return "", fmt.Errorf("could not determine backend framework: %w", detectionError)
+	}
+
+	// No command/args to detect from and no explicit config
+	return BackendFrameworkNoop, nil
+}
+
+// getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
+// 1. Check if component is a worker - if not, return noop
+// 2. For workers: try to detect from command/args, fall back to explicit config
+// 3. Return error if worker has neither detection nor explicit config
+// Also validates consistency between detected and explicit if both exist
+func getBackendFrameworkFromComponent(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+) (BackendFramework, error) {
+	// Extract command/args from component
+	var command, args []string
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		command = component.ExtraPodSpec.MainContainer.Command
+		args = component.ExtraPodSpec.MainContainer.Args
+	}
+
+	// Extract explicit backend framework from deployment
+	explicitBackendFramework := dynamoDeployment.Spec.BackendFramework
+
+	return determineBackendFramework(
+		component.ComponentType,
+		command,
+		args,
+		explicitBackendFramework,
+	)
+}
+
+// ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
+// This is a helper for the controller to use our backend logic
+func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeploymentSharedSpec {
+	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
+}
+
+// GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
+func GetBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
+	// Extract command/args from component
+	var command, args []string
+	if dynComponent.Spec.ExtraPodSpec != nil && dynComponent.Spec.ExtraPodSpec.MainContainer != nil {
+		command = dynComponent.Spec.ExtraPodSpec.MainContainer.Command
+		args = dynComponent.Spec.ExtraPodSpec.MainContainer.Args
+	}
+
+	// Extract explicit backend framework
+	explicitBackendFramework := dynComponent.Spec.BackendFramework
+
+	return determineBackendFramework(
+		dynComponent.Spec.ComponentType,
+		command,
+		args,
+		explicitBackendFramework,
+	)
+}
+
+// GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
+// This preserves the base pod generation while allowing controller-specific enhancements
+func GenerateBasePodSpecForController(
+	dynComponent *v1alpha1.DynamoComponentDeployment,
+	secretsRetriever SecretsRetriever,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	role Role,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
+) (*corev1.PodSpec, error) {
+	// Convert to our interface
+	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
+
+	numberOfNodes := componentSpec.GetNumberOfNodes()
+
+	// Determine backend framework using hybrid approach
+	backendFramework, err := GetBackendFrameworkFromDynamoComponent(dynComponent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
+	}
+
+	// Generate base PodSpec with standard env vars using merged component envs
+	serviceName := dynComponent.Spec.ServiceName
+	if serviceName == "" {
+		serviceName = dynComponent.Name
+	}
+	podSpec, err := GenerateBasePodSpec(
+		componentSpec,
+		backendFramework,
+		secretsRetriever,
+		dynComponent.GetParentGraphDeploymentName(),
+		dynComponent.Namespace,
+		role,
+		numberOfNodes,
+		operatorConfig,
+		multinodeDeploymentType,
+		serviceName,
+		checkpointInfo,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return podSpec, nil
+}
+
+// getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
+func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) string {
+	switch backendFramework {
+	case BackendFrameworkVLLM:
+		return commonconsts.DefaultVLLMCacheMountPoint
+	case BackendFrameworkSGLang, BackendFrameworkTRTLLM:
+		// SGLang and TensorRT-LLM don't currently support compilation caches
+		// Return empty string as these should not be used
+		return ""
+	default:
+		// For unknown backends, don't assume compilation cache support
+		return ""
+	}
+}

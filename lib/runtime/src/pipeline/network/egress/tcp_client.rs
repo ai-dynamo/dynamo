@@ -1,10 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! TCP Request Plane Client
 //!
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::metrics::transport_metrics::{
+    TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -250,6 +253,7 @@ impl TcpConnection {
             // With TCP_NODELAY, no need for explicit flush()
             match write_half.write_all(&req.encoded_data).await {
                 Ok(()) => {
+                    TCP_BYTES_SENT_TOTAL.inc_by(req.encoded_data.len() as f64);
                     // Forward response channel to reader task (FIFO ordering)
                     if response_tx_channel.send(req.response_tx).is_err() {
                         tracing::debug!("Reader task closed, stopping writer");
@@ -324,7 +328,8 @@ impl TcpConnection {
         // Encode request on caller's thread (hot path optimization)
         // This allows multiple concurrent callers to encode in parallel
         // rather than serializing through the writer task
-        let request_msg = TcpRequestMessage::new(endpoint_path, payload);
+        // Include all headers (especially trace headers) in the message
+        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
         let encoded_data = request_msg.encode()?;
 
         // Create response channel
@@ -379,14 +384,14 @@ impl TcpConnectionPool {
                 if conn.is_healthy() {
                     return Ok(conn);
                 } else {
-                    tracing::debug!("Discarding unhealthy connection for {}", addr);
+                    tracing::debug!("Discarding unhealthy connection for {addr}");
                     // Connection will be dropped here, cleaning up tasks
                 }
             }
         }
 
         // Create new connection with configured channel buffer
-        tracing::debug!("Creating new TCP connection to {}", addr);
+        tracing::debug!("Creating new TCP connection to {addr}");
         TcpConnection::connect(
             addr,
             self.config.connect_timeout,
@@ -416,7 +421,7 @@ impl TcpConnectionPool {
         if pool.len() < self.config.pool_size {
             pool.push(conn);
         } else {
-            tracing::debug!("Connection pool full for {}, dropping connection", addr);
+            tracing::debug!("Connection pool full for {addr}, dropping connection");
             // Otherwise drop the connection (tasks will be cleaned up)
         }
     }
@@ -502,11 +507,12 @@ impl RequestPlaneClient for TcpRequestClient {
         payload: Bytes,
         mut headers: Headers,
     ) -> Result<Bytes> {
-        tracing::debug!("TCP client sending request to address: {}", address);
+        tracing::debug!("TCP client sending request to address: {address}");
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
+        let payload_len = payload.len();
         self.stats
             .bytes_sent
-            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+            .fetch_add(payload_len as u64, Ordering::Relaxed);
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
@@ -534,6 +540,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats
                     .bytes_received
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
+                TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
 
                 // Return connection to pool (health check happens inside)
                 self.pool.return_connection(conn).await;
@@ -542,15 +549,31 @@ impl RequestPlaneClient for TcpRequestClient {
             }
             Ok(Err(e)) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
                 // Don't return unhealthy connection to pool, let it drop
-                Err(e)
+                let cause = crate::error::DynamoError::from(
+                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+                );
+                Err(anyhow::anyhow!(
+                    crate::error::DynamoError::builder()
+                        .error_type(crate::error::ErrorType::CannotConnect)
+                        .message(format!("TCP request to {addr} failed"))
+                        .cause(cause)
+                        .build()
+                ))
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("TCP request timeout to {}", addr);
+                TCP_ERRORS_TOTAL.inc();
+                tracing::warn!("TCP request timeout to {addr}");
                 // Don't return timed-out connection to pool
-                Err(anyhow::anyhow!("TCP request timeout to {}", addr))
+                Err(anyhow::anyhow!(
+                    crate::error::DynamoError::builder()
+                        .error_type(crate::error::ErrorType::CannotConnect)
+                        .message(format!("TCP request to {addr} timed out"))
+                        .build()
+                ))
             }
         }
     }
@@ -657,7 +680,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (mut read_half, mut write_half) = tokio::io::split(stream);
 
-            // Read request
+            // Read path length and path
             let mut len_buf = [0u8; 2];
             read_half.read_exact(&mut len_buf).await.unwrap();
             let path_len = u16::from_be_bytes(len_buf) as usize;
@@ -665,6 +688,15 @@ mod tests {
             let mut path_buf = vec![0u8; path_len];
             read_half.read_exact(&mut path_buf).await.unwrap();
 
+            // Read headers length and headers
+            let mut headers_len_buf = [0u8; 2];
+            read_half.read_exact(&mut headers_len_buf).await.unwrap();
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+            let mut headers_buf = vec![0u8; headers_len];
+            read_half.read_exact(&mut headers_buf).await.unwrap();
+
+            // Read payload length and payload
             let mut len_buf = [0u8; 4];
             read_half.read_exact(&mut len_buf).await.unwrap();
             let payload_len = u32::from_be_bytes(len_buf) as usize;
@@ -725,6 +757,17 @@ mod tests {
 
                 let mut path_buf = vec![0u8; path_len];
                 if read_half.read_exact(&mut path_buf).await.is_err() {
+                    break;
+                }
+
+                let mut headers_len_buf = [0u8; 2];
+                if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                    break;
+                }
+                let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+                let mut headers_buf = vec![0u8; headers_len];
+                if read_half.read_exact(&mut headers_buf).await.is_err() {
                     break;
                 }
 
@@ -823,6 +866,17 @@ mod tests {
 
                         let mut path_buf = vec![0u8; path_len];
                         if read_half.read_exact(&mut path_buf).await.is_err() {
+                            break;
+                        }
+
+                        let mut headers_len_buf = [0u8; 2];
+                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                            break;
+                        }
+                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+                        let mut headers_buf = vec![0u8; headers_len];
+                        if read_half.read_exact(&mut headers_buf).await.is_err() {
                             break;
                         }
 

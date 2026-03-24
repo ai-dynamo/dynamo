@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration test for parallel tool calling functionality
@@ -91,6 +91,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         common: CommonExt::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -197,7 +198,7 @@ async fn test_parallel_tool_call_parsing() {
 
     // Parse the tool calls using the hermes parser (works well with <tool_call> format)
     let (tool_calls, remaining_content) =
-        detect_and_parse_tool_call(&response_content, Some("hermes"))
+        detect_and_parse_tool_call(&response_content, Some("hermes"), None)
             .await
             .expect("Should successfully parse tool calls");
 
@@ -239,7 +240,7 @@ async fn test_parallel_tool_call_with_explicit_parser() {
 
     for parser in parsers_to_test {
         let (tool_calls, remaining_content) =
-            detect_and_parse_tool_call(&response_content, Some(parser))
+            detect_and_parse_tool_call(&response_content, Some(parser), None)
                 .await
                 .unwrap_or_else(|e| panic!("Should successfully parse with {parser} parser: {e}"));
 
@@ -267,7 +268,7 @@ async fn test_parallel_tool_call_with_explicit_parser() {
 async fn test_tool_call_json_structure() {
     let response_content = get_mock_response_content();
 
-    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"))
+    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"), None)
         .await
         .expect("Should parse tool calls");
 
@@ -288,7 +289,7 @@ async fn test_tool_call_json_structure() {
 async fn test_openai_compatibility_structure() {
     let response_content = get_mock_response_content();
 
-    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"))
+    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"), None)
         .await
         .expect("Should parse tool calls");
 
@@ -335,7 +336,7 @@ async fn test_parallel_tool_call_error_handling() {
 {"invalid_json": }
 </tool_call>"#;
 
-    let result = detect_and_parse_tool_call(malformed_content, Some("hermes")).await;
+    let result = detect_and_parse_tool_call(malformed_content, Some("hermes"), None).await;
 
     // Should handle partial parsing gracefully
     match result {
@@ -368,7 +369,7 @@ async fn test_empty_tool_calls() {
     let content_without_tools = "This is just a regular response without any tool calls.";
 
     let (tool_calls, remaining_content) =
-        detect_and_parse_tool_call(content_without_tools, Some("hermes"))
+        detect_and_parse_tool_call(content_without_tools, Some("hermes"), None)
             .await
             .expect("Should handle content without tool calls");
 
@@ -412,7 +413,7 @@ async fn test_deepseek_v3_1_tool_call_parsing() {
 
     // Parse the tool calls using the deepseek_v3_1 parser
     let (tool_calls, remaining_content) =
-        detect_and_parse_tool_call(response_content, Some("deepseek_v3_1"))
+        detect_and_parse_tool_call(response_content, Some("deepseek_v3_1"), None)
             .await
             .expect("Should successfully parse deepseek_v3_1 tool calls");
 

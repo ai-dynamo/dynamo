@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
@@ -116,7 +116,15 @@ impl CheckedFile {
                     *path = new_path;
                 }
             }
-            Either::Right(_) => tracing::warn!("Cannot update directory on URL"),
+            Either::Right(url) => {
+                let Some(filename) = url.path().split('/').next_back().filter(|s| !s.is_empty())
+                else {
+                    tracing::warn!(%url, "Cannot update directory on invalid URL");
+                    return;
+                };
+                let p = dir.join(filename);
+                self.path = Either::Left(p);
+            }
         }
     }
 }

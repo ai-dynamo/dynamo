@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import json
@@ -15,39 +15,33 @@ import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import FRONTEND_PORT
+from tests.utils.managed_process import (
+    DynamoFrontendProcess as BaseDynamoFrontendProcess,
+)
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend with ETCD HA support"""
+class DynamoFrontendProcess(BaseDynamoFrontendProcess):
+    """Process manager for Dynamo frontend with ETCD HA support."""
 
-    def __init__(self, request, etcd_endpoints: list):
-        command = ["python", "-m", "dynamo.frontend"]
-
-        # Set debug logging and ETCD endpoints
-        env = os.environ.copy()
-        env["DYN_LOG"] = "debug"
-        env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            pass
-
+    def __init__(self, request, etcd_endpoints: list[str]):
+        extra_env = {
+            "DYN_LOG": "debug",
+            "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
+        }
+        # WARNING: terminate_all_matching_process_names=True is NOT pytest-xdist safe!
+        # DANGER: Kills ALL dynamo-frontend processes system-wide, including other parallel tests.
+        # For parallel-safe alternative, use terminate_all_matching_process_names=False.
+        # See tests/kvbm_integration/common.py:llm_server_kvbm for example.
+        # TODO: Switch to terminate_all_matching_process_names=False with dynamic ports
         super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
-            terminate_existing=True,
-            log_dir=log_dir,
+            request,
+            router_mode="round-robin",
+            extra_env=extra_env,
+            terminate_all_matching_process_names=True,  # TODO: Change to False
         )
 
 
@@ -102,7 +96,7 @@ class EtcdReplicaServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             data_dir=data_dir,
             log_dir=log_dir,
         )
@@ -150,7 +144,9 @@ class EtcdCluster:
         self.base_port = base_port
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
-        self.log_base_dir = f"{request.node.name}_etcd_cluster"
+        self.log_base_dir = resolve_test_output_path(
+            f"{request.node.name}_etcd_cluster"
+        )
 
         # Clean up any existing log directory
         try:
@@ -298,9 +294,12 @@ class EtcdCluster:
         except Exception as e:
             raise RuntimeError(f"Error during member removal: {e}")
 
-        # Add the new member to the cluster
+        # Add the new member to the cluster, retrying if the cluster is temporarily unhealthy
+        # after member removal (etcd may reject adds until raft peers are fully connected)
         logger.info(f"Adding new member {name} to cluster with peer URL {peer_url}")
-        try:
+        max_attempts = 20
+        last_err = ""
+        for attempt in range(max_attempts):
             add_result = subprocess.run(
                 ["etcdctl", "member", "add", name, f"--peer-urls={peer_url}"],
                 env=etcdctl_env,
@@ -308,11 +307,18 @@ class EtcdCluster:
                 text=True,
                 timeout=5,
             )
-            if add_result.returncode != 0:
-                raise RuntimeError(f"Failed to add new member: {add_result.stderr}")
-            logger.info(f"Successfully added new member {name}")
-        except Exception as e:
-            raise RuntimeError(f"Error adding new member: {e}")
+            if add_result.returncode == 0:
+                logger.info(f"Successfully added new member {name}")
+                break
+            last_err = add_result.stderr.strip()
+            logger.warning(
+                f"Member add attempt {attempt + 1}/{max_attempts} failed: {last_err}"
+            )
+            time.sleep(0.5)  # time for cluster to stabilize before retrying
+        else:
+            raise RuntimeError(
+                f"Failed to add new member after {max_attempts} attempts: {last_err}"
+            )
 
     def start(self):
         """Start ETCD cluster with configured number of replicas"""

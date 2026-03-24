@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Block ID validation for transfers.
@@ -253,7 +253,7 @@ pub fn validate_block_transfer(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::super::tests::*;
     use super::*;

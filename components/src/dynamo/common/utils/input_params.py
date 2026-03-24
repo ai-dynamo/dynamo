@@ -1,18 +1,19 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
+
+from typing import Any, Optional
 
 
 class InputParamManager:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer: Any) -> None:
         self.tokenizer = tokenizer
 
-    def get_input_param(self, request: dict, use_tokenizer: bool):
+    def get_input_param(self, request: dict, use_tokenizer: bool) -> Optional[Any]:
         """
         Get the input parameter for the request.
         """
 
         if use_tokenizer:
-            print(f"Request: {request}")
             if self.tokenizer is None:
                 raise ValueError("Tokenizer is not available")
 
@@ -21,10 +22,9 @@ class InputParamManager:
                     request["messages"], tokenize=False, add_generation_prompt=True
                 )
             elif "prompt" in request:
-                return request["prompt"]
+                return self.tokenizer.encode(request["prompt"])
             elif "text" in request:
-                return request["text"]
+                return self.tokenizer.encode(request["text"])
             else:
                 raise ValueError("No input parameter found in request")
-
         return request.get("token_ids")

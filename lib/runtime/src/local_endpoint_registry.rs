@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Local Endpoint Registry
@@ -45,7 +45,7 @@ impl LocalEndpointRegistry {
     /// * `endpoint_name` - Name of the endpoint (e.g., "load_lora", "generate")
     /// * `engine` - The async engine that handles requests for this endpoint
     pub fn register(&self, endpoint_name: String, engine: LocalAsyncEngine) {
-        tracing::debug!("Registering local endpoint: {}", endpoint_name);
+        tracing::debug!("Registering local endpoint: {endpoint_name}");
         self.engines.insert(endpoint_name, engine);
     }
 

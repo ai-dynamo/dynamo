@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Module for recording logprobs from a streaming response.
@@ -953,7 +953,11 @@ mod tests {
             choices: vec![ChatChoiceStream {
                 index: 0,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                    ),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -961,6 +965,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -986,7 +991,11 @@ mod tests {
             .map(|(i, token_logprobs)| ChatChoiceStream {
                 index: i as u32,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                    ),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -994,6 +1003,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1335,7 +1345,11 @@ mod tests {
             choices: vec![ChatChoiceStream {
                 index: 0,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                    ),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -1343,6 +1357,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: None, // No logprobs
             }],
             created: 1234567890,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! HTTP/2 client for request plane
@@ -179,7 +179,15 @@ impl RequestPlaneClient for HttpRequestClient {
             req = req.header(key, value);
         }
 
-        let response = req.send().await?;
+        let response = req.send().await.map_err(|e| {
+            anyhow::anyhow!(
+                crate::error::DynamoError::builder()
+                    .error_type(crate::error::ErrorType::CannotConnect)
+                    .message(format!("HTTP request to {address} failed"))
+                    .cause(e)
+                    .build()
+            )
+        })?;
 
         if !response.status().is_success() {
             anyhow::bail!(

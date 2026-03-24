@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-kvbm-tp2
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-kvbm-tp2
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -35,6 +33,10 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             - --gpu-memory-utilization
             - "0.23"
             - --max-model-len
@@ -43,7 +45,6 @@ spec:
             - --tensor-parallel-size
             - "2"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-kvbm-tp2
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -68,14 +69,14 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --gpu-memory-utilization
             - "0.23"
             - --max-model-len
             - "32000"
             - --enforce-eager
-            - --connector
-            - kvbm
-            - nixl
+            - --kv-transfer-config
+            - '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
             - --tensor-parallel-size
             - "2"

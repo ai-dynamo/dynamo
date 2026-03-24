@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -152,12 +152,11 @@ impl KvConnectorLeaderRecorder {
                 if let (Some(vllm_ep), Some(output_ep)) =
                     (consolidator_vllm_ep, consolidator_output_ep)
                 {
-                    block_manager_builder =
-                        block_manager_builder.consolidator_config(
-                            vllm_ep,
-                            Some(output_ep),
-                            EventSource::Vllm,
-                        );
+                    block_manager_builder = block_manager_builder.consolidator_config(
+                        vllm_ep,
+                        Some(output_ep),
+                        EventSource::Vllm,
+                    );
                 }
 
                 let block_manager = match block_manager_builder.build().await {

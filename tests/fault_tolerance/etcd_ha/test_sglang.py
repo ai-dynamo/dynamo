@@ -1,5 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# TODO: Update to use dynamic port allocation (allocate_free_port) for parallel execution
+# Currently uses hardcoded ports: FRONTEND_PORT (8000), system ports (8081, 8082)
+# See tests/fault_tolerance/migration/test_sglang.py for dynamic port pattern
 
 import logging
 import os
@@ -21,6 +25,11 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
+
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.sglang,
+]
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -114,7 +123,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             # Ensure any orphaned SGLang engine cores or child helpers are cleaned up
             stragglers=[
                 "SGLANG:EngineCore",
@@ -144,10 +153,11 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_sglang_aggregated(request, predownload_models):
     """
     Test ETCD High Availability with repeated node failures and recoveries using SGLang.
@@ -216,10 +226,11 @@ def test_etcd_ha_failover_sglang_aggregated(request, predownload_models):
                         etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.sglang
 @pytest.mark.gpu_2
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_sglang_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
@@ -296,10 +307,11 @@ def test_etcd_ha_failover_sglang_disaggregated(
                             etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_sglang_aggregated(request, predownload_models):
     """
     Test that frontend and worker shut down when single ETCD node is terminated using SGLang.
@@ -352,10 +364,11 @@ def test_etcd_non_ha_shutdown_sglang_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.sglang
 @pytest.mark.gpu_2
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_sglang_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):

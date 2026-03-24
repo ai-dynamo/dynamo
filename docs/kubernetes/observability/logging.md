@@ -1,4 +1,8 @@
-# Log Aggregation in Dynamo on Kubernetes
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Logging
+---
 
 This guide demonstrates how to set up logging for Dynamo in Kubernetes using Grafana Loki and Alloy. This setup provides a simple reference logging setup that can be followed in Kubernetes clusters including Minikube and MicroK8s.
 
@@ -15,9 +19,9 @@ This guide demonstrates how to set up logging for Dynamo in Kubernetes using Gra
 
 ## Prerequisites
 
-### 1. Dynamo Cloud Kubernetes Operator
+### 1. Dynamo Kubernetes Platform
 
-This guide assumes you have installed Dynamo Cloud Kubernetes Operator. For more information, see [Dynamo Cloud Operator](../README.md).
+This guide assumes you have installed Dynamo Kubernetes Platform. For more information, see [Dynamo Kubernetes Platform](../README.md).
 
 ### 2. Kube-prometheus
 
@@ -29,7 +33,7 @@ While this guide does not use Prometheus, it assumes Grafana is pre-installed wi
 
 The following env variables are set:
 - `MONITORING_NAMESPACE`: The namespace where Loki is installed
-- `DYN_NAMESPACE`: The namespace where Dynamo Cloud Operator is installed
+- `DYN_NAMESPACE`: The namespace where Dynamo Kubernetes Platform is installed
 
 ```bash
 export MONITORING_NAMESPACE=monitoring
@@ -123,7 +127,7 @@ Since we are using Grafana with the Prometheus Operator, we can simply apply the
 envsubst < deploy/observability/k8s/logging/grafana/loki-datasource.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
 
 # Configure Grafana with the Dynamo Logs dashboard
-envsubst < deploy/observability/k8s/logging/grafana/logging-dashboard.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
+kubectl apply -f deploy/observability/k8s/logging/grafana/logging-dashboard.yaml -n $MONITORING_NAMESPACE
 ```
 
 > [!Note]

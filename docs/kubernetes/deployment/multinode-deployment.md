@@ -1,4 +1,8 @@
-# Multinode Deployment Guide
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Multinode Deployments
+---
 
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
 
@@ -34,6 +38,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Multi-level horizontal auto-scaling
 - Custom startup ordering for components
 - Resource-aware rolling updates
+- [Topology Aware Scheduling](../topology-aware-scheduling.md) — pack pods within a rack, block, or other topology domain for lower latency
 
 
 [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is a Kubernetes native scheduler optimized for AI workloads at large scale.
@@ -190,17 +195,25 @@ For vLLM multinode deployments, the operator automatically selects and configure
 
 The operator automatically determines the deployment mode based on your parallelism configuration:
 
-**1. Ray-Based Mode (Tensor/Pipeline Parallelism across nodes)**
+**1. Tensor/Pipeline Parallelism Mode (Single model across nodes)**
 - **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
 - **Use case**: Distributing a single model instance across multiple nodes using tensor or pipeline parallelism
 
+The operator uses Ray for multi-node tensor/pipeline parallel deployments. Ray provides automatic placement group management and worker spawning across nodes.
+
 **Leader Node:**
-- **Ray Head**: The operator prepends `ray start --head --port=6379` to your existing command
+- **Command**: `ray start --head --port=6379 && <original-vllm-command> --distributed-executor-backend ray`
+- **Behavior**: Starts Ray head node, then runs vLLM which creates a placement group spanning all Ray workers
 - **Probes**: All health probes remain active (liveness, readiness, startup)
 
 **Worker Nodes:**
-- **Ray Worker**: The command is replaced with `ray start --address=<leader-hostname>:6379 --block`
-- **Probes**: All probes (liveness, readiness, startup) are automatically removed since workers don't expose health endpoints
+- **Command**: `ray start --address=<leader-hostname>:6379 --block`
+- **Behavior**: Joins Ray cluster and blocks; vLLM on leader spawns Ray actors to these workers
+- **Probes**: All probes (liveness, readiness, startup) are automatically removed
+
+<Note>
+vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
+</Note>
 
 **2. Data Parallel Mode (Multiple model instances across nodes)**
 - **When used**: When `world_size × data_parallel_size > GPUs_per_node`
@@ -215,6 +228,18 @@ The operator automatically determines the deployment mode based on your parallel
 - **Probes**: Worker probes are removed; leader probes remain active
 
 **Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
+
+#### Why Ray for Multi-Node TP/PP?
+
+vLLM supports two distributed executor backends: `ray` and `mp`. For multi-node deployments:
+
+- **Ray executor**: vLLM creates a placement group and spawns Ray actors across the cluster. Workers don't run vLLM directly - the leader's vLLM process manages everything.
+- **mp executor**: Each node must run its own vLLM process with `--nnodes`, `--node-rank`, `--master-addr`, `--master-port`. This approach is more complex to orchestrate.
+
+The Dynamo operator uses Ray because:
+1. It aligns with vLLM's official multi-node documentation (see `multi-node-serving.sh`)
+2. Simpler orchestration - only the leader runs vLLM, workers just need Ray agents
+3. vLLM automatically handles placement group creation and worker management
 
 #### Compilation Cache Support
 When a volume mount is configured with `useAsCompilationCache: true`, the operator automatically sets:
@@ -264,8 +289,7 @@ For TensorRT-LLM multinode deployments, the operator configures MPI-based commun
 #### Additional Configuration
 - **Environment Variable**: `OMPI_MCA_orte_keep_fqdn_hostnames=1` is added to all nodes
 - **SSH Volume**: Automatically mounts the SSH keypair secret (typically named `mpirun-ssh-key-<deployment-name>`)
-
-**Important:** TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
+- **Automatic SSH key generation**: The operator automatically generates the SSH keypair secret when it detects a multi-node `DynamoGraphDeployment`. No manual secret creation is required.
 
 ### Compilation Cache Configuration
 
@@ -283,8 +307,8 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/)
-- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/)
-- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/)
+- **SGLang**: [examples/backends/sglang/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)
+- **vLLM**: [examples/backends/vllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

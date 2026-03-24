@@ -1,20 +1,27 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# Timing notes (measured locally):
+# - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests.
+# These tests load a real model and can be slow/flaky when GPU resources are contended,
+# so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
+import json
 import logging
 import os
-import time
 from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import (  # utilities
-    _test_router_basic,
-    _test_router_decisions,
-    _test_router_indexers_sync,
-    generate_random_suffix,
-    get_runtime,
+from tests.router.e2e_harness import (
+    ManagedEngineProcessMixin,
+    run_basic_router_test,
+    run_indexers_sync_test,
+    run_router_decisions_test,
 )
+from tests.router.helper import generate_random_suffix
+from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
@@ -22,29 +29,12 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.vllm,
     pytest.mark.model(MODEL_NAME),
 ]
 SPEEDUP_RATIO = 10.0
-PORTS = [
-    8011,
-    8022,
-]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
-NUM_REQUESTS = 10
 BLOCK_SIZE = 16
-
-# Shared test payload for all tests
-TEST_PAYLOAD: Dict[str, Any] = {
-    "model": MODEL_NAME,
-    "messages": [
-        {
-            "role": "user",
-            "content": "In a quiet meadow tucked between rolling hills, a plump gray rabbit nibbled on clover beneath the shade of a gnarled oak tree. Its ears twitched at the faint rustle of leaves, but it remained calm, confident in the safety of its burrow just a few hops away. The late afternoon sun warmed its fur, and tiny dust motes danced in the golden light as bees hummed lazily nearby. Though the rabbit lived a simple life, every day was an adventure of scents, shadows, and snacks—an endless search for the tastiest patch of greens and the softest spot to nap.",
-        }
-    ],
-    "stream": True,
-    "max_tokens": 10,
-}
 
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
@@ -57,7 +47,7 @@ VLLM_ARGS: Dict[str, Any] = {
 }
 
 
-class VLLMProcess:
+class VLLMProcess(ManagedEngineProcessMixin):
     """Manages vLLM workers using dynamo.vllm (HTTP API + KV events).
 
     This is a drop-in replacement for MockerProcess that uses real vLLM workers.
@@ -74,6 +64,9 @@ class VLLMProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
+        request_plane: str = "tcp",
+        store_backend: str = "etcd",
+        durable_kv_events: bool = False,
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -89,6 +82,9 @@ class VLLMProcess:
             num_workers: Number of vLLM worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
+            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -96,7 +92,20 @@ class VLLMProcess:
         self.component_name = "backend"
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
+        self.data_parallel_size = data_parallel_size
         self.worker_processes = []
+        self.store_backend = store_backend
+
+        # Dynamically allocate unique system, KV event, and NIXL side-channel
+        # ports (one of each per worker) to avoid conflicts in parallel test runs.
+        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._nixl_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        request.addfinalizer(
+            lambda: deallocate_ports(
+                self._system_ports + self._kv_event_ports + self._nixl_ports
+            )
+        )
 
         if vllm_args is None:
             vllm_args = {}
@@ -115,7 +124,7 @@ class VLLMProcess:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
         # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
-        # - --connector nixl enables KV cache transfer between ranks
+        # - --kv-transfer-config enables KV cache transfer between ranks
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -174,20 +183,45 @@ class VLLMProcess:
                         str(data_parallel_size),
                         # "--data-parallel-address", "127.0.0.1",  # Required for DP coordination
                         # "--data-parallel-rpc-port", "13345",  # RPC port for DP coordination
-                        # "--connector", "nixl",  # Required for KV transfer between DP ranks
+                        # "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',  # Required for KV transfer between DP ranks
                     ]
                 )
 
-            env = os.environ.copy()  # Copy parent environment
-            env.update(
+            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
+            if durable_kv_events:
+                command.append("--durable-kv-events")
+
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            system_port = self._system_ports[worker_idx]
+            kv_event_port = self._kv_event_ports[worker_idx]
+            nixl_port = self._nixl_ports[worker_idx]
+
+            # Pass KV events config explicitly via CLI
+            kv_events_cfg = json.dumps(
                 {
-                    "CUDA_VISIBLE_DEVICES": gpu_device,
-                    "DYN_NAMESPACE": self.namespace,
-                    "DYN_VLLM_KV_EVENT_PORT": str(20080 + worker_idx),
-                    "VLLM_NIXL_SIDE_CHANNEL_PORT": str(20090 + worker_idx),
-                    "PYTHONHASHSEED": "0",  # for deterministic event id's
+                    "publisher": "zmq",
+                    "topic": "kv-events",
+                    "endpoint": f"tcp://*:{kv_event_port}",
+                    "enable_kv_cache_events": True,
                 }
             )
+            command.extend(["--kv-events-config", kv_events_cfg])
+
+            env = os.environ.copy()  # Copy parent environment
+            env_vars = {
+                "CUDA_VISIBLE_DEVICES": gpu_device,
+                "DYN_NAMESPACE": self.namespace,
+                "DYN_REQUEST_PLANE": request_plane,
+                "DYN_SYSTEM_PORT": str(system_port),
+                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
+                "PYTHONHASHSEED": "0",  # for deterministic event id's
+            }
+
+            # Add DYN_FILE_KV if using file storage backend
+            if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
+                env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
+
+            env.update(env_vars)
 
             # Create managed process for the worker
             process = ManagedProcess(
@@ -198,196 +232,87 @@ class VLLMProcess:
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=request.node.name,
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(gpu_mem={gpu_memory_utilization}) "
+                    f"(gpu_mem={gpu_memory_utilization}, system_port={system_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created vLLM worker {worker_idx} on GPU {gpu_device} "
-                    f"(gpu_mem={gpu_memory_utilization}) "
+                    f"(gpu_mem={gpu_memory_utilization}, system_port={system_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
-    def __enter__(self):
-        """Start all vLLM worker processes with sequential initialization.
-
-        Workers are started sequentially with a delay between each to avoid
-        NIXL/UCX resource contention during initialization. This prevents
-        UCX shared memory handle allocation failures when multiple workers
-        try to initialize simultaneously on the same GPU.
-        """
-        logger.info(
-            f"[VLLMProcess] Starting {len(self.worker_processes)} worker processes sequentially..."
-        )
-
-        # Start each process sequentially, waiting for NIXL initialization before next
-        for i, process in enumerate(self.worker_processes):
-            logger.info(f"[VLLMProcess] Starting vLLM worker {i}...")
-            try:
-                # Manually initialize the process without blocking on health checks
-                process._logger = logging.getLogger(process.__class__.__name__)
-                process._command_name = process.command[0]
-                os.makedirs(process.log_dir, exist_ok=True)
-                log_name = f"{process._command_name}.log.txt"
-                process._log_path = os.path.join(process.log_dir, log_name)
-
-                if process.data_dir:
-                    process._remove_directory(process.data_dir)
-
-                process._terminate_existing()
-                logger.info(
-                    f"[VLLMProcess] Launching process {i} (pid will be assigned)..."
-                )
-                process._start_process()  # Start the process but don't wait
-                logger.info(
-                    f"[VLLMProcess] Worker {i} launched with PID: {process.proc.pid if process.proc else 'unknown'}"
-                )
-                time.sleep(process.delayed_start)
-
-                # Wait for NIXL initialization before starting next worker
-                # This prevents UCX shared memory contention
-                if i < len(self.worker_processes) - 1:
-                    nixl_init_delay = 5  # seconds
-                    logger.info(
-                        f"[VLLMProcess] Waiting {nixl_init_delay}s for worker {i} to initialize NIXL before starting next worker..."
-                    )
-                    time.sleep(nixl_init_delay)
-
-            except Exception:
-                logger.exception(f"[VLLMProcess] Failed to start worker {i}")
-                # Clean up on failure
-                try:
-                    process.__exit__(None, None, None)
-                except Exception as cleanup_err:
-                    logger.warning(f"[VLLMProcess] Error during cleanup: {cleanup_err}")
-                raise
-
-        logger.info(
-            f"[VLLMProcess] All {len(self.worker_processes)} workers launched with sequential initialization."
-        )
-        logger.info("[VLLMProcess] Waiting for health checks to complete...")
-
-        # Now wait for health checks for all processes
-        for i, process in enumerate(self.worker_processes):
-            logger.info(f"[VLLMProcess] Checking health for worker {i}...")
-            try:
-                elapsed = process._check_ports(process.timeout)
-                process._check_urls(process.timeout - elapsed)
-                process._check_funcs(process.timeout - elapsed)
-                logger.info(f"[VLLMProcess] Worker {i} health checks passed")
-            except Exception:
-                logger.error(f"[VLLMProcess] Worker {i} health check failed")
-                # Clean up all processes on failure
-                self.__exit__(None, None, None)
-                raise
-
-        logger.info(
-            "[VLLMProcess] All workers started successfully and passed health checks!"
-        )
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Stop all vLLM worker processes gracefully."""
-        for i, process in enumerate(self.worker_processes):
-            logger.info(f"Stopping vLLM worker {i}")
-            process.__exit__(exc_type, exc_val, exc_tb)
-
-        # Add delay to ensure full cleanup of NATS/ETCD/ZMQ resources
-        # This prevents test isolation issues when running multiple tests
-        logger.info("Waiting for vLLM worker resources to fully clean up...")
-        time.sleep(2)
+    process_name = "vLLM worker"
+    cleanup_name = "vLLM worker resources"
+    init_delay_reason = "initialize NIXL before starting next worker"
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
-    """
-    Quick e2e sanity test for KV router with vLLM engine instances.
-    """
-
-    # runtime_services starts etcd and nats
-    N_VLLM_WORKERS = 2
-    logger.info(f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers")
-
-    try:
-        # Start vLLM workers
-        logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_VLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-        )
-        logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-        vllm_workers.__enter__()
-
-        # Run basic router test (starts router internally and waits for workers to be ready)
-        _test_router_basic(
-            engine_workers=vllm_workers,
-            block_size=BLOCK_SIZE,
-            request=request,
-            frontend_port=PORTS[0],
-            test_payload=TEST_PAYLOAD,
-            num_requests=NUM_REQUESTS,
-            frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
-            store_backend="etcd",  # Explicit for clarity
-        )
-
-    finally:
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
+    run_basic_router_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        num_workers=2,
+        single_gpu=True,
+        request=request,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+    )
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
-    # runtime_services starts etcd and nats
-    logger.info("Starting vLLM router prefix reuse test with two workers")
-    N_WORKERS = 2
-
-    try:
-        # Start 2 worker processes on the same GPU
-        logger.info("Starting 2 vLLM worker processes on single GPU (gpu_mem=0.4)")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_WORKERS,
-            single_gpu=True,  # Worker uses GPU 0
-        )
-        logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-
-        # Initialize vLLM workers
-        vllm_workers.__enter__()
-
-        # Get runtime and create endpoint
-        runtime = get_runtime()
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")
-        endpoint = component.endpoint("generate")
-
-        _test_router_decisions(
-            vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=False
-        )
-
-    finally:
-        # Clean up vLLM workers
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
+    run_router_decisions_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=BLOCK_SIZE,
+        component_name="backend",
+        num_workers=2,
+        single_gpu=True,
+        test_dp_rank=False,
+    )
 
 
 @pytest.mark.gpu_2
+@pytest.mark.nightly
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_vllm_dp(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
     """Validate KV cache prefix reuse with vLLM by sending progressive requests with overlapping prefixes.
     Same flow as test_router_decisions_vllm_multiple_workers; force first request to (worker_id, dp_rank=1).
@@ -396,74 +321,53 @@ def test_router_decisions_vllm_dp(
         * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
         * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
     """
-    N_WORKERS = 1
-    DP_SIZE = 2
-
-    try:
-        logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4)")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
-            single_gpu=False,
-            data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
-        )
-        logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-        vllm_workers.__enter__()
-
-        # Get runtime and create endpoint
-        runtime = get_runtime()
-        # Use the namespace from the vLLM workers
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")  # endpoint is backend.generate
-        endpoint = component.endpoint("generate")
-
-        _test_router_decisions(
-            vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
-        )
-
-    finally:
-        # Clean up vLLM workers
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
+    run_router_decisions_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=BLOCK_SIZE,
+        component_name="backend",
+        num_workers=1,
+        single_gpu=False,
+        test_dp_rank=True,
+        extra_process_kwargs={"data_parallel_size": 2},
+    )
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.parametrize(
+    "store_backend,durable_kv_events,request_plane",
+    [
+        ("etcd", False, "tcp"),
+    ],
+    ids=["nats_core"],
+    indirect=["durable_kv_events", "request_plane"],
+)
 def test_vllm_indexers_sync(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    file_storage_backend,
+    set_ucx_tls_no_mm,
+    store_backend,
+    durable_kv_events,
+    request_plane,
 ):
-    """
-    Test that two KV routers have synchronized indexer states after processing requests
-    with vLLM workers. This test verifies that both routers converge to the same internal state.
-    """
-    logger.info("Starting vLLM indexers sync test")
-    N_VLLM_WORKERS = 2
-
-    try:
-        # Start vLLM workers
-        logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_VLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-        )
-        logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-        vllm_workers.__enter__()
-
-        # Use the common test implementation (creates its own runtimes for each router)
-        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        _test_router_indexers_sync(
-            engine_workers=vllm_workers,
-            block_size=BLOCK_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=N_VLLM_WORKERS,
-            store_backend="etcd",
-        )
-
-        logger.info("vLLM indexers sync test completed successfully")
-
-    finally:
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
+    run_indexers_sync_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        request=request,
+        runtime_services_dynamic_ports=runtime_services_dynamic_ports,
+        store_backend=store_backend,
+        durable_kv_events=durable_kv_events,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        num_workers=2,
+    )

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +21,21 @@ contextual information to help with debugging and error handling.
 """
 
 from typing import List
+
+__all__ = [
+    "PlannerError",
+    "DynamoGraphDeploymentNotFoundError",
+    "ComponentError",
+    "ModelNameNotFoundError",
+    "DeploymentModelNameMismatchError",
+    "UserProvidedModelNameMismatchError",
+    "BackendFrameworkNotFoundError",
+    "BackendFrameworkInvalidError",
+    "SubComponentNotFoundError",
+    "DuplicateSubComponentError",
+    "DeploymentValidationError",
+    "EmptyTargetReplicasError",
+]
 
 
 class PlannerError(Exception):
@@ -48,6 +63,9 @@ class DynamoGraphDeploymentNotFoundError(PlannerError):
         message = f"Parent DynamoGraphDeployment not found (name: '{deployment_name}' in namespace '{namespace}')"
 
         super().__init__(message)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
 
 
 class ComponentError(PlannerError):
@@ -78,6 +96,9 @@ class DeploymentModelNameMismatchError(PlannerError):
         message = f"Model name mismatch in DynamoGraphDeployment: prefill model name {prefill_model_name} != decode model name {decode_model_name}"
         self.message = message
         super().__init__(self.message)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(prefill_model_name={self.prefill_model_name!r}, decode_model_name={self.decode_model_name!r})"
 
 
 class UserProvidedModelNameMismatchError(PlannerError):
@@ -130,6 +151,11 @@ class SubComponentNotFoundError(ComponentError):
 
         super().__init__(message)
 
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(sub_component_type={self.sub_component_type!r})"
+        )
+
 
 class DuplicateSubComponentError(ComponentError):
     """Raised when multiple services have the same subComponentType.
@@ -149,6 +175,9 @@ class DuplicateSubComponentError(ComponentError):
         )
 
         super().__init__(message)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(sub_component_type={self.sub_component_type!r}, service_names={self.service_names!r})"
 
 
 class DeploymentValidationError(PlannerError):

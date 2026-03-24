@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -7,7 +7,11 @@ import pytest
 
 from dynamo.runtime import Context
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 class MockServer:
@@ -128,8 +132,7 @@ async def server(runtime, namespace):
 
     async def init_server():
         """Initialize the test server component and serve the generate endpoint"""
-        component = runtime.namespace(namespace).component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{namespace}.backend.generate")
         print("Started test server instance")
 
         # Serve the endpoint - this will block until shutdown
@@ -156,7 +159,7 @@ async def server(runtime, namespace):
 async def client(runtime, namespace):
     """Create a client connected to the test server"""
     # Create client
-    endpoint = runtime.namespace(namespace).component("backend").endpoint("generate")
+    endpoint = runtime.endpoint(f"{namespace}.backend.generate")
     client = await endpoint.client()
     await client.wait_for_instances()
 
@@ -165,6 +168,7 @@ async def client(runtime, namespace):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_cancel(temp_file_store, server, client):
     _, handler = server
     context = Context()
@@ -198,6 +202,7 @@ async def test_client_context_cancel(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_loop_break(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_until_context_cancelled")
@@ -230,6 +235,7 @@ async def test_client_loop_break(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_server_context_cancel(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_and_cancel_context")
@@ -245,7 +251,9 @@ async def test_server_context_cancel(temp_file_store, server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert str(e).startswith("Stream ended before generation completed")
+        assert str(e).startswith(
+            "Disconnected: Stream ended before generation completed"
+        )
 
     # Verify server context cancellation status
     assert handler.context_is_stopped
@@ -254,6 +262,7 @@ async def test_server_context_cancel(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_server_raise_cancelled(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_and_raise_cancelled")
@@ -269,9 +278,8 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert (
-            str(e)
-            == "a python exception was caught while processing the async generator: CancelledError: "
+        assert str(e).endswith(
+            "a python exception was caught while processing the async generator: CancelledError: "
         )
 
     # Verify server context cancellation status
@@ -282,6 +290,7 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_already_cancelled(temp_file_store, server, client):
     _, handler = server
     context = Context()
@@ -304,6 +313,7 @@ async def test_client_context_already_cancelled(temp_file_store, server, client)
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_cancel_before_await_request(
     temp_file_store, server, client
 ):

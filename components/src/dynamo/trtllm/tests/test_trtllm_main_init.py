@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -71,8 +71,7 @@ def test_prometheus_metrics_integration():
         register_engine_metrics_callback(
             endpoint=mock_endpoint,
             registry=REGISTRY,
-            exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm_",
+            metric_prefix_filters=["trtllm_"],
         )
 
         print("✅ Prometheus metrics integration test passed")

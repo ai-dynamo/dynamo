@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! KV Event Consolidator
@@ -40,7 +40,7 @@ impl KvEventConsolidatorHandle {
         token_ids: Vec<u32>,
         parent_hash: Option<String>,
         block_size: usize,
-        lora_id: Option<u64>,
+        lora_name: Option<String>,
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) {
@@ -51,7 +51,7 @@ impl KvEventConsolidatorHandle {
             token_ids,
             parent_hash,
             block_size,
-            lora_id.map(|id| id as i32),
+            lora_name,
             tier,
             data_parallel_rank,
         );

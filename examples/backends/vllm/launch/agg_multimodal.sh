@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated multimodal serving with standard Dynamo preprocessing
@@ -14,8 +14,12 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
 # Parse command line arguments
 # Extra arguments are passed through to the vLLM worker
@@ -43,6 +47,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT"
+
 # Use TCP transport (instead of default NATS)
 # TCP is preferred for multimodal workloads because it overcomes:
 # - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
@@ -52,23 +59,27 @@ export DYN_REQUEST_PLANE=tcp
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend &
 
-# Configure GPU memory optimization for specific models (if no extra args override)
-MODEL_SPECIFIC_ARGS=""
-if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
-elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
-fi
+# ---- Per-model defaults ----
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+MODEL_EXTRA_ARGS=""
+case "$MODEL_NAME" in
+    meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
+        MAX_MODEL_LEN="${MAX_MODEL_LEN:-108960}"
+        MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
+esac
+
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
 
 # Start vLLM worker with vision model
-# Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
-# --connector none: No KV transfer needed for aggregated serving
 # Extra args from command line come last to allow overrides
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --enforce-eager --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}"
 
-# Wait for all background processes to complete
-wait
-
-
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
