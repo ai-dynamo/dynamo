@@ -12,6 +12,11 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+# Platform detection for downloading pre-built binaries.
+GOOS := $(shell go env GOOS)
+GOARCH := $(shell go env GOARCH)
+CURL_RETRIES ?= 3
+
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
@@ -58,38 +63,34 @@ check: generate manifests generate-api-docs generate-helm-docs
 	@echo "> Check complete"
 
 
-.PHONY: ensure-yq
-ensure-yq:
-	@if ! command -v yq &> /dev/null; then \
-		echo "Installing yq..."; \
-		ARCH=$$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/'); \
-		OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
-		wget https://github.com/mikefarah/yq/releases/latest/download/yq_$${OS}_$${ARCH} -O /usr/local/bin/yq && \
-		chmod +x /usr/local/bin/yq; \
-	else \
-		echo "yq is already installed: $$(yq --version)"; \
+.PHONY: tilt-up
+tilt-up: kubectl helm ## Start Tilt for local operator development.
+	@if [ ! -f tilt-settings.yaml ]; then \
+		echo "WARNING: tilt-settings.yaml not found — using defaults."; \
 	fi
+	tilt up
+
 
 .PHONY: manifests
-manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
 	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
-		yq eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
+		$(YQ) eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Removing containers from extraPodSpec required fields"
 	for file in config/crd/bases/*.yaml; do \
-		yq eval '(.. | select(has("extraPodSpec")) | .extraPodSpec.required) |= (. - ["containers"])' -i --indent 2 $$file || exit 1; \
+		$(YQ) eval '(.. | select(has("extraPodSpec")) | .extraPodSpec.required) |= (. - ["containers"])' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
-		yq eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
+		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Fixing profilingJob template metadata: controller-gen emits bare type: object for metav1.ObjectMeta, add x-kubernetes-preserve-unknown-fields so labels/annotations are accepted"
 	for file in config/crd/bases/*.yaml; do \
-		yq eval '(.. | select(has("profilingJob")) | .profilingJob.properties.template.properties.metadata)."x-kubernetes-preserve-unknown-fields" = true' -i --indent 2 $$file || exit 1; \
+		$(YQ) eval '(.. | select(has("profilingJob")) | .profilingJob.properties.template.properties.metadata)."x-kubernetes-preserve-unknown-fields" = true' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
@@ -104,8 +105,8 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	done
 	echo "Adding helm.sh/resource-policy: keep annotation to CRD files"
 	for file in config/crd/bases/*.yaml; do \
-		if ! yq eval '.metadata.annotations."helm.sh/resource-policy"' "$$file" | grep -q "keep"; then \
-			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
+		if ! $(YQ) eval '.metadata.annotations."helm.sh/resource-policy"' "$$file" | grep -q "keep"; then \
+			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
 	echo "Copying CRD files to operator Helm chart crds/ directory"
@@ -163,7 +164,7 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet helm ## Build manager binary.
+build: manifests generate fmt vet helmify-chart ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: run
@@ -215,20 +216,20 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
-install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+install: manifests kustomize kubectl ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
 
 .PHONY: uninstall
-uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+uninstall: manifests kustomize kubectl ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize kubectl ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+undeploy: kustomize kubectl ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies
@@ -238,18 +239,65 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
+.PHONY: clean-bin
+clean-bin: ## Remove all downloaded tool binaries.
+	rm -rf $(LOCALBIN)
+
+## Prefer project-local binaries over system-wide ones.
+export PATH := $(LOCALBIN):$(PATH)
+
+## Tool Versions
+KUBECTL_VERSION ?= v1.31.4
+HELM_VERSION ?= v3.17.3
+YQ_VERSION ?= v4.45.4
+KUSTOMIZE_VERSION ?= v5.5.0
+CONTROLLER_TOOLS_VERSION ?= v0.16.4
+ENVTEST_VERSION ?= release-0.19
+GOLANGCI_LINT_VERSION ?= v1.64.8
+
 ## Tool Binaries
-KUBECTL ?= kubectl
+KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
+HELM ?= $(LOCALBIN)/helm-$(HELM_VERSION)
+YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 KUSTOMIZE ?= $(LOCALBIN)/kustomize-$(KUSTOMIZE_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
-## Tool Versions
-KUSTOMIZE_VERSION ?= v5.5.0
-CONTROLLER_TOOLS_VERSION ?= v0.16.4
-ENVTEST_VERSION ?= release-0.19
-GOLANGCI_LINT_VERSION ?= v1.64.8
+## ---------- Binary download targets ----------
+
+.PHONY: kubectl
+kubectl: $(KUBECTL) ## Download kubectl locally if necessary.
+$(KUBECTL):
+	mkdir -p $(LOCALBIN)
+	rm -f "$(LOCALBIN)/kubectl-*"
+	curl --retry $(CURL_RETRIES) -fsL \
+		https://dl.k8s.io/release/$(KUBECTL_VERSION)/bin/$(GOOS)/$(GOARCH)/kubectl \
+		-o $(KUBECTL)
+	ln -sf $(KUBECTL) $(LOCALBIN)/kubectl
+	chmod +x $(KUBECTL) $(LOCALBIN)/kubectl
+
+.PHONY: helm
+helm: $(HELM) ## Download helm locally if necessary.
+$(HELM):
+	mkdir -p $(LOCALBIN)
+	rm -f "$(LOCALBIN)/helm-*"
+	curl --retry $(CURL_RETRIES) -fsSL https://get.helm.sh/helm-$(HELM_VERSION)-$(GOOS)-$(GOARCH).tar.gz \
+		| tar xzf - --strip-components=1 -C $(LOCALBIN) $(GOOS)-$(GOARCH)/helm
+	mv $(LOCALBIN)/helm $(HELM)
+	ln -sf $(HELM) $(LOCALBIN)/helm
+	chmod +x $(HELM) $(LOCALBIN)/helm
+
+.PHONY: yq
+yq: $(YQ) ## Download yq locally if necessary.
+$(YQ):
+	mkdir -p $(LOCALBIN)
+	rm -f "$(LOCALBIN)/yq-*"
+	curl --retry $(CURL_RETRIES) -fsL \
+		https://github.com/mikefarah/yq/releases/download/$(YQ_VERSION)/yq_$(GOOS)_$(GOARCH) \
+		-o $(YQ)
+	ln -sf $(YQ) $(LOCALBIN)/yq
+	chmod +x $(YQ) $(LOCALBIN)/yq
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -293,7 +341,7 @@ helmify: $(HELMIFY) ## Download helmify locally if necessary.
 $(HELMIFY): $(LOCALBIN)
 	test -s $(LOCALBIN)/helmify || GOBIN=$(LOCALBIN) go install github.com/arttor/helmify/cmd/helmify@v0.4.16
 
-helm: manifests kustomize helmify
+helmify-chart: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
 ######################### CRD Reference Docs
