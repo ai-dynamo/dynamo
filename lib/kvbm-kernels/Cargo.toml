@@ -47,6 +47,10 @@ level-zero = []
 # Requires libloading for dlopen at runtime.
 sycl-kernel = ["dep:libloading", "level-zero"]
 
+# Skip CUDA compilation and linking entirely (forces stub path).
+# Use this when building for XPU-only targets without libcudart.
+no-cuda = []
+
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]

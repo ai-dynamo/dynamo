@@ -43,6 +43,8 @@ testing-nixl-gds = []
 level-zero = ["dynamo-memory/level-zero", "dep:syclrc", "kvbm-kernels/level-zero"]
 sycl-kernel = ["level-zero", "kvbm-kernels/sycl-kernel"]
 bench-xpu = ["level-zero", "dep:clap"]
+# Skip CUDA compilation/linking — forward to kvbm-kernels/no-cuda
+no-cuda = ["kvbm-kernels/no-cuda"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
