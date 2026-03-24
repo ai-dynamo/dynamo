@@ -1742,6 +1742,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
@@ -1749,6 +1750,9 @@ class KvRouter:
 
         Args:
             token_ids: List of token IDs to evaluate
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in hash computation
+                           for MM-aware potential-load estimation.
 
         Returns:
             A list of dictionaries, each containing:

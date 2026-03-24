@@ -161,8 +161,15 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         lora_name: Option<&str>,
         is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence =
-            compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
+        let sequence = compute_block_hash_for_seq(
+            tokens,
+            self.kv_block_size,
+            BlockHashOptions {
+                lora_name,
+                is_eagle,
+                ..Default::default()
+            },
+        );
         Ok(self.backend.find_matches(&sequence, false))
     }
 

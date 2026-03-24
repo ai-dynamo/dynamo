@@ -889,9 +889,16 @@ mod lora_tests {
         // Same token sequence for both base model and LoRA adapter
         let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
 
-        let base_hashes = compute_block_hash_for_seq(&tokens, kv_block_size, None, None, None);
-        let lora_hashes =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"), None);
+        let base_hashes =
+            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
+        let lora_hashes = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
 
         // Hashes must differ despite identical tokens
         assert_ne!(
@@ -976,9 +983,16 @@ mod lora_tests {
         let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
 
         // With LoRA-aware hashing, base and adapter produce different LocalBlockHash
-        let base_local = compute_block_hash_for_seq(&tokens, kv_block_size, None, None, None);
-        let lora_local =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"), None);
+        let base_local =
+            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
+        let lora_local = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(
             base_local, lora_local,
@@ -1050,10 +1064,22 @@ mod lora_tests {
 
         let tokens: Vec<u32> = (0..kv_block_size * 2).collect();
 
-        let hashes_a =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-a"), None);
-        let hashes_b =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-b"), None);
+        let hashes_a = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let hashes_b = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(
             hashes_a, hashes_b,

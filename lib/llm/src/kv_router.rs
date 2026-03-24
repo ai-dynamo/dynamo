@@ -12,8 +12,9 @@ use dynamo_kv_router::{
     indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, OverlapScores, RouterEvent,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -389,6 +390,10 @@ where
         &self.kv_router_config
     }
 
+    pub fn is_eagle(&self) -> bool {
+        self.is_eagle
+    }
+
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking.
@@ -419,9 +424,11 @@ where
             compute_block_hash_for_seq(
                 tokens,
                 self.block_size,
-                block_mm_infos,
-                lora_name.as_deref(),
-                Some(self.is_eagle),
+                BlockHashOptions {
+                    block_mm_infos,
+                    lora_name: lora_name.as_deref(),
+                    is_eagle: Some(self.is_eagle),
+                },
             )
         });
         let hash_elapsed = start.elapsed();
@@ -439,8 +446,11 @@ where
                 tokens,
                 self.block_size,
                 router_config_override,
-                lora_name.as_deref(),
-                Some(self.is_eagle),
+                BlockHashOptions {
+                    block_mm_infos,
+                    lora_name: lora_name.as_deref(),
+                    is_eagle: Some(self.is_eagle),
+                },
             )
         });
         let seq_hash_elapsed = start.elapsed();
@@ -496,6 +506,7 @@ where
         &self,
         request_id: String,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         overlap_blocks: u32,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
@@ -508,8 +519,11 @@ where
             tokens,
             self.block_size,
             router_config_override,
-            lora_name.as_deref(),
-            Some(self.is_eagle),
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name: lora_name.as_deref(),
+                is_eagle: Some(self.is_eagle),
+            },
         );
 
         if let Err(e) = self
@@ -565,15 +579,18 @@ where
     pub async fn get_overlap_blocks(
         &self,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
     ) -> Result<u32, KvRouterError> {
         let block_hashes = compute_block_hash_for_seq(
             tokens,
             self.block_size,
-            None,
-            lora_name,
-            Some(self.is_eagle),
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
         );
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
@@ -584,15 +601,18 @@ where
         &self,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(
             tokens,
             self.block_size,
-            None,
-            lora_name,
-            Some(self.is_eagle),
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
         );
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
@@ -600,8 +620,11 @@ where
             tokens,
             self.block_size,
             router_config_override,
-            lora_name,
-            Some(self.is_eagle),
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
         );
 
         Ok(self

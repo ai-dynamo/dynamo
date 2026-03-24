@@ -11,7 +11,7 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{OverlapScores, RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::{BlockHashOptions, OverlapScores, RouterEvent, WorkerId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -187,8 +187,7 @@ impl KvReplayRouter {
             &request.tokens,
             self.block_size,
             None,
-            None,
-            None,
+            BlockHashOptions::default(),
         );
         let response = self
             .scheduler

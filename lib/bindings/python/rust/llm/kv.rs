@@ -184,9 +184,11 @@ pub fn compute_block_hash_for_seq_py(
     let hashes = compute_block_hash_for_seq(
         &tokens,
         kv_block_size as u32,
-        mm_infos.as_deref(),
-        lora_name.as_deref(),
-        is_eagle,
+        BlockHashOptions {
+            block_mm_infos: mm_infos.as_deref(),
+            lora_name: lora_name.as_deref(),
+            is_eagle,
+        },
     );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
@@ -720,14 +722,13 @@ async fn create_kv_router_from_endpoint(
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
 
-    // Only query discovery for model_name when a remote indexer is configured,
-    // since model_name is only needed for the RemoteIndexer path.
+    // Query discovery once so we can derive both model_name (for remote indexer)
+    // and Eagle routing semantics from the model card.
     let needs_model_name = kv_router_config
         .as_ref()
         .map(|cfg| cfg.remote_indexer_component.is_some())
         .unwrap_or(false);
-
-    let model_name = if needs_model_name {
+    let (model_name, enable_eagle) = {
         let discovery = endpoint.inner.component().drt().discovery();
         let instances = discovery
             .list(rs::discovery::DiscoveryQuery::EndpointModels {
@@ -738,23 +739,18 @@ async fn create_kv_router_from_endpoint(
             .await
             .map_err(to_pyerr)?;
 
-        Some(
-            instances
-                .into_iter()
-                .find_map(|inst| {
-                    inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
-                        .ok()
-                        .map(|card| card.display_name)
-                })
-                .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "no model card found in discovery for endpoint {}/{}/{}",
-                        endpoint_id.namespace, endpoint_id.component, endpoint_id.name
-                    ))
-                })?,
-        )
-    } else {
-        None
+        let card = instances
+            .into_iter()
+            .find_map(|inst| inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>().ok())
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "no model card found in discovery for endpoint {}/{}/{}",
+                    endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+                ))
+            })?;
+
+        let model_name = needs_model_name.then(|| card.display_name.clone());
+        (model_name, card.runtime_config.enable_eagle)
     };
 
     let kv_router = model_manager
@@ -764,7 +760,7 @@ async fn create_kv_router_from_endpoint(
             kv_router_config,
             worker_type,
             model_name,
-            false,
+            enable_eagle,
         )
         .await
         .map_err(to_pyerr)?;
@@ -1125,18 +1121,22 @@ impl KvRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, lora_name=None))]
+    #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
+        block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
         let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids, None, lora_name.as_deref())
+                .get_potential_loads(&token_ids, None, block_mm_infos.as_deref(), lora_name.as_deref())
                 .await
                 .map_err(to_pyerr)?;
 

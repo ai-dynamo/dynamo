@@ -456,8 +456,15 @@ impl KvIndexerInterface for KvIndexer {
             tokens,
             tokens.len()
         );
-        let sequence =
-            compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
+        let sequence = compute_block_hash_for_seq(
+            tokens,
+            self.kv_block_size,
+            BlockHashOptions {
+                lora_name,
+                is_eagle,
+                ..Default::default()
+            },
+        );
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }

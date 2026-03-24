@@ -17,9 +17,9 @@ use serde::Serialize;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::protocols::{
-    BlockExtraInfo, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement, PlacementEvent,
-    StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent,
+    KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement,
+    PlacementEvent, StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
 // -------------------------------------------------------------------------
@@ -488,9 +488,11 @@ pub fn create_stored_block_from_parts(
     let tokens_hash = compute_block_hash_for_seq(
         token_ids,
         kv_block_size,
-        block_mm_infos.as_deref(),
-        lora_name,
-        is_eagle,
+        BlockHashOptions {
+            block_mm_infos: block_mm_infos.as_deref(),
+            lora_name,
+            is_eagle,
+        },
     )[0];
 
     tracing::trace!(
@@ -567,4 +569,96 @@ pub fn create_stored_blocks(
     }
 
     blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
+
+    use rmp_serde::{from_slice, to_vec};
+
+    use super::*;
+
+    #[test]
+    fn test_deserialize_bigram_block_stored_sequence() {
+        let raw_event = (
+            "BlockStored",
+            vec![BlockHashValue::Unsigned(11), BlockHashValue::Unsigned(12)],
+            Option::<BlockHashValue>::None,
+            vec![(10u32, 11u32), (11, 12), (12, 13), (13, 14)],
+            2usize,
+            Option::<u64>::None,
+            Option::<String>::None,
+            Option::<String>::None,
+        );
+        let encoded = to_vec(&raw_event).unwrap();
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+        match event {
+            RawKvEvent::BlockStored {
+                token_ids,
+                block_size,
+                is_eagle,
+                ..
+            } => {
+                assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
+                assert_eq!(block_size, 2);
+                assert_eq!(is_eagle, Some(true));
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_event_bigram_emits_eagle_windows() {
+        let raw_event = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(21), BlockHashValue::Unsigned(22)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11, 12, 13, 14],
+            block_size: 2,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+            is_eagle: Some(true),
+        };
+        let warning_count = Arc::new(AtomicU32::new(0));
+        let placement_event =
+            convert_event(raw_event, 7, 2, WorkerWithDpRank::new(3, 0), &warning_count);
+
+        match placement_event.event.data {
+            KvCacheEventData::Stored(store_data) => {
+                assert_eq!(store_data.blocks.len(), 2);
+                assert_eq!(
+                    store_data.blocks[0].block_hash,
+                    ExternalSequenceBlockHash(21)
+                );
+                assert_eq!(
+                    store_data.blocks[1].block_hash,
+                    ExternalSequenceBlockHash(22)
+                );
+
+                let expected_first = compute_block_hash_for_seq(
+                    &[10, 11, 12],
+                    2,
+                    BlockHashOptions {
+                        is_eagle: Some(true),
+                        ..Default::default()
+                    },
+                );
+                let expected_second = compute_block_hash_for_seq(
+                    &[12, 13, 14],
+                    2,
+                    BlockHashOptions {
+                        is_eagle: Some(true),
+                        ..Default::default()
+                    },
+                );
+
+                assert_eq!(store_data.blocks[0].tokens_hash, expected_first[0]);
+                assert_eq!(store_data.blocks[1].tokens_hash, expected_second[0]);
+            }
+            other => panic!("expected Stored event, got {other:?}"),
+        }
+    }
 }

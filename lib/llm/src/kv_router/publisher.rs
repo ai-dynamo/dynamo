@@ -1048,7 +1048,7 @@ impl WorkerMetricsPublisher {
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use dynamo_kv_router::protocols::compute_block_hash_for_seq;
+    use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
@@ -1063,7 +1063,8 @@ mod test_event_processing {
             create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None, None)[0];
+        let expected_hash =
+            compute_block_hash_for_seq(&token_ids, 4, BlockHashOptions::default())[0];
         assert_eq!(stored.tokens_hash, expected_hash);
         assert!(stored.mm_extra_info.is_none());
     }
