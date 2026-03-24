@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # This is the image that will be used for the Dynamo Frontend, Prefill, and Decode services
-x-dynamo-image: &DYNAMO_IMAGE nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
+x-dynamo-image: &DYNAMO_IMAGE nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
 
 # The environment variables lifted to this top section are either ones that you may want to change or shared between multiple services
 #   Service-specific environment variables are included under their specific "environment:" sections
@@ -11,10 +11,6 @@ x-shared-environ: &shared-environ
   MODEL_NAME: "Qwen/Qwen3-0.6B"
   PREFILL_ENGINE_ARGS: "/workspace/engine_configs/qwen3/prefill.yaml"
   DECODE_ENGINE_ARGS: "/workspace/engine_configs/qwen3/decode.yaml"
-
-  # (May want to change) If you have more than 2 gpus available, you can assign them to your prefill and decode workers below
-  PREFILL_CUDA_VISIBLE_DEVICES: 0
-  DECODE_CUDA_VISIBLE_DEVICES: 1
 
   # (May want to change) If you want to use multimodal, you can set MODALITY to "multimodal"
   MODALITY: "text"
@@ -37,6 +33,7 @@ services:
       - 8000:8000
     environment:
       <<: *shared-environ
+    restart: always
     depends_on:
       - nats-server
       - etcd-server
@@ -52,7 +49,6 @@ services:
       --disaggregation-mode prefill"
     environment:
       <<: *shared-environ
-      CUDA_VISIBLE_DEVICES: ${PREFILL_CUDA_VISIBLE_DEVICES:-0}
     volumes:
       - *shared-config-volume
     deploy:
@@ -61,11 +57,12 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-              count: all
+              device_ids: ['0']
     ulimits:
       memlock: -1
       stack: 67108864
     ipc: host
+    restart: always
     depends_on:
       - nats-server
       - etcd-server
@@ -81,7 +78,6 @@ services:
       --disaggregation-mode decode"
     environment:
       <<: *shared-environ
-      CUDA_VISIBLE_DEVICES: ${DECODE_CUDA_VISIBLE_DEVICES:-1}
     volumes:
       - *shared-config-volume
     deploy:
@@ -90,11 +86,12 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-              count: all
+              device_ids: ['1']
     ulimits:
       memlock: -1
       stack: 67108864
     ipc: host
+    restart: always
     depends_on:
       - nats-server
       - etcd-server
