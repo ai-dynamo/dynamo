@@ -29,13 +29,13 @@ spec:
           ## utility functions -- can be moved to a bash script / configmap
           wait_for_model_ready() {
             echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every 5s)..."
-            while ! curl -s -H "Host: $GATEWAY_HOST" "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+            while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
                 echo "[$(date '+%H:%M:%S')] Model not ready yet, sleeping 5s before checking again http://$ENDPOINT/v1/models"
                 sleep 5
             done
             echo "✅ Model '$TARGET_MODEL' is now available!"
             echo "Model '$TARGET_MODEL' is now available!"
-            curl -s -H "Host: $GATEWAY_HOST" "http://$ENDPOINT/v1/models" | jq .
+            curl -s "http://$ENDPOINT/v1/models" | jq .
           }
           run_perf() {
             local concurrency=$1
@@ -69,7 +69,6 @@ spec:
                 --num-dataset-entries 12800 \
                 --random-seed 100 \
                 --workers-max $max_threads \
-                -H "Host: $GATEWAY_HOST" \
                 -H 'Authorization: Bearer NOT USED' \
                 -H 'Accept: text/event-stream'\
                 --record-processors 32 \
@@ -105,9 +104,7 @@ spec:
         - name: TARGET_MODEL
           value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
         - name: ENDPOINT
-          value: inference-gateway.kgateway-system.svc.cluster.local:80
-        - name: GATEWAY_HOST
-          value: llama3-70b-disagg.example.com
+          value: llama3-70b-disagg-sn-frontend:8000
         - name: CONCURRENCY_PER_GPU
           value: "2"
         - name: DEPLOYMENT_GPU_COUNT
