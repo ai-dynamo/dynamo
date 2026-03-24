@@ -741,7 +741,10 @@ async fn create_kv_router_from_endpoint(
 
         let card = instances
             .into_iter()
-            .find_map(|inst| inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>().ok())
+            .find_map(|inst| {
+                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                    .ok()
+            })
             .ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "no model card found in discovery for endpoint {}/{}/{}",
@@ -1136,7 +1139,12 @@ impl KvRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids, None, block_mm_infos.as_deref(), lora_name.as_deref())
+                .get_potential_loads(
+                    &token_ids,
+                    None,
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                )
                 .await
                 .map_err(to_pyerr)?;
 
