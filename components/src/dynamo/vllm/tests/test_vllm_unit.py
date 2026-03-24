@@ -531,6 +531,16 @@ class TestEnsureSideChannelHost:
 
         assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "192.168.99.99"
 
+    def test_sets_env_var_on_successful_detection(self, monkeypatch):
+        """No env var set, successful detection populates the side-channel host."""
+        monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
+        with patch("dynamo.vllm.args.get_host_ip", return_value="10.0.0.5"):
+            ensure_side_channel_host()
+
+        import os
+
+        assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.5"
+
     def test_raises_when_detection_fails_and_no_env(self, monkeypatch):
         """All strategies fail, no env var → RuntimeError."""
         monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
