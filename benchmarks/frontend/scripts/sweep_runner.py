@@ -125,8 +125,14 @@ class RunResult:
 
 
 def _kill_port(port: int):
-    """Kill any process holding a port."""
-    subprocess.run(f"fuser -k {port}/tcp", shell=True, capture_output=True, timeout=5)
+    """Kill any process holding a port (SIGTERM first, then SIGKILL)."""
+    subprocess.run(
+        f"fuser -k -TERM {port}/tcp", shell=True, capture_output=True, timeout=5
+    )
+    time.sleep(2)
+    subprocess.run(
+        f"fuser -k -KILL {port}/tcp", shell=True, capture_output=True, timeout=5
+    )
 
 
 def _port_free(port: int) -> bool:
@@ -253,9 +259,13 @@ def _run_single(
     except subprocess.TimeoutExpired:
         result.status = "fail"
         print("    TIMEOUT after 600s")
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        time.sleep(2)
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            time.sleep(2)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already exited
     except Exception as e:
         result.status = "fail"
         print(f"    ERROR: {e}")

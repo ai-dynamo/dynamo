@@ -149,121 +149,17 @@ def _extract_aiperf_metrics(data: dict) -> AiperfResult:
 
 
 def parse_prometheus_snapshot(path: Path) -> Optional[PrometheusSnapshot]:
-    """Parse Prometheus text format snapshot."""
+    """Parse Prometheus text format snapshot.
+
+    Delegates to parsing_util.parse_prometheus_text() with the conventional
+    ``prometheus_snapshot.txt`` filename.
+    """
+    from parsing_util import parse_prometheus_text
+
     snapshot_path = path / "prometheus_snapshot.txt"
     if not snapshot_path.exists():
         return None
-
-    with open(snapshot_path) as f:
-        text = f.read()
-
-    snap = PrometheusSnapshot()
-
-    def get_gauge(name: str) -> Optional[float]:
-        """Read a plain gauge or counter (no labels)."""
-        m = re.search(rf"^{re.escape(name)}\s+(\S+)", text, re.MULTILINE)
-        return float(m.group(1)) if m else None
-
-    def get_gauge_by_label(name: str, label_key: str) -> dict:
-        """Read a gauge vec, return {label_value: float}."""
-        pattern = rf'^{re.escape(name)}\{{[^}}]*{re.escape(label_key)}="([^"]+)"[^}}]*\}}\s+(\S+)'
-        return {
-            m.group(1): float(m.group(2))
-            for m in re.finditer(pattern, text, re.MULTILINE)
-        }
-
-    def histogram_quantile(name: str, quantile: float, filter_label: str = "") -> float:
-        """Compute a quantile from a Prometheus histogram (linear interpolation)."""
-        # Collect bucket lines that match optional filter label
-        bucket_pattern = rf"^{re.escape(name)}_bucket\{{[^}}]*{re.escape(filter_label)}[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+(\S+)"
-        buckets = []
-        for m in re.finditer(bucket_pattern, text, re.MULTILINE):
-            le_str, count_str = m.group(1), m.group(2)
-            le = float("inf") if le_str == "+Inf" else float(le_str)
-            buckets.append((le, float(count_str)))
-        if not buckets:
-            return 0.0
-        buckets.sort(key=lambda x: x[0])
-
-        # Get total count from _count line (or last bucket)
-        count_m = re.search(
-            rf"^{re.escape(name)}_count\{{{re.escape(filter_label)}[^}}]*\}}\s+(\S+)",
-            text,
-            re.MULTILINE,
-        )
-        total = float(count_m.group(1)) if count_m else buckets[-1][1]
-        if total == 0:
-            return 0.0
-
-        target = quantile * total
-        prev_le, prev_count = 0.0, 0.0
-        for le, count in buckets:
-            if count >= target:
-                if count == prev_count:
-                    return prev_le
-                # Linear interpolation within the bucket
-                frac = (target - prev_count) / (count - prev_count)
-                return prev_le + frac * (le - prev_le)
-            prev_le, prev_count = le, count
-        return buckets[-1][0] if buckets else 0.0
-
-    # Stage durations — histograms with stage label
-    for stage in ["preprocess", "route", "transport_roundtrip", "postprocess"]:
-        label_filter = f'stage="{stage}"'
-        p50 = histogram_quantile(
-            "dynamo_frontend_stage_duration_seconds", 0.50, label_filter
-        )
-        p95 = histogram_quantile(
-            "dynamo_frontend_stage_duration_seconds", 0.95, label_filter
-        )
-        p99 = histogram_quantile(
-            "dynamo_frontend_stage_duration_seconds", 0.99, label_filter
-        )
-        # Check there's actually data for this stage
-        count_m = re.search(
-            rf"^dynamo_frontend_stage_duration_seconds_count\{{[^}}]*stage=\"{re.escape(stage)}\"[^}}]*\}}\s+(\S+)",
-            text,
-            re.MULTILINE,
-        )
-        if count_m and float(count_m.group(1)) > 0:
-            snap.stage_durations[stage] = {"p50": p50, "p95": p95, "p99": p99}
-
-    # Request plane histograms (no extra label filter)
-    snap.request_plane_queue_p50 = histogram_quantile(
-        "dynamo_request_plane_queue_seconds", 0.50
-    )
-    snap.request_plane_roundtrip_ttft_p50 = histogram_quantile(
-        "dynamo_request_plane_roundtrip_ttft_seconds", 0.50
-    )
-    snap.request_plane_inflight = get_gauge("dynamo_request_plane_inflight") or 0
-
-    # Tokio worker gauges
-    poll_times = get_gauge_by_label("dynamo_tokio_worker_mean_poll_time_ns", "worker")
-    snap.tokio_worker_mean_poll_time_ns = list(poll_times.values())
-
-    # Event loop stall is under dynamo_frontend_event_loop_stall_total
-    snap.tokio_event_loop_stall_total = (
-        get_gauge("dynamo_frontend_event_loop_stall_total") or 0
-    )
-    snap.tokio_global_queue_depth = get_gauge("dynamo_tokio_global_queue_depth") or 0
-    snap.tokio_budget_forced_yield_total = (
-        get_gauge("dynamo_tokio_budget_forced_yield_total") or 0
-    )
-
-    # busy_ratio is stored as integer per-mille (0-1000); divide by 1000 to get 0-1
-    busy_ratios_raw = get_gauge_by_label("dynamo_tokio_worker_busy_ratio", "worker")
-    snap.tokio_worker_busy_ratio = [v / 1000.0 for v in busy_ratios_raw.values()]
-
-    # Transport gauges
-    snap.tcp_pool_active = get_gauge("dynamo_transport_tcp_pool_active") or 0
-    snap.tcp_pool_idle = get_gauge("dynamo_transport_tcp_pool_idle") or 0
-
-    # Compute pool
-    snap.compute_pool_active = (
-        get_gauge("dynamo_compute_compute_pool_active_tasks") or 0
-    )
-
-    return snap
+    return parse_prometheus_text(snapshot_path)
 
 
 def load_test_points(artifact_dir: Path) -> list[TestPoint]:
