@@ -868,7 +868,7 @@ mod tests {
             .collect::<Vec<_>>();
         let report = collector.finish();
 
-        assert!(arrival_times.iter().any(|arrival| *arrival == 0.0));
+        assert!(arrival_times.contains(&0.0));
         assert!(arrival_times.iter().all(|arrival| *arrival >= 0.0));
         assert_eq!(report.request_counts.completed_requests, 3);
     }
