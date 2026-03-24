@@ -614,6 +614,8 @@ class BasePlanner:
         if require_prefill:
             try:
                 if self.prefill_client is None:
+                    assert self.prefill_worker_info.component_name is not None
+                    assert self.prefill_worker_info.endpoint is not None
                     self.prefill_client = await self._get_or_create_client(
                         self.prefill_worker_info.component_name,
                         self.prefill_worker_info.endpoint,
@@ -628,6 +630,8 @@ class BasePlanner:
         if require_decode:
             try:
                 if self.workers_client is None:
+                    assert self.decode_worker_info.component_name is not None
+                    assert self.decode_worker_info.endpoint is not None
                     self.workers_client = await self._get_or_create_client(
                         self.decode_worker_info.component_name,
                         self.decode_worker_info.endpoint,
@@ -817,7 +821,9 @@ class BasePlanner:
 
     def _component_name(self) -> str:
         if self.component_type == SubComponentType.PREFILL:
+            assert self.prefill_worker_info.k8s_name is not None
             return self.prefill_worker_info.k8s_name
+        assert self.decode_worker_info.k8s_name is not None
         return self.decode_worker_info.k8s_name
 
     def _engine_num_gpu(self) -> int:
