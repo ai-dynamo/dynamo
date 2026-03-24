@@ -3,6 +3,7 @@
 
 use super::*;
 
+use dynamo_async_openai::types::ReasoningEffort;
 use minijinja::{context, value::Value};
 use std::result::Result::Ok;
 
@@ -269,6 +270,26 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         self.chat_template_args.as_ref()
     }
 
+    fn extract_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        if let Some(reasoning_effort) = self.inner.reasoning_effort.clone() {
+            return Some(reasoning_effort);
+        }
+
+        if let Some(enable_thinking) = self
+            .chat_template_args()
+            .and_then(|obj| obj.get("enable_thinking"))
+            .and_then(|value| value.as_bool())
+        {
+            return Some(if enable_thinking {
+                ReasoningEffort::Medium
+            } else {
+                ReasoningEffort::None
+            });
+        }
+
+        None
+    }
+
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         self.media_io_kwargs.as_ref()
     }
@@ -334,6 +355,32 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
             }
             _ => None,
         }
+    }
+
+    fn extract_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        if let Some(reasoning_effort) = self
+            .unsupported_fields
+            .get("reasoning_effort")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+        {
+            return Some(reasoning_effort);
+        }
+
+        if let Some(enable_thinking) = self
+            .unsupported_fields
+            .get("chat_template_kwargs")
+            .and_then(|kwargs| kwargs.as_object())
+            .and_then(|obj| obj.get("enable_thinking"))
+            .and_then(|value| value.as_bool())
+        {
+            return Some(if enable_thinking {
+                ReasoningEffort::Medium
+            } else {
+                ReasoningEffort::None
+            });
+        }
+
+        None
     }
 }
 
@@ -547,6 +594,71 @@ mod tests {
         // text should be unchanged
         assert_eq!(result[3]["type"], "text");
         assert_eq!(result[3]["text"], "hello");
+    }
+
+    #[test]
+    fn test_reasoning_effort_direct_extraction() {
+        let json_str = r#"{
+            "model": "deepseek-v3.2",
+            "prompt": "",
+            "messages": [],
+            "reasoning_effort": "high"
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let reasoning_effort = request.extract_reasoning_effort();
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let reasoning_effort = request.extract_reasoning_effort();
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
+    }
+
+    #[test]
+    fn test_reasoning_effort_kwargs_extraction() {
+        let json_str = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [],
+            "prompt": "",
+            "chat_template_kwargs": {
+                "enable_thinking": true
+            }
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let reasoning_effort = request.extract_reasoning_effort();
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::Medium)));
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let reasoning_effort = request.extract_reasoning_effort();
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::Medium)));
+    }
+
+    #[test]
+    fn test_reasoning_effort_mixed_extraction() {
+        let json_str = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [],
+            "prompt": "",
+            "chat_template_kwargs": {
+                "enable_thinking": true
+            },
+            "reasoning_effort": "high"
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let reasoning_effort = request.extract_reasoning_effort();
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let reasoning_effort = request.extract_reasoning_effort();
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
     }
 
     #[test]

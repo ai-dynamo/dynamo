@@ -1338,12 +1338,69 @@ impl
             context.clone(),
         );
 
-        let transformed_stream =
-            self.postprocessor_parsing_stream(stream, &request, prompt_injected_reasoning)?;
+        // Try to parse reasoning content only if parser is configured AND reasoning is not
+        // explicitly disabled. When reasoning_effort=none, the prompt template omits the
+        // <think> tag, so the reasoning parser (which may assume it starts inside a thinking
+        // block) must be skipped to avoid misclassifying normal content as reasoning.
+        let reasoning_disabled = match request.extract_reasoning_effort() {
+            Some(dynamo_async_openai::types::ReasoningEffort::None) => true,
+            Some(_) => false,
+            None => false,
+        };
+        let should_parse_reasoning =
+            self.runtime_config.reasoning_parser.is_some() && !reasoning_disabled;
 
-        // Apply audit aggregation strategy.
-        // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
-        // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
+        // Reasoning Content Parsing Transformation Step
+        // Current Solution:
+        // This step operates on Deltas created by the transform_postprocessor_stream function
+        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
+        // Future Solution:
+        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
+        // Use backend_output.reasoning_content field to fill out the deltas.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(Self::parse_reasoning_content_from_stream(
+                stream,
+                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
+        // Check if tools are present and if we should apply jail
+        let has_tools =
+            request.inner.tools.is_some() && !request.inner.tools.as_ref().unwrap().is_empty();
+
+        // Determine if we should apply jail (do this before moving request)
+        let should_jail = Self::should_apply_tool_jail(
+            self.tool_call_parser.as_ref(),
+            request.inner.tool_choice.as_ref(),
+            has_tools,
+        )?;
+
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+      
+        // Apply jail conditionally
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                tool_definitions,
+                stream,
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
+        // Step 4: Apply audit aggregation strategy.
         let final_stream = if let Some(mut audit) = audit_handle {
             let (stream, agg_fut) = if audit.streaming() {
                 // Streaming: apply scan (pass-through + parallel aggregation)

@@ -9,6 +9,7 @@
 //! Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding
 
 use anyhow::{Context, Result};
+use dynamo_async_openai::types::ReasoningEffort;
 use serde_json::Value as JsonValue;
 
 /// Special tokens for DeepSeek V3.2
@@ -558,6 +559,13 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
             }
         }
 
+        // Parse thinking mode from the request
+        let thinking_mode = match req.extract_reasoning_effort() {
+            Some(ReasoningEffort::None) => ThinkingMode::Chat,
+            Some(_) => ThinkingMode::Thinking,
+            None => self.thinking_mode,
+        };
+
         // Encode with native implementation
         encode_messages(
             &messages_array,
@@ -620,6 +628,73 @@ mod tests {
         assert!(result.contains("get_weather"));
         assert!(result.contains("<functions>"));
     }
+
+    #[test]
+    fn test_reasoning_effort_disabling() {
+        use super::super::OAIPromptFormatter;
+        use crate::types::openai::{
+            chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+        };
+
+        let json_str = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "How do I reverse a string in Python?"
+                }
+            ],
+            "prompt": "",
+            "reasoning_effort": "none"
+        }"#;
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.starts_with(tokens::BOS));
+        assert!(!result.contains(tokens::THINKING_START));
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.starts_with(tokens::BOS));
+        assert!(!result.contains(tokens::THINKING_START));
+    }
+
+    #[test]
+    fn test_reasoning_effort_enabling() {
+        use super::super::OAIPromptFormatter;
+        use crate::types::openai::{
+            chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+        };
+
+        let json_str = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "How do I reverse a string in Python?"
+                }
+            ],
+            "prompt": "",
+            "reasoning_effort": "high"
+        }"#;
+
+        let formatter = DeepSeekV32Formatter::new_chat();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.starts_with(tokens::BOS));
+        assert!(result.contains(tokens::THINKING_START));
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.starts_with(tokens::BOS));
+        assert!(result.contains(tokens::THINKING_START));
 
     // Mock request for testing OAIPromptFormatter implementation
     struct MockRequest {
