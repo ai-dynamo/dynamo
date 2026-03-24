@@ -11,7 +11,7 @@ The Mocker is a lightweight, high-fidelity simulation of an LLM inference engine
 The mocker simulates:
 
 - **Block-based KV cache management** with LRU eviction
-- **Continuous batching scheduler** with watermark-based admission control
+- **Engine-specific continuous batching schedulers** for vLLM and SGLang
 - **Prefix caching** with hash-based block deduplication
 - **Chunked prefill** for better batching efficiency
 - **Realistic timing models** for prefill and decode phases
@@ -73,11 +73,8 @@ python -m dynamo.mocker \
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
 | `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
-| `--trace-file` | None | Run offline trace replay from a Mooncake-style JSONL trace file |
-| `--output-file` | `<trace stem>.replay.json` | Write replay metrics JSON to this path |
-| `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
-| `--block-size` | 64 | Tokens per KV cache block |
+| `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
 | `--enable-prefix-caching` | True | Enable prefix caching |
@@ -85,7 +82,6 @@ python -m dynamo.mocker \
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
 | `--no-enable-chunked-prefill` | - | Disable chunked prefill |
 | `--preemption-mode` | `lifo` | Decode eviction policy under memory pressure: `lifo` (vLLM v1 style) or `fifo` |
-| `--watermark` | 0.01 | KV cache watermark (fraction reserved) |
 | `--speedup-ratio` | 1.0 | Timing speedup factor |
 | `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
 | `--data-parallel-size` | 1 | Number of DP replicas |
@@ -95,11 +91,15 @@ python -m dynamo.mocker \
 | `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
 | `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
-| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens |
+| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens. Also becomes the effective block size when `--engine-type sglang` and `--block-size` is omitted |
 | `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
+| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Requires `aiconfigurator` SDK installed (install with `pip install ai-dynamo[mocker]`) |
+| `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
+| `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
+| `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
 | `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
@@ -122,19 +122,46 @@ python -m dynamo.mocker \
 
 > **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
 
-## Offline Trace Replay
+## Trace Replay
 
-The mocker also supports an offline replay mode for Mooncake-style traces:
+The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
+`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, and the synthetic replay path
+directly:
 
 ```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --num-workers 4 \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --arrival-speedup-ratio 5 \
+    --extra-engine-args '{"block_size":512}' \
+    --router-config '{"router_queue_policy":"fcfs"}' \
+    --report-json /tmp/replay-report.json
 ```
 
-This mode writes a replay report JSON and prints a `Replay Summary` table without launching a runtime or router.
+The same CLI also supports synthetic replay without a trace file:
 
-For full usage, constraints, and benchmarking guidance, see [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md).
+```bash
+python -m dynamo.replay \
+    --input-tokens 5000 \
+    --output-tokens 500 \
+    --request-count 1000 \
+    --arrival-interval-ms 1.0 \
+    --num-workers 1 \
+    --replay-mode offline \
+    --replay-concurrency 100 \
+    --extra-engine-args '{"block_size":512}' \
+    --report-json /tmp/replay-report.json
+```
+
+The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
+report JSON to disk.
+
+For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
+
+Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay uses canonical
+`block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
+as it matches `block_size` when both are provided.
 
 ## Performance Modeling Setup
 
@@ -156,6 +183,22 @@ python -m dynamo.mocker \
     --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
     --speedup-ratio 1.0
 ```
+
+### AIC Performance Model
+
+To use the AIC SDK for latency prediction:
+
+```bash
+pip install ai-dynamo[mocker]
+
+python -m dynamo.mocker \
+    --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --engine-type vllm \
+    --aic-perf-model \
+    --aic-system h200_sxm
+```
+
+The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
 
 Example `--reasoning` configuration:
 
@@ -205,15 +248,21 @@ The mocker is organized into several cooperating components that mirror the inte
 
 ### Scheduler
 
-The scheduler implements continuous batching, maintaining three logical queues:
+The mocker now has two scheduler shapes rather than one generic queue model:
 
-1. **Waiting Queue** - Newly arrived requests awaiting scheduling
-2. **Prefill Queue** - Requests scheduled for prefill
-3. **Decode Queue** - Requests actively decoding (ordered by age for preemption)
+- **vLLM mocker** uses an upstream-style `waiting + running` scheduler. Each request tracks
+  computed tokens, the scheduler spends one token budget across the running set first, and decode
+  pressure triggers inline preemption of running requests.
+- **SGLang mocker** uses a cache-aware waiting/running scheduler around a radix-style prefix cache.
+  It batches prefill work with decode-state awareness and handles pressure primarily through decode
+  retraction while preserving cached prefixes.
 
-Each iteration, the scheduler receives incoming requests, moves eligible requests from waiting to prefill based on available memory and compute budgets, simulates the prefill phase for queued requests, runs one decode step for all active sequences, and publishes metrics about current resource utilization.
+Both schedulers simulate continuous batching, prefix reuse, chunked prefill, memory pressure, and
+decode token emission while publishing metrics about current resource utilization.
 
-When resources become constrained, the scheduler employs preemption: the oldest decoding request is evicted back to the waiting queue, its KV blocks are freed, and it will be rescheduled later. This mirrors how real engines handle memory pressure.
+When resources become constrained, the mocker simulates the engine's real recovery path:
+- vLLM-style decode preemption and recompute
+- SGLang-style decode retraction plus prefix-preserving cache updates
 
 ### KV Block Manager
 
@@ -257,11 +306,13 @@ Each active request is tracked as a sequence, managing its token blocks and gene
 
 ### Performance Model
 
-The mocker supports two timing prediction modes:
+The mocker supports three timing prediction modes:
 
 **Polynomial Model (Default):** Uses hardcoded polynomial formulas that approximate typical GPU behavior. Prefill time scales quadratically with token count, while decode time depends on the total active KV cache size.
 
 **Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
+
+**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode requires the `aiconfigurator` SDK, installable via `pip install ai-dynamo[mocker]`.
 
 ### Bootstrap Rendezvous (Disaggregated Serving)
 

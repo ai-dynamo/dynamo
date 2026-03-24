@@ -11,11 +11,16 @@ use validator::{Validate, ValidationError};
 
 use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
+const fn default_min_initial_workers() -> usize {
+    1
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
     #[default]
     Fcfs,
+    Lcfs,
     Wspt,
 }
 
@@ -23,6 +28,7 @@ impl fmt::Display for RouterQueuePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fcfs => f.write_str("fcfs"),
+            Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
         }
     }
@@ -34,9 +40,10 @@ impl FromStr for RouterQueuePolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "fcfs" => Ok(Self::Fcfs),
+            "lcfs" => Ok(Self::Lcfs),
             "wspt" => Ok(Self::Wspt),
             _ => Err(format!(
-                "unknown queue policy: {s:?}, expected 'fcfs' or 'wspt'"
+                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
             )),
         }
     }
@@ -58,6 +65,7 @@ pub struct RouterConfigOverride {
 
 /// KV Router configuration parameters
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(default)]
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
@@ -130,6 +138,13 @@ pub struct KvRouterConfig {
     /// When true, the router starts immediately without waiting for discovery-based
     /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
+
+    /// Minimum number of workers that must be discovered before router startup continues.
+    /// Default: 1. Ignored when skip_initial_worker_wait=true.
+    #[serde(default = "default_min_initial_workers")]
+    #[validate(range(min = 1))]
+    pub min_initial_workers: usize,
+
     /// Scheduling policy for the router queue.
     /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
     /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -159,10 +174,11 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
-            router_queue_threshold: Some(2.0),
+            router_queue_threshold: Some(4.0),
             router_event_threads: 4,
             router_enable_cache_control: false,
             skip_initial_worker_wait: false,
+            min_initial_workers: default_min_initial_workers(),
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
         }
@@ -235,5 +251,41 @@ impl KvRouterConfig {
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_weight > 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn router_queue_policy_display_and_parse_support_lcfs() {
+        assert_eq!(RouterQueuePolicy::Lcfs.to_string(), "lcfs");
+        assert_eq!(
+            "lcfs".parse::<RouterQueuePolicy>().unwrap(),
+            RouterQueuePolicy::Lcfs
+        );
+    }
+
+    #[test]
+    fn router_queue_policy_serde_round_trip_supports_lcfs() {
+        let serialized = serde_json::to_string(&RouterQueuePolicy::Lcfs).unwrap();
+        assert_eq!(serialized, "\"lcfs\"");
+        let deserialized: RouterQueuePolicy = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, RouterQueuePolicy::Lcfs);
+    }
+
+    #[test]
+    fn kv_router_config_defaults_to_one_initial_worker() {
+        assert_eq!(KvRouterConfig::default().min_initial_workers, 1);
+    }
+
+    #[test]
+    fn kv_router_config_rejects_zero_initial_workers() {
+        let cfg = KvRouterConfig {
+            min_initial_workers: 0,
+            ..KvRouterConfig::default()
+        };
+        assert!(cfg.validate().is_err());
     }
 }

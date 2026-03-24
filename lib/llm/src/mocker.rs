@@ -20,7 +20,8 @@ use dashmap::DashMap;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
 use dynamo_mocker::common::bootstrap::{BootstrapServer, connect_to_prefill};
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, MockEngineArgs, OutputSignal,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal, RawKvEvent,
+    RawKvEventSink,
 };
 use dynamo_mocker::common::utils::{compute_kv_transfer_delay, sleep_precise};
 use dynamo_mocker::engine::create_engine;
@@ -48,11 +49,7 @@ pub const MOCKER_COMPONENT: &str = "mocker";
 struct KvEventSinkAdapter(KvEventPublisher);
 
 impl KvCacheEventSink for KvEventSinkAdapter {
-    fn publish(
-        &self,
-        event: KvCacheEvent,
-        _block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()> {
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         self.0
             .publish(event)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
@@ -77,13 +74,8 @@ enum ZmqRawKvEvent {
     },
 }
 
-struct ZmqKvEventMsg {
-    event: KvCacheEvent,
-    block_token_ids: Option<Vec<Vec<u32>>>,
-}
-
 struct ZmqKvEventSink {
-    tx: mpsc::UnboundedSender<ZmqKvEventMsg>,
+    tx: mpsc::UnboundedSender<RawKvEvent>,
 }
 
 /// Maximum number of entries in the replay ring buffer.
@@ -96,7 +88,7 @@ impl ZmqKvEventSink {
         dp_rank: u32,
         block_size: u32,
     ) -> Result<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<ZmqKvEventMsg>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<RawKvEvent>();
 
         // Bind the PUB socket before returning so that any SUB connect()
         // that follows is guaranteed to find the endpoint already listening.
@@ -250,17 +242,10 @@ impl ZmqKvEventSink {
     }
 }
 
-impl KvCacheEventSink for ZmqKvEventSink {
-    fn publish(
-        &self,
-        event: KvCacheEvent,
-        block_token_ids: Option<&[Vec<u32>]>,
-    ) -> anyhow::Result<()> {
+impl RawKvEventSink for ZmqKvEventSink {
+    fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
         self.tx
-            .send(ZmqKvEventMsg {
-                event,
-                block_token_ids: block_token_ids.map(|t| t.to_vec()),
-            })
+            .send(event)
             .map_err(|_| anyhow::anyhow!("ZMQ event sink channel closed"))
     }
 }
@@ -413,8 +398,8 @@ impl MockEngine {
         for dp_rank in 0..args.dp_size {
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
-            let (kv_event_sink, relay_publisher): (
-                Option<Arc<dyn KvCacheEventSink>>,
+            let (kv_event_publishers, relay_publisher): (
+                KvEventPublishers,
                 Option<KvEventPublisher>,
             ) = match component {
                 Some(comp) if args.zmq_kv_events_port.is_some() => {
@@ -442,14 +427,17 @@ impl MockEngine {
                                 None,
                             ) {
                                 Ok(publisher) => (
-                                    Some(Arc::new(sink) as Arc<dyn KvCacheEventSink>),
+                                    KvEventPublishers::new(
+                                        None,
+                                        Some(Arc::new(sink) as Arc<dyn RawKvEventSink>),
+                                    ),
                                     Some(publisher),
                                 ),
                                 Err(e) => {
                                     tracing::error!(
                                         "Failed to create KV event relay for dp_rank {dp_rank}: {e}"
                                     );
-                                    (None, None)
+                                    (KvEventPublishers::default(), None)
                                 }
                             }
                         }
@@ -457,7 +445,7 @@ impl MockEngine {
                             tracing::error!(
                                 "Failed to create ZMQ KV event sink for dp_rank {dp_rank}: {e}"
                             );
-                            (None, None)
+                            (KvEventPublishers::default(), None)
                         }
                     }
                 }
@@ -471,26 +459,29 @@ impl MockEngine {
                         None,
                     ) {
                         Ok(publisher) => (
-                            Some(Arc::new(KvEventSinkAdapter(publisher))
-                                as Arc<dyn KvCacheEventSink>),
+                            KvEventPublishers::new(
+                                Some(Arc::new(KvEventSinkAdapter(publisher))
+                                    as Arc<dyn KvCacheEventSink>),
+                                None,
+                            ),
                             None,
                         ),
                         Err(e) => {
                             tracing::error!(
                                 "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
                             );
-                            (None, None)
+                            (KvEventPublishers::default(), None)
                         }
                     }
                 }
-                None => (None, None),
+                None => (KvEventPublishers::default(), None),
             };
 
             let scheduler = create_engine(
                 args.clone(),
                 dp_rank,
                 Some(output_tx),
-                kv_event_sink,
+                kv_event_publishers,
                 Some(cancel_token.clone()),
             );
 

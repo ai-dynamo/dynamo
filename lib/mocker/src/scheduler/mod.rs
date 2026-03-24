@@ -3,14 +3,156 @@
 
 //! Engine-specific scheduling implementations.
 
+mod kv_event_sink;
+#[path = "sglang/mod.rs"]
 pub mod sglang;
 pub mod vllm;
 
-use crate::common::protocols::DirectRequest;
+use crate::common::protocols::{DirectRequest, KvEventPublishers, OutputSignal};
+use dynamo_kv_router::protocols::RouterEvent;
+pub(crate) use kv_event_sink::{
+    CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
+    publish_deferred_kv_events,
+};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
+pub(crate) use sglang::SglangCore;
 pub use sglang::SglangScheduler;
+pub(crate) use vllm::VllmCore;
 pub use vllm::{MockerMetrics, Scheduler};
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionEvent {
+    pub(crate) uuid: Uuid,
+    pub(crate) reused_input_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EnginePassResult {
+    pub(crate) end_ms: f64,
+    pub(crate) completed_requests: usize,
+    pub(crate) output_signals: Vec<OutputSignal>,
+    pub(crate) admissions: Vec<AdmissionEvent>,
+    pub(crate) active_decode_blocks: u64,
+    /// Controls when replay/live schedulers should expose this pass's buffered
+    /// KV events to the real router or publisher sink.
+    pub(crate) router_event_visibility: RouterEventVisibility,
+    /// Router-visible KV events emitted during this pass.
+    pub(crate) kv_events: Vec<RouterEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouterEventVisibility {
+    /// Expose buffered KV events when the pass starts, before the modeled sleep.
+    PassStart,
+    /// Expose buffered KV events when the pass finishes, before output flush.
+    PassEnd,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum EngineCore {
+    Vllm(VllmCore),
+    Sglang(SglangCore),
+}
+
+impl EngineCore {
+    pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+        match self {
+            Self::Vllm(core) => core.receive(request),
+            Self::Sglang(core) => core.receive(request),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Vllm(core) => core.is_empty(),
+            Self::Sglang(core) => core.is_empty(),
+        }
+    }
+
+    pub(crate) fn num_requests(&self) -> usize {
+        match self {
+            Self::Vllm(core) => core.num_requests(),
+            Self::Sglang(core) => core.num_requests(),
+        }
+    }
+
+    pub(crate) fn execute_pass(
+        &mut self,
+        collector: &mut crate::replay::TraceCollector,
+        now_ms: f64,
+    ) -> EnginePassResult {
+        match self {
+            Self::Vllm(core) => core.execute_pass(collector, now_ms),
+            Self::Sglang(core) => core.execute_pass(collector, now_ms),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum EngineScheduler {
+    Vllm(Scheduler),
+    Sglang(SglangScheduler),
+}
+
+impl EngineScheduler {
+    pub(crate) fn new_with_admission(
+        args: crate::common::protocols::MockEngineArgs,
+        dp_rank: u32,
+        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        kv_event_publishers: KvEventPublishers,
+        cancellation_token: Option<CancellationToken>,
+        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+    ) -> Self {
+        match args.engine_type {
+            crate::common::protocols::EngineType::Vllm => {
+                Self::Vllm(Scheduler::new_with_admission(
+                    args,
+                    dp_rank,
+                    output_tx,
+                    kv_event_publishers,
+                    cancellation_token,
+                    admission_tx,
+                ))
+            }
+            crate::common::protocols::EngineType::Sglang => {
+                Self::Sglang(SglangScheduler::new_with_admission(
+                    args,
+                    dp_rank,
+                    output_tx,
+                    kv_event_publishers,
+                    cancellation_token,
+                    admission_tx,
+                ))
+            }
+        }
+    }
+}
+
+impl SchedulerHandle for EngineScheduler {
+    fn receive(&self, request: DirectRequest) {
+        match self {
+            Self::Vllm(scheduler) => scheduler.receive(request),
+            Self::Sglang(scheduler) => scheduler.receive(request),
+        }
+    }
+
+    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
+        match self {
+            Self::Vllm(scheduler) => scheduler.request_sender(),
+            Self::Sglang(scheduler) => scheduler.request_sender(),
+        }
+    }
+
+    fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
+        match self {
+            Self::Vllm(scheduler) => scheduler.metrics_receiver(),
+            Self::Sglang(scheduler) => scheduler.metrics_receiver(),
+        }
+    }
+}
 
 /// Engine-agnostic scheduler interface.
 ///
@@ -29,87 +171,4 @@ pub trait SchedulerHandle: Send + Sync {
 
 /// Shared test utilities for scheduler stress tests.
 #[cfg(test)]
-pub(crate) mod test_utils {
-    use super::*;
-    use crate::common::protocols::OutputSignal;
-    use tokio::time::Duration;
-
-    /// Send `num_requests` to a scheduler, collect all output signals, and assert
-    /// that the scheduler produces exactly `num_requests * max_output_tokens` signals
-    /// and returns to idle (0 active decode blocks).
-    ///
-    /// When `use_shared_tokens` is true, the first half of each request shares a
-    /// common prefix to exercise prefix caching / radix tree reuse.
-    pub async fn assert_scheduler_completes_all(
-        scheduler: &dyn SchedulerHandle,
-        output_rx: &mut mpsc::UnboundedReceiver<OutputSignal>,
-        num_requests: usize,
-        input_len: usize,
-        max_output_tokens: usize,
-        use_shared_tokens: bool,
-    ) {
-        let shared_tokens = if use_shared_tokens {
-            Some(
-                (0..input_len / 2)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-
-        for _ in 0..num_requests {
-            let input_tokens = if let Some(ref shared) = shared_tokens {
-                let mut tokens = shared.clone();
-                tokens.extend((0..input_len / 2).map(|_| rand::random::<u32>() % 50000));
-                tokens
-            } else {
-                (0..input_len)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>()
-            };
-
-            scheduler.receive(DirectRequest {
-                tokens: input_tokens,
-                max_output_tokens,
-                uuid: None,
-                dp_rank: 0,
-                arrival_timestamp_ms: None,
-            });
-        }
-
-        let expected_tokens = num_requests * max_output_tokens;
-        let mut received_tokens = 0;
-
-        let timeout = tokio::time::sleep(Duration::from_secs(2));
-        tokio::pin!(timeout);
-
-        loop {
-            tokio::select! {
-                biased;
-                Some(_) = output_rx.recv() => {
-                    received_tokens += 1;
-                    if received_tokens >= expected_tokens {
-                        break;
-                    }
-                    timeout.set(tokio::time::sleep(Duration::from_secs(2)));
-                }
-                _ = &mut timeout => break,
-            }
-        }
-
-        assert_eq!(
-            received_tokens, expected_tokens,
-            "Expected {expected_tokens} output signals, got {received_tokens}"
-        );
-
-        // Verify scheduler returns to idle
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let metrics = scheduler.metrics_receiver().borrow().clone();
-        assert_eq!(
-            metrics.active_decode_blocks, 0,
-            "Scheduler should be idle after all requests complete, got {} active blocks",
-            metrics.active_decode_blocks
-        );
-    }
-}
+pub(crate) mod test_utils;

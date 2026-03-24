@@ -9,7 +9,7 @@ use clap::Parser;
 use common::NoopSequencePublisher;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
-use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};
+use dynamo_mocker::common::protocols::{DirectRequest, KvEventPublishers, OutputSignal};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_tokens::SequenceHash;
@@ -101,7 +101,13 @@ async fn generate_sequence_events(
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
             // No KvCacheEventSink — we only need output signals
-            let scheduler = Scheduler::new(sched_args, 0, Some(output_tx), None, None);
+            let scheduler = Scheduler::new(
+                sched_args,
+                0,
+                Some(output_tx),
+                KvEventPublishers::default(),
+                None,
+            );
 
             // Pre-compute metadata for each request before submission
             let mut metadata: HashMap<Uuid, RequestMetadata> = HashMap::new();
