@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,7 +12,16 @@ from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
+from dynamo.sglang.multimodal_utils.routing_tokens import (
+    SglangMultimodalTokenExpander,
+    build_multi_modal_data,
+    extract_image_urls,
+    has_unsupported_multimodal_content,
+)
+
 from .utils import random_call_id
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,6 +29,8 @@ class SglangPreprocessResult:
     """Result of SGLang preprocessing."""
 
     prompt_token_ids: list[int]
+    routing_token_ids: list[int] | None
+    multi_modal_data: dict[str, Any] | None
     tool_call_parser: FunctionCallParser | None
     reasoning_parser: ReasoningParser | None
     request: dict[str, Any]
@@ -98,6 +110,7 @@ def preprocess_chat_request(
     request: dict[str, Any],
     *,
     tokenizer,
+    multimodal_token_expander: SglangMultimodalTokenExpander | None = None,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
 ) -> SglangPreprocessResult:
@@ -122,6 +135,28 @@ def preprocess_chat_request(
     if not isinstance(prompt_token_ids, list):
         prompt_token_ids = list(prompt_token_ids)
 
+    image_urls = extract_image_urls(messages)
+    multi_modal_data = build_multi_modal_data(image_urls)
+    routing_token_ids: list[int] | None = None
+    if image_urls and multimodal_token_expander is not None:
+        if has_unsupported_multimodal_content(messages):
+            logger.info(
+                "Skipping SGLang multimodal routing expansion for unsupported content types"
+            )
+        else:
+            render_template_kwargs = dict(template_kwargs)
+            render_template_kwargs["tokenize"] = False
+            prompt_text = tokenizer.apply_chat_template(
+                messages,
+                **render_template_kwargs,
+            )
+            if not isinstance(prompt_text, str):
+                prompt_text = str(prompt_text)
+            routing_token_ids = multimodal_token_expander.expand_prompt_tokens(
+                prompt_text,
+                image_urls,
+            )
+
     tool_call_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_call_parser_name,
@@ -131,6 +166,8 @@ def preprocess_chat_request(
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
+        routing_token_ids=routing_token_ids,
+        multi_modal_data=multi_modal_data,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         request=request,

@@ -169,6 +169,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         image_data.append(item)
                     elif isinstance(item, dict) and "Url" in item:
                         image_data.append(item["Url"])
+                    elif isinstance(item, dict) and "RawUrl" in item:
+                        image_data.append(item["RawUrl"])
                 image_data = image_data or None
 
             trace_header = (
