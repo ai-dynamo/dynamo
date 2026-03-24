@@ -47,18 +47,15 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 
 
 # vLLM test configurations
-# NOTE: pytest.mark.xpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
-# TODO: Now that these tests use dynamic ports, optimize the runtime by bin-packing and running
-# multiple engine deployments in parallel (while keeping GPU contention under control). This may
-# require annotating each config with approximate GPU RAM usage so a future collector/launcher can
-# bin-pack safely.
+# NOTE: skip the test cases for XPU
+# TODO: Add the test cases back if CI system has XPU servers
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.pre_merge,
             pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
@@ -85,7 +82,7 @@ vllm_configs = {
         name="aggregated_logprobs_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.xpu_1, pytest.mark.post_merge],
+        marks=[pytest.mark.skip(reason="skip for xpu"), pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         script_args=["--block-size", "64"],
         request_payloads=[
@@ -110,7 +107,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
@@ -128,7 +125,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache_multiproc.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
@@ -149,7 +146,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.pre_merge,
             pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
@@ -166,7 +163,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.pre_merge,
             pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
@@ -183,7 +180,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_router.sh",
         marks=[
-            pytest.mark.xpu_2,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -206,7 +203,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_router_approx.sh",
         marks=[
-            pytest.mark.xpu_2,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],
@@ -241,7 +238,7 @@ vllm_configs = {
         name="multimodal_agg_frontend_decoding_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.xpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.skip(reason="skip for xpu"), pytest.mark.pre_merge],
         model="Qwen/Qwen2-VL-2B-Instruct",
         env={"DYN_DEVICE": "xpu"},
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
@@ -273,7 +270,7 @@ vllm_configs = {
         name="multimodal_agg_qwen_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.xpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.skip(reason="skip for xpu"), pytest.mark.pre_merge],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         env={"DYN_DEVICE": "xpu"},
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
@@ -302,7 +299,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.nightly,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
@@ -339,7 +336,11 @@ vllm_configs = {
         name="aggregated_toolcalling_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.xpu_2, pytest.mark.multimodal, pytest.mark.nightly],
+        marks=[
+            pytest.mark.skip(reason="skip for xpu"), 
+            pytest.mark.multimodal, 
+            pytest.mark.nightly
+        ],
         model="Qwen/Qwen3-VL-8B-Instruct",
         env={"DYN_DEVICE": "xpu"},
         script_args=[
@@ -409,7 +410,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
-            pytest.mark.xpu_1,
+            pytest.mark.skip(reason="skip for xpu"),
             pytest.mark.post_merge,
             pytest.mark.timeout(
                 420
@@ -432,7 +433,7 @@ vllm_configs = {
         name="guided_decoding_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.xpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.skip(reason="skip for xpu"), pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         script_args=["--block-size", "64"],
         request_payloads=[
@@ -501,7 +502,7 @@ def test_serve_deployment(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.xpu_2
+@pytest.mark.skip(reason="skip for xpu")
 @pytest.mark.nightly
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
@@ -596,7 +597,7 @@ def lora_chat_payload(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.xpu_1
+@pytest.mark.skip(reason="skip for xpu")
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
@@ -653,7 +654,7 @@ def test_lora_aggregated(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.xpu_2
+@pytest.mark.skip(reason="skip for xpu")
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
