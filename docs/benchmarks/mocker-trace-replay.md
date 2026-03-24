@@ -99,12 +99,13 @@ Example:
 {"session_id":"session-b","delay_ms":50,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
 ```
 
-The mocker synthesizes token blocks from `hash_ids` using the configured `--block-size`, so the
+The mocker synthesizes token blocks from `hash_ids` using the configured mocker `block_size`, so the
 replay block size must match the block size used when the trace was generated. Public Mooncake
 traces are commonly block-level hashes at `512` tokens per hash ID, so replaying them with the
-default mocker `block_size=64` will fail once `input_length > len(hash_ids) * 64`. For
-`engine_type=sglang`, replay still uses canonical `block_size` internally; `sglang.page_size` is
-accepted as a compatibility alias and is normalized into `block_size` before replay starts.
+default mocker `block_size=64` will fail once `input_length > len(hash_ids) * 64`. Set that
+through `--extra-engine-args '{"block_size":512}'`. For `engine_type=sglang`, replay still uses
+canonical `block_size` internally; `sglang.page_size` is accepted as a compatibility alias and is
+normalized into `block_size` before replay starts.
 
 ## Replay Surfaces
 
@@ -126,6 +127,11 @@ The dedicated replay CLI exposes:
 - `--extra-engine-args` (JSON string)
 - `--router-config` (JSON string)
 - `--report-json`
+
+Defaults:
+
+- `--replay-mode offline`
+- `--router-mode round_robin`
 
 Example:
 
@@ -153,9 +159,10 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 }
 ```
 
-Both `--extra-engine-args` and `--router-config` accept partial JSON objects. Unspecified fields
-fall back to the same defaults used by `MockEngineArgs::default()` and
-`KvRouterConfig::default()`.
+Both `--extra-engine-args` and `--router-config` accept partial JSON objects. Engine settings such
+as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_ratio` belong in
+`--extra-engine-args`, not as top-level replay CLI flags. Unspecified fields fall back to the same
+defaults used by `MockEngineArgs::default()` and `KvRouterConfig::default()`.
 
 ### Synthetic Replay
 
@@ -314,8 +321,8 @@ If `--report-json` is not provided, `python -m dynamo.replay` writes a timestamp
 Shared replay constraints:
 
 - aggregated mode
-- `--engine-type vllm|sglang`
-- `--data-parallel-size 1`
+- `extra_engine_args.engine_type` must be `vllm` or `sglang`
+- `extra_engine_args.dp_size` must be `1`
 
 Additional offline constraints:
 
@@ -335,7 +342,8 @@ If you violate those constraints, replay fails immediately with a validation err
 - `python -m dynamo.replay` requires exactly one of:
   either a trace file, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
 - `--replay-concurrency` works with both trace replay and synthetic replay
-- `--speedup-ratio` still affects simulated timing
+- mocker compute-speed knobs such as `speedup_ratio` still affect simulated timing when passed via
+  `--extra-engine-args`
 - `--arrival-speedup-ratio` affects trace timestamps, not worker compute speed
 - `--arrival-interval-ms` only applies to synthetic replay
 - `--turns-per-session`, `--shared-prefix-ratio`, `--num-prefix-groups`, and

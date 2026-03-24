@@ -128,6 +128,9 @@ The mocker supports replaying Mooncake-style traces through the dedicated replay
 `offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
 admission, and synthetic workload generation directly:
 
+The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Engine settings
+such as `block_size`, `engine_type`, and compute speedups still belong in `--extra-engine-args`.
+
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
