@@ -134,14 +134,14 @@ def _get_model_architectures(model_name: str) -> tuple[str, ...]:
     Returns:
         Tuple of architecture class names (empty if lookup fails).
     """
-    normalized = normalize_model_name(model_name)
     try:
-        # Local path
-        local_config = Path(normalized) / "config.json"
+        # Check the original model_name as a local directory first
+        local_config = Path(model_name) / "config.json"
         if local_config.is_file():
             config_path = str(local_config)
         else:
             # Download (or resolve from HF cache) just the config file
+            normalized = normalize_model_name(model_name)
             config_path = hf_hub_download(normalized, "config.json")
 
         with open(config_path) as f:
@@ -151,7 +151,7 @@ def _get_model_architectures(model_name: str) -> tuple[str, ...]:
         logger.warning(
             "Could not load config.json for model %s, "
             "architecture-based detection unavailable",
-            normalized,
+            model_name,
         )
         return ()
 
