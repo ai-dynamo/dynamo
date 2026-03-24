@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import socket
-import warnings
 from typing import Any, Dict, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
@@ -311,28 +310,11 @@ def create_kv_events_config(
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 
-    # Create default events config for prefix caching
-    # TODO: move this to configuration system.
-    port = envs.DYN_VLLM_KV_EVENT_PORT
-    warnings.warn(
-        "Automatic KV events configuration is deprecated and will be removed in "
-        "the next release. After that, KV events will be disabled by default "
-        "(matching upstream vLLM). To preserve current behavior, pass "
-        "--kv-events-config explicitly. For example:\n"
-        f'  --kv-events-config \'{{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{port}"}}\'\n'
-        "See docs/backends/vllm/README.md for details.",
-        FutureWarning,
-        stacklevel=2,
-    )
     logger.info(
-        f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
+        "No kv_events_config required: KV events are disabled by default unless "
+        "--kv-events-config is provided explicitly"
     )
-    dp_rank = engine_config.data_parallel_rank or 0
-    return KVEventsConfig(
-        enable_kv_cache_events=True,
-        publisher="zmq",
-        endpoint=f"tcp://*:{port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-    )
+    return None
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
