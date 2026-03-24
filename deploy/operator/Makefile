@@ -232,6 +232,22 @@ deploy: manifests kustomize kubectl ## Deploy controller to the K8s cluster spec
 undeploy: kustomize kubectl ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+GPU_OPERATOR_NAMESPACE ?= gpu-operator
+
+.PHONY: install-gpu-operator
+install-gpu-operator: helm ## Install NVIDIA GPU Operator if not already present.
+	@if $(HELM) list -n $(GPU_OPERATOR_NAMESPACE) -q 2>/dev/null | grep -q '^gpu-operator$$'; then \
+		echo "GPU Operator is already installed — skipping."; \
+	else \
+		echo "Installing NVIDIA GPU Operator..."; \
+		$(HELM) repo add nvidia https://helm.ngc.nvidia.com/nvidia --force-update; \
+		$(HELM) repo update nvidia; \
+		$(HELM) upgrade --install gpu-operator nvidia/gpu-operator \
+			--namespace $(GPU_OPERATOR_NAMESPACE) --create-namespace \
+			--wait --timeout=600s; \
+		echo "GPU Operator installed successfully."; \
+	fi
+
 ##@ Dependencies
 
 ## Location to install dependencies to
