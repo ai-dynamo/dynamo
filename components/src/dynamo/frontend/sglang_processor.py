@@ -105,12 +105,15 @@ def _init_worker(
     model_path: str,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
+    exclude_tools_when_tool_choice_none: bool = True,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
+    global _w_exclude_tools_when_tool_choice_none
     _w_tokenizer = get_tokenizer(model_path)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
+    _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
 
 def _preprocess_worker(
@@ -580,6 +583,7 @@ class SglangEngineFactory:
                     source_path,
                     tool_call_parser_name,
                     reasoning_parser_name,
+                    self.config.exclude_tools_when_tool_choice_none,
                 ),
             )
             futures = [
