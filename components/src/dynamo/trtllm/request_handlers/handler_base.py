@@ -31,7 +31,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
-from dynamo._core import Context
+from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
@@ -66,9 +66,9 @@ class RequestHandlerConfig:
 
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
-    publisher: Publisher
+    publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
-    encode_client: Optional[object] = None
+    encode_client: Optional[Client] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
     ] = None  # for multimodal support
@@ -295,6 +295,10 @@ class HandlerBase(BaseGenerativeHandler):
         # Remove worker_id if present (added by prefill worker, not needed for decode)
         params_dict.pop("worker_id", None)
 
+        # Deserialize first_gen_log_probs from transport format back to
+        # TRT-LLM's internal {token_id: Logprob} dict format.
+        DisaggregatedParamsCodec.deserialize_first_gen_log_probs(params_dict)
+
         # Extract EPD metadata that was packed by prefill worker
         epd_metadata = {}
         if "_epd_metadata" in params_dict:
@@ -385,6 +389,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         logging.debug("PREFILL: Successfully encoded disaggregated params")
         params_dict = asdict(encoded_params)
+
+        # Serialize first_gen_log_probs for the Rust transport layer.
+        DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
@@ -544,13 +551,19 @@ class HandlerBase(BaseGenerativeHandler):
                 processed_input["multi_modal_data"] = None
             return processed_input
 
+        if self.multimodal_processor is None and self._request_has_multimodal(request):
+            raise RuntimeError(
+                "Multimodal input received but worker started without --modality multimodal. "
+                "Restart the worker with --modality multimodal or remove image_url content."
+            )
+
         # PREFILL/ENCODE/AGGREGATED: Process multimodal content if available
         if self.multimodal_processor:
-            processed_input = await self.multimodal_processor.process_openai_request(
+            mm_result = await self.multimodal_processor.process_openai_request(
                 request, embeddings, ep_disaggregated_params
             )
-            if processed_input:
-                return processed_input
+            if mm_result:
+                return mm_result
 
             # If multimodal processing returned None but request has multimodal data,
             # this is an error (not a text-only request). Raise instead of falling back.
@@ -563,6 +576,20 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
+
+    def _request_has_multimodal(self, request: dict) -> bool:
+        if request.get("multi_modal_data"):
+            return True
+
+        extra_args = request.get("extra_args") or {}
+        messages = extra_args.get("messages") or request.get("messages") or []
+        for message in messages:
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        return True
+        return False
 
     def _normalize_request_format(self, request: dict) -> None:
         """

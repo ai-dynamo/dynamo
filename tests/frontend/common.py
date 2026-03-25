@@ -2,6 +2,7 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import importlib.util
 
 
 def check_module_available(module_name: str) -> bool:

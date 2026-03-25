@@ -47,40 +47,23 @@ test: fmt vet ## Run tests.
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.
-	$(GOLANGCI_LINT) run --timeout=5m
+	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
-	$(GOLANGCI_LINT) run --fix --timeout=5m
+	$(GOLANGCI_LINT) run --fix
 
 ##@ Build
 
 .PHONY: build
 build: fmt vet ## Build snapshot-agent binary.
-	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/snapshot-agent ./cmd/agent
-
-.PHONY: run
-run: build ## Run snapshot-agent from your host.
-	./bin/snapshot-agent
-
-.PHONY: clean
-clean: ## Remove build artifacts.
-	rm -rf bin/
-	rm -f cover.out
+	go build -o bin/snapshot-agent ./cmd/agent
 
 ##@ Docker
 
 .PHONY: docker-build-agent
 docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent -t ${IMG} .
-
-.PHONY: docker-build-agent-lint
-docker-build-agent-lint: ## Build snapshot-agent docker image up to lint stage.
-	$(CONTAINER_TOOL) build --target linter -t ${IMG}-lint .
-
-.PHONY: docker-build-agent-test
-docker-build-agent-test: ## Build snapshot-agent docker image up to test stage.
-	$(CONTAINER_TOOL) build --target tester -t ${IMG}-test .
 
 .PHONY: docker-build-placeholder
 docker-build-placeholder: ## Build placeholder image for checkpoint restore (linux/amd64 only). Requires PLACEHOLDER_BASE_IMG.
@@ -139,5 +122,5 @@ mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
 endef
 
 .PHONY: coverage
-coverage: test ## Show test coverage report.
+coverage: test
 	go tool cover -func=cover.out

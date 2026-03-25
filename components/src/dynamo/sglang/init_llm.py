@@ -9,11 +9,13 @@ from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -101,9 +103,14 @@ async def init_decode(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:

@@ -71,7 +71,15 @@ class FrontendConfig(KvRouterConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
+    strip_anthropic_preamble: bool
+    debug_perf: bool
+    enable_streaming_tool_dispatch: bool
+    enable_streaming_reasoning_dispatch: bool
+    exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
+    tokenizer_backend: str
+
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -84,6 +92,11 @@ class FrontendConfig(KvRouterConfigBase):
             )
         if self.router_enable_cache_control and self.router_mode != "kv":
             raise ValueError("--enable-cache-control requires --router-mode=kv")
+        if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
+            raise ValueError(
+                f"--tokenizer: invalid value '{self.tokenizer_backend}' "
+                f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
 
 
 @register_encoder(FrontendConfig)
@@ -169,8 +182,11 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
-            help="How to route the request.",
-            choices=["round-robin", "random", "kv", "direct"],
+            help="How to route the request. power-of-two picks 2 random workers and "
+            "routes to the one with fewer in-flight requests. In disaggregated prefill "
+            "mode, power-of-two skips bootstrap optimization and falls back to the "
+            "synchronous prefill path.",
+            choices=["round-robin", "random", "power-of-two", "kv", "direct"],
         )
 
         # KV router options (shared with dynamo.router)
@@ -343,6 +359,56 @@ class FrontendArgGroup(ArgGroup):
                 "This feature is experimental and may change."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--strip-anthropic-preamble",
+            env_var="DYN_STRIP_ANTHROPIC_PREAMBLE",
+            default=False,
+            help=(
+                "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
+                "from the system prompt. Saves tokens and improves prompt caching."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-streaming-tool-dispatch",
+            env_var="DYN_ENABLE_STREAMING_TOOL_DISPATCH",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable streaming tool call dispatch. Emits "
+                "'event: tool_call_dispatch' SSE events on /v1/chat/completions "
+                "for each complete tool call before finish_reason arrives. "
+                "Can be combined with --enable-streaming-reasoning-dispatch."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-streaming-reasoning-dispatch",
+            env_var="DYN_ENABLE_STREAMING_REASONING_DISPATCH",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable streaming reasoning dispatch. Emits a "
+                "single 'event: reasoning_dispatch' SSE event on /v1/chat/completions "
+                "with the complete reasoning block once thinking ends. "
+                "Can be combined with --enable-streaming-tool-dispatch."
+            ),
+        )
+        # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
+        # Both definitions are needed: runtime_args controls the Rust-native
+        # chat template path (oai.rs), while this one controls the Python
+        # frontend processors (vllm_processor / sglang_processor) which parse
+        # arguments independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help=(
+                "Exclude tool definitions from the chat template when "
+                "tool_choice='none'. Prevents models from generating raw XML "
+                "tool calls in the content field."
+            ),
+        )
         add_argument(
             g,
             flag_name="--dyn-chat-processor",
@@ -350,10 +416,25 @@ class FrontendArgGroup(ArgGroup):
             default="dynamo",
             dest="chat_processor",
             help=(
-                "[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post "
-                "processor."
+                "[EXPERIMENTAL] Chat pre/post processor backend. 'dynamo' uses the Rust "
+                "preprocessor. 'vllm' uses local vLLM for pre and post processing. "
+                "'sglang' uses SGLang APIs for chat template rendering, tool call "
+                "parsing, and reasoning parsing."
             ),
-            choices=["dynamo", "vllm"],
+            choices=["dynamo", "vllm", "sglang"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dyn-debug-perf",
+            env_var="DYN_DEBUG_PERF",
+            default=False,
+            dest="debug_perf",
+            help=(
+                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
+                "Logs per-function timing, request concurrency, and hot-path section durations. "
+                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+            ),
         )
 
         add_argument(
@@ -366,7 +447,22 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
                 "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
+                "own GIL. 0 (default) keeps all processing on the main event loop. "
+                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tokenizer",
+            env_var="DYN_TOKENIZER",
+            default="default",
+            dest="tokenizer_backend",
+            help=(
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
+                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
+                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+            ),
+            choices=["default", "fastokens"],
         )

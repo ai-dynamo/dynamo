@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Result;
+use dynamo_kv_router::{config::KvRouterConfig, protocols::RouterEvent};
 use dynamo_runtime::{
     component::Component,
     config::environment_names::nats as env_nats,
@@ -17,8 +18,7 @@ use rand::Rng;
 use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
-    Indexer, KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    protocols::RouterEvent, router_discovery_query,
+    Indexer, KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, router_discovery_query,
 };
 
 /// Helper function to create a KV stream name from a component and subject.

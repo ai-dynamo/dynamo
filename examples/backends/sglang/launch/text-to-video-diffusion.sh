@@ -6,15 +6,10 @@
 # GPUs: 1 (--wan-size 1b) or 2 (--wan-size 14b)
 
 set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $FRONTEND_PID 2>/dev/null || true
-    wait $FRONTEND_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Defaults
 WAN_SIZE="1b"
@@ -98,40 +93,32 @@ case "$WAN_SIZE" in
         ;;
 esac
 
-echo "=========================================="
-echo "Launching T2V Video Generation Worker"
-echo "=========================================="
-echo "Model:       $MODEL_PATH"
-echo "TP Size:     $TP_SIZE"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "FS URL:      $FS_URL"
-echo "Resolution:  ${WIDTH}x${HEIGHT}"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/videos \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"prompt\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\","
-echo "      \"model\": \"${MODEL_PATH}\","
-echo "      \"seconds\": 2,"
-echo "      \"size\": \"${WIDTH}x${HEIGHT}\","
-echo "      \"response_format\": \"url\","
-echo "      \"nvext\": {"
-echo "        \"fps\": 8,"
-echo "        \"num_frames\": ${NUM_FRAMES},"
-echo "        \"num_inference_steps\": ${NUM_INFERENCE_STEPS}"
-echo "      }"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --no-curl "Launching T2V Video Generation Worker" "$MODEL_PATH" "$HTTP_PORT" \
+    "TP Size:     $TP_SIZE" \
+    "FS URL:      $FS_URL" \
+    "Resolution:  ${WIDTH}x${HEIGHT}"
+
+print_curl_footer <<CURL
+  curl http://localhost:${HTTP_PORT}/v1/videos \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "prompt": "${EXAMPLE_PROMPT_VISUAL}",
+      "model": "${MODEL_PATH}",
+      "seconds": 2,
+      "size": "${WIDTH}x${HEIGHT}",
+      "response_format": "url",
+      "nvext": {
+        "fps": 8,
+        "num_frames": ${NUM_FRAMES},
+        "num_inference_steps": ${NUM_INFERENCE_STEPS}
+      }
+    }'
+CURL
 
 # Launch frontend
 echo "Starting Dynamo Frontend on port $HTTP_PORT..."
 python3 -m dynamo.frontend \
     --http-port "$HTTP_PORT" &
-FRONTEND_PID=$!
 
 sleep 2
 
@@ -146,4 +133,7 @@ python3 -m dynamo.sglang \
     --trust-remote-code \
     --skip-tokenizer-init \
     --enable-metrics \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

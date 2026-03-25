@@ -18,8 +18,7 @@ Dynamo SGLang uses SGLang's native argument parser -- all SGLang engine argument
 | **Decode** *(default)* | Standard LLM inference (aggregated or disaggregated decode) |
 | **Prefill** | Disaggregated prefill phase (`--disaggregation-mode prefill`) |
 | **Embedding** | Text embedding models (`--embedding-worker`) |
-| **Multimodal Processor** | HTTP entry point for multimodal, OpenAI-to-SGLang conversion (`--multimodal-processor`) |
-| **Multimodal Encode** | Vision encoder and embeddings generation (`--multimodal-encode-worker`) |
+| **Multimodal Encode** | Frontend-facing: vision encoding, embeddings generation (`--multimodal-encode-worker`) |
 | **Multimodal Worker** | LLM inference with multimodal data (`--multimodal-worker`) |
 | **Multimodal Prefill** | Prefill phase for multimodal disaggregation (`--multimodal-worker --disaggregation-mode prefill`) |
 | **Image Diffusion** | Image generation via DiffGenerator (`--image-diffusion-worker`) |
@@ -35,13 +34,12 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 | Argument | Env Var | Default | Description |
 |----------|---------|---------|-------------|
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
-| `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | Use SGLang's tokenizer instead of Dynamo's |
+| `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](sglang-chat-processor.md). |
 | `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../agents/tool-calling.md) parser (overrides SGLang's `--tool-call-parser`) |
 | `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | Reasoning parser for chain-of-thought models |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
-| `--multimodal-processor` | `DYN_SGL_MULTIMODAL_PROCESSOR` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) processor |
-| `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as multimodal encode worker |
+| `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) encode worker (frontend-facing) |
 | `--multimodal-worker` | `DYN_SGL_MULTIMODAL_WORKER` | `false` | Run as multimodal LLM worker |
 | `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](sglang-diffusion.md#image-diffusion) worker |
 | `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](sglang-diffusion.md#video-generation) worker |
@@ -56,10 +54,10 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 
 By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).
 
-With `--use-sglang-tokenizer`, SGLang handles tokenization internally and Dynamo passes raw prompts. This restricts the frontend to `v1/chat/completions` only.
+For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](sglang-chat-processor.md) for architecture and usage.
 
 <Warning>
-`--custom-jinja-template` and `--use-sglang-tokenizer` are mutually exclusive. Custom templates require Dynamo's preprocessor.
+`--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
 </Warning>
 
 ## Request Cancellation

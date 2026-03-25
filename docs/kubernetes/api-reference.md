@@ -176,7 +176,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
-| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0" |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
@@ -262,9 +262,10 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed |  | Required: \{\} <br /> |
-| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | BackoffLimit specifies the number of retries before marking the Job failed | 3 | Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Optional: \{\} <br /> |
+| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
+| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointPhase
@@ -324,7 +325,7 @@ _Appears in:_
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represent the latest available observations of the checkpoint's state |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointStorageType
@@ -398,6 +399,7 @@ _Appears in:_
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -439,6 +441,7 @@ _Appears in:_
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -633,11 +636,14 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `annotations` _object (keys:string, values:string)_ | Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).<br />Service-level annotations take precedence over these values. |  | Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).<br />Service-level labels take precedence over these values. |  | Optional: \{\} <br /> |
 | `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, topologyProfile is required and names the ClusterTopology CR to use.<br />packDomain is optional here — it can be omitted when only services carry constraints.<br />Services without their own topologyConstraint inherit from this value. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -945,7 +951,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
-| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0" |  | Required: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
 | `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
@@ -1155,7 +1161,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
 | `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
-| `checkpointRef` _string_ | CheckpointRef references an existing Checkpoint CR to use<br />If specified, Identity is ignored and this checkpoint is used directly |  | Optional: \{\} <br /> |
+| `checkpointRef` _string_ | CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.<br />If specified, this service's Identity is ignored and the referenced checkpoint is used directly. |  | Optional: \{\} <br /> |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the checkpoint identity for hash computation<br />Used when Mode is Auto or when looking up existing checkpoints<br />Required when checkpointRef is not specified |  | Optional: \{\} <br /> |
 
 
@@ -1174,7 +1180,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  | Optional: \{\} <br /> |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates if the checkpoint is ready for use |  | Optional: \{\} <br /> |
+| `ready` _boolean_ | Ready indicates if the checkpoint was visible to the worker at startup |  | Optional: \{\} <br /> |
 
 
 #### ServiceReplicaStatus
@@ -1208,6 +1214,7 @@ _Appears in:_
 
 
 _Appears in:_
+- [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
@@ -1215,6 +1222,63 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
+
+
+#### SpecTopologyConstraint
+
+
+
+SpecTopologyConstraint defines deployment-level topology placement requirements.
+It carries both the topology profile (which ClusterTopology CR to use) and an
+optional default pack domain that services without their own constraint inherit.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `topologyProfile` _string_ | TopologyProfile is the name of the ClusterTopology CR that defines the<br />topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the default topology domain to pack pods within.<br />Optional — omit when only services carry constraints. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+
+
+#### TopologyConstraint
+
+
+
+TopologyConstraint defines service-level topology placement requirements.
+The topology profile is inherited from the deployment-level SpecTopologyConstraint;
+only the pack domain is specified here.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+
+
+#### TopologyDomain
+
+_Underlying type:_ _string_
+
+TopologyDomain is a free-form topology level identifier.
+Domain names are defined by the cluster admin in the ClusterTopology CR.
+Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (lowercase alphanumeric,
+may contain hyphens but must not start or end with one).
+
+_Validation:_
+- Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+_Appears in:_
+- [SpecTopologyConstraint](#spectopologyconstraint)
+- [TopologyConstraint](#topologyconstraint)
+
 
 
 #### VolumeMount
@@ -1480,24 +1544,6 @@ _Appears in:_
 | `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
 
 
-#### OptimizationType
-
-_Underlying type:_ _string_
-
-OptimizationType specifies the profiling optimization strategy.
-
-_Validation:_
-- Enum: [latency throughput]
-
-_Appears in:_
-- [SLASpec](#slaspec)
-
-| Field | Description |
-| --- | --- |
-| `latency` |  |
-| `throughput` |  |
-
-
 #### OverridesSpec
 
 
@@ -1579,7 +1625,6 @@ _Appears in:_
 
 
 SLASpec defines the service-level agreement targets for profiling optimization.
-Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 
 
 
@@ -1588,7 +1633,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
 | `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
 | `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
 | `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
@@ -2369,17 +2413,6 @@ These are injected into all components when the corresponding infrastructure ser
 | --- | --- | --- | --- | --- |
 | `OMPI_MCA_orte_keep_fqdn_hostnames` | Instructs OpenMPI to preserve FQDN hostnames for inter-node communication | `1` | `string` | Multinode deployments only |
 
-### Checkpoint / Restore
-
-These environment variables are injected when checkpoint/restore is enabled for a component.
-
-| Variable | Purpose | Default | Type | Condition |
-| --- | --- | --- | --- | --- |
-| `DYN_CHECKPOINT_PATH` | Base directory where checkpoint data is stored | From operator checkpoint config `storage.pvc.basePath` | `string` | PVC storage type |
-| `DYN_CHECKPOINT_LOCATION` | Full checkpoint URI (for non-PVC backends) | — | `string` | S3 or OCI storage type |
-| `DYN_CHECKPOINT_HASH` | Identity hash that uniquely identifies the checkpoint | — | `string` | Always set when checkpoint is enabled |
-| `SKIP_WAIT_FOR_CHECKPOINT` | Skips the checkpoint readiness polling loop; checks once and proceeds | — | `string` | Set on restored and DGD pods |
-
 ## Service Accounts
 
 The following component types automatically receive dedicated service accounts:
@@ -2474,7 +2507,10 @@ For users who want to understand the implementation details or contribute to the
   - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_vllm.go)
   - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_sglang.go)
   - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_trtllm.go)
-- **Checkpoint / Restore**: [`internal/checkpoint/dgd_integration.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/dgd_integration.go) - Checkpoint env var injection and volume setup
+- **Checkpoint / Restore**:
+  - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
+  - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
+  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes

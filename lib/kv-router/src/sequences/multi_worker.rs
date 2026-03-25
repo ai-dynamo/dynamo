@@ -15,12 +15,18 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
 };
+
+// How often we force expire stale requests across all workers. See the comment
+// in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
+// more details.
+const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -80,6 +86,9 @@ pub enum SequenceError {
 
     #[error("Failed to publish event: {0}")]
     PublishFailed(#[from] anyhow::Error),
+
+    #[error("Synchronous mutation requires replica_sync=false")]
+    SyncMutationRequiresNoReplicaSync,
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
@@ -274,6 +283,33 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
+    /// Register externally-provided workers (e.g. from EPP) in the slot tracker,
+    /// adding any that are missing.
+    ///
+    /// Unlike [`update_workers`], this does not remove workers absent from the
+    /// input — it only adds new ones.  This is intentional: the EPP may send
+    /// different subsets of workers on different requests, and one routing call
+    /// must not evict workers registered by another.
+    ///
+    /// Worker removal in External mode will be handled separately via GAIE
+    /// lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
+    pub fn register_external_workers(&self, dp_range: &HashMap<u64, (u32, u32)>) {
+        let mut table = self.workers.write();
+        for (&worker_id, &(dp_start, dp_size)) in dp_range {
+            for dp_rank in dp_start..(dp_start + dp_size) {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                if !table.index.contains_key(&worker) {
+                    tracing::debug!("Lazily registering external worker {:?}", worker);
+                    let idx = table.slots.len();
+                    table
+                        .slots
+                        .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
+                    table.index.insert(worker, idx);
+                }
+            }
+        }
+    }
+
     /// Update the set of workers, adding and removing as needed.
     ///
     /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
@@ -331,7 +367,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+    fn ensure_sync_mutation_allowed(&self) -> Result<(), SequenceError> {
+        if self.replica_sync {
+            return Err(SequenceError::SyncMutationRequiresNoReplicaSync);
+        }
+        Ok(())
+    }
+
+    fn add_request_local(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         let SequenceRequest {
             request_id,
             token_sequence,
@@ -351,22 +394,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 request_id,
                 worker: *existing_worker,
             });
-        }
-
-        if self.replica_sync {
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::AddRequest {
-                    token_sequence: token_sequence.clone(),
-                    isl,
-                    overlap,
-                    expected_output_tokens,
-                },
-                router_id: self.router_id,
-                lora_name: lora_name.clone(),
-            };
-            self.publisher.publish_event(&event).await?;
         }
 
         self.request_to_worker.insert(request_id.clone(), worker);
@@ -401,8 +428,67 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: req.request_id.clone(),
+                worker: req.worker,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: req.token_sequence.clone(),
+                    isl: req.isl,
+                    overlap: req.overlap,
+                    expected_output_tokens: req.expected_output_tokens,
+                },
+                router_id: self.router_id,
+                lora_name: req.lora_name.clone(),
+            };
+            self.publisher.publish_event(&event).await?;
+        }
+
+        self.add_request_local(req)
+    }
+
+    pub fn add_request_sync(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        self.ensure_sync_mutation_allowed()?;
+        self.add_request_local(req)
+    }
+
     /// Send a mutation to the worker assigned to a request, optionally publishing
     /// a replica-sync event and cleaning up request mappings afterward.
+    fn mutate_request_worker_local(
+        &self,
+        request_id: &RequestId,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId),
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        {
+            let table = self.workers.read();
+            let &idx = table
+                .index
+                .get(&worker)
+                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let mut seq = table.slots[idx].1.write();
+            mutate_fn(&mut seq, request_id);
+        }
+
+        if remove_mapping {
+            self.request_to_worker.remove(request_id);
+            self.request_to_lora.remove(request_id);
+        }
+
+        self.publish_active_load_for_worker(worker);
+
+        Ok(())
+    }
+
     async fn mutate_request_worker(
         &self,
         request_id: &RequestId,
@@ -434,24 +520,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.publisher.publish_event(&event).await?;
         }
 
-        {
-            let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
-            let mut seq = table.slots[idx].1.write();
-            mutate_fn(&mut seq, request_id);
-        }
-
-        if remove_mapping {
-            self.request_to_worker.remove(request_id);
-            self.request_to_lora.remove(request_id);
-        }
-
-        self.publish_active_load_for_worker(worker);
-
-        Ok(())
+        self.mutate_request_worker_local(request_id, mutate_fn, remove_mapping)
     }
 
     /// Free all blocks associated with a request.
@@ -475,6 +544,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         .await
     }
 
+    pub fn free_sync(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        self.ensure_sync_mutation_allowed()?;
+        if !self.request_to_worker.contains_key(request_id) {
+            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
+            return Ok(());
+        }
+        self.mutate_request_worker_local(
+            request_id,
+            |seqs, rid| {
+                seqs.free(rid);
+            },
+            true,
+        )
+    }
+
     /// Mark prefill as completed for a request.
     ///
     /// Note: Calling this multiple times for the same request is allowed and will be a no-op
@@ -492,6 +576,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             false,
         )
         .await
+    }
+
+    pub fn mark_prefill_completed_sync(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        self.ensure_sync_mutation_allowed()?;
+        self.mutate_request_worker_local(
+            request_id,
+            |seqs, rid| {
+                seqs.mark_prefill_completed(rid);
+            },
+            false,
+        )
     }
 
     /// Add an output block with optional fractional decay weight.
@@ -656,6 +751,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         results
     }
 
+    /// Return true if any worker satisfies the provided predicate on active token count.
+    pub fn any_worker_matches_active_tokens(
+        &self,
+        mut predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
+    ) -> bool {
+        let table = self.workers.read();
+        for (worker, lock) in &table.slots {
+            if predicate(*worker, lock.read().active_tokens()) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for entry in self.request_to_lora.iter() {
@@ -663,5 +772,63 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             *counts.entry(lora_name).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// Force expire stale requests across all workers (one-shot).
+    ///
+    /// This is necessary because worker expiration otherwise only runs as a side-effect
+    /// of `add_request`. If a worker has many expired active sequences and no new
+    /// requests are added, expiration never runs. This method forces it on all workers.
+    ///
+    /// To run this periodically, use start_periodic_force_expiry_across_all_workers.
+    pub fn force_expire_requests_across_all_workers(&self) {
+        let now = Instant::now();
+        let table = self.workers.read();
+        let mut removed_request_count = 0;
+        for (worker, lock) in &table.slots {
+            let removed_requests = lock.write().force_expiry();
+            if !removed_requests.is_empty() {
+                for expired_id in &removed_requests {
+                    self.request_to_worker.remove(expired_id);
+                    self.request_to_lora.remove(expired_id);
+                    removed_request_count += 1;
+                }
+                self.publish_active_load_for_worker(*worker);
+            }
+        }
+        let duration = now.elapsed();
+        tracing::debug!(
+            duration = duration.as_secs_f64(),
+            removed_request_count,
+            "Force expired stale requests across all workers"
+        );
+    }
+
+    /// Spawn a background task that calls `force_expire_requests_across_all_workers`
+    /// at the given interval until `cancel_token` is cancelled.
+    ///
+    /// **Concurrency note:** This type is always used as `Arc<ActiveSequencesMultiWorker>`. All
+    /// mutation is via interior mutability (`RwLock<WorkerTable>`, `DashMap`), so the periodic
+    /// task only needs `&self` and does not block other callers.
+    pub fn start_periodic_force_expiry_across_all_workers(
+        self: &Arc<Self>,
+        cancel_token: CancellationToken,
+    ) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut expiry_interval =
+                tokio::time::interval(FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL);
+            expiry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = expiry_interval.tick() => {
+                        this.force_expire_requests_across_all_workers();
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                }
+            }
+        });
     }
 }

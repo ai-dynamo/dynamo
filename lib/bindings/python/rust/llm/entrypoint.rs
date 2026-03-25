@@ -10,18 +10,22 @@ use std::sync::Arc;
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::perf_model::PerfModel;
+
+use super::aic_callback::create_aic_callback;
+use super::replay::MockEngineArgs as PyMockEngineArgs;
+use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -40,21 +44,21 @@ pub enum EngineType {
 }
 
 #[pyclass]
-#[derive(Default, Clone, Debug, Copy)]
+#[derive(Default, Clone, Debug)]
 pub struct KvRouterConfig {
     inner: RsKvRouterConfig,
 }
 
 impl KvRouterConfig {
     pub fn inner(&self) -> RsKvRouterConfig {
-        self.inner
+        self.inner.clone()
     }
 }
 
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=None, router_event_threads=4, router_enable_cache_control=false))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_enable_cache_control=false, min_initial_workers=1, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -73,6 +77,9 @@ impl KvRouterConfig {
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
         router_enable_cache_control: bool,
+        min_initial_workers: usize,
+        router_queue_policy: &str,
+        remote_indexer_component: Option<String>,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -92,8 +99,21 @@ impl KvRouterConfig {
                 router_queue_threshold,
                 router_event_threads,
                 router_enable_cache_control,
+                skip_initial_worker_wait: false,
+                min_initial_workers,
+                router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
+                    panic!("invalid router_queue_policy: {router_queue_policy:?}")
+                }),
+                remote_indexer_component,
             },
         }
+    }
+
+    #[staticmethod]
+    fn from_json(config_json: &str) -> PyResult<Self> {
+        serde_json::from_str::<RsKvRouterConfig>(config_json)
+            .map(|inner| KvRouterConfig { inner })
+            .map_err(|e| PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}")))
     }
 }
 
@@ -185,6 +205,7 @@ pub(crate) struct EntrypointArgs {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
+    mocker_engine_args: Option<PyMockEngineArgs>,
     runtime_config: Option<ModelRuntimeConfig>,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
@@ -197,7 +218,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -214,6 +235,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
+        mocker_engine_args: Option<PyMockEngineArgs>,
         runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
@@ -261,6 +283,7 @@ impl EntrypointArgs {
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
+            mocker_engine_args,
             runtime_config,
             namespace,
             namespace_prefix,
@@ -316,6 +339,11 @@ pub fn make_engine<'p>(
             } else {
                 // Mocker only needs tokenizer, not weights
                 let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                // Preserve the original HF model ID as source_path so the
+                // frontend can resolve model metadata even when the served
+                // model name differs (e.g., --model-name model-1 --model-path
+                // Qwen/Qwen3-0.6B).
+                builder.source_path(model_path.clone());
                 LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
                     .await
                     .map_err(to_pyerr)?
@@ -408,8 +436,10 @@ async fn select_engine(
             }
         }
         EngineType::Mocker => {
-            let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
-                MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
+            let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
+                mocker_engine_args.inner()
+            } else if let Some(extra_args_path) = args.extra_engine_args {
+                RsMockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to load mocker args from {:?}: {}",
                         extra_args_path,
@@ -420,8 +450,40 @@ async fn select_engine(
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
                 );
-                MockEngineArgs::default()
+                RsMockEngineArgs::default()
             };
+
+            // If aic_backend is set, create Python AIC callback and override perf_model
+            if let Some(ref backend_name) = mocker_args.aic_backend {
+                let backend = backend_name.clone();
+                let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
+                let model_name = mocker_args
+                    .aic_model_path
+                    .as_deref()
+                    .unwrap_or_else(|| local_model.card().source_path());
+                let backend_version = mocker_args.aic_backend_version.as_deref();
+                let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
+                match Python::with_gil(|py| {
+                    create_aic_callback(py, &backend, system, model_name, tp_size, backend_version)
+                }) {
+                    Ok(callback) => {
+                        tracing::info!(
+                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+                            backend,
+                            system,
+                            model_name,
+                            backend_version
+                        );
+                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
+                            e
+                        ));
+                    }
+                }
+            }
 
             let endpoint = local_model.endpoint_id().clone();
 

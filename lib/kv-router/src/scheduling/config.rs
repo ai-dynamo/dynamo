@@ -1,12 +1,55 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+use std::str::FromStr;
+
 use derive_builder::Builder;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+use crate::protocols::{
+    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
+
+const fn default_min_initial_workers() -> usize {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterQueuePolicy {
+    #[default]
+    Fcfs,
+    Lcfs,
+    Wspt,
+}
+
+impl fmt::Display for RouterQueuePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fcfs => f.write_str("fcfs"),
+            Self::Lcfs => f.write_str("lcfs"),
+            Self::Wspt => f.write_str("wspt"),
+        }
+    }
+}
+
+impl FromStr for RouterQueuePolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fcfs" => Ok(Self::Fcfs),
+            "lcfs" => Ok(Self::Lcfs),
+            "wspt" => Ok(Self::Wspt),
+            _ => Err(format!(
+                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
+            )),
+        }
+    }
+}
 
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
@@ -23,7 +66,8 @@ pub struct RouterConfigOverride {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(default)]
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
@@ -75,8 +119,8 @@ pub struct KvRouterConfig {
 
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
-    /// If None (default), queueing is disabled and all requests go directly to ready.
-    /// Must be > 0.
+    /// If None, queueing is disabled and all requests go directly to ready.
+    /// Default: 2.0. Must be > 0.
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
@@ -91,6 +135,29 @@ pub struct KvRouterConfig {
     /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
     /// When false (default), cache_control is ignored and no cache_control client is created.
     pub router_enable_cache_control: bool,
+
+    /// Skip blocking for workers at init time (default: false).
+    /// When true, the router starts immediately without waiting for discovery-based
+    /// workers and workers are provided externally per-request (e.g., EPP).
+    pub skip_initial_worker_wait: bool,
+
+    /// Minimum number of workers that must be discovered before router startup continues.
+    /// Default: 1. Ignored when skip_initial_worker_wait=true.
+    #[serde(default = "default_min_initial_workers")]
+    #[validate(range(min = 1))]
+    pub min_initial_workers: usize,
+
+    /// Scheduling policy for the router queue.
+    /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
+    /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+    pub router_queue_policy: RouterQueuePolicy,
+
+    /// Component name of a standalone KV indexer to use for overlap scoring.
+    /// When set, the router creates a `Remote` indexer that queries the standalone
+    /// indexer via the request plane instead of maintaining a local radix tree.
+    /// The standalone indexer handles its own event subscription and discovery.
+    #[serde(default)]
+    pub remote_indexer_component: Option<String>,
 }
 
 impl Default for KvRouterConfig {
@@ -109,9 +176,13 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
-            router_queue_threshold: None,
+            router_queue_threshold: Some(4.0),
             router_event_threads: 4,
             router_enable_cache_control: false,
+            skip_initial_worker_wait: false,
+            min_initial_workers: default_min_initial_workers(),
+            router_queue_policy: RouterQueuePolicy::default(),
+            remote_indexer_component: None,
         }
     }
 }
@@ -148,7 +219,8 @@ impl KvRouterConfig {
         tokens: &[u32],
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
-        lora_name: Option<&str>,
+        hash_options: BlockHashOptions<'_>,
+        precomputed_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -164,8 +236,14 @@ impl KvRouterConfig {
             .unwrap_or(self.router_assume_kv_reuse);
 
         if assume_kv_reuse {
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
-            Some(compute_seq_hash_for_block(&block_hashes))
+            let block_hashes = match precomputed_block_hashes {
+                Some(block_hashes) => block_hashes,
+                None => {
+                    let computed = compute_block_hash_for_seq(tokens, block_size, hash_options);
+                    return Some(compute_seq_hash_for_block(&computed));
+                }
+            };
+            Some(compute_seq_hash_for_block(block_hashes))
         } else {
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
@@ -182,5 +260,92 @@ impl KvRouterConfig {
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_weight > 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+
+    #[test]
+    fn router_queue_policy_display_and_parse_support_lcfs() {
+        assert_eq!(RouterQueuePolicy::Lcfs.to_string(), "lcfs");
+        assert_eq!(
+            "lcfs".parse::<RouterQueuePolicy>().unwrap(),
+            RouterQueuePolicy::Lcfs
+        );
+    }
+
+    #[test]
+    fn router_queue_policy_serde_round_trip_supports_lcfs() {
+        let serialized = serde_json::to_string(&RouterQueuePolicy::Lcfs).unwrap();
+        assert_eq!(serialized, "\"lcfs\"");
+        let deserialized: RouterQueuePolicy = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, RouterQueuePolicy::Lcfs);
+    }
+
+    #[test]
+    fn kv_router_config_defaults_to_one_initial_worker() {
+        assert_eq!(KvRouterConfig::default().min_initial_workers, 1);
+    }
+
+    #[test]
+    fn kv_router_config_rejects_zero_initial_workers() {
+        let cfg = KvRouterConfig {
+            min_initial_workers: 0,
+            ..KvRouterConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
+        let cfg = KvRouterConfig::default();
+        let tokens = vec![1, 2, 3, 4];
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![],
+                }],
+            }),
+            None,
+        ];
+
+        let without_mm = cfg
+            .compute_seq_hashes_for_tracking(&tokens, 2, None, BlockHashOptions::default(), None)
+            .unwrap();
+        let with_mm = cfg
+            .compute_seq_hashes_for_tracking(
+                &tokens,
+                2,
+                None,
+                BlockHashOptions {
+                    block_mm_infos: Some(&mm_infos),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_ne!(without_mm, with_mm);
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_uses_precomputed_block_hashes() {
+        let config = KvRouterConfig::default();
+        let tokens: Vec<u32> = (0..8).collect();
+        let precomputed = vec![LocalBlockHash(11), LocalBlockHash(29)];
+
+        let seq_hashes = config.compute_seq_hashes_for_tracking(
+            &tokens,
+            4,
+            None,
+            BlockHashOptions::default(),
+            Some(&precomputed),
+        );
+
+        assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
     }
 }

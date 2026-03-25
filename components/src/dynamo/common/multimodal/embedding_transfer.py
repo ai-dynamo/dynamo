@@ -21,6 +21,7 @@ from safetensors import torch as safetensors_torch
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -765,46 +766,15 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.ring_buffer.release_buffer(buffer_id)
 
 
-class PersistentConnector(nixl_connect.Connector):
-    """A persistent NIXL connector that can be shared across multiple send/receive operations."""
-
-    def __init__(self):
-        super().__init__()
-        self._connection = None
-
-    async def _create_connection(self) -> nixl_connect.Connection:
-        """
-        Private method to create a new connection.
-        """
-        if self._connection is None:
-            self._connection = nixl_connect.Connection(self, 1)
-            await self._connection.initialize()
-        return self._connection
-
-
-# Overwrite the remote release method to prevent deregistering the remote agent on each release,
-# with persistent connection, all operations will be initiated on the same agent-pair, if not
-# avoiding the deregisteration, the inflight operations will be teminated.
-def remote_release_overwrite(self) -> None:
-    pass
-
-
-nixl_connect.Remote._release = remote_release_overwrite  # type: ignore[method-assign]
-
-
 class NixlReadEmbeddingSender(AbstractEmbeddingSender):
-    """
-    Initial implementation of NIXL READ based transfer. This implementation uses
-    a monkey-patched version of 'nixl_connect' wrapper library to persist
-    connection (agent registration) and descriptors across multiple send operations
-    to avoid the overhead of repeated connection setup and teardown.
-    NOTE This implementation or the use of 'nixl_connect' needs to be revisited as
-    the benchmarking result is unexpectedly slow. Keeping it now for completeness,
-    i.e. provide NIXL WRITE based and READ based transfer classes.
+    """NIXL READ based embedding transfer sender.
+
+    Uses nixl_connect.Connector which now natively provides a shared singleton
+    Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
     def __init__(self):
-        self.connector = PersistentConnector()
+        self.connector = nixl_connect.Connector()
 
     @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
@@ -838,16 +808,10 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
 
 
 class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
-    """
-    Counter part of 'NixlReadEmbeddingSender', see 'NixlReadEmbeddingSender' for details.
-    Initial implementation of another usage of NIXL connect library that persists
-    connection (agent registration) and descriptors (memory registration) across multiple send operations
-    to avoid the overhead of repeated connection setup and teardown.
-    [gluo FIXME] This implementation requires more memory allocation and somewhat rigid, should move away
-    from connect library so we can have single descriptor and chunk for transfer on demand, similarly to
-    KV cache transfer. We may worry less on memory fragmentation as the memory can be released for next
-    transfer as soon as the embedding has passed to the framework (NEED TO VERIFY: framework will copy) and
-    can simply loop around the large buffer.
+    """NIXL READ based embedding transfer receiver.
+
+    Uses nixl_connect.Connector which now natively provides a shared singleton
+    Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
     def __init__(
@@ -857,25 +821,13 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         max_items: int = 1024,
     ) -> None:
         super().__init__()
-        self.connector = PersistentConnector()
+        self.connector = nixl_connect.Connector()
         self.tensor_id_counter = 0
         self.aggregated_op_create_time = 0
         self.aggregated_op_wait_time = 0
         self.warmedup_descriptors: Queue[nixl_connect.Descriptor] = Queue()
         self.inuse_descriptors: dict[int, tuple[nixl_connect.Descriptor, bool]] = {}
-        # Handle both sync and async contexts
-        try:
-            asyncio.get_running_loop()  # Check if we're in async context
-            # If we're in an async context, we need to run the connection creation in a separate thread to avoid blocking the event loop
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                connection = pool.submit(
-                    asyncio.run, self.connector._create_connection()
-                ).result(timeout=10)
-        except RuntimeError:
-            # No running loop - safe to use asyncio.run()
-            connection = asyncio.run(self.connector._create_connection())
+        connection = run_async(self.connector._create_connection)
         # Create descriptor for our allocated tensor
         for _ in range(max_items):
             encodings_tensor = torch.zeros(

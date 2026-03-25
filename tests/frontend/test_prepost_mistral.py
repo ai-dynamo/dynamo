@@ -61,7 +61,15 @@ THINK_END_TOKEN_ID = 8
 class _InnerTokenizer:
     """Mimics the inner ``tokenizer.tokenizer`` accessed by MistralReasoningParser."""
 
+    def get_special_token(self, token):
+        # vLLM 0.17.0 renamed get_control_token -> get_special_token
+        return self._token_lookup(token)
+
     def get_control_token(self, token):
+        # kept for older vLLM compat
+        return self._token_lookup(token)
+
+    def _token_lookup(self, token):
         return {
             SpecialTokens.begin_think: THINK_START_TOKEN_ID,
             SpecialTokens.end_think: THINK_END_TOKEN_ID,
@@ -537,7 +545,6 @@ def sampling_params():
         prompt_logprobs=None,
         skip_special_tokens=True,
         spaces_between_special_tokens=True,
-        truncate_prompt_tokens=None,
     )
 
 

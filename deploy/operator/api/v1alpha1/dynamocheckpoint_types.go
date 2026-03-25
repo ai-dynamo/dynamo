@@ -93,18 +93,25 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Required
 	PodTemplateSpec corev1.PodTemplateSpec `json:"podTemplateSpec"`
 
+	// SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
+	// When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
+	// +optional
+	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
+
 	// ActiveDeadlineSeconds specifies the maximum time the Job can run
 	// +optional
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=3600
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 
-	// BackoffLimit specifies the number of retries before marking the Job failed
+	// Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.
 	// +optional
-	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
 	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
 	// +optional
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=300
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
@@ -124,9 +131,9 @@ type DynamoCheckpointSpec struct {
 type DynamoCheckpointConditionType string
 
 const (
-	// DynamoCheckpointConditionJobCreated indicates whether the checkpoint Job has been created
+	// DEPRECATED: DynamoCheckpointConditionJobCreated is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCreated DynamoCheckpointConditionType = "JobCreated"
-	// DynamoCheckpointConditionJobCompleted indicates whether the checkpoint Job has completed
+	// DEPRECATED: DynamoCheckpointConditionJobCompleted is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCompleted DynamoCheckpointConditionType = "JobCompleted"
 )
 
@@ -164,7 +171,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// Conditions represent the latest available observations of the checkpoint's state
+	// DEPRECATED: Conditions are deprecated. Use status.phase instead.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

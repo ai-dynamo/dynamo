@@ -237,6 +237,12 @@ class MinioService:
             f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
         )
 
+        # Run with HF_HUB_OFFLINE unset so the download works even when
+        # the predownload_models fixture has already enabled offline mode.
+        # This only affects the subprocess env; the parent process is unchanged.
+        env = os.environ.copy()
+        env.pop("HF_HUB_OFFLINE", None)
+
         result = subprocess.run(
             [
                 "huggingface-cli",
@@ -249,6 +255,7 @@ class MinioService:
             ],
             capture_output=True,
             text=True,
+            env=env,
         )
 
         if result.returncode != 0:

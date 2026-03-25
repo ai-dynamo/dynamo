@@ -36,6 +36,10 @@ libc = { version = "0.2" }
 nix = { version = "0.30", features = ["fs"] }
 offset-allocator = "0.2"
 
+[[bin]]
+name = "validate_numa_placement"
+path = "bin/validate_numa_placement.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"

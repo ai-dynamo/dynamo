@@ -49,7 +49,7 @@ spec:
           echo 1024 > /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true
           apt-get update && apt-get install -y curl jq procps git && apt-get clean
           # pip install git+https://github.com/ai-dynamo/aiperf.git
-          pip install aiperf==0.5.0
+          pip install aiperf==0.6.0
           echo "aiperf installation completed"
           sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
           export COLUMNS=200

@@ -18,11 +18,9 @@ func TestBuildExclusions(t *testing.T) {
 		want     map[string]bool // expected entries (true = must be present)
 	}{
 		{
-			name: "merges all lists and normalizes paths",
+			name: "normalizes rooted paths",
 			settings: types.OverlaySettings{
-				SystemDirs:           []string{"/proc", "/sys"},
-				CacheDirs:            []string{"/root/.cache"},
-				AdditionalExclusions: []string{"/tmp"},
+				Exclusions: []string{"/proc", "/sys", "/root/.cache", "/tmp"},
 			},
 			want: map[string]bool{
 				"./proc":        true,
@@ -34,7 +32,7 @@ func TestBuildExclusions(t *testing.T) {
 		{
 			name: "strips leading dot and slash before prepending ./",
 			settings: types.OverlaySettings{
-				SystemDirs: []string{"./proc", "/sys", "tmp"},
+				Exclusions: []string{"./proc", "/sys", "tmp"},
 			},
 			want: map[string]bool{
 				"./proc": true,
@@ -45,11 +43,13 @@ func TestBuildExclusions(t *testing.T) {
 		{
 			name: "glob patterns starting with * are untouched",
 			settings: types.OverlaySettings{
-				AdditionalExclusions: []string{"*.pyc", "*/__pycache__"},
+				Exclusions: []string{"*/.cache/huggingface", "*/.cache/vllm/torch_compile_cache", "*.pyc", "*/__pycache__"},
 			},
 			want: map[string]bool{
-				"*.pyc":         true,
-				"*/__pycache__": true,
+				"*/.cache/huggingface":              true,
+				"*/.cache/vllm/torch_compile_cache": true,
+				"*.pyc":                             true,
+				"*/__pycache__":                     true,
 			},
 		},
 		{
@@ -81,33 +81,46 @@ func TestBuildExclusions(t *testing.T) {
 func TestFindWhiteoutFiles(t *testing.T) {
 	tests := []struct {
 		name  string
-		setup func(dir string) // create files in temp dir
+		setup func(t *testing.T, dir string) // create files in temp dir
 		want  []string
 	}{
 		{
 			name: "top-level whiteout",
-			setup: func(dir string) {
-				os.WriteFile(filepath.Join(dir, ".wh.somefile"), nil, 0644)
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, ".wh.somefile"), nil, 0644); err != nil {
+					t.Fatalf("write whiteout: %v", err)
+				}
 			},
 			want: []string{"somefile"},
 		},
 		{
 			name: "nested whiteout returns relative path",
-			setup: func(dir string) {
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
 				sub := filepath.Join(dir, "subdir")
-				os.MkdirAll(sub, 0755)
-				os.WriteFile(filepath.Join(sub, ".wh.nested"), nil, 0644)
+				if err := os.MkdirAll(sub, 0755); err != nil {
+					t.Fatalf("mkdir subdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(sub, ".wh.nested"), nil, 0644); err != nil {
+					t.Fatalf("write nested whiteout: %v", err)
+				}
 			},
 			want: []string{"subdir/nested"},
 		},
 		{
-			name:  "no whiteouts returns empty",
-			setup: func(dir string) { os.WriteFile(filepath.Join(dir, "regular"), nil, 0644) },
-			want:  nil,
+			name: "no whiteouts returns empty",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "regular"), nil, 0644); err != nil {
+					t.Fatalf("write regular file: %v", err)
+				}
+			},
+			want: nil,
 		},
 		{
 			name:  "empty dir returns empty",
-			setup: func(dir string) {},
+			setup: func(*testing.T, string) {},
 			want:  nil,
 		},
 	}
@@ -115,7 +128,7 @@ func TestFindWhiteoutFiles(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			tc.setup(dir)
+			tc.setup(t, dir)
 			got, err := findWhiteoutFiles(dir)
 			if err != nil {
 				t.Fatalf("findWhiteoutFiles: %v", err)
@@ -136,7 +149,9 @@ func TestCaptureDeletedFiles(t *testing.T) {
 	t.Run("dir with whiteouts writes JSON and returns true", func(t *testing.T) {
 		upperDir := t.TempDir()
 		checkpointDir := t.TempDir()
-		os.WriteFile(filepath.Join(upperDir, ".wh.removed"), nil, 0644)
+		if err := os.WriteFile(filepath.Join(upperDir, ".wh.removed"), nil, 0644); err != nil {
+			t.Fatalf("write whiteout: %v", err)
+		}
 
 		found, err := CaptureDeletedFiles(upperDir, checkpointDir)
 		if err != nil {
@@ -162,7 +177,9 @@ func TestCaptureDeletedFiles(t *testing.T) {
 	t.Run("dir with no whiteouts returns false and no file", func(t *testing.T) {
 		upperDir := t.TempDir()
 		checkpointDir := t.TempDir()
-		os.WriteFile(filepath.Join(upperDir, "normalfile"), nil, 0644)
+		if err := os.WriteFile(filepath.Join(upperDir, "normalfile"), nil, 0644); err != nil {
+			t.Fatalf("write regular file: %v", err)
+		}
 
 		found, err := CaptureDeletedFiles(upperDir, checkpointDir)
 		if err != nil {
@@ -195,11 +212,18 @@ func TestApplyDeletedFiles(t *testing.T) {
 		targetRoot := t.TempDir()
 
 		// Create target file that should be deleted
-		os.WriteFile(filepath.Join(targetRoot, "old-cache"), []byte("data"), 0644)
+		if err := os.WriteFile(filepath.Join(targetRoot, "old-cache"), []byte("data"), 0644); err != nil {
+			t.Fatalf("write target file: %v", err)
+		}
 
 		// Write deleted-files.json
-		data, _ := json.Marshal([]string{"old-cache"})
-		os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644)
+		data, err := json.Marshal([]string{"old-cache"})
+		if err != nil {
+			t.Fatalf("marshal deleted files: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644); err != nil {
+			t.Fatalf("write deleted-files.json: %v", err)
+		}
 
 		if err := ApplyDeletedFiles(checkpointDir, targetRoot, log); err != nil {
 			t.Fatalf("ApplyDeletedFiles: %v", err)
@@ -223,12 +247,22 @@ func TestApplyDeletedFiles(t *testing.T) {
 		// Create a file outside targetRoot that the traversal would try to delete
 		outsideDir := t.TempDir()
 		secretFile := filepath.Join(outsideDir, "passwd")
-		os.WriteFile(secretFile, []byte("secret"), 0644)
+		if err := os.WriteFile(secretFile, []byte("secret"), 0644); err != nil {
+			t.Fatalf("write secret file: %v", err)
+		}
 
 		// Construct a relative path that escapes targetRoot
-		rel, _ := filepath.Rel(targetRoot, secretFile)
-		data, _ := json.Marshal([]string{rel})
-		os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644)
+		rel, err := filepath.Rel(targetRoot, secretFile)
+		if err != nil {
+			t.Fatalf("build relative path: %v", err)
+		}
+		data, err := json.Marshal([]string{rel})
+		if err != nil {
+			t.Fatalf("marshal deleted files: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644); err != nil {
+			t.Fatalf("write deleted-files.json: %v", err)
+		}
 
 		if err := ApplyDeletedFiles(checkpointDir, targetRoot, log); err != nil {
 			t.Fatalf("ApplyDeletedFiles: %v", err)
@@ -244,8 +278,13 @@ func TestApplyDeletedFiles(t *testing.T) {
 		checkpointDir := t.TempDir()
 		targetRoot := t.TempDir()
 
-		data, _ := json.Marshal([]string{"nonexistent"})
-		os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644)
+		data, err := json.Marshal([]string{"nonexistent"})
+		if err != nil {
+			t.Fatalf("marshal deleted files: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644); err != nil {
+			t.Fatalf("write deleted-files.json: %v", err)
+		}
 
 		if err := ApplyDeletedFiles(checkpointDir, targetRoot, log); err != nil {
 			t.Fatalf("ApplyDeletedFiles: %v", err)
@@ -256,8 +295,13 @@ func TestApplyDeletedFiles(t *testing.T) {
 		checkpointDir := t.TempDir()
 		targetRoot := t.TempDir()
 
-		data, _ := json.Marshal([]string{""})
-		os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644)
+		data, err := json.Marshal([]string{""})
+		if err != nil {
+			t.Fatalf("marshal deleted files: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644); err != nil {
+			t.Fatalf("write deleted-files.json: %v", err)
+		}
 
 		if err := ApplyDeletedFiles(checkpointDir, targetRoot, log); err != nil {
 			t.Fatalf("ApplyDeletedFiles: %v", err)

@@ -378,12 +378,51 @@ impl ModelDeploymentCard {
 
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
+    ///
+    /// When the `DYN_TOKENIZER=fastokens` env var is set, uses `fastokens` for encoding
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let use_fast = match std::env::var("DYN_TOKENIZER") {
+            Ok(v) if v == "fastokens" => true,
+            Ok(v) if v == "default" || v.is_empty() => false,
+            Ok(v) => {
+                tracing::warn!(
+                    value = %v,
+                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                );
+                false
+            }
+            Err(_) => false,
+        };
+
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
+
+                // Try fastokens backend if requested
+                if use_fast {
+                    if let Some(path_str) = p.to_str() {
+                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                            Ok(fast) => {
+                                tracing::info!("Using fastokens tokenizer backend");
+                                return Ok(crate::tokenizers::Tokenizer::from(Arc::new(fast)));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %e,
+                                    "Failed to load fastokens, falling back to HuggingFace"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            path = %p.display(),
+                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                        );
+                    }
+                }
+
                 let hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()

@@ -36,6 +36,7 @@ from dynamo.profiler.utils.dgd_generation import assemble_final_config
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
     DynamoGraphDeploymentRequestSpec,
+    ProfilingPhase,
 )
 from dynamo.profiler.utils.dgdr_validate import (
     valid_dgdr_spec,
@@ -183,6 +184,14 @@ async def _execute_strategy(
                 deployment_clients,
             )
 
+        ops.current_phase = ProfilingPhase.SelectingConfig
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Filtering results and selecting cost-efficient configuration",
+            phase=ProfilingPhase.SelectingConfig,
+        )
+
         best_config_df = pick_result["best_config_df"]
         best_latencies = pick_result["best_latencies"]
 
@@ -244,6 +253,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
                 status=ProfilerStatus.FAILED,
                 error=error_msg,
                 message=error_msg,
+                phase=ProfilingPhase.GeneratingDGD,
             )
             return False
     else:
@@ -261,6 +271,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
         outputs={
             "final_config": "final_config.yaml",
         },
+        phase=ProfilingPhase.Done,
     )
     return True
 
@@ -287,6 +298,7 @@ async def run_profile(
         ops.output_dir,
         status=ProfilerStatus.RUNNING,
         message="Profiler job started",
+        phase=ProfilingPhase.Initializing,
     )
 
     try:
@@ -311,6 +323,14 @@ async def run_profile(
             aic_supported = check_model_hardware_support(model, system, backend)
         # then validate DGDR features based on AIC support
         validate_dgdr_dynamo_features(dgdr, aic_supported)
+
+        ops.current_phase = ProfilingPhase.SweepingPrefill
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Sweeping parallelization strategies",
+            phase=ops.current_phase,
+        )
 
         (
             pick_result,
@@ -337,39 +357,79 @@ async def run_profile(
         )
 
         dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
+        resolved_backend = pick_result.get("resolved_backend", backend)
+
+        if dgd_config and dgdr.overrides and dgdr.overrides.dgd:
+            dgd_config = apply_dgd_overrides(dgd_config, dgdr.overrides.dgd)
+            logger.info("Applied DGD overrides to the picked DGD config.")
+        job_tolerations = get_profiling_job_tolerations(dgdr)
+        if job_tolerations and dgd_config:
+            dgd_config = inject_tolerations_into_dgd(dgd_config, job_tolerations)
+            logger.debug(
+                "Propagated %d profiling-job toleration(s) to the picked DGD config.",
+                len(job_tolerations),
+            )
 
         # ---------------------------------------------------------------
         # Interpolation curves — only needed when something consumes
         # the per-engine performance data (throughput scaling or mocker).
         # ---------------------------------------------------------------
+        chosen_exp = pick_result.get("chosen_exp", "")
+        is_disagg_config = chosen_exp not in ("agg",) and bool(chosen_exp)
         if not ops.dry_run and dgd_config and needs_profile_data(dgdr):
-            try:
-                model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
-                sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
-            except Exception:
-                logger.warning("Could not fetch model max context length.")
-                sweep_max_context_length = 0
-            if not sweep_max_context_length:
-                sweep_max_context_length = isl * 2 if isl > 0 else 8192
-
-            await run_interpolation(
-                dgdr,
-                ops,
-                dgd_config,
-                best_prefill_config,
-                best_decode_config,
-                model,
-                system,
-                backend,
-                isl,
-                osl,
-                sweep_max_context_length,
-                deployment_clients,
+            ops.current_phase = ProfilingPhase.BuildingCurves
+            write_profiler_status(
+                ops.output_dir,
+                status=ProfilerStatus.RUNNING,
+                message="Building interpolation curves for planner integration",
+                phase=ops.current_phase,
             )
+            if not is_disagg_config:
+                logger.info(
+                    "Picked config is aggregated (chosen_exp=%r) — "
+                    "skipping interpolation (requires disaggregated config).",
+                    chosen_exp,
+                )
+            else:
+                try:
+                    model_cfg = get_model_config_from_model_path(
+                        resolve_model_path(dgdr)
+                    )
+                    sweep_max_context_length = model_cfg.get(
+                        "max_position_embeddings", 0
+                    )
+                except Exception:
+                    logger.warning("Could not fetch model max context length.")
+                    sweep_max_context_length = 0
+                if not sweep_max_context_length:
+                    sweep_max_context_length = isl * 2 if isl > 0 else 8192
+
+                await run_interpolation(
+                    dgdr,
+                    ops,
+                    dgd_config,
+                    best_prefill_config,
+                    best_decode_config,
+                    model,
+                    system,
+                    resolved_backend,
+                    isl,
+                    osl,
+                    sweep_max_context_length,
+                    deployment_clients,
+                    job_tolerations=job_tolerations,
+                )
 
         # ---------------------------------------------------------------
         # Final DGD assembly
         # ---------------------------------------------------------------
+        ops.current_phase = ProfilingPhase.GeneratingDGD
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Packaging data and generating final DGD YAML",
+            phase=ops.current_phase,
+        )
         final_config = assemble_final_config(
             dgdr, ops, dgd_config, best_prefill_config, best_decode_config
         )
@@ -384,8 +444,8 @@ async def run_profile(
                 final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
             logger.info("Applied DGD overrides to the final config.")
 
-        # Propagate profiling-job tolerations to the final DGD
-        job_tolerations = get_profiling_job_tolerations(dgdr)
+        # Propagate profiling-job tolerations to the final DGD (covers any
+        # services added by assemble_final_config, e.g. Planner).
         if job_tolerations and final_config:
             final_config = _apply_tolerations_to_final_config(
                 final_config, job_tolerations
@@ -405,6 +465,7 @@ async def run_profile(
             status=ProfilerStatus.FAILED,
             error=str(e),
             message=f"Profiler failed with exception: {type(e).__name__}",
+            phase=ops.current_phase,
         )
         raise
     finally:
