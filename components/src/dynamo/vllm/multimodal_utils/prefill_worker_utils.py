@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-from collections import defaultdict
 from typing import Any, Dict, List
 
 import torch
@@ -18,6 +17,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
 )
+from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import Client
 
 from .encode_utils import get_embedding_hash
@@ -91,34 +91,32 @@ def _accumulate_embeddings(
         image_grid_thw=image_grid_thw,
     )
 
+    if "image" not in multi_modal_data:
+        multi_modal_data["image"] = mm_data["image"]
+        return
+
     if isinstance(mm_data["image"], dict):
         # Qwen-VL style: dict with image_embeds + image_grid_thw tensors
-        if multi_modal_data["image"] == []:
-            multi_modal_data["image"] = mm_data["image"]
-        else:
-            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
-            multi_modal_data["image"]["image_embeds"] = torch.cat(
-                (
-                    multi_modal_data["image"]["image_embeds"],
-                    mm_data["image"]["image_embeds"],
-                )
+        multi_modal_data["image"]["image_embeds"] = torch.cat(
+            (
+                multi_modal_data["image"]["image_embeds"],
+                mm_data["image"]["image_embeds"],
             )
-            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
-                (
-                    multi_modal_data["image"]["image_grid_thw"],
-                    mm_data["image"]["image_grid_thw"],
-                )
+        )
+        multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+            (
+                multi_modal_data["image"]["image_grid_thw"],
+                mm_data["image"]["image_grid_thw"],
             )
+        )
+    elif isinstance(mm_data["image"], torch.Tensor):
+        multi_modal_data["image"] = torch.cat(
+            (multi_modal_data["image"], mm_data["image"])
+        )
     else:
-        # Plain tensor embeddings
-        logger.info(f"Get embedding of shape {mm_data['image'].shape}")
-        # [gluo FIXME] embedding with multiple images?
-        if multi_modal_data["image"] == []:
-            multi_modal_data["image"] = mm_data["image"]
-        else:
-            multi_modal_data["image"] = torch.cat(
-                (multi_modal_data["image"], mm_data["image"])
-            )
+        raise ValueError(
+            f"Unexpected image data format from construct_mm_data: {type(mm_data['image'])}"
+        )
 
 
 def _ensure_owned_tensors(multi_modal_data: Dict[str, Any]) -> None:
@@ -141,6 +139,7 @@ async def _fetch_from_encode_workers(
     image_urls: List[str],
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
+    context=None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
     """Fan out image URLs to encode workers, load embeddings, and return ready groups.
 
@@ -165,41 +164,49 @@ async def _fetch_from_encode_workers(
         multimodal_inputs=[],
     )
 
-    batch: List[MultiModalGroup] = []
-    encode_response_streams = []
-    for url in image_urls:
-        multimodal_input = MultiModalInput()
-        multimodal_input.image_url = url
-        batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+    with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
+        batch: List[MultiModalGroup] = []
+        encode_response_streams = []
+        for url in image_urls:
+            multimodal_input = MultiModalInput()
+            multimodal_input.image_url = url
+            batch.append(MultiModalGroup(multimodal_input=multimodal_input))
 
-        if len(batch) >= encode_batch_size:
+            if len(batch) >= encode_batch_size:
+                encode_request.multimodal_inputs = batch
+                payload = encode_request.model_dump_json()
+                encode_response_streams.append(
+                    await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
+                )
+                batch = []
+
+        if batch:
             encode_request.multimodal_inputs = batch
             payload = encode_request.model_dump_json()
             encode_response_streams.append(
-                await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
+                await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
             )
-            batch = []
 
-    if batch:
-        encode_request.multimodal_inputs = batch
-        payload = encode_request.model_dump_json()
-        encode_response_streams.append(
-            await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
-        )
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} receive encode responses"
+    ):
+        multimodal_groups: List[MultiModalGroup] = []
+        for stream in encode_response_streams:
+            async for response in stream:
+                logger.debug(f"Received response from encode worker: {response}")
+                output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
+                if output.multimodal_inputs:
+                    multimodal_groups.extend(output.multimodal_inputs)
 
-    multimodal_groups: List[MultiModalGroup] = []
-    for stream in encode_response_streams:
-        async for response in stream:
-            logger.debug(f"Received response from encode worker: {response}")
-            output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
-            if output.multimodal_inputs:
-                multimodal_groups.extend(output.multimodal_inputs)
-
-    tasks = [
-        asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
-        for group in multimodal_groups
-    ]
-    loaded = await asyncio.gather(*tasks)
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} receive embeddings"
+    ):
+        tasks = [
+            asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
+            for group in multimodal_groups
+            if group.serialized_request is not None
+        ]
+        loaded = await asyncio.gather(*tasks)
 
     is_local = isinstance(receiver, LocalEmbeddingReceiver)
     pending: _PendingRelease | None = None if is_local else _PendingRelease(receiver)
@@ -217,6 +224,7 @@ async def _fetch_embeddings(
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
+    context=None,
 ) -> tuple[list[MultiModalGroup], _PendingRelease | None]:
     """Fetch multimodal embeddings with transparent cache-through.
 
@@ -250,22 +258,20 @@ async def _fetch_embeddings(
     # ── 2. Fetch uncached from encode workers ────────────────────────
     pending: _PendingRelease | None = None
     if to_fetch:
-        if cache is not None:
-            logger.info(
-                f"[{request_id}] Cache miss for {len(to_fetch)}/{len(image_urls)} URLs, "
-                "fetching from encode workers"
-            )
         miss_urls = [url for _, url, _ in to_fetch]
         groups, pending = await _fetch_from_encode_workers(
             encode_worker_client,
             miss_urls,
             request_id,
             receiver,
+            context=context,
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
+
         for (idx, _url, key), group in zip(to_fetch, groups, strict=True):
             if cache is not None and key is not None:
+                assert group.loaded_embedding is not None
                 cache.set(
                     key,
                     CachedEmbedding(
@@ -274,8 +280,6 @@ async def _fetch_embeddings(
                     ),
                 )
             results[idx] = group
-    else:
-        logger.info(f"[{request_id}] All {len(image_urls)} URLs served from cache")
 
     return [r for r in results if r is not None], pending
 
@@ -283,47 +287,66 @@ async def _fetch_embeddings(
 # ── Public API (single entry point) ─────────────────────────────────
 
 
-async def load_multimodal_embeddings(
-    encode_worker_client: Client,
-    image_urls: list[str],
-    request_id: str,
-    receiver: AbstractEmbeddingReceiver,
-    *,
-    model: str,
-    embeddings_dtype: torch.dtype,
-    cache: MultimodalEmbeddingCacheManager | None = None,
-) -> Dict[str, Any]:
-    """Fetch embeddings and build engine-ready ``multi_modal_data``.
+class MultiModalEmbeddingLoader:
+    """Helper class for requesting remote encode and receive embeddings."""
 
-    Full pipeline:
-      cache check → remote fetch → cache update → accumulate → release NIXL buffers.
+    def __init__(
+        self,
+        encode_worker_client: Client,
+        receiver: AbstractEmbeddingReceiver,
+        embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None,
+    ):
+        self._encode_worker_client = encode_worker_client
+        self._receiver = receiver
+        self._embedding_cache_manager = embedding_cache_manager
 
-    Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
-    """
-    groups, pending = await _fetch_embeddings(
-        encode_worker_client,
-        image_urls,
-        request_id,
-        receiver,
-        cache=cache,
-    )
+    async def load_multimodal_embeddings(
+        self,
+        image_urls: list[str],
+        request_id: str,
+        *,
+        model: str,
+        context=None,
+    ) -> Dict[str, Any]:
+        """Fetch embeddings and build engine-ready ``multi_modal_data``.
 
-    multi_modal_data: Dict[str, Any] = defaultdict(list)
-    for group in groups:
-        _accumulate_embeddings(
-            multi_modal_data,
-            model,
-            embeddings_dtype,
-            group.loaded_embedding,
-            group.image_grid_thw,
+        Full pipeline:
+        cache check → remote fetch → cache update → accumulate → release NIXL buffers.
+
+        Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
+        """
+        if self._encode_worker_client is None or not image_urls:
+            return {}
+
+        groups, pending = await _fetch_embeddings(
+            self._encode_worker_client,
+            image_urls,
+            request_id,
+            self._receiver,
+            cache=self._embedding_cache_manager,
+            context=context,
         )
 
-    if pending is not None:
-        # Multi-image: torch.cat in _accumulate_embeddings already created
-        # owned tensors.  Single-image: the data is still a view into the
-        # NIXL buffer, so we must clone before releasing.
-        if len(groups) == 1:
-            _ensure_owned_tensors(multi_modal_data)
-        pending.release_all()
+        multi_modal_data: Dict[str, Any] = {}
+        with time_and_log_code_section(
+            f"[PREFILL] request: {request_id} accumulate embeddings"
+        ):
+            for group in groups:
+                assert group.loaded_embedding is not None
+                _accumulate_embeddings(
+                    multi_modal_data,
+                    model,
+                    group.loaded_embedding.dtype,
+                    group.loaded_embedding,
+                    group.image_grid_thw,
+                )
 
-    return multi_modal_data
+        if pending is not None:
+            # Multi-image: torch.cat in _accumulate_embeddings already created
+            # owned tensors.  Single-image: the data is still a view into the
+            # NIXL buffer, so we must clone before releasing.
+            if len(groups) == 1:
+                _ensure_owned_tensors(multi_modal_data)
+            pending.release_all()
+
+        return multi_modal_data

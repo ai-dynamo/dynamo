@@ -9,9 +9,18 @@ These tests check that the vLLM KV events classes have the expected fields
 that our Rust deserializers depend on. If vLLM changes their API, these tests
 will fail early, before hitting runtime deserialization errors.
 
-The Rust code in kv_router/publisher.rs and kv_consolidator/subscriber.rs
-deserializes vLLM's msgpack-encoded KV events. Since vLLM uses msgspec with
-array_like=True, the field ORDER matters - fields are serialized positionally.
+This test is the early warning for vLLM KV-event wire-format changes.
+
+In the normal case, if this fails, update `lib/kv-router/src/zmq_wire.rs` to
+match the new upstream vLLM event shape, then update this test.
+
+That file is Dynamo's compatibility layer for vLLM KV events:
+- it decodes vLLM's msgpack `array_like=True` wire format
+- it handles field order changes in `BlockStored` / `BlockRemoved` / `EventBatch`
+- it translates upstream `extra_keys` into Dynamo's internal `block_mm_infos`
+
+Only touch consolidator files if we explicitly need the consolidator publisher
+to preserve and republish a new upstream field.
 """
 
 import importlib
@@ -51,6 +60,7 @@ class TestVllmKvEventsApi:
         5. lora_id
         6. medium
         7. lora_name (added in vLLM 0.14.0)
+        8. extra_keys (added in vLLM 0.17.0)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -62,6 +72,7 @@ class TestVllmKvEventsApi:
             "lora_id",
             "medium",
             "lora_name",
+            "extra_keys",
         )
 
         actual_fields = BlockStored.__struct_fields__
@@ -69,9 +80,10 @@ class TestVllmKvEventsApi:
             f"BlockStored fields changed!\n"
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
-            f"If vLLM changed the API, update the Rust deserializers in:\n"
-            f"  - lib/llm/src/kv_router/publisher.rs (RawKvEvent::BlockStored)\n"
-            f"  - lib/llm/src/block_manager/kv_consolidator/subscriber.rs (VllmRawEvent::BlockStored)"
+            f"Required follow-up:\n"
+            f"  - Update lib/kv-router/src/zmq_wire.rs to match the new BlockStored wire format.\n"
+            f"  - Update this test's expected_fields and msgpack position checks.\n"
+            f"  - If needed, add or update a regression test in lib/llm/src/kv_router/publisher.rs."
         )
 
     def test_block_removed_fields(self):
@@ -86,7 +98,9 @@ class TestVllmKvEventsApi:
             f"BlockRemoved fields changed!\n"
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
-            f"If vLLM changed the API, update the Rust deserializers."
+            f"Required follow-up:\n"
+            f"  - Update lib/kv-router/src/zmq_wire.rs RawKvEvent::BlockRemoved seq deserializer.\n"
+            f"  - Update this test's expected_fields."
         )
 
     def test_event_batch_fields(self):
@@ -101,7 +115,11 @@ class TestVllmKvEventsApi:
         assert actual_fields == expected_fields, (
             f"EventBatch fields changed!\n"
             f"Expected: {expected_fields}\n"
-            f"Actual:   {actual_fields}"
+            f"Actual:   {actual_fields}\n"
+            f"Required follow-up:\n"
+            f"  - Update lib/kv-router/src/zmq_wire.rs KvEventBatch Deserialize impl.\n"
+            f"  - Update subscriber.rs VllmEventBatch tuple if batch field order changes.\n"
+            f"  - Update this test's expected_fields."
         )
 
     def test_kv_cache_event_uses_array_like(self):
@@ -148,6 +166,7 @@ class TestVllmKvEventsApi:
             lora_id=None,
             medium="GPU",
             lora_name=None,
+            extra_keys=None,
         )
 
         encoded = msgspec.msgpack.encode(event)
@@ -159,9 +178,9 @@ class TestVllmKvEventsApi:
             decoded[0] == "BlockStored"
         ), f"Expected tag 'BlockStored', got {decoded[0]}"
 
-        # Verify field count (tag + 7 fields = 8 elements)
-        assert len(decoded) == 8, (
-            f"Expected 8 elements (tag + 7 fields), got {len(decoded)}.\n"
+        # Verify field count (tag + 8 fields = 9 elements)
+        assert len(decoded) == 9, (
+            f"Expected 9 elements (tag + 8 fields), got {len(decoded)}.\n"
             f"Decoded: {decoded}\n"
             f"If field count changed, update Rust deserializers."
         )
@@ -174,3 +193,4 @@ class TestVllmKvEventsApi:
         assert decoded[5] is None, f"lora_id at wrong position: {decoded[5]}"
         assert decoded[6] == "GPU", f"medium at wrong position: {decoded[6]}"
         assert decoded[7] is None, f"lora_name at wrong position: {decoded[7]}"
+        assert decoded[8] is None, f"extra_keys at wrong position: {decoded[8]}"

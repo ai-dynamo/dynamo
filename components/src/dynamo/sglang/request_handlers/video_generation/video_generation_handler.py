@@ -103,14 +103,22 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             # Parse size
+            assert req.size is not None, "Size is required"
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
             num_frames = nvext.num_frames
+            assert nvext.fps is not None, "FPS is required"
             if num_frames is None:
+                assert req.seconds is not None, "Seconds is required"
                 num_frames = nvext.fps * req.seconds
 
             # Generate video
+            context_id = context.id()
+            assert context_id is not None
+            assert (
+                nvext.num_inference_steps is not None
+            ), "Num inference steps is required"
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,
@@ -120,14 +128,14 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 num_inference_steps=nvext.num_inference_steps,
                 guidance_scale=nvext.guidance_scale,
                 seed=nvext.seed,
-                request_id=context.id(),
+                request_id=context_id,
                 negative_prompt=nvext.negative_prompt,
                 input_reference=req.input_reference,
             )
 
             video_data = []
             if req.response_format == "url":
-                url = await self._upload_to_fs(video_bytes, context.id())
+                url = await self._upload_to_fs(video_bytes, context_id)
                 video_data.append(VideoData(url=url))
             else:  # b64_json
                 b64 = self._encode_base64(video_bytes)
@@ -269,13 +277,13 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             output_buffer = io.BytesIO()
             with imageio.get_writer(
                 output_buffer,
-                format="mp4",
+                format="mp4",  # type: ignore
                 fps=fps,
                 codec=codec,
                 output_params=["-pix_fmt", "yuv420p"],
             ) as writer:
                 for frame in np_frames:
-                    writer.append_data(frame)
+                    writer.append_data(frame)  # type: ignore
 
             output_buffer.seek(0)
             return output_buffer.read()

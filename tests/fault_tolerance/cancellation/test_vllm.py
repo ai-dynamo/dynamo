@@ -21,6 +21,8 @@ from tests.fault_tolerance.cancellation.utils import (
     poll_for_pattern,
     read_streaming_responses,
     send_cancellable_request,
+    verify_frontend_cancellation_metrics,
+    verify_runtime_cancellation_metrics,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -32,7 +34,6 @@ logger = logging.getLogger(__name__)
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
@@ -46,7 +47,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         frontend_port: int,
-        is_prefill: bool = False,
+        is_prefill: bool | None = None,
     ):
         # Allocate system port for this worker
         system_port = allocate_port(9100)
@@ -66,16 +67,35 @@ class DynamoWorkerProcess(ManagedProcess):
             "16384",
         ]
 
-        # Configure health check based on worker type
-        if is_prefill:
-            # Prefill workers check their own status endpoint
+        # Configure disaggregation mode, KV transfer, and health checks per worker type
+        if is_prefill is True:
+            # Prefill worker: disaggregated prefill mode; check own status endpoint only
             command.extend(["--disaggregation-mode", "prefill"])
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                ]
+            )
             health_check_urls = [
                 (f"http://localhost:{system_port}/health", self.is_ready)
             ]
+        elif is_prefill is False:
+            # Decode worker: disaggregated decode mode; also verify frontend sees the model
+            command.extend(["--disaggregation-mode", "decode"])
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                ]
+            )
+            health_check_urls = [
+                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                (f"http://localhost:{frontend_port}/health", check_health_generate),
+            ]
         else:
-            # Decode workers should also check their own status endpoint first,
-            # then verify the frontend sees the model
+            # Aggregated worker: no disaggregation mode; verify frontend sees the model
             health_check_urls = [
                 (f"http://localhost:{system_port}/health", self.is_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
@@ -98,7 +118,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
-        if is_prefill:
+        if is_prefill is True:
             command.extend(
                 [
                     "--kv-events-config",
@@ -117,7 +137,12 @@ class DynamoWorkerProcess(ManagedProcess):
             ] = "5601"  # TODO: use dynamic port allocation
 
         # Set log directory based on worker type
-        worker_type = "prefill_worker" if is_prefill else "worker"
+        if is_prefill is True:
+            worker_type = "prefill_worker"
+        elif is_prefill is False:
+            worker_type = "decode_worker"
+        else:
+            worker_type = "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
         # Clean up any existing log directory from previous runs
@@ -179,6 +204,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(110)  # 3x average
 @pytest.mark.post_merge
+@pytest.mark.gpu_1
 def test_request_cancellation_vllm_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -218,7 +244,7 @@ def test_request_cancellation_vllm_aggregated(
                 ),
             ]
 
-            for request_type, description in test_scenarios:
+            for idx, (request_type, description) in enumerate(test_scenarios):
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
@@ -258,9 +284,21 @@ def test_request_cancellation_vllm_aggregated(
 
                 logger.info(f"{description} detected successfully")
 
+                # Verify cancellation metrics after each scenario
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type=request_type,
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=worker.system_port,
+                    expected_count=idx + 1,
+                )
+
 
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
+@pytest.mark.gpu_2
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -340,9 +378,26 @@ def test_request_cancellation_vllm_decode_cancel(
                     "Chat completion stream cancellation in decode phase detected successfully"
                 )
 
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="chat_completion_stream",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
+                )
+
 
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
+@pytest.mark.gpu_2
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -431,4 +486,20 @@ def test_request_cancellation_vllm_prefill_cancel(
 
                 logger.info(
                     "Completion request cancellation during prefill phase detected successfully"
+                )
+
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=0,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=1,
+                    component="prefill",
                 )

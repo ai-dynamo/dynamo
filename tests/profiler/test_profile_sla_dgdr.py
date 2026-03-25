@@ -155,7 +155,7 @@ class TestRapidSupported:
 
 
 class TestRapidUnsupported:
-    """Rapid strategy with AIC-unsupported model (Qwen3-32B on l40s/vllm)."""
+    """Rapid strategy with AIC-unsupported model/hardware combos."""
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -186,9 +186,7 @@ class TestRapidUnsupported:
             CONFIGS_DIR / "5b_rapid_unsupported_planner_throughput_error.yaml"
         )
         ops = _make_ops(tmp_path)
-        with pytest.raises(
-            ValueError, match="Throughput-based planner scaling requires AIC support"
-        ):
+        with pytest.raises(ValueError, match="AIC does not support"):
             asyncio.run(run_profile(dgdr, ops))
 
 

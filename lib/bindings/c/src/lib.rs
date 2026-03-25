@@ -11,7 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use dynamo_llm::kv_router::{protocols::*, publisher::KvEventPublisher};
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::*,
+};
+use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
@@ -19,9 +23,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -57,9 +59,9 @@ fn initialize_tracing() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    tracing::debug!("Tracing initialized");
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        tracing::debug!("Tracing initialized");
+    }
 }
 
 #[repr(u32)]
@@ -433,12 +435,16 @@ impl RouterHandles {
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
-        block_mm_infos: Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
+        block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<u64, QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
         self.prefill_router
             .query_prefill_worker(
                 tokens,
@@ -473,6 +479,10 @@ impl RouterHandles {
         is_disaggregated: bool,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.decode_router.register_workers(ids);
+        }
+
         // For decode phase in disaggregated mode, use overlap_score_weight=0
         // This matches prefill_router.rs
         let config_override = if is_disaggregated {
@@ -493,6 +503,7 @@ impl RouterHandles {
                 false,
                 None,
                 0.0,
+                None,
                 allowed_worker_ids,
             )
             .await
@@ -553,6 +564,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         cfg.router_track_output_blocks = v;
     }
+    if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
+        cfg.router_queue_threshold = Some(v);
+    }
 
     tracing::info!(
         overlap_score_weight = cfg.overlap_score_weight,
@@ -561,6 +575,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_replica_sync = cfg.router_replica_sync,
         router_track_active_blocks = cfg.router_track_active_blocks,
         router_track_output_blocks = cfg.router_track_output_blocks,
+        router_queue_threshold = ?cfg.router_queue_threshold,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 
@@ -576,7 +591,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `decode_fallback`: If true, allows falling back to decode-only mode when no prefill workers are found
+/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -586,9 +601,11 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
     component: *const c_char,
-    decode_fallback: bool,
+    enforce_disagg: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
+    initialize_tracing();
+
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -628,24 +645,29 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Wait for at least one worker to be discovered before proceeding
-        // This ensures the decode router can be created successfully
-        let instance_count = wait_for_discovery_sync(&drt).await;
-        if instance_count == 0 {
-            tracing::error!(
-                "Discovery sync failed: no worker instances found. Is the backend running?"
+        let (preprocessor, block_size, model_name, actual_namespace) =
+            match init_preprocessor(&drt, &namespace_str).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize preprocessor");
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            };
+
+        if actual_namespace != namespace_str {
+            tracing::info!(
+                base_namespace = namespace_str,
+                actual_namespace = actual_namespace,
+                "Worker namespace has rolling-update suffix"
             );
-            return Err(QueryRouterResult::ErrInitFailed);
         }
-        tracing::info!(
-            "Discovery sync complete, {} worker(s) found",
-            instance_count
-        );
 
-        let kv_router_config = kv_router_config_from_env();
+        let mut kv_router_config = kv_router_config_from_env();
+        kv_router_config.skip_initial_worker_wait = true;
 
-        // Get component and endpoint
-        let component_handle = match drt.namespace(&namespace_str) {
+        // Build endpoint using the actual namespace discovered from workers,
+        // which may include a rolling-update hash suffix.
+        let component_handle = match drt.namespace(&actual_namespace) {
             Ok(ns) => match ns.component(&component_str) {
                 Ok(c) => c,
                 Err(e) => {
@@ -662,32 +684,14 @@ pub unsafe extern "C" fn create_routers(
 
         let model_manager = Arc::new(ModelManager::new());
 
-        // Fetch model card via discovery and create preprocessor + get block_size
-        let (preprocessor, block_size, model_name) =
-            match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
-                Ok((prep, bs, name)) => {
-                    tracing::info!(
-                        kv_cache_block_size = bs,
-                        "Preprocessor created from discovery"
-                    );
-                    (Some(prep), bs, name)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to fetch model card from discovery - cannot determine block_size"
-                    );
-                    return Err(QueryRouterResult::ErrInitFailed);
-                }
-            };
-
         // Create decode router
         let decode_router = match model_manager
             .kv_chooser_for(
                 &endpoint,
                 block_size,
-                Some(kv_router_config),
+                Some(kv_router_config.clone()),
                 WORKER_TYPE_DECODE,
+                Some(model_name.clone()),
             )
             .await
         {
@@ -697,6 +701,44 @@ pub unsafe extern "C" fn create_routers(
                 return Err(QueryRouterResult::ErrInitFailed);
             }
         };
+
+        // Wait for the runtime config watch to be populated with at least one
+        // decode worker's ModelRuntimeConfig. skip_initial_worker_wait=true
+        // skips this inside KvRouter::new, but the selector needs workers in
+        // workers_with_configs to avoid NoEndpoints on the first request.
+        // discovery sync already confirmed workers exist; this just waits for
+        // the async join of instance IDs + configs to complete in the watch.
+        {
+            let mut config_watch = model_manager
+                .get_or_create_runtime_config_watcher(&endpoint)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = ?e, "Failed to get runtime config watcher");
+                    QueryRouterResult::ErrInitFailed
+                })?;
+            tracing::info!(
+                "Waiting for decode workers to register ModelRuntimeConfig \
+                 (no timeout - controlled by K8s StartupProbe)..."
+            );
+            let wait_result = config_watch.wait_for(|m| !m.is_empty()).await.map(|_| ());
+            match wait_result {
+                Ok(()) => {
+                    let count = config_watch.borrow().len();
+                    tracing::info!(
+                        worker_count = count,
+                        "Runtime config watch populated with decode workers"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "Runtime config watch closed before any workers appeared. \
+                         Decode routing will fail. \
+                         Verify workers are running and publishing to discovery."
+                    );
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            }
+        }
 
         // Create PrefillRouter based on one-time discovery of prefill workers
         // Auto-detects disaggregated mode by checking if prefill workers are present
@@ -718,20 +760,20 @@ pub unsafe extern "C" fn create_routers(
                     RouterMode::KV,
                     block_size,
                     Some(prefill_config),
-                    decode_fallback,
+                    enforce_disagg,
                     model_name.clone(),
                     namespace_str.clone(),
                 )
             }
-            None if !decode_fallback => {
+            None if enforce_disagg => {
                 tracing::error!(
-                    "Prefill workers required but none found and decode fallback is disabled"
+                    "Prefill workers required but none found (enforce_disagg is enabled)"
                 );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, decode_fallback)
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
             }
         };
 
@@ -994,7 +1036,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     // Free token IDs
     if !res.token_ids.is_null() && res.token_count > 0 {
         drop(unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 res.token_ids,
                 res.token_count,
             ))
@@ -1237,6 +1279,51 @@ pub unsafe extern "C" fn route_decode_request(
     }
 }
 
+/// Initialize the preprocessor, block size, and model name.
+///
+/// Waits for discovery to sync (model card must be available for tokenization),
+/// then creates the preprocessor from the model card. The `kv_cache_block_size`
+/// and `model_name` are taken from the model card to ensure consistency with
+/// the worker configuration.
+async fn init_preprocessor(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> anyhow::Result<(Option<Arc<OpenAIPreprocessor>>, u32, String, String)> {
+    let instance_count = wait_for_discovery_sync(drt).await;
+    if instance_count == 0 {
+        anyhow::bail!("Discovery sync failed: no worker instances found. Is the backend running?");
+    }
+    tracing::info!(
+        "Discovery sync complete, {} worker(s) found",
+        instance_count
+    );
+
+    // Retry fetching the preprocessor: model card metadata may arrive after
+    // worker endpoints are registered.
+    let (prep, block_size, model_name, actual_namespace) = loop {
+        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+            Ok(result) => break result,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    target_namespace,
+                    "Model card not available yet, retrying in 5s..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    };
+
+    tracing::info!(
+        kv_cache_block_size = block_size,
+        model_name = model_name,
+        actual_namespace = actual_namespace,
+        "Preprocessor initialized from model card"
+    );
+
+    Ok((Some(prep), block_size, model_name, actual_namespace))
+}
+
 /// Fetch model card via discovery and create preprocessor.
 ///
 /// This function:
@@ -1248,7 +1335,7 @@ pub unsafe extern "C" fn route_decode_request(
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     target_namespace: &str,
-) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32, String)> {
+) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32, String, String)> {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::DiscoveryInstance;
 
@@ -1257,16 +1344,18 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find first model card in the target namespace (decode workers only)
-    let mut model_card: Option<ModelDeploymentCard> = None;
+    // Find first model card in the target namespace (decode workers only).
+    // Use prefix matching because workers may append a rolling-update hash
+    // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
+    let mut model_card: Option<(ModelDeploymentCard, String)> = None;
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            // Filter by namespace
-            if namespace != target_namespace {
+            if !namespace.starts_with(target_namespace) {
                 continue;
             }
 
+            let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
                     // Skip prefill-only workers, we want decode workers for routing
@@ -1276,7 +1365,7 @@ async fn fetch_preprocessor_from_discovery(
                     {
                         continue;
                     }
-                    model_card = Some(card);
+                    model_card = Some((card, actual_namespace));
                     break;
                 }
                 Err(e) => {
@@ -1287,7 +1376,7 @@ async fn fetch_preprocessor_from_discovery(
         }
     }
 
-    let mut card = model_card.ok_or_else(|| {
+    let (mut card, actual_namespace) = model_card.ok_or_else(|| {
         anyhow::anyhow!(
             "No model found in namespace '{}' via discovery",
             target_namespace
@@ -1299,6 +1388,7 @@ async fn fetch_preprocessor_from_discovery(
     tracing::info!(
         model_name = model_name,
         kv_cache_block_size = kv_cache_block_size,
+        actual_namespace = actual_namespace,
         "Found model card via discovery"
     );
 
@@ -1307,7 +1397,12 @@ async fn fetch_preprocessor_from_discovery(
 
     // Create preprocessor
     let preprocessor = OpenAIPreprocessor::new(card)?;
-    Ok((preprocessor, kv_cache_block_size, model_name))
+    Ok((
+        preprocessor,
+        kv_cache_block_size,
+        model_name,
+        actual_namespace,
+    ))
 }
 
 /// Find a prefill endpoint from already-discovered instances (one-time filter).
@@ -1336,8 +1431,7 @@ async fn find_prefill_endpoint(
             ..
         } = &instance
         {
-            // Filter by namespace
-            if namespace != target_namespace {
+            if !namespace.starts_with(target_namespace) {
                 continue;
             }
 

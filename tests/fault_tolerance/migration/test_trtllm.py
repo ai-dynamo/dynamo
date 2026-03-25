@@ -35,17 +35,7 @@ pytestmark = [
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
-        "immediate_kill",
-        [
-            pytest.param(True, id="worker_failure"),
-            pytest.param(
-                False,
-                id="graceful_shutdown",
-                marks=pytest.mark.xfail(
-                    strict=False, reason="TRT-LLM graceful shutdown not yet implemented"
-                ),
-            ),
-        ],
+        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
     ),
     pytest.mark.parametrize(
         "request_api",
@@ -197,8 +187,8 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(290)
-@pytest.mark.post_merge  # 3x average
+@pytest.mark.timeout(290)  # 3x average
+@pytest.mark.post_merge
 def test_request_migration_trtllm_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -247,7 +237,9 @@ def test_request_migration_trtllm_aggregated(
                 )
 
 
-@pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
+@pytest.mark.skip(
+    reason="Prefill migration not yet supported, XFail eats up CI time due to timeout"
+)
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
 def test_request_migration_trtllm_prefill(

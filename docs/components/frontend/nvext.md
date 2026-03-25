@@ -1,0 +1,193 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: NVIDIA Request Extensions (nvext)
+---
+
+`nvext` is a top-level JSON object on the request body that provides NVIDIA-specific extensions to the OpenAI-compatible API. `nvext` fields are consumed by the Dynamo frontend, preprocessor, router, and backend workers to control routing, preprocessing, response metadata, scheduling, and engine-level priority.
+
+## Usage
+
+Include `nvext` as a top-level field alongside standard OpenAI-compatible fields:
+
+```json
+{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "nvext": {
+        "greed_sampling": true,
+        "extra_fields": ["worker_id", "timing"],
+        "agent_hints": {
+            "osl": 1024,
+            "priority": 5
+        }
+    }
+}
+```
+
+## Field Reference
+
+| Field | Type | Default | Consumed By | Description |
+|-------|------|---------|-------------|-------------|
+| `greed_sampling` | `bool` | `None` | Preprocessor | Forces greedy sampling regardless of other sampling parameters. |
+| `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template and passes the prompt directly to the tokenizer. |
+| `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field. |
+| `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
+| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
+| `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`. |
+| `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
+| `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
+| `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
+| `cache_control` | object | `None` | Router | KV cache pinning hint with TTL. See [Cache Control](#cache-control). |
+
+### Header Overrides
+
+Routing fields can also be set via HTTP headers, which take priority over `nvext` values:
+
+| Header | Overrides |
+|--------|-----------|
+| `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
+| `x-prefill-instance-id` | `prefill_worker_id` |
+
+## Agent Hints
+
+The `agent_hints` sub-object carries per-request hints that the router uses for scheduling, load balancing, and KV cache optimization.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `priority` | `i32` | `None` | Unified request priority. Higher values mean higher priority at the Dynamo API level. Used for router queue ordering and backend scheduling/eviction. |
+| `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
+| `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
+
+### `priority`
+
+`priority` is the single user-facing scheduling hint. Higher values mean "more important" across Dynamo.
+
+When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "priority": 5
+        }
+    }
+}
+```
+
+### `osl`
+
+Expected output sequence length — the estimated number of output tokens the request will generate. The router uses this hint in two ways:
+
+1. **Output block tracking**: When `--router-track-output-blocks` is enabled, the router adds placeholder blocks during generation and applies fractional decay based on progress toward `osl`.
+2. **Resource estimation**: Helps the router estimate total resource requirements when making routing decisions.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "osl": 1024
+        }
+    }
+}
+```
+
+### `speculative_prefill`
+
+When set to `true`, the system speculatively prefills the predicted next-turn prompt after the current assistant turn completes. This is designed for multi-turn agentic workloads where the next request's prefix is predictable.
+
+How it works:
+
+1. As the assistant response streams, the system accumulates the full response text.
+2. Once the response finishes, a background task constructs the next-turn prompt by appending the assistant response to the conversation history (with thinking content stripped for non-last turns).
+3. The constructed prompt is tokenized and sent as a `max_tokens=1` request to warm the KV cache on a worker.
+4. When the actual next request arrives, it benefits from the already-warm KV cache, reducing TTFT.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "speculative_prefill": true
+        }
+    }
+}
+```
+
+Backend details:
+
+- **SGLang**: Requires `--enable-priority-scheduling` for queue ordering and `--radix-eviction-policy priority` for priority-based eviction.
+- **vLLM**: Requires `--scheduling-policy priority`.
+- **TensorRT-LLM**: Does not currently support per-request priority.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "priority": 5
+        }
+    }
+}
+```
+
+## Cache Control
+
+> [!WARNING]
+> Cache control is experimental and available on development branches only. The API may change.
+
+The `cache_control` object enables explicit KV cache pinning with a TTL. When set, the router fires a `pin_prefix` call to the backend worker after generation completes, protecting the conversation's KV cache from eviction for the specified duration.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cache_control.type` | `string` | — | Cache control type. Currently only `"ephemeral"` is supported. |
+| `cache_control.ttl` | `string` | `"300"` | TTL as integer seconds (`"600"`) or shorthand (`"5m"`, `"1h"`). Clamped to [300, 3600] seconds. |
+
+```json
+{
+    "nvext": {
+        "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+        }
+    }
+}
+```
+
+Requires `--enable-cache-control` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md#cache-pinning-experimental) for full setup and usage details.
+
+## Response Extensions
+
+When the client requests response metadata via `extra_fields`, the response includes an `nvext` object with the requested fields:
+
+| Field | Requested Via | Description |
+|-------|---------------|-------------|
+| `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
+| `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
+| `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
+
+### Example response `nvext`
+
+```json
+{
+    "nvext": {
+        "worker_id": {
+            "prefill_worker_id": 1,
+            "prefill_dp_rank": 0,
+            "decode_worker_id": 2,
+            "decode_dp_rank": 0
+        },
+        "timing": {
+            "ttft_ms": 45.2,
+            "itl_ms": 12.1
+        }
+    }
+}
+```
+
+## See Also
+
+| Document | Description |
+|----------|-------------|
+| [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
+| [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and cache pinning |

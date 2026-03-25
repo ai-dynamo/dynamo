@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_runtime::{
+    dynamo_nvtx_range,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -21,7 +23,6 @@ use crate::{
         CacheControlClient, KvRouter,
         cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
-        protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -222,6 +223,7 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
+        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
@@ -242,6 +244,7 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
+            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -252,6 +255,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
+                    expected_output_tokens,
                     allowed_worker_ids,
                 )
                 .await?;
@@ -382,12 +386,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // This covers both pre-selected workers and find_best_match selections.
         if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(request.token_ids.clone(), self.chooser.block_size());
             if let Err(e) = self
                 .chooser
-                .indexer()
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+                .record_routing_decision(request.token_ids.clone(), worker)
                 .await
             {
                 tracing::warn!(
@@ -412,6 +413,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
+            tracker.record_router_queue_depth(self.chooser.pending_count());
             if let Some(hit_rate) = tracker.kv_hit_rate() {
                 request_metrics.kv_hit_rate.observe(hit_rate);
             }

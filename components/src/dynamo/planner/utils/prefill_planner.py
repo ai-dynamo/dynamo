@@ -78,6 +78,13 @@ class PrefillPlanner(BasePlanner):
                 m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
             )
             if all_below:
+                if num_workers - 1 < self.config.min_endpoint:
+                    logger.info(
+                        f"Load-based prefill: ALL workers below boundary ({boundary:.1f}), "
+                        f"but cannot scale down below min_endpoint ({self.config.min_endpoint}); "
+                        f"maintaining {num_workers} prefill workers"
+                    )
+                    return num_workers
                 logger.info(
                     f"Load-based prefill: ALL workers below boundary ({boundary:.1f}), "
                     f"scaling down to {num_workers - 1}"
@@ -87,6 +94,7 @@ class PrefillPlanner(BasePlanner):
         return None
 
     def _update_correction_factor(self) -> bool:
+        assert self.last_metrics.isl is not None and self.last_metrics.ttft is not None
         expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
         self.p_correction_factor = self.last_metrics.ttft / expect_ttft
         logger.info(f"Correction factor (prefill TTFT): {self.p_correction_factor:.3f}")
@@ -110,6 +118,7 @@ class PrefillPlanner(BasePlanner):
                 "(no throughput satisfies TTFT target), falling back to min_endpoint"
             )
             return self.config.min_endpoint
+        assert self.config.prefill_engine_num_gpu is not None
         next_num_p = math.ceil(
             pred_prefill_throughput
             / p_thpt_per_gpu

@@ -17,12 +17,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# run ingress
-# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+MODEL="Qwen/Qwen3-0.6B"
+
+# ---- Tunable (override via env vars) ----
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Aggregated + LMCache + Multiproc (1 GPU)" "$MODEL" "$HTTP_PORT"
+
 python -m dynamo.frontend &
 
-# run worker with LMCache enabled and PROMETHEUS_MULTIPROC_DIR explicitly set
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   PROMETHEUS_MULTIPROC_DIR="$PROMETHEUS_MULTIPROC_DIR" \
-  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+  python -m dynamo.vllm --model "$MODEL" --enforce-eager \
+  --max-model-len "$MAX_MODEL_LEN" \
+  --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+  ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' &
 
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

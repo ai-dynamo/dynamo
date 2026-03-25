@@ -69,6 +69,13 @@ class DecodePlanner(BasePlanner):
                 m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
             )
             if all_below:
+                if num_workers - 1 < self.config.min_endpoint:
+                    logger.info(
+                        f"Load-based decode: ALL workers below boundary ({boundary:.1f}), "
+                        f"but cannot scale down below min_endpoint ({self.config.min_endpoint}); "
+                        f"maintaining {num_workers} decode workers"
+                    )
+                    return num_workers
                 logger.info(
                     f"Load-based decode: ALL workers below boundary ({boundary:.1f}), "
                     f"scaling down to {num_workers - 1}"
@@ -83,12 +90,17 @@ class DecodePlanner(BasePlanner):
                 "No decode workers found for correction factor, skipping correction update"
             )
             return True
+        assert self.last_metrics.num_req is not None
+        assert self.last_metrics.request_duration is not None
+        assert self.last_metrics.isl is not None
+        assert self.last_metrics.osl is not None
+        assert self.last_metrics.itl is not None
         expect_itl = self.decode_interpolator.interpolate_itl(
-            concurrency=self.last_metrics.num_req  # type: ignore
+            concurrency=self.last_metrics.num_req
             / self.shared_state.num_d_workers
-            * self.last_metrics.request_duration  # type: ignore
+            * self.last_metrics.request_duration
             / self.config.throughput_adjustment_interval,
-            context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
+            context_length=self.last_metrics.isl + self.last_metrics.osl / 2,
         )
         self.d_correction_factor = self.last_metrics.itl / expect_itl
         logger.info(f"Correction factor (decode ITL): {self.d_correction_factor:.3f}")
@@ -119,6 +131,7 @@ class DecodePlanner(BasePlanner):
                 "(no throughput satisfies ITL target), falling back to min_endpoint"
             )
             return self.config.min_endpoint
+        assert self.config.decode_engine_num_gpu is not None
         pred_decode_throughput = (
             next_num_req * next_osl / self.config.throughput_adjustment_interval
         )

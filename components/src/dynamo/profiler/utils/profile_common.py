@@ -15,16 +15,20 @@
 
 """Shared helpers and configuration for the profiler pipeline."""
 
+import copy
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    ProfilingPhase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +114,7 @@ class ProfilerOperationalConfig:
     prefill_interpolation_granularity: int = DEFAULT_PREFILL_INTERPOLATION_GRANULARITY
     decode_interpolation_granularity: int = DEFAULT_DECODE_INTERPOLATION_GRANULARITY
     dry_run: bool = DEFAULT_DRY_RUN
+    current_phase: ProfilingPhase = field(default=ProfilingPhase.Initializing)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +155,30 @@ def is_planner_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
         dgdr.features is not None
         and dgdr.features.planner is not None
         and dgdr.features.planner.scaling_enabled()
+    )
+
+
+def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec has mocker explicitly enabled."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.mocker is not None
+        and dgdr.features.mocker.enabled is True
+    )
+
+
+def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR requires profiling interpolation data.
+
+    Profile data is consumed by mocker workers (for latency simulation)
+    and by the planner when throughput-based scaling is enabled.
+    """
+    if is_mocker_enabled(dgdr):
+        return True
+    return (
+        dgdr.features is not None
+        and dgdr.features.planner is not None
+        and dgdr.features.planner.enable_throughput_scaling
     )
 
 
@@ -207,3 +236,35 @@ def warn_gpu_shortage(
             gpus_needed,
             total_gpus,
         )
+
+
+def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> list:
+    """Return tolerations from overrides.profilingJob.template.spec.tolerations."""
+    try:
+        if dgdr.overrides is None or dgdr.overrides.profilingJob is None:
+            return []
+        return (
+            dgdr.overrides.profilingJob.get("template", {})
+            .get("spec", {})
+            .get("tolerations", [])
+        )
+    except (AttributeError, KeyError):
+        return []
+
+
+def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
+    """Add tolerations to every service's extraPodSpec in a DGD config dict.
+
+    Tolerations already present in a service are preserved; only new entries
+    (by identity) are appended.  Returns a deep copy with tolerations applied.
+    """
+    result = copy.deepcopy(dgd_config)
+    for _svc_name, svc in result.get("spec", {}).get("services", {}).items():
+        if not isinstance(svc, dict):
+            continue
+        eps = svc.setdefault("extraPodSpec", {})
+        existing = eps.get("tolerations", [])
+        new_entries = [t for t in tolerations if t not in existing]
+        if new_entries:
+            eps["tolerations"] = list(existing) + new_entries
+    return result

@@ -18,6 +18,7 @@ RUN apt remove -y python3-apt python3-blinker && \
 
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
+ARG TARGETARCH
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -65,46 +66,85 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
+# NIXL environment and native libraries
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Copy UCX and NIXL native libraries to system directories
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+
+ENV PATH=/usr/local/ucx/bin:$PATH
+
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
+
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+
+{% if target not in ("dev", "local-dev") %}
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
-ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION} && \
+        sglang==${SGLANG_VERSION}
+{% else %}
+# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+# Install NIXL wheel (pre-built C++ binary, not buildable from source) and sglang.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+        sglang==${SGLANG_VERSION}
+{% endif %}
+
+# Install gpu_memory_service wheel if enabled (all targets)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        export PIP_CACHE_DIR=/root/.cache/pip && \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
+        if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
 
+{% if target not in ("dev", "local-dev") %}
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+{% endif %}
 
-# Install common and test dependencies as root
-RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
-    --mount=type=bind,source=container/deps/requirements.test.txt,target=/tmp/deps/requirements.test.txt \
+# Install runtime dependencies (common + planner + benchmarks) as root.
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
+    --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/deps/requirements.planner.txt \
+    --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /tmp/deps/requirements.txt \
-        --requirement /tmp/deps/requirements.test.txt \
+        --requirement /tmp/deps/requirements.common.txt \
+        --requirement /tmp/deps/requirements.planner.txt \
+        --requirement /tmp/deps/requirements.benchmark.txt \
         sglang==${SGLANG_VERSION} && \
+    #TODO: Temporary change until upstream sglang runtime image is updated
+    pip install --break-system-packages "urllib3>=2.6.3"
+
+{% if target not in ("dev", "local-dev") %}
+# Install benchmarks and fix permissions (dev/local-dev install from bind-mounted source if needed)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
-    #TODO: Temporary change until upstream sglang runtime image is updated
-    pip install --break-system-packages "urllib3>=2.6.3" && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+{% endif %}
 
-# Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
+# Force-reinstall NVIDIA packages in a separate layer so requirements changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \

@@ -7,12 +7,21 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, Tuple
 
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
-from tritonclient.utils import InferenceServerException
+
+try:
+    import tritonclient.grpc.model_config_pb2 as mc
+    from tritonclient.utils import InferenceServerException
+except ImportError:
+    mc = None
+    InferenceServerException = None
 
 from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
 
 async def _fetch_model_config(

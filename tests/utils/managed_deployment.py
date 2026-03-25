@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import secrets
-import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -68,6 +67,20 @@ class ServiceSpec:
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     @property
+    def frontend_sidecar_image(self) -> Optional[str]:
+        """Container image for the frontendSidecar (if present)."""
+        try:
+            return self._spec["frontendSidecar"]["image"]
+        except KeyError:
+            return None
+
+    @frontend_sidecar_image.setter
+    def frontend_sidecar_image(self, value: str):
+        if "frontendSidecar" not in self._spec:
+            self._spec["frontendSidecar"] = {}
+        self._spec["frontendSidecar"]["image"] = value
+
+    @property
     def envs(self) -> list[dict[str, str]]:
         """Environment variables for the service"""
         return self._spec.get("envs", [])
@@ -75,6 +88,25 @@ class ServiceSpec:
     @envs.setter
     def envs(self, value: list[dict[str, str]]):
         self._spec["envs"] = value
+
+    def _get_args(self) -> list[str]:
+        """Return the container args list, normalising scalar strings to a list in-place.
+
+        Always returns the same list object that is stored in the spec, so
+        in-place mutations (append / index assignment) are reflected immediately
+        without an explicit writeback.
+        """
+        try:
+            container = self._spec["extraPodSpec"]["mainContainer"]
+        except KeyError:
+            return []
+        if "args" not in container:
+            container["args"] = []
+        args = container["args"]
+        if isinstance(args, str):
+            args = args.split()
+            container["args"] = args
+        return args
 
     # ----- Replicas -----
     @property
@@ -88,47 +120,21 @@ class ServiceSpec:
     @property
     def model(self) -> Optional[str]:
         """Model being served by this service (checks both --model and --model-path)"""
-        try:
-            args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
-        except KeyError:
-            return None
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-        for i, part in enumerate(parts):
-            if part in ["--model", "--model-path"]:
-                return parts[i + 1] if i + 1 < len(parts) else None
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg in ["--model", "--model-path"]:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    return args[i + 1]
         return None
 
     @model.setter
     def model(self, value: str):
-        if "extraPodSpec" not in self._spec:
-            return
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            return
-
-        args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-
-        # Try to update --model first, then --model-path
-        model_index = None
-        for i, part in enumerate(parts):
-            if part in ["--model", "--model-path"]:
-                model_index = i
-                break
-
-        if model_index is not None:
-            if model_index + 1 < len(parts):
-                parts[model_index + 1] = value
-            else:
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg in ["--model", "--model-path"]:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    args[i + 1] = value
                 return
-        else:
-            return
-
-        # Store args as a list of separate strings for proper command-line parsing
-        # WRONG: [" ".join(parts)] creates ["--model Qwen/Qwen3-0.6B"] (single string)
-        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B"] (separate strings)
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
 
     # ----- GPUs -----
     @property
@@ -149,54 +155,26 @@ class ServiceSpec:
     @property
     def tensor_parallel_size(self) -> int:
         """Get tensor parallel size from vLLM arguments"""
-        try:
-            args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
-        except KeyError:
-            return 1  # Default tensor parallel size
-
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-        for i, part in enumerate(parts):
-            if part == "--tensor-parallel-size":
-                return int(parts[i + 1]) if i + 1 < len(parts) else 1
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg == "--tensor-parallel-size":
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    return int(args[i + 1])
+                return 1
         return 1
 
     @tensor_parallel_size.setter
     def tensor_parallel_size(self, value: int):
-        if "extraPodSpec" not in self._spec:
-            return
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            return
-
-        args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-
-        # Find existing tensor-parallel-size argument
-        tp_index = None
-        for i, part in enumerate(parts):
-            if part == "--tensor-parallel-size":
-                tp_index = i
-                break
-
-        if tp_index is not None:
-            # Update existing value
-            if tp_index + 1 < len(parts):
-                parts[tp_index + 1] = str(value)
-            else:
-                parts.append(str(value))
-        else:
-            # Add new argument
-            parts.extend(["--tensor-parallel-size", str(value)])
-
-        # Store args as a list of separate strings for proper command-line parsing
-        # When TP > 1, this setter is called and adds --tensor-parallel-size to args.
-        # WRONG: [" ".join(parts)] would create ["--model Qwen/Qwen3-0.6B --tensor-parallel-size 2"]
-        #        causing argparse to fail with "IndexError: list index out of range"
-        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2"]
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
-
-        # Auto-adjust GPU count to match tensor parallel size
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg == "--tensor-parallel-size":
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    args[i + 1] = str(value)
+                else:
+                    args.append(str(value))
+                self.gpus = value
+                return
+        args.extend(["--tensor-parallel-size", str(value)])
         self.gpus = value
 
 
@@ -265,6 +243,16 @@ class DeploymentSpec:
             services = [self[service_name]]
         for service in services:
             service.image = image
+
+    def set_frontend_sidecar_image(
+        self, image: str, service_name: Optional[str] = None
+    ):
+        if service_name is None:
+            services = self.services
+        else:
+            services = [self[service_name]]
+        for service in services:
+            service.frontend_sidecar_image = image
 
     def set_tensor_parallel(self, tp_size: int, service_names: Optional[list] = None):
         """Scale deployment for different tensor parallel configurations

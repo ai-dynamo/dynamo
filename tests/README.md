@@ -13,7 +13,7 @@ All tests run inside containers. See the [Container Development Guide](../contai
 Each area can have one or more of the following types of tests:
 
 1. **Unit** -- Exercises a single function, class, or module in isolation. No external services, no GPU. Each test typically runs in milliseconds; all unit tests combined may take <5 minutes.
-2. **Integration** -- Wires multiple components together using **mock engines** (`dynamo.mocker`) and **real infrastructure** (ETCD for service discovery, NATS for messaging if enabled). Validates that the router, planner, frontend gRPC, and similar subsystems work together without launching a real inference engine. No GPU required. Each test typically runs in seconds; all integration tests combined may take <30 minutes.
+2. **Integration** -- Wires multiple components together using **mock engines** (`dynamo.mocker`) and **real infrastructure** (ETCD for service discovery, NATS for messaging, if enabled). Validates that the router, planner, frontend gRPC, and similar subsystems work together without launching a real inference engine. No GPU required. Each test typically runs in seconds; all integration tests combined may take <30 minutes.
 3. **End-to-End (E2E)** -- Starts a **real inference engine** (vLLM, SGLang, or TRT-LLM), sends requests through the frontend, and validates responses. Requires GPU. Each test typically runs in minutes; the full E2E suite may take several hours.
 
 It is absolutely important to be mindful of how long a test you write takes. Slow tests have a compounding cost: they burn GPU-hours in CI (GPUs are expensive and shared), they discourage engineers from running suites locally (so bugs slip through to CI), and they slow down the entire team's development velocity. A test suite that takes too long becomes a test suite that nobody runs. When adding or modifying tests, include a per-test time estimate in your PR description -- CI GPU resources are limited and these estimates help the team schedule tests across pre-merge, nightly, and weekly pipelines.
@@ -107,8 +107,8 @@ dynamo/
 Markers are required for all tests. They are used for test selection in CI and local runs.
 
 ### Marker Requirements
-- Every test must have at least one **Lifecycle** marker, and **test type** and **Hardware** markers.
-- **component** markers are required as applicable.
+- Every test must have at least one **Lifecycle** marker, and **Test Type** and **Hardware** markers.
+- **Component/Framework** markers are required as applicable.
 
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
@@ -116,6 +116,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
+| VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). The pytest invocation can use `--max-vram-gib=N` to select only tests that fit on the available GPU. Does not prevent running on smaller GPUs (that will OOM). Use `profile_pytest.py` to measure. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
@@ -126,9 +127,32 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.gpu_1
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
 @pytest.mark.vllm
 def test_kv_cache_behavior():
     ...
+```
+
+### Filtering by VRAM
+
+The `max_vram_gib(N)` marker records how much GPU memory a test needs. The pytest invocation can use `--max-vram-gib=N` as a **selector** to run only tests that fit on the available GPU. Tests that exceed the budget are skipped at collection time (before any test starts). Tests without a `max_vram_gib` marker always run (no constraint assumed).
+
+This is for the following use cases:
+- **MIG partitioned GPUs:** when running tests in parallel on MIG slices (e.g., 2x 40 GiB partitions on an 80 GiB GPU), each slice has limited VRAM.
+- **Smaller CI GPUs:** some CI jobs use L4 GPUs with only 24 GiB of VRAM.
+
+Nothing prevents you from running without this flag — but if a test needs more VRAM than is physically available, it will OOM at runtime (e.g., vLLM raises `ValueError: No available memory for the cache blocks`).
+
+```bash
+# Preview which gpu_1 vllm tests fit on a 16 GiB MIG partition (no tests are executed)
+python3 -m pytest --max-vram-gib=16 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
+
+# Same, but for 24 GiB L4 CI GPUs
+python3 -m pytest --max-vram-gib=24 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
+
+# GPU tests that have no max_vram_gib marker yet — need profiling
+# TODO: profile these tests and add max_vram_gib markers
+python3 -m pytest --dry-run -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/serve/test_vllm.py
 ```
 
 ### Lifecycle Marker Note
@@ -181,7 +205,6 @@ cargo test --features integration
 ```
 
 
-
 ### Additional Options
 - **Feature gates:** Use Cargo features to run specific test subsets, e.g. `cargo test --features planner`. Integration tests must be behind the `integration` feature gate.
 - **Ignored tests:** Use `#[ignore]` to mark slow or special-case tests. Run them explicitly with `cargo test -- --ignored`.
@@ -216,7 +239,9 @@ This section assumes you are already inside a running **runtime**, **local-dev**
 
 1. Build a development container (`render.py ...` + `docker build ...`)
 2. Launch it (`run.sh ...`)
-3. Inside the container, compile code and run tests (see below)
+3. Inside the container, compile code and run tests
+
+All commands below are meant to be run **inside the container**.
 
 **Local-dev / dev containers** -- you must compile the Rust bindings before running pytest. Without this step, tests that import `dynamo._internal` will fail with `ImportError`:
 ```bash
@@ -302,7 +327,7 @@ pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short
 
 ### Running tests locally outside of a container
 
-To run tests outside of the development container, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
+To run tests outside of the development container, ensure that you have properly set up your environment and have installed the following dependencies in your `venv`:
 
 ```bash
 uv pip install pytest-mypy
@@ -341,7 +366,7 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 
 | Stage | What it does | Local equivalent |
 |-------|-------------|-----------------|
-| Build image | Render Dockerfile, build runtime container | `python container/render.py --framework=vllm --target=runtime && docker build ...` |
+| Build image | Render Dockerfile, build runtime container | `container/render.py --framework=vllm --target=runtime && docker build ...` |
 | Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check` |
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
@@ -412,6 +437,115 @@ GPU and model-loading overhead means Dynamo E2E tests are inherently slower than
 - If model downloads fail, ensure `HF_TOKEN` is set and network access is available.
 - If `ImportError: cannot import name ... from 'dynamo._internal'`, you need to compile the Rust bindings first (see [Prerequisites](#prerequisites)).
 - If coverage is insufficient, add more tests or refactor code for better testability.
+
+---
+
+## GPU VRAM Profiler (`profile_pytest.py`)
+
+When writing or reviewing GPU tests, use `tests/utils/profile_pytest.py` to measure how much VRAM a test actually needs. The script runs the test repeatedly with different GPU memory caps and uses binary search to find the minimum VRAM required. It then prints recommended pytest markers you can copy into your test.
+
+### How it works
+
+The profiler sets the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` environment variable (a fraction from 0.0 to 1.0 of total GPU RAM) and runs the test at each probe point. It bisects between "passes" and "OOM/fails" to find the boundary. After the search, it samples `nvidia-smi` to report peak VRAM, phase analysis, and marker recommendations.
+
+**Requirement:** The test under profile **must** honor the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` env var. For standalone tests that allocate CUDA memory directly, check `os.environ.get("_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")` and cap your allocation accordingly — see `tests/utils/test_mock_gpu_alloc.py` for an example.
+
+### Engine-specific mapping
+
+`_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is a generic env var (float 0.0-1.0) that launch scripts translate to the engine-specific CLI flag:
+
+| Engine  | CLI flag                         | Launch script support |
+|---------|----------------------------------|-----------------------|
+| vLLM    | `--gpu-memory-utilization`       | Implemented in `agg.sh`, `disagg.sh`, etc. via `build_gpu_mem_args` |
+| SGLang  | `--mem-fraction-static`          | Implemented in `agg.sh`, `agg_embed.sh`, `disagg.sh`, `agg_router.sh`, `disagg_same_gpu.sh` via `build_gpu_mem_args`. Multimodal scripts (`multimodal_epd.sh`, `multimodal_disagg.sh`) split the override proportionally between workers. |
+| TRT-LLM | `--free-gpu-memory-fraction`    | Not yet implemented (has its own `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`, TODO: unify) |
+
+**Note on sglang:** Unlike vLLM (where `--max-model-len` affects KV cache sizing), sglang's `--mem-fraction-static` is the sole knob for KV cache allocation. `--context-length` and `--max-running-requests` only affect request scheduling, not memory allocation. See `examples/common/gpu_utils.md` for details.
+
+If the profiler detects constant VRAM across all probes (meaning the env var is ignored), it prints a warning and skips marker recommendations.
+
+### Usage
+
+```bash
+# Default mode: binary search for minimum VRAM (recommended)
+# -xvs is optional: stop on first failure, verbose, show output
+python tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated] -xvs
+
+# Single-pass profiling (no binary search, just measure one run using default RAM)
+python tests/utils/profile_pytest.py --no-find-min-vram tests/serve/test_vllm.py::test_serve_deployment[aggregated]
+```
+
+### Example output
+
+```bash
+========================================================================
+FIND MINIMUM VRAM (binary search)
+========================================================================
+  GPU total : 48.0 GiB
+  GPU free  : 48.0 GiB  (in use: 0.0 GiB)
+  Test      : tests/serve/test_vllm.py::test_serve_deployment[aggregated] -x
+
+  Range   : 5% - 95%  (tolerance 5%)
+  Max iter: 6 (1 validation + 5 bisections)
+
+  [probe 1/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.95 (45.6 GiB)  [validation run]
+  [PASS] peak 18.5 GiB, wall 41s, iter took 49s
+  ...
+  [probe 5/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.33 (15.9 GiB)
+  [FAIL] OOM or error at 33% (15.9 GiB), iter took 30s
+
+  [probe 6/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.36 (17.2 GiB)  [~0 left, ETA ~0s]
+  [PASS] peak 18.5 GiB, wall 41s, iter took 49s
+
+========================================================================
+MINIMUM VRAM RESULT
+========================================================================
+  Lowest passing utilization : 36%
+  Minimum VRAM needed        : ~17.2 GiB (peak observed: 18.5 GiB, +10% safety: 20.4 GiB)
+
+  # test_serve_deployment[aggregated]: @pytest.mark.max_vram_gib(21)
+  # Fits on: L4 (24 GiB), V100-32GB (32 GiB), A6000/A40 (48 GiB), A100/H100 (80 GiB)
+  # Will OOM on: edge/embedded (4 GiB), RTX 3060/4060 (8 GiB), T4 (16 GiB)
+========================================================================
+
+========================================================================
+Recommended markers to add to your pytest. You can copy-paste this:
+========================================================================
+# Measured using: tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated]
+@pytest.mark.e2e  # wall time 41.2s, loads a real model
+@pytest.mark.gpu_1  # 1 GPU(s) used, peak 18.5 GiB
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.timeout(124)  # 3x observed 41.2s
+
+  WARNING: Wall time 41.2s is too slow for pre_merge (> 20s). Consider post_merge or nightly instead.
+  WARNING: Will OOM on edge/embedded (4 GiB).
+  WARNING: Will OOM on RTX 3060/4060 (8 GiB).
+  WARNING: Will OOM on T4 (16 GiB).
+========================================================================
+```
+
+### How to use the recommendations
+
+1. **Copy the `@pytest.mark.*` lines** into your test function or `pytestmark` list.
+
+2. **VRAM marker** — `max_vram_gib(N)` records the peak GPU memory the test needs (with 10% safety margin). This marker does **not** skip tests on its own — if a test runs on a GPU that is too small, it will OOM and fail hard. Use `--max-vram-gib=N` to select only tests that fit on the available GPU (see [Filtering by VRAM](#filtering-by-vram) for examples). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
+
+3. **Lifecycle markers** — the profiler recommends `pre_merge` only for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
+
+4. **Timeout** — the recommended value is 3x the observed wall time. Adjust upward if your test has high variance (e.g., first-run model download, flaky network).
+
+5. **Test type** (`unit`, `integration`, `e2e`) — inferred from wall time and whether a real model was loaded. Override if you know better (e.g., a fast test that uses a mock engine is `integration`, not `e2e`).
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--no-find-min-vram` | Skip binary search; run a single profiling pass instead |
+| `--interval N` | GPU sampling interval in seconds (default: 1.0) |
+| `--baseline-seconds N` | Seconds to sample before launching pytest (default: 3.0) |
+| `--teardown-seconds N` | Seconds to sample after pytest exits (default: 5.0) |
+| `--csv FILE` | Write raw nvidia-smi samples to a CSV file |
+| `--no-recommend` | Suppress marker recommendations |
 
 ---
 

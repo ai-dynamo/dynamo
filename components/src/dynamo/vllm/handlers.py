@@ -13,32 +13,80 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, Final
+from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
+import ray
+import ray.util.state as _ray_util_state
 import torch
+from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-import dynamo.nixl_connect as nixl_connect
+from dynamo._core import Context
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
+    ModelRuntimeConfig,
     ModelType,
     lora_name_to_id,
     register_model,
     unregister_model,
 )
+from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .args import Config
+from .constants import EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
+from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
+
+# TODO(upstream-vllm): remove this patch once vLLM fixes add_dp_placement_groups in
+# vllm/v1/engine/utils.py to use ray.nodes() instead of ray.util.state.list_nodes().
+#
+# Patch ray.util.state.list_nodes to use the GCS API instead of the dashboard HTTP
+# API (127.0.0.1:8265/api/v0/nodes). The dynamo image installs ray core only (not
+# ray[default]), so the dashboard HTTP server starts in --minimal mode with the HTTP
+# server disabled. vLLM's add_dp_placement_groups calls list_nodes() which requires
+# that HTTP endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+# API server".
+#
+# ray.nodes() uses the GCS gRPC channel directly (no dashboard process needed) and
+# returns the same information. This patch makes elastic EP scaling self-contained.
+#
+# Format mapping:
+#   list_nodes() → objects with .node_ip and .node_id
+#   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+
+
+class _NodeInfo:
+    __slots__ = ("node_ip", "node_id")
+
+    def __init__(self, d: dict) -> None:
+        self.node_ip: str = d["NodeManagerAddress"]
+        self.node_id: str = d["NodeID"]
+
+
+_ray_util_state.list_nodes = lambda **kw: [
+    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+]
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -48,6 +96,43 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+class VllmEngineQuiesceController:
+    def __init__(self, engine_client: Any):
+        self._engine_client = engine_client
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, *args: object) -> bool:
+        if self._is_quiesced:
+            return False
+
+        level = args[0] if args else None
+        await self._engine_client.pause_generation()
+        if level is None:
+            await self._engine_client.sleep()
+        else:
+            await self._engine_client.sleep(level)
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+
+        if tags is None:
+            await self._engine_client.wake_up()
+        else:
+            await self._engine_client.wake_up(tags)
+        await self._engine_client.resume_generation()
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
 
 
 @dataclass(frozen=True)
@@ -70,6 +155,11 @@ def _compute_mm_uuids(
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
     images = multi_modal_data["image"]
+    # [gluo FIXME] Dict being returned when the mm data has been processed,
+    # in this case, we skip computing mm_uuids for now until we better understand
+    # what info should be hash on.
+    if isinstance(images, dict):
+        return None
     if not isinstance(images, list):
         images = [images]
     if not images:
@@ -260,7 +350,37 @@ def build_sampling_params_openai(
     return sampling_params
 
 
-class BaseWorkerHandler(ABC):
+def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
+    """
+    Get the global DP rank range that this worker is responsible for based on vLLM config.
+    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
+    The return value is in the format of (start_dp_rank, managed_dp_size)."""
+    if vllm_config.parallel_config.data_parallel_external_lb:
+        # external load balancing, each worker is responsible for exactly 1 rank
+        return (vllm_config.parallel_config.data_parallel_rank, 1)
+    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
+        # hybrid load balancing, each worker is responsible for a subset of local ranks
+        return (
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_size_local,
+        )
+    else:
+        # internal load balancing, the worker is responsible for all DP ranks
+        logger.warning(
+            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
+            " hybrid or external load balancing is recommended."
+        )
+        return (
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_size,
+        )
+
+
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+
+
+class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
     """
@@ -268,31 +388,28 @@ class BaseWorkerHandler(ABC):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Optional[Client] = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[KvEventPublisher] | None = None
+        self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
-        self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
-        self.enable_frontend_decoding = enable_frontend_decoding
-        # NIXL connector for frontend decoding - lazy initialized
-        self._nixl_connector = None
-        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
@@ -300,7 +417,16 @@ class BaseWorkerHandler(ABC):
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
 
+        self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+        self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
+
         self.use_vllm_tokenizer = use_vllm_tokenizer
+
+        self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
+        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        self._quiesce_lock = asyncio.Lock()
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -310,6 +436,52 @@ class BaseWorkerHandler(ABC):
 
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
+
+    def init_embedding_loader(
+        self, config: Config, encode_worker_client: Optional[Client] = None
+    ) -> Optional[MultiModalEmbeddingLoader]:
+        """Initialize the embedding loader with the given encode worker client."""
+        # Without encode worker, the embedding will be generated internally by vLLM.
+        if encode_worker_client is None:
+            return None
+        # Embedding loader consist of two main components:
+        # 1) An remote encode worker client and matching embedding receiver,
+        #    which can request remote encode and handle the transfer of embeddings
+        #    from the encode worker to this prefill worker.
+        # 2) A local embedding cache manager, which can store previously fetched embeddings
+        #    and used to determine whether remote encode is necessary for a given mm data.
+        self.encode_worker_client = encode_worker_client
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_receiver = LocalEmbeddingReceiver()  # type: ignore
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()  # type: ignore
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+            # to be at matching size, need to overwrite nixl connect library
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)  # type: ignore
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
+        # [gluo FIXME/NOTE] This embedding cache manager is purely used for caching embedding
+        # results from encode worker, but 'config.multimodal_embedding_cache_capacity_gb' is
+        # also used to configure the DynamoMultimodalEmbeddingCacheConnector within the vLLM.
+        # This results in duplication of memory and ideally we should have single cache manager
+        # which can be used by vLLM internal and here. Then we can explore asynchrous embedding
+        # transfer as we can process and block until the embedding is actually used within vLLM.
+        self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
+        if config.multimodal_embedding_cache_capacity_gb > 0:
+            capacity_bytes = int(
+                config.multimodal_embedding_cache_capacity_gb * 1024**3
+            )
+            self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
+                capacity_bytes
+            )
+        return MultiModalEmbeddingLoader(
+            encode_worker_client=self.encode_worker_client,  # type: ignore
+            receiver=self.embedding_receiver,
+            embedding_cache_manager=self.embedding_cache_manager,
+        )
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -322,67 +494,116 @@ class BaseWorkerHandler(ABC):
         2. Abort and drain in-flight requests
         3. Sleep engine - safe now that GPU is quiesced
         """
+        body = body or {}
         level = body.get("level", 1)
-        try:
-            # Step 1: Unregister endpoint instance FIRST to stop new requests from arriving
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
+                return {
+                    "status": "ok",
+                    "message": "Engine already sleeping",
+                }
+
             try:
-                await self.generate_endpoint.unregister_endpoint_instance()
-                logger.info(
-                    "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
-                )
-            except Exception as unreg_err:
-                logger.warning(
-                    f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
-                )
+                # Step 1: Unregister endpoint instance before memory transitions.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+                    logger.info(
+                        "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
+                    )
 
-            # Step 2: Abort in-flight requests and wait for them to drain so the
-            # GPU is fully quiesced before unmapping memory.
-            await self.engine_client.pause_generation()
+                # Step 2: Abort in-flight requests and wait for them to drain so the
+                # GPU is fully quiesced before unmapping memory.
+                if not await self._quiesce_controller.quiesce(level):
+                    return {
+                        "status": "ok",
+                        "message": "Engine already sleeping",
+                    }
 
-            # Step 3: Now safe to sleep - no in-flight GPU work
-            await self.engine_client.sleep(level)
+                return {
+                    "status": "ok",
+                    "message": f"Engine slept (level={level})",
+                }
+            except Exception as e:
+                logger.error(f"Failed to sleep engine: {e}")
+                return {"status": "error", "message": str(e)}
 
-            return {"status": "ok", "message": f"Engine slept (level={level})"}
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale the elastic expert-parallelism data-parallel size live.
+
+        Args:
+            body: Dict with required 'new_data_parallel_size' key (int).
+                Example::
+
+                    {"new_data_parallel_size": 4}
+
+        The vLLM Ray DP backend will spin up / tear down DP workers on the GPUs
+        already reserved by the pod, then hot-swap the expert routing table.
+        No pod restart is needed.
+        """
+        body = body or {}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+
+        logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
+        try:
+            await self.engine_client.scale_elastic_ep(new_dp_size)
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
         except Exception as e:
-            logger.error(f"Failed to sleep engine: {e}")
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
             return {"status": "error", "message": str(e)}
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
-            body: Dict with optional 'tags' key (e.g., ["weights", "kv_cache"]). None wakes all.
+            body: Optional dict with "tags" to request a partial wake.
 
         Order of operations:
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
+        body = body or {}
         tags = body.get("tags")
-        try:
-            # Step 1: Wake engine first - must be ready before accepting requests
-            await self.engine_client.wake_up(tags)
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Engine already awake"}
 
-            # Step 2: Resume generation so new requests can be processed
-            await self.engine_client.resume_generation()
-
-            # Step 3: Re-register endpoint instance to discovery so frontend can route to us again
             try:
-                await self.generate_endpoint.register_endpoint_instance()
-                logger.info(
-                    "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
-                )
-            except Exception as reg_err:
-                logger.warning(
-                    f"[Wake] Failed to re-register endpoint to discovery: {reg_err}"
-                )
+                # Step 1: Wake engine first - must be ready before accepting requests
+                await self._quiesce_controller.resume(tags)
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+                    logger.info(
+                        "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                    )
+                self._quiesce_controller.mark_resumed()
 
-            return {"status": "ok", "message": f"Engine woke (tags={tags})"}
-        except Exception as e:
-            logger.error(f"Failed to wake up engine: {e}")
-            return {"status": "error", "message": str(e)}
+                return {
+                    "status": "ok",
+                    "message": "Engine woke",
+                }
+            except Exception as e:
+                logger.error(f"Failed to wake up engine: {e}")
+                return {"status": "error", "message": str(e)}
 
     @abstractmethod
-    async def generate(self, request, context) -> AsyncGenerator[dict, None]:
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):
@@ -462,6 +683,21 @@ class BaseWorkerHandler(ABC):
         """Add a temporary directory to be cleaned up later."""
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
+
+    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
+        """Convert global DP rank to local DP rank based on engine config."""
+        if dp_rank is None:
+            return None
+        if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
+            logger.warning(
+                f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
+            )
+            return None
+        local_dp_rank = (dp_rank - self.dp_range[0]) % self.dp_range[1]
+        logger.debug(
+            f"Converted global DP rank {dp_rank} to local DP rank {local_dp_rank}"
+        )
+        return local_dp_rank
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest if model_name is a loaded adapter, else None."""
@@ -599,7 +835,7 @@ class BaseWorkerHandler(ABC):
                     # Publish LoRA as a ModelDeploymentCard with format:
                     # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
                     # This allows the frontend to discover it and route correctly to the worker instance
-                    if self.generate_endpoint is not None and self.config is not None:
+                    if self.generate_endpoint is not None:
                         logger.debug(
                             f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
                         )
@@ -614,6 +850,14 @@ class BaseWorkerHandler(ABC):
                                 "lora_id": lora_id,
                             }
 
+                            runtime_config = ModelRuntimeConfig()
+                            runtime_config.tool_call_parser = (
+                                self.config.dyn_tool_call_parser
+                            )
+                            runtime_config.reasoning_parser = (
+                                self.config.dyn_reasoning_parser
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
@@ -621,6 +865,7 @@ class BaseWorkerHandler(ABC):
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
+                                runtime_config=runtime_config,
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
@@ -902,7 +1147,7 @@ class BaseWorkerHandler(ABC):
         return prompt, sequence_length, embeddings_tensor
 
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], request_id: str, context
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -918,20 +1163,34 @@ class BaseWorkerHandler(ABC):
             )
 
         mm_map = request["multi_modal_data"]
+
+        # [gluo NOTE] If embedding loader is configured, currently we unconditionally
+        # fetch from the embedding loader.
+        if self.embedding_loader is not None:
+            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
+            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
+            # support 'Decoded' variant. Need to update the encode worker to unify handling
+            image_urls = []
+            supported = True
+            for item in mm_map.get(IMAGE_URL_KEY, []):
+                if isinstance(item, dict) and "Url" in item:
+                    image_urls.append(item["Url"])
+                elif isinstance(item, dict) and "Decoded" in item:
+                    supported = False
+            if supported:
+                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
+                    image_urls, request_id, model=self.config.model, context=context
+                )
+                logger.debug(
+                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                )
+                return vllm_mm_data if vllm_mm_data else None
+
+        # Fallback that the vLLM engine will perform encoding internally.
         vllm_mm_data = {}
-
-        # Lazy-init NIXL connector only when frontend decoding is enabled
-        if self.enable_frontend_decoding:
-            async with self._nixl_connector_lock:
-                if self._nixl_connector is None:
-                    self._nixl_connector = nixl_connect.Connector()
-                    await self._nixl_connector.initialize()
-
         # Process image_url entries
         images = await self.image_loader.load_image_batch(
             mm_map.get(IMAGE_URL_KEY, []),
-            enable_frontend_decoding=self.enable_frontend_decoding,
-            nixl_connector=self._nixl_connector,
         )
 
         if images:
@@ -1049,7 +1308,7 @@ class BaseWorkerHandler(ABC):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int
+        output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from vLLM CompletionOutput for new tokens.
@@ -1057,6 +1316,8 @@ class BaseWorkerHandler(ABC):
         Args:
             output: vLLM CompletionOutput object
             num_output_tokens_so_far: Number of tokens already processed
+            tokenizer: Optional tokenizer for decoding token IDs when
+                       decoded_token is not populated by the engine
 
         Returns:
             Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
@@ -1089,18 +1350,23 @@ class BaseWorkerHandler(ABC):
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
+                token_str = getattr(logprob_info, "decoded_token", None)
+                if not token_str and tokenizer:
+                    try:
+                        token_str = tokenizer.decode([tok_id])
+                    except Exception:
+                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": (
                             logprob_info.rank if hasattr(logprob_info, "rank") else 0
                         ),
                         "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
+                        "token": token_str,
                         "logprob": float(logprob_info.logprob),
+                        "bytes": (
+                            list(token_str.encode("utf-8")) if token_str else None
+                        ),
                     }
                 )
             top_logprobs.append(token_top_logprobs)
@@ -1192,8 +1458,9 @@ class BaseWorkerHandler(ABC):
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 # Extract logprobs for new tokens if available
+                tokenizer = getattr(self.engine_client, "tokenizer", None)
                 log_probs, top_logprobs = self._extract_logprobs(
-                    output, num_output_tokens_so_far
+                    output, num_output_tokens_so_far, tokenizer=tokenizer
                 )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
@@ -1231,47 +1498,81 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
         super().__init__(
             runtime,
+            config,
             engine,
             default_sampling_params,
             model_max_len,
             enable_multimodal,
             generate_endpoint,
-            config,
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
+            encode_worker_client,
         )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        first_token = True
+        with time_and_log_code_section(
+            f"[DECODE] request: {request_id} generate"
+        ) as decode_timer:
+            if self.use_vllm_tokenizer:
+                # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+                generator = self._generate_text_mode(request, context, request_id)
+            else:
+                # Token-in-token-out mode: internal protocol format
+                generator = self._generate_token_mode(request, context, request_id)
 
-        if self.use_vllm_tokenizer:
-            # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
-            async for chunk in self._generate_text_mode(request, context, request_id):
-                yield chunk
-        else:
-            # Token-in-token-out mode: internal protocol format
-            async for chunk in self._generate_token_mode(request, context, request_id):
+            async for chunk in generator:
+                if first_token:
+                    decode_timer.stop_interval()
+                    first_token = False
                 yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
-        # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        # Firstly extract disaggregated params from prefill result if available
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
+                "kv_transfer_params"
+            )
+            embedding_params = prefill_result.get("disaggregated_params", {}).get(
+                "embedding_params"
+            )
+        else:
+            kv_params = None
+            embedding_params = None
+
+        multi_modal_data = None
+        # The decode worker is handling disaggregated requests, the mm embedding will be synthetic
+        if prefill_result is not None and embedding_params is not None:
+            if is_qwen_vl_model(self.config.model):
+                multi_modal_data = construct_qwen_decode_mm_data(
+                    embedding_params["image_grid_thw"],
+                    embedding_params["embeddings_shape"],
+                    request_id,
+                )
+        else:
+            # Extract and decode multimodal data if present
+            multi_modal_data = await self._extract_multimodal_data(
+                request, request_id, context
+            )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1285,14 +1586,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = build_sampling_params(
             request, self.default_sampling_params, self.model_max_len
         )
-
-        prefill_result = request.get("prefill_result")
-        if prefill_result and isinstance(prefill_result, dict):
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
-        else:
-            kv_params = None
 
         if kv_params is not None:
             if sampling_params.extra_args is None:
@@ -1317,8 +1610,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
-        priority = routing.get("priority", 0)
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 
@@ -1364,8 +1657,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
-        priority = routing.get("priority", 0)
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1439,27 +1732,29 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
         super().__init__(
             runtime,
+            config,
             engine,
             default_sampling_params,
             model_max_len,
             enable_multimodal,
             generate_endpoint,
-            config,
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
+            encode_worker_client,
         )
 
     async def generate(self, request, context):
@@ -1468,13 +1763,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prefill Request ID: {request_id}")
 
         # Token-in-token-out mode: internal protocol format
-        async for chunk in self._generate_token_mode(request, context, request_id):
-            yield chunk
+        with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        multi_modal_data = await self._extract_multimodal_data(
+            request, request_id, context
+        )
+        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1525,8 +1824,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
-        priority = routing.get("priority", 0)
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 
@@ -1554,10 +1853,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": (
-                        {"kv_transfer_params": res.kv_transfer_params}
-                        if res.kv_transfer_params
-                        else None
+                    "disaggregated_params": self._build_disaggregated_params(
+                        res.kv_transfer_params, embedding_params
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -1577,3 +1874,38 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 )
 
                 yield output
+
+    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+        disaggregated_params = {}
+        if kv_transfer_params is not None:
+            disaggregated_params["kv_transfer_params"] = kv_transfer_params
+        if embedding_params is not None:
+            disaggregated_params["embedding_params"] = embedding_params
+
+        return disaggregated_params if disaggregated_params else None
+
+    def _build_embedding_params(
+        self, multi_modal_data: dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Helper function to build mm embedding parameters to be consumed by the decode worker, typically
+        decode worker doesn't require any metadata for mm embedding as the content has been consumed by
+        prefill. However, especially found for Qwen models, vLLM's processor will try to expand image
+        tokens in the prompt which requires such a metadata to pass through the processor.
+        """
+        embedding_params = {}
+        if is_qwen_vl_model(self.config.model) and isinstance(
+            multi_modal_data.get("image"), dict
+        ):
+            image_data = multi_modal_data["image"]
+            image_grid_thw = image_data.get("image_grid_thw")
+            image_embeds = image_data.get("image_embeds")
+            if image_grid_thw is not None:
+                embedding_params["image_grid_thw"] = (
+                    image_grid_thw.tolist()
+                    if isinstance(image_grid_thw, torch.Tensor)
+                    else image_grid_thw
+                )
+            if image_embeds is not None:
+                embedding_params["embeddings_shape"] = list(image_embeds.shape)
+        return embedding_params if embedding_params else None

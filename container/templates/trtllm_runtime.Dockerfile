@@ -24,7 +24,7 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
-ARG ARCH_ALT
+ARG TARGETARCH
 WORKDIR /workspace
 ENV ENV=${ENV:-/etc/shinit_v2}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
@@ -56,8 +56,11 @@ ENV CUDA_HOME=/usr/local/cuda \
 
 # Copy OpenMPI from PyTorch base image
 COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
-# Copy NUMA library from PyTorch base image
-COPY --from=pytorch_base /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+# Copy NUMA library from PyTorch base image (arch-dependent path)
+RUN --mount=type=bind,from=pytorch_base,source=/usr/lib,target=/mnt/usr_lib \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    mkdir -p /usr/lib/${ARCH_ALT}-linux-gnu && \
+    cp /mnt/usr_lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
 COPY --from=pytorch_base /opt/hpcx /opt/hpcx
@@ -93,12 +96,13 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 ARG PYTHON_VERSION
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64"); \
     if [ ${ARCH_ALT} = "x86_64" ]; then \
         ARCH_FOR_GPG=${ARCH_ALT}; \
     else \
         ARCH_FOR_GPG="sbsa"; \
     fi && \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-delay 3 \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG}/cuda-archive-keyring.gpg \
         -o /usr/share/keyrings/cuda-archive-keyring.gpg &&\
     echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] \
@@ -143,6 +147,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Create libnccl.so symlink pointing to libnccl.so.2. TensorRT-LLM requires explicit libnccl.so
     ln -sf /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so.2 /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so
 
+# nvcr.io/nvidia/cuda-dl-base includes the AWS OFI NCCL plugin, which can crash TRTLLM.
+# Disable it by renaming aws-ofi-nccl.conf and refreshing the dynamic linker cache.
+RUN if [ -f /etc/ld.so.conf.d/aws-ofi-nccl.conf ]; then \
+      mv /etc/ld.so.conf.d/aws-ofi-nccl.conf /etc/ld.so.conf.d/aws-ofi-nccl.conf.disabled; \
+    fi && \
+    ldconfig
+
 {% if context.trtllm.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -153,6 +164,19 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
+# Copy TensorRT and libgomp from framework image (arch-dependent path, needs root)
+COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
+RUN --mount=type=bind,from=framework,source=/usr/lib,target=/mnt/usr_lib \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    cp /mnt/usr_lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+
+# Register arch-dependent TensorRT and nvshmem library paths with ldconfig so the
+# dynamic linker finds them in every execution context (docker run, exec, k8s, etc.)
+RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    echo "/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib" > /etc/ld.so.conf.d/tensorrt.conf && \
+    echo "/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13" >> /etc/ld.so.conf.d/tensorrt.conf && \
+    ldconfig
+
 # Switch to dynamo user
 USER dynamo
 ENV HOME=/home/dynamo
@@ -161,12 +185,8 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 ENV DYNAMO_HOME=/workspace
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-# Copy libgomp.so from framework image
-COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
-COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -177,20 +197,21 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 # Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
+# Both arch paths are listed; the non-existent one is silently ignored by the linker.
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
-/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
-$TENSORRT_LIB_DIR:\
+/usr/local/tensorrt/targets/x86_64-linux-gnu/lib:\
+/usr/local/tensorrt/targets/aarch64-linux-gnu/lib:\
+/usr/lib/x86_64-linux-gnu/nvshmem/13/:\
+/usr/lib/aarch64-linux-gnu/nvshmem/13/:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
 /usr/local/cuda/lib:\
@@ -199,28 +220,24 @@ $LD_LIBRARY_PATH
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
+# TODO: skip /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+{% if target not in ("dev", "local-dev") %}
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+{% endif %}
 
-# Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
+{% if target not in ("dev", "local-dev") %}
+# Install dynamo, NIXL, and dynamo-specific dependencies
+ARG ENABLE_KVBM
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$GMS_WHEEL"; \
-    fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -231,21 +248,43 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     fi && \
     cd /workspace/benchmarks && \
     UV_GIT_LFS=1 uv pip install --no-cache . && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+{% else %}
+# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
 
-# Install common and test dependencies
+# Install gpu_memory_service wheel if enabled (all targets)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
+    fi
+
+# Install runtime dependencies (common + planner + benchmarks).
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+    --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt \
-        cupy-cuda13x
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.planner.txt \
+        --requirement /tmp/requirements.benchmark.txt \
+        cupy-cuda13x && \
+    # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
+    # that unconditionally raises NotImplementedError, crashing TRT-LLM on import. cutlass-dsl==4.3.4
+    # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
+    rm -rf ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/experimental/
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>

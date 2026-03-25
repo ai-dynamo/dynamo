@@ -12,6 +12,7 @@ MODEL="${MODEL:-Qwen/Qwen2.5-Omni-7B}"
 
 # Stage config path - use single-stage LLM config for text-to-text
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 STAGE_CONFIG="${STAGE_CONFIG:-$SCRIPT_DIR/stage_configs/single_stage_llm.yaml}"
 
 # Parse command line arguments
@@ -29,15 +30,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=========================================="
-echo "Starting vLLM-Omni Worker (Text-to-Text)"
-echo "Model: $MODEL"
-echo "Stage Config: $STAGE_CONFIG"
-echo "=========================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching vLLM-Omni Text-to-Text (1 GPU)" "$MODEL" "$HTTP_PORT"
+
+# Disable version check for flashinfer
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 # Run ingress (frontend)
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-echo "Starting frontend on port ${DYN_HTTP_PORT:-8000}..."
 python -m dynamo.frontend &
 FRONTEND_PID=$!
 
@@ -46,8 +46,10 @@ sleep 2
 
 echo "Starting Omni worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm \
+    python -m dynamo.vllm.omni \
     --model "$MODEL" \
-    --omni \
     --stage-configs-path "$STAGE_CONFIG" \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

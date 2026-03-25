@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 MISSING_PROFILING_DATA_ERROR_MESSAGE = (
     "SLA-Planner requires pre-deployment profiling results to run.\n"
-    "Please follow /docs/pages/components/profiler/profiler-guide.md to run the profiling first,\n"
+    "Please follow /docs/components/profiler/profiler-guide.md to run the profiling first,\n"
     "and make sure the profiling results are present in --profile-results-dir."
 )
 
@@ -151,6 +151,8 @@ class DecodeInterpolator:
         self.resolution = resolution
         self.xi = np.linspace(0, 1, resolution)
         self.yi = np.linspace(0, max(self.y_context_length), resolution)
+        self.X: np.ndarray
+        self.Y: np.ndarray
         self.X, self.Y = np.meshgrid(self.xi, self.yi)
 
         # Lazy import scipy only when interpolation is actually needed

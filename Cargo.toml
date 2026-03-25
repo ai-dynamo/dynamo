@@ -10,14 +10,18 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
+    "lib/kvbm-common",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
+    "lib/kvbm-physical",
     "lib/async-openai",
     "lib/parsers",
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/config",
+    "lib/velo-common",
+    "lib/velo-transports",
+    "lib/velo-events",
 ]
 resolver = "3"
 
@@ -39,11 +43,22 @@ dynamo-config = { path = "lib/config", version = "1.0.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
 dynamo-memory = { path = "lib/memory", version = "1.0.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics"] }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics", "runtime-protocols"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+fastokens = { version = "0.1.0" }
+
+# kvbm
+kvbm-common = { path = "lib/kvbm-common", version = "0.1.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.1.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "0.1.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "0.1.0" }
+
+# velo
+velo-common = { path = "lib/velo-common", version = "0.1.0" }
+velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
+velo-events = { path = "lib/velo-events", version = "0.1.0" }
+
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
@@ -59,13 +74,14 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.19.2", features = ["cuda-12020"] }
+cudarc = { version = "0.19.2", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
 futures = { version = "0.3" }
+futures-util = { version = "0.3.32" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
     "tokio",
     "rustls-tls",
@@ -77,17 +93,21 @@ modelexpress-client = { version = "0.2.0" }
 modelexpress-common = { version = "0.2.0" }
 
 humantime = { version = "2.2.0" }
+indexmap = { version = "2" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.13", features = ["std", "async"] }
+ordered-float = "4"
 parking_lot = "0.12.5"
 prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
 reqwest = { version = "0.12.24", default-features = false, features = [
+    "multipart",
     "json",
     "stream",
     "rustls-tls",
 ] }
 rmp-serde = { version = "1" }
+serde_bytes = { version = "0.11" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
@@ -111,9 +131,10 @@ tracing-subscriber = { version = "0.3", features = [
     "json",
 ] }
 tracing-opentelemetry = { version = "0.32.0" }
-opentelemetry = { version = "0.31.0", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["trace", "grpc-tonic"] }
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
@@ -130,3 +151,10 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+
+# Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
+# Build: cargo build --profile profiling --features nvtx
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

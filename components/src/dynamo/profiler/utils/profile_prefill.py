@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -82,15 +82,15 @@ def _profile_prefill_helper(
 
 
 def profile_prefill(
-    work_dir,
-    model_name,
-    tokenizer,
-    url,
-    num_gpus,
-    max_context_length,
-    interpolation_granularity,
+    work_dir: str,
+    model_name: str,
+    tokenizer: str,
+    url: str,
+    num_gpus: int,
+    max_context_length: int,
+    interpolation_granularity: int,
     attention_dp_size: int = 1,
-):
+) -> None:
     def get_ttft(isl):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}"
         return get_prefill_ttft(
@@ -113,13 +113,13 @@ def profile_prefill(
 
 
 def profile_prefill_aiconfigurator(
-    work_dir,
-    num_gpus,
-    max_context_length,
-    interpolation_granularity,
+    work_dir: str,
+    num_gpus: int,
+    max_context_length: int,
+    interpolation_granularity: int,
     ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
-    **model_config_kwargs,
-):
+    **model_config_kwargs: Any,
+) -> None:
     def get_ttft(isl):
         perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
             isl,

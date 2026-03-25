@@ -1148,7 +1148,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "(dynamo_component_kvstats_gpu_cache_usage_percent{namespace=\"$namespace\"}) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(dynamo_component_gpu_cache_usage_percent{namespace=\"$namespace\"}) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "{{pod}}",
               "range": true,
               "refId": "A"
@@ -1162,7 +1162,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Active KV cache blocks vs total available blocks for decode workers. Shows numeric capacity utilization. When active approaches total, workers are at capacity.",
+          "description": "Total KV cache blocks available on decode workers. Shows numeric capacity.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -1257,20 +1257,13 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "(dynamo_component_kvstats_active_blocks{namespace=\"$namespace\"}) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
-              "legendFormat": "Active - {{pod}}",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "editorMode": "code",
-              "expr": "(dynamo_component_kvstats_total_blocks{namespace=\"$namespace\"}) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(dynamo_component_total_blocks{namespace=\"$namespace\"}) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "Total - {{pod}}",
               "range": true,
-              "refId": "B"
+              "refId": "A"
             }
           ],
-          "title": "KV Cache Blocks (Active/Total)",
+          "title": "KV Cache Blocks (Total)",
           "type": "timeseries"
         },
         {

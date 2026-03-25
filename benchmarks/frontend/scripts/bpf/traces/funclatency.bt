@@ -1,0 +1,49 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Latency of specific functions (requires debug symbols / profiling build).
+// Measures function entry-to-exit time.
+//
+// Usage:
+//   # Trace a specific function by name (requires DWARF symbols):
+//   sudo bpftrace -p <PID> -e '
+//     uprobe:/path/to/binary:function_name { @start[tid] = nsecs; }
+//     uretprobe:/path/to/binary:function_name /@start[tid]/ {
+//       @latency_us = hist((nsecs - @start[tid]) / 1000);
+//       delete(@start[tid]);
+//     }'
+//
+//   # Or use this script with BINARY and FUNC env vars:
+//   sudo BINARY=/path/to/binary FUNC=function_name bpftrace funclatency.bt
+//
+// Build target with symbols:
+//   cargo build --profile profiling --features nvtx
+
+BEGIN
+{
+    printf("Tracing function latency... Hit Ctrl-C to end.\n");
+    printf("Note: Set BINARY and FUNC environment variables, or edit this script.\n");
+    printf("Example: sudo BINARY=target/profiling/dynamo-frontend FUNC=apply_template bpftrace funclatency.bt\n");
+}
+
+// Generic uprobe placeholder — edit the probe target as needed.
+// bpftrace doesn't support env var substitution in probe specs,
+// so this serves as a template. Use the one-liner above for actual tracing.
+
+// Example for tokenizer:
+// uprobe:target/profiling/dynamo-frontend:*gather_tokens* { @start[tid] = nsecs; }
+// uretprobe:target/profiling/dynamo-frontend:*gather_tokens* /@start[tid]/ {
+//   @latency_us["gather_tokens"] = hist((nsecs - @start[tid]) / 1000);
+//   delete(@start[tid]);
+// }
+
+interval:s:1
+{
+    printf(".");
+}
+
+END
+{
+    printf("\nDone.\n");
+}
