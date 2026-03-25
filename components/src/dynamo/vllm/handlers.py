@@ -1386,6 +1386,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = build_trace_headers(context)
 
+        t_decode_start = time.perf_counter()
+        first_token_logged = False
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
@@ -1398,6 +1400,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     trace_headers=trace_headers,
                     priority=priority,
                 ):
+                    if not first_token_logged:
+                        logger.info(
+                            "[DIAG-ROUTE] decode first_token: req=%s, "
+                            "decode_setup_time=%.3fs, has_kv_params=%s",
+                            request_id,
+                            time.perf_counter() - t_decode_start,
+                            kv_params is not None,
+                        )
+                        first_token_logged = True
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
                             "prompt_tokens_details"
@@ -1594,6 +1605,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_headers = build_trace_headers(context)
 
+        t_prefill_start = time.perf_counter()
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
                 gen = self.engine_client.generate(
@@ -1638,6 +1650,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     level="info" if lora_request else "debug",
                     token_count=len(token_ids),
                     has_kv_params=res.kv_transfer_params is not None,
+                )
+                logger.info(
+                    "[DIAG-ROUTE] prefill done: req=%s, prefill_time=%.3fs, "
+                    "has_kv_params=%s, blocks=%d",
+                    request_id,
+                    time.perf_counter() - t_prefill_start,
+                    res.kv_transfer_params is not None,
+                    len(res.kv_transfer_params.get("remote_block_ids", []))
+                    if res.kv_transfer_params else 0,
                 )
 
                 yield output
