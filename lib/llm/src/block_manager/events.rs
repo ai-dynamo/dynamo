@@ -7,6 +7,7 @@ use super::block::registry::RegistrationHandle;
 
 use crate::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::kv_consolidator::KvEventConsolidator;
+use crate::tokens::SequenceHash;
 
 /// The [EventManager] is not responsible for managing the history of the blocks, nor what
 /// events have been published.
@@ -152,6 +153,34 @@ pub struct DynamoEventManager {
 }
 
 impl DynamoEventManager {
+    fn required_event_sequence_hash(handle: &RegistrationHandle) -> SequenceHash {
+        handle.event_sequence_hash().unwrap_or_else(|| {
+            panic!(
+                "missing framework event sequence hash for registered block sequence_hash={} tier={:?}",
+                handle.sequence_hash(),
+                handle.storage_tier()
+            )
+        })
+    }
+
+    fn required_event_parent_sequence_hash(handle: &RegistrationHandle) -> Option<SequenceHash> {
+        match (
+            handle.parent_sequence_hash(),
+            handle.event_parent_sequence_hash(),
+        ) {
+            (Some(_), Some(parent_hash)) => Some(parent_hash),
+            (Some(parent_hash), None) => {
+                panic!(
+                    "missing framework event parent sequence hash for registered block sequence_hash={} parent_sequence_hash={} tier={:?}",
+                    handle.sequence_hash(),
+                    parent_hash,
+                    handle.storage_tier()
+                )
+            }
+            (None, _) => None,
+        }
+    }
+
     /// Create a new DynamoEventManager with a consolidator handle
     pub fn new(
         consolidator_handle: Arc<crate::block_manager::kv_consolidator::KvEventConsolidatorHandle>,
@@ -181,8 +210,8 @@ impl DynamoEventManager {
 
     /// Send store events to the kv event consolidator
     ///
-    /// Called when KVBM registers/stores blocks. Sends events to the kv event consolidator
-    /// which will deduplicate them with vLLM events.
+    /// Called when KVBM registers/stores blocks. Sends events to the kv event consolidator,
+    /// which forwards them into the merged raw event stream.
     ///
     fn publish_store_events(&self, handles: Vec<Arc<RegistrationHandle>>) {
         if handles.is_empty() {
@@ -201,14 +230,9 @@ impl DynamoEventManager {
             rt.spawn(async move {
                 for handle in handles {
                     // Extract block metadata from RegistrationHandle
-                    let block_hash = handle
-                        .event_sequence_hash()
-                        .unwrap_or(handle.sequence_hash())
-                        .to_string();
-                    let parent_hash = handle
-                        .event_parent_sequence_hash()
-                        .or(handle.parent_sequence_hash())
-                        .map(|h| h.to_string());
+                    let block_hash = Self::required_event_sequence_hash(&handle).to_string();
+                    let parent_hash =
+                        Self::required_event_parent_sequence_hash(&handle).map(|h| h.to_string());
 
                     // Extract block_size and tokens from RegistrationHandle
                     let block_size = handle.block_size(); // usize
@@ -248,14 +272,13 @@ impl DynamoEventManager {
     ///
     /// Called when a RegistrationHandle is dropped (block evicted from KVBM).
     fn publish_remove_event(&self, registration_handle: &RegistrationHandle) {
-        let block_hash = registration_handle
-            .event_sequence_hash()
-            .unwrap_or(registration_handle.sequence_hash())
-            .to_string();
+        let block_hash = Self::required_event_sequence_hash(registration_handle).to_string();
+        let storage_tier = registration_handle.storage_tier();
 
         tracing::debug!(
-            "DynamoEventManager::publish_remove_event called: block_hash={}",
-            block_hash
+            "DynamoEventManager::publish_remove_event called: block_hash={}, tier={:?}",
+            block_hash,
+            storage_tier
         );
 
         let kv_event_consolidator = self.consolidator_handle.clone();
@@ -263,7 +286,7 @@ impl DynamoEventManager {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
                 kv_event_consolidator
-                    .handle_remove(&block_hash, EventSource::Kvbm)
+                    .handle_remove(&block_hash, EventSource::Kvbm, Some(storage_tier), None)
                     .await;
             });
         } else {
@@ -297,14 +320,23 @@ impl EventReleaseManager for DynamoEventManager {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::tokens::SequenceHash;
+    use crate::block_manager::block::registry::{BlockRegistry, GlobalRegistry};
+    use crate::block_manager::block::state::{BlockState, CompleteState};
+    use crate::block_manager::kv_consolidator::StorageTier;
+    use crate::tokens::{SequenceHash, Tokens};
 
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
     pub enum EventType {
-        Register(SequenceHash),
-        Remove(SequenceHash),
+        Register {
+            sequence_hash: SequenceHash,
+            storage_tier: StorageTier,
+        },
+        Remove {
+            sequence_hash: SequenceHash,
+            storage_tier: StorageTier,
+        },
     }
 
     pub struct MockEventManager {
@@ -331,7 +363,12 @@ pub mod tests {
         fn publish(&self, handles: Vec<Arc<RegistrationHandle>>) {
             let events = handles
                 .iter()
-                .map(|handle| EventType::Register(handle.sequence_hash()))
+                .map(|handle| EventType::Register {
+                    sequence_hash: handle
+                        .event_sequence_hash()
+                        .unwrap_or(handle.sequence_hash()),
+                    storage_tier: handle.storage_tier(),
+                })
                 .collect::<Vec<_>>();
             self.tx.send(events).unwrap();
         }
@@ -339,8 +376,68 @@ pub mod tests {
 
     impl EventReleaseManager for MockEventManager {
         fn block_release(&self, registration_handle: &RegistrationHandle) {
-            let events = vec![EventType::Remove(registration_handle.sequence_hash())];
+            let events = vec![EventType::Remove {
+                sequence_hash: registration_handle
+                    .event_sequence_hash()
+                    .unwrap_or(registration_handle.sequence_hash()),
+                storage_tier: registration_handle.storage_tier(),
+            }];
             self.tx.send(events).unwrap();
         }
+    }
+
+    fn registration_handle_with_event_hashes(
+        block_index: usize,
+        event_sequence_hash: Option<SequenceHash>,
+        event_parent_sequence_hash: Option<SequenceHash>,
+    ) -> Arc<RegistrationHandle> {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut registry = BlockRegistry::new(
+            NullEventManager::new(),
+            GlobalRegistry::default(),
+            runtime.handle().clone(),
+            StorageTier::HostPinned,
+        );
+        let tokens: Vec<u32> = (0..12).collect();
+        let sequence = Tokens::from(tokens).into_sequence(4, None);
+        let mut block_state =
+            BlockState::Complete(CompleteState::new(sequence.blocks()[block_index].clone()));
+        registry
+            .register_block(
+                &mut block_state,
+                event_sequence_hash,
+                event_parent_sequence_hash,
+            )
+            .unwrap()
+            .unwrap()
+            .remove_handle()
+    }
+
+    #[test]
+    fn test_required_event_hashes_accept_root_block_without_parent_override() {
+        let handle = registration_handle_with_event_hashes(0, Some(999), None);
+
+        assert_eq!(
+            DynamoEventManager::required_event_sequence_hash(&handle),
+            999
+        );
+        assert_eq!(
+            DynamoEventManager::required_event_parent_sequence_hash(&handle),
+            None
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "missing framework event sequence hash")]
+    fn test_required_event_hashes_panic_without_sequence_override() {
+        let handle = registration_handle_with_event_hashes(0, None, None);
+        let _ = DynamoEventManager::required_event_sequence_hash(&handle);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing framework event parent sequence hash")]
+    fn test_required_event_hashes_panic_without_parent_override_for_non_root_block() {
+        let handle = registration_handle_with_event_hashes(1, Some(1001), None);
+        let _ = DynamoEventManager::required_event_parent_sequence_hash(&handle);
     }
 }

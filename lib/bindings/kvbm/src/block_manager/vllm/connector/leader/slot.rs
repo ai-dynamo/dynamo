@@ -396,8 +396,14 @@ pub struct VllmConnectorSlot {
     /// Used as fallback when priorities=None in subsequent chunked prefill iterations.
     stored_block_priorities: HashMap<BlockId, u32>,
 
-    /// Optional framework-provided sequence hashes aligned to `self.sequence.blocks()`.
+    /// Optional framework-provided sequence hashes aligned to committed
+    /// `self.sequence.blocks()`. Scheduler payloads may include one additional
+    /// trailing hash for the current partial block; we ignore that suffix.
     stored_block_hashes: Vec<Option<SequenceHash>>,
+
+    /// Whether this request has provided framework block hashes and should
+    /// therefore always emit tier events with framework sequence hashes.
+    expects_framework_event_hashes: bool,
 }
 
 impl VllmConnectorSlot {
@@ -440,6 +446,7 @@ impl VllmConnectorSlot {
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
             stored_block_hashes: Vec::new(),
+            expects_framework_event_hashes: false,
         }
     }
 
@@ -479,6 +486,7 @@ impl VllmConnectorSlot {
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
             stored_block_hashes: Vec::new(),
+            expects_framework_event_hashes: false,
         }
     }
 
@@ -543,7 +551,27 @@ impl VllmConnectorSlot {
             return Ok(());
         }
 
-        if block_hashes.len() != total_blocks {
+        self.expects_framework_event_hashes = true;
+
+        let accepted_hashes = if block_hashes.len() == total_blocks {
+            block_hashes
+        } else if block_hashes.len() == total_blocks.saturating_add(1) {
+            tracing::debug!(
+                request_id = %self.request_id,
+                num_block_hashes = block_hashes.len(),
+                total_blocks,
+                "discarding trailing partial framework block hash"
+            );
+            &block_hashes[..total_blocks]
+        } else if block_hashes.len() < total_blocks {
+            tracing::debug!(
+                request_id = %self.request_id,
+                num_block_hashes = block_hashes.len(),
+                total_blocks,
+                "accepting shorter committed framework block hash prefix"
+            );
+            block_hashes
+        } else {
             tracing::warn!(
                 request_id = %self.request_id,
                 num_block_hashes = block_hashes.len(),
@@ -551,9 +579,20 @@ impl VllmConnectorSlot {
                 "ignoring framework block hashes due to length mismatch"
             );
             return Ok(());
+        };
+
+        for (index, hash) in accepted_hashes.iter().copied().enumerate() {
+            self.stored_block_hashes[index] = Some(hash);
         }
 
-        self.stored_block_hashes = block_hashes.iter().copied().map(Some).collect();
+        for entry in self
+            .stored_block_hashes
+            .iter_mut()
+            .skip(accepted_hashes.len())
+        {
+            *entry = None;
+        }
+
         Ok(())
     }
 
@@ -1321,6 +1360,31 @@ impl VllmConnectorSlot {
         assert!(block_ids.len() == token_blocks.len());
         assert!(block_ids.len() == priorities.len());
         assert!(block_ids.len() == event_hashes.len());
+
+        if self.expects_framework_event_hashes {
+            for ((block_id, token_block), event_hashes) in block_ids
+                .iter()
+                .zip(token_blocks.iter())
+                .zip(event_hashes.iter())
+            {
+                assert!(
+                    event_hashes.sequence_hash.is_some(),
+                    "missing framework event sequence hash for offloaded block {} on request {}",
+                    block_id,
+                    self.request_id
+                );
+
+                if token_block.parent_sequence_hash().is_some() {
+                    assert!(
+                        event_hashes.parent_sequence_hash.is_some(),
+                        "missing framework event parent sequence hash for offloaded block {} on request {}",
+                        block_id,
+                        self.request_id
+                    );
+                }
+            }
+        }
+
         let operation_id = uuid::Uuid::new_v4();
 
         let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
@@ -1419,7 +1483,7 @@ enum LocalTransferRequest {
     Onboard(LocalOnboardRequest),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct EventHashes {
     sequence_hash: Option<SequenceHash>,
     parent_sequence_hash: Option<SequenceHash>,
@@ -2329,6 +2393,114 @@ mod connector_tests {
 
         assert_eq!(slot.num_device_blocks_allocated(), 5);
         assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13, 14]);
+    }
+
+    #[test]
+    fn test_trtllm_block_hashes_allow_trailing_partial_block() {
+        let num_tokens = (31 * BLOCK_SIZE) + 2; // 31 complete blocks + partial block
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 31);
+        let framework_hashes: Vec<SequenceHash> = (1000..1032).collect();
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(
+            &[],
+            &blocks,
+            0,
+            31 * BLOCK_SIZE,
+            None,
+            Some(&framework_hashes),
+        )
+        .unwrap();
+
+        assert_eq!(slot.sequence.blocks().len(), 31);
+        assert_eq!(slot.stored_block_hashes.len(), 31);
+        assert_eq!(
+            slot.stored_block_hashes,
+            framework_hashes[..31]
+                .iter()
+                .copied()
+                .map(Some)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            slot.event_hashes_for_block(0),
+            EventHashes {
+                sequence_hash: Some(framework_hashes[0]),
+                parent_sequence_hash: None,
+            }
+        );
+        assert_eq!(
+            slot.event_hashes_for_block(30),
+            EventHashes {
+                sequence_hash: Some(framework_hashes[30]),
+                parent_sequence_hash: Some(framework_hashes[29]),
+            }
+        );
+    }
+
+    #[test]
+    fn test_trtllm_block_hashes_allow_shorter_committed_prefix() {
+        let num_tokens = 96; // 3 complete blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+        let framework_hashes: Vec<SequenceHash> = vec![1000, 1001];
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(&[], &blocks, 0, 64, None, Some(&framework_hashes))
+            .unwrap();
+
+        assert_eq!(slot.sequence.blocks().len(), 3);
+        assert_eq!(slot.stored_block_hashes.len(), 3);
+        assert_eq!(
+            slot.stored_block_hashes,
+            vec![Some(framework_hashes[0]), Some(framework_hashes[1]), None]
+        );
+        assert_eq!(
+            slot.event_hashes_for_block(1),
+            EventHashes {
+                sequence_hash: Some(framework_hashes[1]),
+                parent_sequence_hash: Some(framework_hashes[0]),
+            }
+        );
+        assert_eq!(
+            slot.event_hashes_for_block(2),
+            EventHashes {
+                sequence_hash: None,
+                parent_sequence_hash: None,
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "missing framework event sequence hash")]
+    fn test_trtllm_offload_requires_framework_hashes_for_offloaded_blocks() {
+        let num_tokens = 96; // 3 complete blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+        let framework_hashes: Vec<SequenceHash> = vec![1000, 1001];
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None, Some(&framework_hashes))
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "missing framework event parent sequence hash")]
+    fn test_trtllm_offload_requires_framework_parent_hashes_for_non_root_blocks() {
+        let num_tokens = 64; // 2 complete blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 2);
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.expects_framework_event_hashes = true;
+        slot.stored_block_hashes = vec![None, Some(1001)];
+
+        let token_block = slot.sequence.blocks()[1].clone();
+        let event_hashes = vec![slot.event_hashes_for_block(1)];
+
+        slot.offload_blocks(&[blocks[1]], &[token_block], &[0], &event_hashes)
+            .unwrap();
     }
 
     // ---------------------------------------------------------------

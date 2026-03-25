@@ -362,6 +362,20 @@ mod tests {
         sequence
     }
 
+    fn register_event(sequence_hash: u64, storage_tier: StorageTier) -> EventType {
+        EventType::Register {
+            sequence_hash,
+            storage_tier,
+        }
+    }
+
+    fn remove_event(sequence_hash: u64, storage_tier: StorageTier) -> EventType {
+        EventType::Remove {
+            sequence_hash,
+            storage_tier,
+        }
+    }
+
     #[test]
     fn test_mock_event_manager_with_single_publish_handle() {
         let sequence = create_sequence();
@@ -387,7 +401,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Register(sequence.blocks()[0].sequence_hash())
+            register_event(sequence.blocks()[0].sequence_hash(), StorageTier::Device)
         );
 
         // the second event should be a Remove event
@@ -395,7 +409,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Remove(sequence.blocks()[0].sequence_hash())
+            remove_event(sequence.blocks()[0].sequence_hash(), StorageTier::Device)
         );
 
         // there should be no more events
@@ -434,7 +448,7 @@ mod tests {
         );
         assert_eq!(
             register_events[0],
-            EventType::Register(expected_sequence_hash),
+            register_event(expected_sequence_hash, StorageTier::Device),
             "Expected Register event"
         );
 
@@ -445,7 +459,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Remove(expected_sequence_hash),
+            remove_event(expected_sequence_hash, StorageTier::Device),
             "Only Remove event should be triggered"
         );
 
@@ -514,6 +528,120 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_event_manager_emits_independent_events_per_tier() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (event_manager, mut rx) = MockEventManager::new();
+        let global_registry = GlobalRegistry::default();
+        let mut host_registry = BlockRegistry::new(
+            event_manager.clone(),
+            global_registry.clone(),
+            runtime.handle().clone(),
+            StorageTier::HostPinned,
+        );
+        let mut disk_registry = BlockRegistry::new(
+            event_manager.clone(),
+            global_registry,
+            runtime.handle().clone(),
+            StorageTier::Disk,
+        );
+        let sequence = create_sequence();
+        let expected_hash = sequence.blocks()[0].sequence_hash();
+        let mut host_state = BlockState::Complete(CompleteState::new(sequence.blocks()[0].clone()));
+        let mut disk_state = BlockState::Complete(CompleteState::new(sequence.blocks()[0].clone()));
+
+        let host_publish_handle = host_registry
+            .register_block(&mut host_state, None, None)
+            .unwrap()
+            .unwrap();
+        let disk_publish_handle = disk_registry
+            .register_block(&mut disk_state, None, None)
+            .unwrap()
+            .unwrap();
+
+        drop(host_publish_handle);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            vec![register_event(expected_hash, StorageTier::HostPinned)]
+        );
+
+        drop(disk_publish_handle);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            vec![register_event(expected_hash, StorageTier::Disk)]
+        );
+
+        assert!(rx.try_recv().is_err());
+
+        drop(host_state);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            vec![remove_event(expected_hash, StorageTier::HostPinned)]
+        );
+
+        assert!(rx.try_recv().is_err());
+
+        drop(disk_state);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            vec![remove_event(expected_hash, StorageTier::Disk)]
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_same_tier_duplicate_registration_shares_event_lifetime() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (event_manager, mut rx) = MockEventManager::new();
+        let global_registry = GlobalRegistry::default();
+        let mut host_registry_a = BlockRegistry::new(
+            event_manager.clone(),
+            global_registry.clone(),
+            runtime.handle().clone(),
+            StorageTier::HostPinned,
+        );
+        let mut host_registry_b = BlockRegistry::new(
+            event_manager.clone(),
+            global_registry,
+            runtime.handle().clone(),
+            StorageTier::HostPinned,
+        );
+        let sequence = create_sequence();
+        let expected_hash = sequence.blocks()[0].sequence_hash();
+        let mut host_state_a =
+            BlockState::Complete(CompleteState::new(sequence.blocks()[0].clone()));
+        let mut host_state_b =
+            BlockState::Complete(CompleteState::new(sequence.blocks()[0].clone()));
+
+        let first_publish_handle = host_registry_a
+            .register_block(&mut host_state_a, None, None)
+            .unwrap();
+        let second_publish_handle = host_registry_b
+            .register_block(&mut host_state_b, None, None)
+            .unwrap();
+
+        assert!(first_publish_handle.is_some());
+        assert!(second_publish_handle.is_none());
+
+        drop(first_publish_handle);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            vec![register_event(expected_hash, StorageTier::HostPinned)]
+        );
+
+        drop(host_state_a);
+        assert!(rx.try_recv().is_err());
+
+        drop(host_state_b);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            vec![remove_event(expected_hash, StorageTier::HostPinned)]
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn test_mock_event_manager_publisher_multiple_handles_removed() {
         let sequence = create_sequence();
         let block1 = &sequence.blocks()[0];
@@ -560,8 +688,8 @@ mod tests {
             "Should receive two Register events in one batch"
         );
         // Order isn't guaranteed, so check for both
-        assert!(events.contains(&EventType::Register(hash1)));
-        assert!(events.contains(&EventType::Register(hash2)));
+        assert!(events.contains(&register_event(hash1, StorageTier::Device)));
+        assert!(events.contains(&register_event(hash2, StorageTier::Device)));
 
         // no more events immediately after publish
         assert!(rx.try_recv().is_err());
@@ -570,12 +698,12 @@ mod tests {
         drop(reg_handle1);
         let events1 = rx.try_recv().unwrap();
         assert_eq!(events1.len(), 1);
-        assert_eq!(events1[0], EventType::Remove(hash1));
+        assert_eq!(events1[0], remove_event(hash1, StorageTier::Device));
 
         drop(reg_handle2);
         let events2 = rx.try_recv().unwrap();
         assert_eq!(events2.len(), 1);
-        assert_eq!(events2[0], EventType::Remove(hash2));
+        assert_eq!(events2[0], remove_event(hash2, StorageTier::Device));
 
         // no more events
         assert!(rx.try_recv().is_err());
@@ -614,7 +742,7 @@ mod tests {
         publisher.publish();
         let events = rx.try_recv().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], EventType::Register(hash1));
+        assert_eq!(events[0], register_event(hash1, StorageTier::Device));
 
         // The RegistrationHandle Arc was taken by the publisher and dropped after the publish call
         // So, the Remove event should follow immediately.
@@ -626,7 +754,7 @@ mod tests {
         );
         assert_eq!(
             remove_events[0],
-            EventType::Remove(hash1),
+            remove_event(hash1, StorageTier::Device),
             "Expected Remove event"
         );
 

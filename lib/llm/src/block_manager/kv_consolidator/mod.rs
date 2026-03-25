@@ -3,8 +3,8 @@
 
 //! KV Event Consolidator
 //!
-//! This module consolidates kv events from multiple sources (vLLM's G1 events
-//! and KVBM's G2/G3 events) before publishing them to the router.
+//! This module merges kv events from multiple sources into a single stream
+//! after normalizing their storage tier metadata.
 pub mod config;
 pub mod publisher;
 pub mod subscriber;
@@ -57,12 +57,18 @@ impl KvEventConsolidatorHandle {
         );
     }
 
-    /// Send a block remove event to the KV Event Consolidator
+    /// Send a block remove event to the KV Event Consolidator.
     ///
-    /// This is called by KVBM when a block is removed from G2 or G3.
-    pub async fn handle_remove(&self, block_hash: &str, source: EventSource) {
+    /// This is called by KVBM when a block is removed from a tier.
+    pub async fn handle_remove(
+        &self,
+        block_hash: &str,
+        source: EventSource,
+        tier: Option<StorageTier>,
+        data_parallel_rank: Option<i32>,
+    ) {
         let mut tracker = self.tracker.write().await;
-        tracker.handle_remove(block_hash, source);
+        tracker.handle_remove(block_hash, source, tier, data_parallel_rank);
     }
 
     /// Clear all blocks from the KV Event Consolidator
