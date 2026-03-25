@@ -24,6 +24,13 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
     LocalBlockHash(compute_hash(data))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockHashOptions<'a> {
+    pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
+    pub lora_name: Option<&'a str>,
+    pub is_eagle: Option<bool>,
+}
+
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
 /// and LoRA adapter identity.
 ///
@@ -39,37 +46,51 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
-    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    lora_name: Option<&str>,
+    options: BlockHashOptions<'_>,
 ) -> Vec<LocalBlockHash> {
-    let seed = match lora_name.filter(|n| !n.is_empty()) {
+    if kv_block_size == 0 {
+        return Vec::new();
+    }
+
+    let seed = match options.lora_name.filter(|n| !n.is_empty()) {
         Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
         None => XXH3_SEED,
     };
-    tokens
-        .chunks_exact(kv_block_size as usize)
-        .enumerate()
-        .map(|(block_idx, chunk)| {
-            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
 
-            if let Some(mm_infos) = block_mm_infos
-                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
-            {
-                let mut mm_hashes: Vec<u64> = block_mm_info
-                    .mm_objects
-                    .iter()
-                    .map(|obj| obj.mm_hash)
-                    .collect();
-                mm_hashes.sort_unstable();
+    let is_eagle_flag = options.is_eagle.unwrap_or(false);
+    let stride = kv_block_size as usize;
+    let window_size = if is_eagle_flag { stride + 1 } else { stride };
 
-                for mm_hash in mm_hashes {
-                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
-                }
+    let mut hashes = Vec::new();
+    let mut block_idx = 0;
+    let mut start = 0;
+
+    while start + window_size <= tokens.len() {
+        let chunk = &tokens[start..start + window_size];
+        let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+
+        if let Some(mm_infos) = options.block_mm_infos
+            && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+        {
+            let mut mm_hashes: Vec<u64> = block_mm_info
+                .mm_objects
+                .iter()
+                .map(|obj| obj.mm_hash)
+                .collect();
+            mm_hashes.sort_unstable();
+
+            for mm_hash in mm_hashes {
+                bytes.extend_from_slice(&mm_hash.to_le_bytes());
             }
+        }
 
-            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
-        })
-        .collect()
+        hashes.push(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
+
+        start += stride;
+        block_idx += 1;
+    }
+
+    hashes
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.
@@ -718,6 +739,7 @@ pub struct TokensWithHashes {
     lora_name: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
+    is_eagle: Option<bool>,
 }
 
 impl TokensWithHashes {
@@ -730,6 +752,7 @@ impl TokensWithHashes {
             lora_name: None,
             block_hashes: None,
             seq_hashes: None,
+            is_eagle: None,
         }
     }
 
@@ -743,6 +766,24 @@ impl TokensWithHashes {
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
         self
+    }
+
+    /// Sets Eagle hashing semantics for this token sequence.
+    pub fn with_is_eagle(mut self, is_eagle: bool) -> Self {
+        self.set_is_eagle(is_eagle);
+        self
+    }
+
+    /// Updates Eagle hashing semantics and invalidates cached hashes when it changes.
+    pub fn set_is_eagle(&mut self, is_eagle: bool) {
+        let is_eagle = Some(is_eagle);
+        if self.is_eagle == is_eagle {
+            return;
+        }
+
+        self.is_eagle = is_eagle;
+        self.block_hashes = None;
+        self.seq_hashes = None;
     }
 
     /// Returns a reference to the tokens.
@@ -776,8 +817,11 @@ impl TokensWithHashes {
             self.block_hashes = Some(compute_block_hash_for_seq(
                 &self.tokens,
                 self.block_size,
-                self.block_mm_infos.as_deref(),
-                self.lora_name.as_deref(),
+                BlockHashOptions {
+                    block_mm_infos: self.block_mm_infos.as_deref(),
+                    lora_name: self.lora_name.as_deref(),
+                    is_eagle: self.is_eagle,
+                },
             ));
         }
         self.block_hashes.as_ref().unwrap()
@@ -858,24 +902,41 @@ mod tests {
     #[case(64)]
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
         let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 2);
     }
 
     #[test]
     fn test_lora_name_produces_different_hash() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let lora_a = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-a"));
-        let lora_b = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-b"));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let lora_a = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let lora_b = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(base[0], lora_a[0]);
         assert_ne!(base[0], lora_b[0]);
@@ -885,16 +946,23 @@ mod tests {
     #[test]
     fn test_lora_name_none_matches_legacy() {
         let tokens: Vec<u32> = (0..8).collect();
-        let hashes_none = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, None, None);
+        let hashes_none = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
         assert_eq!(hashes_none, hashes_none2);
     }
 
     #[test]
     fn test_lora_name_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let empty = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some(""),
+                ..Default::default()
+            },
+        );
         assert_eq!(
             base, empty,
             "empty lora_name should be treated as base model"
@@ -916,6 +984,73 @@ mod tests {
         for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
             assert_ne!(b, l);
         }
+    }
+
+    #[test]
+    fn test_compute_block_hash_for_seq_eagle_windows() {
+        let tokens: Vec<u32> = (0..6).collect();
+
+        let default_hashes = compute_block_hash_for_seq(&tokens, 2, BlockHashOptions::default());
+        let eagle_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_set_is_eagle_invalidates_cache() {
+        let tokens: Vec<u32> = (0..6).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens, 2);
+
+        let default_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        with_hashes.set_is_eagle(true);
+        let eagle_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
     }
 
     #[test]

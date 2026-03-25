@@ -3,7 +3,6 @@
 
 mod collector;
 mod entrypoints;
-mod loader;
 pub(crate) mod offline;
 mod online;
 mod router;
@@ -30,11 +29,15 @@ pub use entrypoints::{
     simulate_concurrency_file, simulate_concurrency_file_with_router_mode,
     simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
     simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
+    simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
     simulate_concurrency_requests, simulate_concurrency_requests_with_router_mode,
+    simulate_concurrency_workload, simulate_concurrency_workload_with_router_mode,
     simulate_trace_file, simulate_trace_file_with_router_mode, simulate_trace_live_file,
     simulate_trace_live_file_with_router_mode, simulate_trace_live_requests,
-    simulate_trace_live_requests_with_router_mode, simulate_trace_requests,
-    simulate_trace_requests_with_router_mode,
+    simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
+    simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
+    simulate_trace_requests_with_router_mode, simulate_trace_workload,
+    simulate_trace_workload_with_router_mode,
 };
 
 pub(crate) fn normalize_trace_requests(

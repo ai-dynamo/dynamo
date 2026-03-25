@@ -25,6 +25,7 @@ use crate::kv_router::worker_kv_indexer_query_endpoint;
 use dynamo_kv_router::{
     indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse},
     protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
+    recovery::{CursorObservation, CursorState},
 };
 
 // Recovery retry configuration
@@ -37,28 +38,16 @@ const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
 
 type RecoveryKey = (WorkerId, DpRank);
 
-#[derive(Clone, Copy, Debug, Default)]
-enum RankCursor {
-    #[default]
-    NeedsRestore,
-    Live(u64),
-    InvalidatedByBarrier(Option<u64>),
-}
-
 #[derive(Debug, Default)]
 struct RankState {
-    cursor: RankCursor,
+    cursor: CursorState,
     max_seen_live_id: Option<u64>,
     recovery_inflight: bool,
 }
 
 impl RankState {
     fn last_applied_id(&self) -> Option<u64> {
-        match self.cursor {
-            RankCursor::NeedsRestore => None,
-            RankCursor::Live(event_id) => Some(event_id),
-            RankCursor::InvalidatedByBarrier(last_applied_id) => last_applied_id,
-        }
+        self.cursor.last_applied_id()
     }
 
     fn observe_live_id(&mut self, event_id: u64) {
@@ -301,9 +290,7 @@ impl WorkerQueryClient {
         let spawn = {
             let mut worker_state = worker_state.lock().await;
             let rank_state = worker_state.ranks.entry(dp_rank).or_default();
-            if matches!(rank_state.cursor, RankCursor::NeedsRestore)
-                && !rank_state.recovery_inflight
-            {
+            if matches!(rank_state.cursor, CursorState::Initial) && !rank_state.recovery_inflight {
                 tracing::info!(
                     "WorkerQueryClient: discovered worker {worker_id} dp_rank {dp_rank}, scheduling restore"
                 );
@@ -350,13 +337,13 @@ impl WorkerQueryClient {
 
         worker_state.epoch += 1;
         for rank_state in worker_state.ranks.values_mut() {
-            rank_state.cursor = RankCursor::InvalidatedByBarrier(rank_state.last_applied_id());
+            rank_state.cursor = rank_state.cursor.invalidate_by_barrier();
             rank_state.max_seen_live_id = None;
             rank_state.recovery_inflight = false;
         }
 
         let rank_state = worker_state.ranks.entry(clear_dp_rank).or_default();
-        rank_state.cursor = RankCursor::Live(clear_event_id);
+        rank_state.cursor = rank_state.cursor.apply_barrier(clear_event_id);
 
         tracing::info!(
             "Applying clear barrier for worker {worker_id}; invalidating recovery across {} dp_ranks",
@@ -394,62 +381,42 @@ impl WorkerQueryClient {
                 }
                 // Already applied the event, so no further action needed.
                 return;
-            } else {
-                match rank_state.cursor {
-                    // We have never established a cursor for this rank, so live traffic only tells
-                    // us how far ahead the stream has moved while a full restore catches up.
-                    RankCursor::NeedsRestore => {
-                        rank_state.observe_live_id(event_id);
-                        if !rank_state.recovery_inflight {
-                            rank_state.recovery_inflight = true;
-                            Action::SpawnFullRestore {
-                                epoch: worker_state.epoch,
-                            }
-                        } else {
-                            // A recovery is already in flight. Nothing to do.
-                            return;
-                        }
-                    }
-                    // Normal steady-state path: apply contiguous events directly, but coalesce any
-                    // gap into a single recovery pass using `max_seen_live_id` as the high-water mark.
-                    RankCursor::Live(last_applied_id) => {
-                        if event_id <= last_applied_id {
-                            // We've already applied this event. Nothing to do.
-                            return;
-                        } else if rank_state.recovery_inflight {
-                            // A recovery is already in flight. Drop the event for now, and potentially spawn a new recovery afterwards.
+            }
+
+            match rank_state.cursor.observe(event_id) {
+                CursorObservation::Stale { .. } => return,
+                observation if rank_state.recovery_inflight => {
+                    match observation {
+                        CursorObservation::Initial { .. }
+                        | CursorObservation::Contiguous { .. }
+                        | CursorObservation::Gap { .. }
+                        | CursorObservation::FreshAfterBarrier { .. } => {
                             rank_state.observe_live_id(event_id);
-                            return;
-                        } else if event_id > last_applied_id.saturating_add(1) {
-                            // We've detected a gap. Spawn a new recovery pass.
-                            rank_state.observe_live_id(event_id);
-                            rank_state.recovery_inflight = true;
-                            Action::SpawnIncremental {
-                                epoch: worker_state.epoch,
-                                start_event_id: last_applied_id.saturating_add(1),
-                            }
-                        } else {
-                            // Apply the event.
-                            rank_state.cursor = RankCursor::Live(event_id);
-                            rank_state.clear_max_seen_if_caught_up(event_id);
-                            Action::ApplyDirect
                         }
+                        CursorObservation::Stale { .. } => {}
                     }
-                    // A worker-wide barrier (currently `Cleared`) invalidated this rank's old
-                    // cursor. The next newer live event becomes the new starting point; we do not
-                    // recover across the barrier.
-                    RankCursor::InvalidatedByBarrier(last_applied_id) => {
-                        if last_applied_id
-                            .is_some_and(|last_applied_id| event_id <= last_applied_id)
-                        {
-                            return;
-                        } else {
-                            rank_state.cursor = RankCursor::Live(event_id);
-                            rank_state.max_seen_live_id = None;
-                            rank_state.recovery_inflight = false;
-                            Action::ApplyDirect
-                        }
+                    return;
+                }
+                CursorObservation::Initial { .. } => {
+                    rank_state.observe_live_id(event_id);
+                    rank_state.recovery_inflight = true;
+                    Action::SpawnFullRestore {
+                        epoch: worker_state.epoch,
                     }
+                }
+                CursorObservation::Gap { expected, .. } => {
+                    rank_state.observe_live_id(event_id);
+                    rank_state.recovery_inflight = true;
+                    Action::SpawnIncremental {
+                        epoch: worker_state.epoch,
+                        start_event_id: expected,
+                    }
+                }
+                CursorObservation::Contiguous { got }
+                | CursorObservation::FreshAfterBarrier { got, .. } => {
+                    rank_state.cursor = rank_state.cursor.advance_to(got);
+                    rank_state.clear_max_seen_if_caught_up(got);
+                    Action::ApplyDirect
                 }
             }
         };
@@ -531,12 +498,12 @@ impl WorkerQueryClient {
                     if matches!(&event.event.data, KvCacheEventData::Cleared) {
                         self.apply_worker_clear_locked(&mut worker_state, event)
                             .await;
-                        new_cursor = RankCursor::Live(event_id);
+                        new_cursor = new_cursor.apply_barrier(event_id);
                         saw_clear = true;
                         continue;
                     }
                     self.indexer.apply_event(event).await;
-                    new_cursor = RankCursor::Live(event_id);
+                    new_cursor = new_cursor.advance_to(event_id);
                 }
                 successful_response = true;
             }
@@ -554,16 +521,14 @@ impl WorkerQueryClient {
                 for event in &events {
                     self.indexer.apply_event(event.clone()).await;
                 }
-                new_cursor = RankCursor::Live(last_event_id);
+                new_cursor = new_cursor.advance_to(last_event_id);
                 successful_response = true;
             }
             Ok(WorkerKvQueryResponse::TooNew {
-                requested_start,
-                requested_end,
-                newest_available,
+                newest_available, ..
             }) => {
                 tracing::warn!(
-                    "Requested range [{requested_start:?}, {requested_end:?}] is newer than available (newest: {newest_available}) for worker {} dp_rank {}",
+                    "Requested recovery is newer than available (newest: {newest_available}) for worker {} dp_rank {}",
                     key.0,
                     key.1
                 );
@@ -802,6 +767,10 @@ mod tests {
 
         fn call_count(&self) -> usize {
             self.calls.lock().unwrap().len()
+        }
+
+        fn calls(&self) -> Vec<(RecoveryKey, Option<u64>, Option<u64>)> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -1043,7 +1012,7 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(key.0);
             let mut worker_state = worker_state.lock().await;
-            worker_state.ranks.entry(key.1).or_default().cursor = RankCursor::Live(10);
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(10);
         }
 
         let first_started = Arc::new(Notify::new());
@@ -1082,6 +1051,10 @@ mod tests {
             })
         })
         .await;
+        assert_eq!(
+            transport.calls(),
+            vec![(key, Some(11), None), (key, Some(16), None)]
+        );
 
         kv_indexer.flush().await;
         let events = kv_indexer.dump_events().await.unwrap();
@@ -1159,13 +1132,13 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(delayed_key.0);
             let mut worker_state = worker_state.lock().await;
-            worker_state.ranks.entry(delayed_key.1).or_default().cursor = RankCursor::Live(10);
+            worker_state.ranks.entry(delayed_key.1).or_default().cursor = CursorState::Live(10);
         }
         let other_key = (2, 0);
         {
             let worker_state = client.get_or_create_worker_state(other_key.0);
             let mut worker_state = worker_state.lock().await;
-            worker_state.ranks.entry(other_key.1).or_default().cursor = RankCursor::Live(20);
+            worker_state.ranks.entry(other_key.1).or_default().cursor = CursorState::Live(20);
         }
 
         let started = Arc::new(Notify::new());
@@ -1210,7 +1183,7 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(key.0);
             let mut worker_state = worker_state.lock().await;
-            worker_state.ranks.entry(key.1).or_default().cursor = RankCursor::Live(10);
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(10);
         }
 
         let started = Arc::new(Notify::new());
@@ -1247,8 +1220,8 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(1);
             let mut worker_state = worker_state.lock().await;
-            worker_state.ranks.entry(0).or_default().cursor = RankCursor::Live(10);
-            worker_state.ranks.entry(1).or_default().cursor = RankCursor::Live(20);
+            worker_state.ranks.entry(0).or_default().cursor = CursorState::Live(10);
+            worker_state.ranks.entry(1).or_default().cursor = CursorState::Live(20);
         }
 
         let started = Arc::new(Notify::new());
@@ -1280,6 +1253,9 @@ mod tests {
             })
         })
         .await;
+        assert!(rank_state_matches(&client, key1, |state| {
+            matches!(state.cursor, CursorState::InvalidatedByBarrier(Some(20)))
+        }));
 
         client.handle_live_event(make_store_event(1, 0, 15)).await;
         client.handle_live_event(make_store_event(1, 1, 30)).await;
@@ -1300,8 +1276,8 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(1);
             let mut worker_state = worker_state.lock().await;
-            worker_state.ranks.entry(0).or_default().cursor = RankCursor::Live(10);
-            worker_state.ranks.entry(1).or_default().cursor = RankCursor::Live(20);
+            worker_state.ranks.entry(0).or_default().cursor = CursorState::Live(10);
+            worker_state.ranks.entry(1).or_default().cursor = CursorState::Live(20);
         }
 
         transport.push_action(
@@ -1327,6 +1303,9 @@ mod tests {
             })
         })
         .await;
+        assert!(rank_state_matches(&client, key1, |state| {
+            matches!(state.cursor, CursorState::InvalidatedByBarrier(Some(20)))
+        }));
 
         assert_eq!(transport.call_count(), 1);
 

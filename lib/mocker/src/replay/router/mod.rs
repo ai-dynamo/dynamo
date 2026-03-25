@@ -6,4 +6,6 @@ mod online;
 mod shared;
 
 pub(crate) use offline::OfflineReplayRouter;
+#[cfg(test)]
+pub(crate) use offline::OfflineRouterSnapshot;
 pub(crate) use online::ReplayRouter;

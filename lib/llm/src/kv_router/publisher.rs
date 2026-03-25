@@ -1048,7 +1048,7 @@ impl WorkerMetricsPublisher {
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use dynamo_kv_router::protocols::compute_block_hash_for_seq;
+    use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
@@ -1060,10 +1060,11 @@ mod test_event_processing {
         let blk_hash = 0xdead_beef;
 
         let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
+            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None)[0];
+        let expected_hash =
+            compute_block_hash_for_seq(&token_ids, 4, BlockHashOptions::default())[0];
         assert_eq!(stored.tokens_hash, expected_hash);
         assert!(stored.mm_extra_info.is_none());
     }
@@ -1086,6 +1087,7 @@ mod test_event_processing {
             &block_hashes,
             None,
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         );
 
@@ -1110,6 +1112,7 @@ mod test_event_processing {
             None,
             &warning_count,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -1131,6 +1134,7 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
 
         let out = convert_event(
@@ -1156,6 +1160,7 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -1165,6 +1170,7 @@ mod test_event_processing {
             medium: None,
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
+            is_eagle: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -1211,6 +1217,7 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -1220,6 +1227,7 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
 
         let out1 = convert_event(
@@ -1883,6 +1891,7 @@ mod tests_startup_helpers {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         }];
 
         let batch = KvEventBatch {

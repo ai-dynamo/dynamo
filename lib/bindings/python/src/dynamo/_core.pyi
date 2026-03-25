@@ -279,6 +279,7 @@ def compute_block_hash_for_seq(
     kv_block_size: int,
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
+    is_eagle: Optional[bool] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -299,6 +300,9 @@ def compute_block_hash_for_seq(
                                }
                            ]
                        }
+        lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+        is_eagle: Optional Eagle mode flag. When true, hashes use overlapping
+                  `kv_block_size + 1` token windows with `kv_block_size` stride.
 
     Returns:
         List of block hashes (one per block)
@@ -478,6 +482,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    enable_eagle: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -634,7 +639,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None
+        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -682,7 +687,7 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None
+        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -765,6 +770,7 @@ class KvEventPublisher:
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        is_eagle: Optional[bool] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -780,6 +786,8 @@ class KvEventPublisher:
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
             lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+            is_eagle: Optional Eagle mode flag. When true, stored blocks are
+                reconstructed using overlapping `kv_block_size + 1` token windows.
         """
         ...
 
@@ -1071,6 +1079,7 @@ class RouterMode:
     """Router mode for load balancing requests across workers"""
     RoundRobin: "RouterMode"
     Random: "RouterMode"
+    PowerOfTwoChoices: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"
     ...
@@ -1388,6 +1397,10 @@ def run_mocker_synthetic_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     arrival_interval_ms: float = 1.0,
+    turns_per_session: int = 1,
+    shared_prefix_ratio: float = 0.0,
+    num_prefix_groups: int = 0,
+    inter_turn_delay_ms: float = 0.0,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
@@ -1703,6 +1716,7 @@ class KvRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
@@ -1715,6 +1729,10 @@ class KvRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            update_indexer: Whether to record the selected worker in the router's
+                           approximate indexer. This is only meaningful when
+                           `use_kv_events=False` and is independent from lifecycle
+                           state tracking via `request_id`.
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
@@ -1730,6 +1748,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
@@ -1737,6 +1756,9 @@ class KvRouter:
 
         Args:
             token_ids: List of token IDs to evaluate
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in hash computation
+                           for MM-aware potential-load estimation.
 
         Returns:
             A list of dictionaries, each containing:
