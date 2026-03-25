@@ -18,14 +18,17 @@
 import copy
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    ProfilingPhase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,7 @@ class ProfilerOperationalConfig:
     prefill_interpolation_granularity: int = DEFAULT_PREFILL_INTERPOLATION_GRANULARITY
     decode_interpolation_granularity: int = DEFAULT_DECODE_INTERPOLATION_GRANULARITY
     dry_run: bool = DEFAULT_DRY_RUN
+    current_phase: ProfilingPhase = field(default=ProfilingPhase.Initializing)
 
 
 # ---------------------------------------------------------------------------

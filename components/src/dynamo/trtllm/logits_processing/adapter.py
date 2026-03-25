@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import torch
 from tensorrt_llm.sampling_params import LogitsProcessor
@@ -70,7 +70,7 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
 
 
 def create_trtllm_adapters(
-    processors: List[BaseLogitsProcessor],
+    processors: Sequence[BaseLogitsProcessor],
 ) -> List[TrtllmDynamoLogitsAdapter]:
     """
     Create TensorRT-LLM compatible adapters from Dynamo logits processors.

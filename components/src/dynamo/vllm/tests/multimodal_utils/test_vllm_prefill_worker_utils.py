@@ -47,7 +47,6 @@ class TestMultimodalEmbeddingsLoader:
                 [url],
                 "req-1",
                 model=MODEL,
-                embeddings_dtype=DTYPE,
             )
 
         mock_fetch.assert_not_awaited()
@@ -76,7 +75,6 @@ class TestMultimodalEmbeddingsLoader:
                 [url],
                 "req-1",
                 model=MODEL,
-                embeddings_dtype=DTYPE,
             )
 
         mock_fetch.assert_awaited_once()
@@ -108,7 +106,6 @@ class TestMultimodalEmbeddingsLoader:
                 [url],
                 "req-1",
                 model=MODEL,
-                embeddings_dtype=DTYPE,
             )
 
         mock_fetch.assert_awaited_once()
@@ -144,7 +141,6 @@ class TestMultimodalEmbeddingsLoader:
                 [url_cached, url_miss],
                 "req-1",
                 model=MODEL,
-                embeddings_dtype=DTYPE,
             )
 
         mock_fetch.assert_awaited_once()

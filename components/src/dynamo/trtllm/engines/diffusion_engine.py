@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 if TYPE_CHECKING:
-    from tensorrt_llm._torch.visual_gen import DiffusionArgs
+    from tensorrt_llm._torch.visual_gen import VisualGenArgs
     from tensorrt_llm._torch.visual_gen.output import MediaOutput
     from tensorrt_llm._torch.visual_gen.pipeline import BasePipeline
 
@@ -71,7 +71,7 @@ class DiffusionEngine:
     The old visual_gen standalone package (setup_configs + from_pretrained +
     PIPELINE_REGISTRY) has been replaced by TensorRT-LLM's integrated
     visual_gen module which uses:
-    - DiffusionArgs for configuration
+    - VisualGenArgs for configuration
     - PipelineLoader for model loading (handles MetaInit, weight loading,
       quantization, torch.compile, and warmup)
     - AutoPipeline for pipeline type auto-detection
@@ -117,12 +117,12 @@ class DiffusionEngine:
         # Import TensorRT-LLM visual_gen components
         from tensorrt_llm._torch.visual_gen import PipelineLoader
 
-        # Build DiffusionArgs from DiffusionConfig
+        # Build VisualGenArgs from DiffusionConfig
         diffusion_args = self._build_diffusion_args()
-        logger.info(f"DiffusionArgs: {diffusion_args}")
+        logger.info(f"VisualGenArgs: {diffusion_args}")
 
         # Use PipelineLoader for the full loading flow:
-        #   DiffusionArgs → DiffusionModelConfig → AutoPipeline → BasePipeline
+        #   VisualGenArgs → DiffusionModelConfig → AutoPipeline → BasePipeline
         loader = PipelineLoader(diffusion_args)
         self._pipeline = loader.load()
 
@@ -132,26 +132,29 @@ class DiffusionEngine:
             f"{self._pipeline.__class__.__name__}"
         )
 
-    def _build_diffusion_args(self) -> "DiffusionArgs":
-        """Build DiffusionArgs from DiffusionConfig.
+    def _build_diffusion_args(self) -> "VisualGenArgs":
+        """Build VisualGenArgs from DiffusionConfig.
 
-        Maps dynamo's DiffusionConfig fields to TensorRT-LLM's DiffusionArgs
-        structure with its nested sub-configs (PipelineConfig, AttentionConfig,
-        ParallelConfig, TeaCacheConfig, quant_config).
+        Maps dynamo's DiffusionConfig fields to TensorRT-LLM's VisualGenArgs
+        structure with its nested sub-configs (PipelineConfig, TorchCompileConfig,
+        CudaGraphConfig, AttentionConfig, ParallelConfig, TeaCacheConfig,
+        quant_config).
 
         Returns:
-            DiffusionArgs instance for PipelineLoader.
+            VisualGenArgs instance for PipelineLoader.
         """
         from tensorrt_llm._torch.visual_gen import (
-            DiffusionArgs,
+            CudaGraphConfig,
             ParallelConfig,
             PipelineConfig,
             TeaCacheConfig,
+            TorchCompileConfig,
+            VisualGenArgs,
         )
         from tensorrt_llm._torch.visual_gen.config import AttentionConfig
 
         # Build quant_config dict if quantization is requested
-        # DiffusionArgs accepts a dict in ModelOpt format and parses it via model_validator
+        # VisualGenArgs accepts a dict in ModelOpt format and parses it via model_validator
         quant_config: dict | None = None
         if self.config.quant_algo:
             quant_config = {
@@ -164,15 +167,18 @@ class DiffusionEngine:
             device=self.device,
             dtype=self.config.torch_dtype,
             skip_components=self.config.skip_components,
+            skip_warmup=(self.config.warmup_steps == 0),
             pipeline=PipelineConfig(
-                enable_torch_compile=not self.config.disable_torch_compile,
-                torch_compile_mode=self.config.torch_compile_mode,
-                enable_fullgraph=self.config.enable_fullgraph,
                 fuse_qkv=self.config.fuse_qkv,
-                enable_cuda_graph=self.config.enable_cuda_graph,
                 enable_layerwise_nvtx_marker=self.config.enable_layerwise_nvtx_marker,
-                warmup_steps=self.config.warmup_steps,
                 enable_offloading=self.config.enable_async_cpu_offload,
+            ),
+            torch_compile=TorchCompileConfig(
+                enable_torch_compile=not self.config.disable_torch_compile,
+                enable_fullgraph=self.config.enable_fullgraph,
+            ),
+            cuda_graph=CudaGraphConfig(
+                enable_cuda_graph=self.config.enable_cuda_graph,
             ),
             attention=AttentionConfig(
                 backend=self.config.attn_backend.upper(),
@@ -198,7 +204,7 @@ class DiffusionEngine:
         if quant_config is not None:
             args_kwargs["quant_config"] = quant_config
 
-        return DiffusionArgs(**args_kwargs)
+        return VisualGenArgs(**args_kwargs)
 
     def generate(
         self,

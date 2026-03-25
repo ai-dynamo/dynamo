@@ -12,8 +12,9 @@ use dynamo_kv_router::{
     indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, OverlapScores, RouterEvent,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -38,8 +39,6 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
-pub mod queue;
-pub mod recorder;
 pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;
@@ -54,7 +53,7 @@ use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
         remote_indexer::RemoteIndexer,
-        scheduler::{KvScheduler, PotentialLoad},
+        scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -108,10 +107,6 @@ pub fn router_discovery_query(namespace: String, component: String) -> Discovery
         endpoint: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
-
-/// Concrete `WorkerSelector` bound to the runtime config type.
-pub type WorkerSelector =
-    dyn dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync;
 
 #[derive(Clone)]
 pub enum Indexer {
@@ -297,26 +292,34 @@ impl Indexer {
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
-pub struct KvRouter {
+pub struct KvRouter<Sel = DefaultWorkerSelector>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+{
     indexer: Indexer,
-    scheduler: KvScheduler,
+    scheduler: KvScheduler<Sel>,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
+    is_eagle: bool,
 }
 
-impl KvRouter {
+impl<Sel> KvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+{
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
         mut workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
-        selector: Option<Box<WorkerSelector>>,
+        selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
         model_name: Option<String>,
+        is_eagle: bool,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -327,10 +330,13 @@ impl KvRouter {
 
         if !kv_router_config.skip_initial_worker_wait {
             let _ = workers_with_configs
-                .wait_for(|m| !m.is_empty())
+                .wait_for(|m| m.len() >= kv_router_config.min_initial_workers)
                 .await
                 .map_err(|_| {
-                    anyhow::anyhow!("runtime config watch closed before any workers appeared")
+                    anyhow::anyhow!(
+                        "runtime config watch closed before {} workers appeared",
+                        kv_router_config.min_initial_workers
+                    )
                 })?;
         }
 
@@ -367,6 +373,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            is_eagle,
         })
     }
 
@@ -381,6 +388,20 @@ impl KvRouter {
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    pub fn is_eagle(&self) -> bool {
+        self.is_eagle
+    }
+
+    pub async fn record_routing_decision(
+        &self,
+        mut tokens_with_hashes: TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        self.indexer
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .await
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
@@ -413,8 +434,11 @@ impl KvRouter {
             compute_block_hash_for_seq(
                 tokens,
                 self.block_size,
-                block_mm_infos,
-                lora_name.as_deref(),
+                BlockHashOptions {
+                    block_mm_infos,
+                    lora_name: lora_name.as_deref(),
+                    is_eagle: Some(self.is_eagle),
+                },
             )
         });
         let hash_elapsed = start.elapsed();
@@ -432,7 +456,11 @@ impl KvRouter {
                 tokens,
                 self.block_size,
                 router_config_override,
-                lora_name.as_deref(),
+                BlockHashOptions {
+                    block_mm_infos,
+                    lora_name: lora_name.as_deref(),
+                    is_eagle: Some(self.is_eagle),
+                },
             )
         });
         let seq_hash_elapsed = start.elapsed();
@@ -488,6 +516,7 @@ impl KvRouter {
         &self,
         request_id: String,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         overlap_blocks: u32,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
@@ -500,7 +529,11 @@ impl KvRouter {
             tokens,
             self.block_size,
             router_config_override,
-            lora_name.as_deref(),
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name: lora_name.as_deref(),
+                is_eagle: Some(self.is_eagle),
+            },
         );
 
         if let Err(e) = self
@@ -556,10 +589,19 @@ impl KvRouter {
     pub async fn get_overlap_blocks(
         &self,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
     ) -> Result<u32, KvRouterError> {
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
+        let block_hashes = compute_block_hash_for_seq(
+            tokens,
+            self.block_size,
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
+        );
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }
@@ -569,17 +611,30 @@ impl KvRouter {
         &self,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
+        let block_hashes = compute_block_hash_for_seq(
+            tokens,
+            self.block_size,
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
+        );
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
-            lora_name,
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
         );
 
         Ok(self
@@ -596,7 +651,11 @@ impl KvRouter {
 // NOTE: KVRouter works like a PushRouter,
 // but without the reverse proxy functionality, but based on contract of 3 request types
 #[async_trait]
-impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
+impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
+    for KvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+{
     async fn generate(
         &self,
         request: SingleIn<RouterRequest>,
@@ -649,7 +708,10 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
     }
 }
 
-impl Drop for KvRouter {
+impl<Sel> Drop for KvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+{
     fn drop(&mut self) {
         tracing::info!("Dropping KvRouter - cancelling background tasks");
         self.cancellation_token.cancel();

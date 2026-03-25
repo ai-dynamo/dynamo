@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 from prometheus_client import Gauge, start_http_server
 
@@ -35,6 +35,9 @@ from dynamo.planner.utils.prometheus import (
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+
+# Union of all connector types used by the planner
+ConnectorType = Union[GlobalPlannerConnector, KubernetesConnector, VirtualConnector]
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -248,14 +251,14 @@ class BasePlanner:
 
     def __init__(
         self,
-        runtime: DistributedRuntime,
+        runtime: Optional[DistributedRuntime],
         config: PlannerConfig,
         dryrun: bool = False,
         shared_state: Optional[PlannerSharedState] = None,
         prometheus_metrics: Optional[PlannerPrometheusMetrics] = None,
         prometheus_traffic_client: Optional[PrometheusAPIClient] = None,
         prometheus_engine_client: Optional[DirectRouterMetricsClient] = None,
-        connector=None,
+        connector: Optional[ConnectorType] = None,
         start_prometheus_server: bool = True,
         component_type: Optional[SubComponentType] = None,
     ):
@@ -272,11 +275,13 @@ class BasePlanner:
         if not self.dryrun:
             self.runtime = runtime
             self.namespace = config.namespace
+            self.connector: ConnectorType
 
             if not config.no_operation:
                 # Initialize connector based on environment
                 if config.environment == "global-planner":
                     assert config.global_planner_namespace is not None
+                    assert runtime is not None
                     self.connector = GlobalPlannerConnector(
                         runtime,
                         self.namespace,
@@ -289,6 +294,7 @@ class BasePlanner:
                         self.namespace, self.model_name
                     )
                 elif config.environment == "virtual":
+                    assert runtime is not None
                     self.connector = VirtualConnector(
                         runtime,
                         self.namespace,
@@ -430,11 +436,12 @@ class BasePlanner:
                 self.prometheus_engine_client = prometheus_engine_client
             else:
                 # Auto-discover frontend metrics URL in Kubernetes mode
+                connector = getattr(self, "connector", None)
                 if not config.load_router_metrics_url and isinstance(
-                    getattr(self, "connector", None), KubernetesConnector
+                    connector, KubernetesConnector
                 ):
                     config.load_router_metrics_url = (
-                        self.connector.get_frontend_metrics_url()
+                        connector.get_frontend_metrics_url()
                     )
                     if not config.load_router_metrics_url:
                         raise ValueError(
@@ -447,6 +454,9 @@ class BasePlanner:
                             f"Auto-discovered frontend metrics URL: {config.load_router_metrics_url}"
                         )
 
+                assert (
+                    config.load_router_metrics_url is not None
+                ), "load_router_metrics_url must be set when load-based scaling is enabled"
                 self.prometheus_engine_client = DirectRouterMetricsClient(
                     config.load_router_metrics_url, config.namespace
                 )
@@ -494,6 +504,7 @@ class BasePlanner:
 
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         """Create a client for the given component and endpoint, with a brief sleep for state sync."""
+        assert self.runtime is not None, "Runtime is not initialized"
         client = await self.runtime.endpoint(
             f"{self.namespace}.{component_name}.{endpoint_name}"
         ).client()
@@ -604,41 +615,46 @@ class BasePlanner:
             )
 
         # Prometheus returns seconds, convert to milliseconds
+        assert (
+            self.model_name is not None
+        ), "model_name must be set before observing traffic stats"
+
+        interval_str = f"{self.config.throughput_adjustment_interval}s"
         self.last_metrics.ttft = (
             self.prometheus_traffic_client.get_avg_time_to_first_token(
-                f"{self.config.throughput_adjustment_interval}s",
+                interval_str,
                 self.model_name,
             )
             * 1000
         )
         self.last_metrics.itl = (
             self.prometheus_traffic_client.get_avg_inter_token_latency(
-                f"{self.config.throughput_adjustment_interval}s",
+                interval_str,
                 self.model_name,
             )
             * 1000
         )
         self.last_metrics.num_req = (
             self.prometheus_traffic_client.get_avg_request_count(
-                f"{self.config.throughput_adjustment_interval}s",
+                interval_str,
                 self.model_name,
             )
         )
         self.last_metrics.request_duration = (
             self.prometheus_traffic_client.get_avg_request_duration(
-                f"{self.config.throughput_adjustment_interval}s",
+                interval_str,
                 self.model_name,
             )
         )
         self.last_metrics.isl = (
             self.prometheus_traffic_client.get_avg_input_sequence_tokens(
-                f"{self.config.throughput_adjustment_interval}s",
+                interval_str,
                 self.model_name,
             )
         )
         self.last_metrics.osl = (
             self.prometheus_traffic_client.get_avg_output_sequence_tokens(
-                f"{self.config.throughput_adjustment_interval}s",
+                interval_str,
                 self.model_name,
             )
         )
@@ -666,9 +682,12 @@ class BasePlanner:
         self.update_predictors_from_metrics(self.last_metrics)
 
     def update_predictors_from_metrics(self, metrics: Metrics) -> None:
-        self.num_req_predictor.add_data_point(metrics.num_req)
-        self.isl_predictor.add_data_point(metrics.isl)
-        self.osl_predictor.add_data_point(metrics.osl)
+        if metrics.num_req is not None:
+            self.num_req_predictor.add_data_point(metrics.num_req)
+        if metrics.isl is not None:
+            self.isl_predictor.add_data_point(metrics.isl)
+        if metrics.osl is not None:
+            self.osl_predictor.add_data_point(metrics.osl)
 
     def predict_load(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
         try:

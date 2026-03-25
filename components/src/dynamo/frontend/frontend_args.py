@@ -181,8 +181,11 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
-            help="How to route the request.",
-            choices=["round-robin", "random", "kv", "direct"],
+            help="How to route the request. power-of-two picks 2 random workers and "
+            "routes to the one with fewer in-flight requests. In disaggregated prefill "
+            "mode, power-of-two skips bootstrap optimization and falls back to the "
+            "synchronous prefill path.",
+            choices=["round-robin", "random", "power-of-two", "kv", "direct"],
         )
 
         # KV router options (shared with dynamo.router)

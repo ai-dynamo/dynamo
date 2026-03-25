@@ -3,12 +3,10 @@
 
 //! Engine factory — creates the appropriate scheduler based on [`EngineType`].
 
-use std::sync::Arc;
-
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{EngineType, KvCacheEventSink, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{EngineType, KvEventPublishers, MockEngineArgs, OutputSignal};
 use crate::scheduler::{Scheduler, SchedulerHandle, SglangScheduler};
 
 /// Create a scheduler for the configured engine type.
@@ -19,7 +17,7 @@ pub fn create_engine(
     args: MockEngineArgs,
     dp_rank: u32,
     output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-    kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+    kv_event_publishers: KvEventPublishers,
     cancellation_token: Option<CancellationToken>,
 ) -> Box<dyn SchedulerHandle> {
     match args.engine_type {
@@ -27,14 +25,14 @@ pub fn create_engine(
             args,
             dp_rank,
             output_tx,
-            kv_event_sink,
+            kv_event_publishers,
             cancellation_token,
         )),
         EngineType::Sglang => Box::new(SglangScheduler::new(
             args,
             dp_rank,
             output_tx,
-            kv_event_sink,
+            kv_event_publishers,
             cancellation_token,
         )),
     }

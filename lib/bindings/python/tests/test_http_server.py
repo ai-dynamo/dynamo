@@ -29,7 +29,11 @@ from dynamo.runtime import DistributedRuntime
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
 
 class MockHttpEngine:
