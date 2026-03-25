@@ -674,6 +674,19 @@ mod tests {
         }
     }
 
+    // IPv6-only resolver: IPv4 unavailable, IPv6 available
+    struct Ipv6OnlyResolver;
+
+    impl IpResolver for Ipv6OnlyResolver {
+        fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
+            Err(Error::LocalIpAddressNotFound)
+        }
+
+        fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
+            Ok(IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]))
+        }
+    }
+
     #[tokio::test]
     async fn test_tcp_stream_server_default_behavior() {
         // Test that TcpStreamServer::new works with default options
@@ -777,5 +790,66 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_ipv6_only_network() {
+        // Test IPv6-only network support: IPv4 unavailable, IPv6 available
+        // This validates that the server properly falls back to IPv6 when IPv4 is not found
+        // Fixes issue #7619: Dynamo should work on IPv6-only networks
+
+        let options = ServerOptions::builder().port(0).build().unwrap();
+
+        // Use the IPv6-only resolver to simulate an IPv6-only environment
+        let result = TcpStreamServer::new_with_resolver(options, Ipv6OnlyResolver).await;
+        assert!(
+            result.is_ok(),
+            "Server creation should succeed on IPv6-only networks"
+        );
+
+        let server = result.unwrap();
+
+        // Get the actual bound address by registering a stream
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending_connection = server.register(stream_options).await;
+        let connection_info = pending_connection
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
+
+        // Should use the IPv6 address from the resolver
+        let ip = socket_addr.ip();
+        assert!(
+            ip.is_ipv6(),
+            "Should use IPv6 address when IPv4 is unavailable"
+        );
+
+        // Verify it matches our test IPv6 address
+        let expected_ipv6 = IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]);
+        assert_eq!(
+            ip, expected_ipv6,
+            "Should use the IPv6 address from resolver, got: {}",
+            ip
+        );
+
+        // The server should work with the IPv6 address
+        assert!(socket_addr.port() > 0, "Server should have a valid port");
+
+        println!(
+            "SUCCESS: IPv6-only network support confirmed. Bound to: {}",
+            ip
+        );
     }
 }
