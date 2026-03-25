@@ -513,6 +513,10 @@ impl JailedStream {
             let mut last_annotated_id: Option<String> = None;
             let mut last_annotated_event: Option<String> = None;
             let mut last_annotated_comment: Option<Vec<String>> = None;
+            // Track stream response metadata so finalization chunks carry real values
+            let mut last_stream_id = String::new();
+            let mut last_stream_model = String::new();
+            let mut last_stream_created: u32 = 0;
 
             // Pin the stream for iteration (stack pinning is more efficient)
             tokio::pin!(stream);
@@ -521,6 +525,10 @@ impl JailedStream {
             // Process each item in the stream
             while let Some(response) = stream.next().await {
                 if let Some(chat_response) = response.data.as_ref() {
+                    last_stream_id.clone_from(&chat_response.id);
+                    last_stream_model.clone_from(&chat_response.model);
+                    last_stream_created = chat_response.created;
+
                     let mut all_emissions = Vec::new();
 
                     if chat_response.choices.is_empty() {
@@ -666,12 +674,12 @@ impl JailedStream {
 
             if !final_emissions.is_empty() {
                 tracing::debug!("Stream ended while jailed, releasing accumulated content");
-                // Create a dummy response for finalization
+                // Create a finalization response carrying forward real stream metadata
                 let dummy_response = NvCreateChatCompletionStreamResponse {
-                    id: "stream-end".to_string(),
+                    id: last_stream_id,
                     object: "chat.completion.chunk".to_string(),
-                    created: 0,
-                    model: "unknown".to_string(),
+                    created: last_stream_created,
+                    model: last_stream_model,
                     choices: Vec::new(),
                     usage: None,
                     service_tier: None,
