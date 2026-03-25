@@ -73,6 +73,8 @@ navigation:
             path: ../pages-dev/kubernetes/inference-gateway.md
           - page: Snapshot
             path: ../pages-dev/kubernetes/snapshot.md
+          - page: Disagg Communication
+            path: ../pages-dev/kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
