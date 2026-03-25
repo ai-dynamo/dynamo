@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -111,7 +113,8 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
         .to_direct_request(4, Uuid::from_u128(1), Some(5.0))
         .unwrap();
     let replay_hashes = turn.to_replay_hashes(4).unwrap();
-    let expected_local = compute_block_hash_for_seq(&request.tokens, 4, None, None);
+    let expected_local =
+        compute_block_hash_for_seq(&request.tokens, 4, BlockHashOptions::default());
 
     assert_eq!(replay_hashes.local_block_hashes, expected_local);
     assert_eq!(

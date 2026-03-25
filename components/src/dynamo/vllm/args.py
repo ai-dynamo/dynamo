@@ -542,6 +542,8 @@ def _try_hostname_resolution() -> str | None:
         )
         for family, socktype, _, _, sockaddr in infos:
             host_ip = sockaddr[0]
+            if not isinstance(host_ip, str):
+                continue
             if not _is_routable(host_ip):
                 continue
             try:

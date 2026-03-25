@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     pipeline::{
@@ -298,7 +298,12 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
+            .get_overlap_blocks(
+                routing_token_ids,
+                block_mm_infos,
+                worker,
+                lora_name.as_deref(),
+            )
             .await?;
 
         if !is_query_only {
@@ -306,6 +311,7 @@ impl KvPushRouter {
                 .add_request(
                     context_id.to_string(),
                     routing_token_ids,
+                    block_mm_infos,
                     overlap_blocks,
                     expected_output_tokens,
                     worker,
@@ -385,10 +391,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // so the indexer can track cache state based on routing decisions.
         // This covers both pre-selected workers and find_best_match selections.
         if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
+            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+            let mut tokens_with_hashes =
+                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
+                    .with_is_eagle(self.chooser.is_eagle());
+            if let Some(infos) = block_mm_infos {
+                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+            }
+            if let Some(lora_name) = lora_name {
+                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+            }
             if let Err(e) = self
                 .chooser
-                .record_routing_decision(request.token_ids.clone(), worker)
+                .record_routing_decision(tokens_with_hashes, worker)
                 .await
             {
                 tracing::warn!(

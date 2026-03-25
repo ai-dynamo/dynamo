@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    OverlapScores, RouterEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    BlockHashOptions, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
     compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
@@ -68,7 +68,14 @@ impl SyncReplayIndexer {
     }
 
     fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
-        let sequence = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(
+            tokens,
+            self.block_size,
+            BlockHashOptions {
+                lora_name,
+                ..Default::default()
+            },
+        );
         self.tree.find_matches(sequence, false)
     }
 
@@ -340,7 +347,7 @@ impl OfflineReplayRouter {
                         &request.tokens,
                         self.block_size,
                         None,
-                        None,
+                        BlockHashOptions::default(),
                     )
                 };
                 (overlaps, token_seq)
@@ -351,7 +358,7 @@ impl OfflineReplayRouter {
                     &request.tokens,
                     self.block_size,
                     None,
-                    None,
+                    BlockHashOptions::default(),
                 );
                 (overlaps, token_seq)
             }

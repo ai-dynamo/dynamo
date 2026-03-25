@@ -279,6 +279,7 @@ def compute_block_hash_for_seq(
     kv_block_size: int,
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
+    is_eagle: Optional[bool] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -299,6 +300,9 @@ def compute_block_hash_for_seq(
                                }
                            ]
                        }
+        lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+        is_eagle: Optional Eagle mode flag. When true, hashes use overlapping
+                  `kv_block_size + 1` token windows with `kv_block_size` stride.
 
     Returns:
         List of block hashes (one per block)
@@ -478,6 +482,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    enable_eagle: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -634,7 +639,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None
+        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -682,7 +687,7 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None
+        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -765,6 +770,7 @@ class KvEventPublisher:
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        is_eagle: Optional[bool] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -780,6 +786,8 @@ class KvEventPublisher:
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
             lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+            is_eagle: Optional Eagle mode flag. When true, stored blocks are
+                reconstructed using overlapping `kv_block_size + 1` token windows.
         """
         ...
 
@@ -1739,6 +1747,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
@@ -1746,6 +1755,9 @@ class KvRouter:
 
         Args:
             token_ids: List of token IDs to evaluate
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in hash computation
+                           for MM-aware potential-load estimation.
 
         Returns:
             A list of dictionaries, each containing:

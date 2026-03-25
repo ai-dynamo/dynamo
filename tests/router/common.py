@@ -677,7 +677,7 @@ def _test_router_overload_503(
                     )
 
                 # Wait briefly to ensure requests are in-flight
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.8)
 
                 # Now send one more request that should get 503
                 logger.info("Sending additional request that should receive 503...")
@@ -687,10 +687,10 @@ def _test_router_overload_503(
                         if status_code == 503:
                             body = await response.json()
                             logger.info(f"Got expected 503 response: {body}")
-                            assert "Service temporarily unavailable" in body.get(
-                                "error", ""
-                            ) or "All workers are busy" in body.get(
-                                "error", ""
+                            error_msg = body.get("message", "")
+                            assert (
+                                "Service temporarily unavailable" in error_msg
+                                or "All workers are busy" in error_msg
                             ), f"Expected service overload error message, got: {body}"
                             return True
                         else:
