@@ -138,6 +138,7 @@ impl KvReplayRouter {
             args.block_size as u32,
             selector,
             policy,
+            config.router_track_prefill_tokens,
             CancellationToken::new(),
             "replay",
             false,

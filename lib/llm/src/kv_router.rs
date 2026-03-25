@@ -505,6 +505,9 @@ where
             router_config_override,
             lora_name.as_deref(),
         );
+        let track_prefill_tokens = self
+            .kv_router_config
+            .track_prefill_tokens(router_config_override);
 
         if let Err(e) = self
             .scheduler
@@ -513,6 +516,7 @@ where
                 token_sequence: maybe_seq_hashes,
                 isl: isl_tokens,
                 overlap: overlap_blocks,
+                track_prefill_tokens,
                 expected_output_tokens,
                 worker,
                 lora_name,
@@ -584,10 +588,16 @@ where
             router_config_override,
             lora_name,
         );
+        let track_prefill_tokens = self
+            .kv_router_config
+            .track_prefill_tokens(router_config_override);
 
-        Ok(self
-            .scheduler
-            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores))
+        Ok(self.scheduler.get_potential_loads(
+            maybe_seq_hashes,
+            isl_tokens,
+            overlap_scores,
+            track_prefill_tokens,
+        ))
     }
 
     /// Dump all events from the indexer

@@ -59,6 +59,17 @@ enum PrefillOutcome {
     Completed(PrefillResult),
 }
 
+fn build_decode_router_override(
+    existing_override: Option<RouterConfigOverride>,
+) -> RouterConfigOverride {
+    RouterConfigOverride {
+        overlap_score_weight: Some(0.0),
+        assume_kv_reuse: Some(false),
+        track_prefill_tokens: Some(false),
+        ..existing_override.unwrap_or_default()
+    }
+}
+
 /// The inner router used by PrefillRouter
 #[derive(Clone)]
 enum InnerPrefillRouter {
@@ -717,12 +728,10 @@ impl
                 // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
                 // - assume_kv_reuse = false (generate random hashes since decode workers
                 //   may already have blocks cached from prefill transfer)
+                // - track_prefill_tokens = false (decode router should ignore prompt-side load)
                 let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    assume_kv_reuse: Some(false),
-                    ..existing_override.unwrap_or_default()
-                });
+                decode_req.router_config_override =
+                    Some(build_decode_router_override(existing_override));
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
@@ -737,5 +746,23 @@ impl
                 Err(anyhow::anyhow!(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_router_override_disables_overlap_and_prefill_tracking() {
+        let override_config = build_decode_router_override(Some(RouterConfigOverride {
+            router_temperature: Some(0.7),
+            ..Default::default()
+        }));
+
+        assert_eq!(override_config.overlap_score_weight, Some(0.0));
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+        assert_eq!(override_config.router_temperature, Some(0.7));
     }
 }

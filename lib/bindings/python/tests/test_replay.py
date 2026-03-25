@@ -75,6 +75,7 @@ def _router_config_payload():
         "router_track_active_blocks": True,
         "router_track_output_blocks": False,
         "router_assume_kv_reuse": True,
+        "router_track_prefill_tokens": True,
         "router_snapshot_threshold": 1000000,
         "router_reset_states": False,
         "router_ttl_secs": 120.0,

@@ -488,6 +488,8 @@ impl RouterHandles {
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
                 overlap_score_weight: Some(0.0),
+                assume_kv_reuse: Some(false),
+                track_prefill_tokens: Some(false),
                 ..Default::default()
             })
         } else {
@@ -564,6 +566,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         cfg.router_track_output_blocks = v;
     }
+    if let Some(v) = env_bool("DYN_ROUTER_TRACK_PREFILL_TOKENS") {
+        cfg.router_track_prefill_tokens = v;
+    }
     if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
         cfg.router_queue_threshold = Some(v);
     }
@@ -575,6 +580,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_replica_sync = cfg.router_replica_sync,
         router_track_active_blocks = cfg.router_track_active_blocks,
         router_track_output_blocks = cfg.router_track_output_blocks,
+        router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
