@@ -15,7 +15,11 @@ use super::runtime_utils::{
     pop_next_trace_ready, pop_ready_decode_handoff, pop_ready_worker_completion,
     push_decode_handoff, push_worker_completion,
 };
-use super::state::OfflineWorkerState;
+#[cfg(test)]
+use super::state::DisaggPhase;
+#[cfg(test)]
+use super::state::DisaggRequestSnapshot;
+use super::state::{DisaggRequestState, OfflineWorkerState};
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
@@ -33,33 +37,6 @@ enum ReplayMode {
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
     Workload(WorkloadDriver),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DisaggPhase {
-    QueuedPrefill,
-    RunningPrefill,
-    QueuedDecode,
-    RunningDecode,
-    Done,
-}
-
-struct DisaggRequestState {
-    original: Option<DirectRequest>,
-    #[cfg(test)]
-    arrival_ms: f64,
-    phase: DisaggPhase,
-    prefill_worker_idx: Option<usize>,
-    decode_worker_idx: Option<usize>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-struct DisaggRequestSnapshot {
-    arrival_ms: f64,
-    phase: DisaggPhase,
-    prefill_worker_idx: Option<usize>,
-    decode_worker_idx: Option<usize>,
 }
 
 #[cfg(test)]
@@ -265,30 +242,11 @@ impl DisaggRuntime {
             .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))
     }
 
-    fn original_request(state: &DisaggRequestState) -> Result<&DirectRequest> {
-        state
-            .original
-            .as_ref()
-            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
-    }
-
-    fn build_prefill_request(state: &DisaggRequestState) -> Result<DirectRequest> {
-        let mut request = Self::original_request(state)?.clone();
-        request.max_output_tokens = 1;
-        Ok(request)
-    }
-
-    fn build_decode_request(state: &DisaggRequestState) -> Result<DirectRequest> {
-        Ok(Self::original_request(state)?.clone())
-    }
-
     fn dispatch_prefill(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
         self.validate_worker_idx(SimulationWorkerStage::Prefill, worker_idx)?;
-        let request = Self::build_prefill_request(self.state(uuid)?)?;
+        let request = self.state(uuid)?.build_prefill_request()?;
         self.prefill_workers[worker_idx].receive_request(request);
-        let state = self.state_mut(uuid)?;
-        state.phase = DisaggPhase::RunningPrefill;
-        state.prefill_worker_idx = Some(worker_idx);
+        self.state_mut(uuid)?.start_prefill(worker_idx);
         #[cfg(test)]
         {
             self.stats.prefill_assignments.insert(uuid, worker_idx);
@@ -298,11 +256,9 @@ impl DisaggRuntime {
 
     fn dispatch_decode(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
         self.validate_worker_idx(SimulationWorkerStage::Decode, worker_idx)?;
-        let request = Self::build_decode_request(self.state(uuid)?)?;
+        let request = self.state(uuid)?.build_decode_request()?;
         self.decode_workers[worker_idx].receive_request(request);
-        let state = self.state_mut(uuid)?;
-        state.phase = DisaggPhase::RunningDecode;
-        state.decode_worker_idx = Some(worker_idx);
+        self.state_mut(uuid)?.start_decode(worker_idx);
         #[cfg(test)]
         {
             self.stats.decode_assignments.insert(uuid, worker_idx);
@@ -312,7 +268,7 @@ impl DisaggRuntime {
 
     fn dispatch_prefill_admissions(&mut self, admissions: Vec<(Uuid, usize)>) -> Result<()> {
         for (uuid, worker_idx) in admissions {
-            if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
+            if !self.state(uuid)?.is_queued_prefill() {
                 bail!("offline disagg replay expected queued prefill request for {uuid}");
             }
             self.dispatch_prefill(uuid, worker_idx)?;
@@ -322,7 +278,7 @@ impl DisaggRuntime {
 
     fn dispatch_decode_admissions(&mut self, admissions: Vec<(Uuid, usize)>) -> Result<()> {
         for (uuid, worker_idx) in admissions {
-            if self.state(uuid)?.phase != DisaggPhase::QueuedDecode {
+            if !self.state(uuid)?.is_queued_decode() {
                 bail!("offline disagg replay expected queued decode request for {uuid}");
             }
             self.dispatch_decode(uuid, worker_idx)?;
@@ -338,9 +294,10 @@ impl DisaggRuntime {
         };
         let maybe_worker_idx = {
             let requests = &self.requests;
-            let request = Self::original_request(requests.get(&uuid).ok_or_else(|| {
-                anyhow!("offline disagg replay missing request state for {uuid}")
-            })?)?;
+            let request = requests
+                .get(&uuid)
+                .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))?
+                .original_request()?;
             decode_router.submit_request_with_hashes(request, None, self.now_ms)?
         };
         self.record_router_pending();
@@ -353,7 +310,7 @@ impl DisaggRuntime {
             return Ok(());
         }
 
-        self.state_mut(uuid)?.phase = DisaggPhase::QueuedDecode;
+        self.state_mut(uuid)?.queue_decode();
         Ok(())
     }
 
@@ -374,15 +331,8 @@ impl DisaggRuntime {
             request.max_output_tokens,
         );
 
-        let state = DisaggRequestState {
-            original: Some(request),
-            #[cfg(test)]
-            arrival_ms: arrival_time_ms,
-            phase: DisaggPhase::QueuedPrefill,
-            prefill_worker_idx: None,
-            decode_worker_idx: None,
-        };
-        self.requests.insert(uuid, state);
+        self.requests
+            .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
         let Some(prefill_router) = self.prefill_router.as_mut() else {
             let worker_idx = self.next_prefill_worker();
             self.dispatch_prefill(uuid, worker_idx)?;
@@ -390,9 +340,10 @@ impl DisaggRuntime {
         };
         let maybe_worker_idx = {
             let requests = &self.requests;
-            let request = Self::original_request(requests.get(&uuid).ok_or_else(|| {
-                anyhow!("offline disagg replay missing request state for {uuid}")
-            })?)?;
+            let request = requests
+                .get(&uuid)
+                .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))?
+                .original_request()?;
             prefill_router.submit_request_with_hashes(request, replay_hashes, self.now_ms)?
         };
         self.record_router_pending();
@@ -501,9 +452,7 @@ impl DisaggRuntime {
         if let AdmissionSource::Workload(driver) = &mut self.admission {
             driver.on_complete(signal.uuid, self.now_ms)?;
         }
-        let state = self.state_mut(signal.uuid)?;
-        state.phase = DisaggPhase::Done;
-        state.original = None;
+        self.state_mut(signal.uuid)?.mark_done();
         self.dispatch_decode_admissions(admissions)?;
         Ok(())
     }
@@ -789,17 +738,7 @@ impl DisaggRuntime {
             self.stats.request_snapshots = self
                 .requests
                 .iter()
-                .map(|(uuid, state)| {
-                    (
-                        *uuid,
-                        DisaggRequestSnapshot {
-                            arrival_ms: state.arrival_ms,
-                            phase: state.phase,
-                            prefill_worker_idx: state.prefill_worker_idx,
-                            decode_worker_idx: state.decode_worker_idx,
-                        },
-                    )
-                })
+                .map(|(uuid, state)| (*uuid, state.debug_snapshot()))
                 .collect();
         }
     }

@@ -9,7 +9,7 @@ use super::runtime_utils::{
 };
 #[cfg(test)]
 use super::state::OfflineWorkerSnapshot;
-use super::state::OfflineWorkerState;
+use super::state::{AggRequestState, OfflineWorkerState};
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
@@ -20,7 +20,7 @@ use crate::scheduler::RouterEventVisibility;
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -66,13 +66,13 @@ struct OfflineRuntime {
     next_worker_idx: usize,
     next_event_seq: u64,
     admission: AdmissionSource,
-    router_pending: HashMap<Uuid, DirectRequest>,
+    requests: HashMap<Uuid, AggRequestState>,
+    queued_requests: usize,
     workers: Vec<OfflineWorkerState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
     mode: ReplayMode,
     router: Option<OfflineReplayRouter>,
-    prefill_completed: HashSet<Uuid>,
     stats: OfflineRuntimeStats,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
@@ -139,7 +139,8 @@ impl OfflineRuntime {
             next_worker_idx: 0,
             next_event_seq: 0,
             admission,
-            router_pending: HashMap::new(),
+            requests: HashMap::new(),
+            queued_requests: 0,
             workers: (0..num_workers)
                 .map(|worker_idx| {
                     OfflineWorkerState::new(worker_idx, args.clone(), capture_kv_events)
@@ -149,7 +150,6 @@ impl OfflineRuntime {
             events: BinaryHeap::new(),
             mode,
             router,
-            prefill_completed: HashSet::new(),
             #[cfg(test)]
             stats: OfflineRuntimeStats::default(),
             #[cfg(not(test))]
@@ -166,7 +166,7 @@ impl OfflineRuntime {
             .iter()
             .map(OfflineWorkerState::in_flight)
             .sum::<usize>()
-            + self.router_pending.len()
+            + self.queued_requests
     }
 
     fn record_in_flight_peak(&mut self) {
@@ -224,9 +224,14 @@ impl OfflineRuntime {
 
     fn dispatch_router_admissions(&mut self, admissions: Vec<(Uuid, usize)>) -> anyhow::Result<()> {
         for (uuid, worker_idx) in admissions {
-            let request = self.router_pending.remove(&uuid).ok_or_else(|| {
-                anyhow::anyhow!("offline replay missing queued request state for {uuid}")
-            })?;
+            let request = self
+                .requests
+                .get_mut(&uuid)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("offline replay missing queued request state for {uuid}")
+                })?
+                .take_queued_request(uuid)?;
+            self.queued_requests = self.queued_requests.saturating_sub(1);
             self.dispatch_to_worker(request, uuid, worker_idx)?;
         }
         Ok(())
@@ -252,6 +257,7 @@ impl OfflineRuntime {
         );
 
         let Some(router) = self.router.as_mut() else {
+            self.requests.insert(uuid, AggRequestState::new_running());
             let worker_idx = self.next_worker_idx;
             self.next_worker_idx = (self.next_worker_idx + 1) % self.workers.len();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
@@ -262,11 +268,14 @@ impl OfflineRuntime {
             router.submit_request_with_hashes(&request, replay_hashes, self.now_ms)?;
         self.record_router_pending();
         if let Some(worker_idx) = maybe_worker_idx {
+            self.requests.insert(uuid, AggRequestState::new_running());
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
         }
 
-        self.router_pending.insert(uuid, request);
+        self.requests
+            .insert(uuid, AggRequestState::new_queued(request));
+        self.queued_requests += 1;
         self.record_in_flight_peak();
         Ok(uuid)
     }
@@ -329,7 +338,9 @@ impl OfflineRuntime {
                 }
                 self.record_router_pending();
             }
-            self.prefill_completed.remove(&signal.uuid);
+            self.requests.remove(&signal.uuid).ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
+            })?;
             if let AdmissionSource::Workload(driver) = &mut self.admission {
                 driver.on_complete(signal.uuid, self.now_ms)?;
             }
@@ -337,10 +348,23 @@ impl OfflineRuntime {
             return Ok(());
         }
 
-        if !self.prefill_completed.insert(signal.uuid) {
+        let already_marked = self
+            .requests
+            .get(&signal.uuid)
+            .ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
+            })?
+            .prefill_completed();
+        if already_marked {
             return Ok(());
         }
 
+        self.requests
+            .get_mut(&signal.uuid)
+            .ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
+            })?
+            .mark_prefill_completed();
         if let Some(router) = self.router.as_mut() {
             admissions = router.mark_prefill_completed(signal.uuid)?;
             #[cfg(test)]
@@ -598,10 +622,19 @@ impl OfflineRuntime {
 
     #[cfg(test)]
     fn debug_snapshot(&self) -> OfflineRuntimeSnapshot {
-        let mut router_pending_request_ids =
-            self.router_pending.keys().copied().collect::<Vec<_>>();
+        let mut router_pending_request_ids = self
+            .requests
+            .iter()
+            .filter(|(_, state)| state.is_queued_at_router())
+            .map(|(uuid, _)| *uuid)
+            .collect::<Vec<_>>();
         router_pending_request_ids.sort_unstable();
-        let mut prefill_completed = self.prefill_completed.iter().copied().collect::<Vec<_>>();
+        let mut prefill_completed = self
+            .requests
+            .iter()
+            .filter(|(_, state)| state.prefill_completed())
+            .map(|(uuid, _)| *uuid)
+            .collect::<Vec<_>>();
         prefill_completed.sort_unstable();
 
         OfflineRuntimeSnapshot {
