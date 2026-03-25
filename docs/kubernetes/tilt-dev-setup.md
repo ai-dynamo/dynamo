@@ -127,7 +127,7 @@ The operator image needs to be pullable by your cluster's nodes. The registry is
 1. **`REGISTRY` env var** — `REGISTRY=docker.io/myuser tilt up`
 2. **`registry` in `tilt-settings.yaml`**
 
-The image is pushed as `<registry>/controller:tilt-dev`.
+The image is pushed as `{registry}/controller:tilt-dev`.
 
 <Warning>
 If no registry is configured, the image is only available locally. This works

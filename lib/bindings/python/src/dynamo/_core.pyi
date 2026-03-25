@@ -1388,6 +1388,10 @@ def run_mocker_synthetic_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     arrival_interval_ms: float = 1.0,
+    turns_per_session: int = 1,
+    shared_prefix_ratio: float = 0.0,
+    num_prefix_groups: int = 0,
+    inter_turn_delay_ms: float = 0.0,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
@@ -1703,6 +1707,7 @@ class KvRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
@@ -1715,6 +1720,10 @@ class KvRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            update_indexer: Whether to record the selected worker in the router's
+                           approximate indexer. This is only meaningful when
+                           `use_kv_events=False` and is independent from lifecycle
+                           state tracking via `request_id`.
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.

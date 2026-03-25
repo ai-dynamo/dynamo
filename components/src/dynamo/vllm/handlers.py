@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
+import ray
+import ray.util.state as _ray_util_state
 import torch
 from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -55,6 +57,36 @@ from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
+
+# TODO(upstream-vllm): remove this patch once vLLM fixes add_dp_placement_groups in
+# vllm/v1/engine/utils.py to use ray.nodes() instead of ray.util.state.list_nodes().
+#
+# Patch ray.util.state.list_nodes to use the GCS API instead of the dashboard HTTP
+# API (127.0.0.1:8265/api/v0/nodes). The dynamo image installs ray core only (not
+# ray[default]), so the dashboard HTTP server starts in --minimal mode with the HTTP
+# server disabled. vLLM's add_dp_placement_groups calls list_nodes() which requires
+# that HTTP endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+# API server".
+#
+# ray.nodes() uses the GCS gRPC channel directly (no dashboard process needed) and
+# returns the same information. This patch makes elastic EP scaling self-contained.
+#
+# Format mapping:
+#   list_nodes() → objects with .node_ip and .node_id
+#   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+
+
+class _NodeInfo:
+    __slots__ = ("node_ip", "node_id")
+
+    def __init__(self, d: dict) -> None:
+        self.node_ip: str = d["NodeManagerAddress"]
+        self.node_id: str = d["NodeID"]
+
+
+_ray_util_state.list_nodes = lambda **kw: [
+    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+]
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -494,6 +526,47 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
                 return {"status": "error", "message": str(e)}
+
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale the elastic expert-parallelism data-parallel size live.
+
+        Args:
+            body: Dict with required 'new_data_parallel_size' key (int).
+                Example::
+
+                    {"new_data_parallel_size": 4}
+
+        The vLLM Ray DP backend will spin up / tear down DP workers on the GPUs
+        already reserved by the pod, then hot-swap the expert routing table.
+        No pod restart is needed.
+        """
+        body = body or {}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+
+        logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
+        try:
+            await self.engine_client.scale_elastic_ep(new_dp_size)
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
+            return {"status": "error", "message": str(e)}
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.

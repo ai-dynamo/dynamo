@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.mocker.args import resolve_planner_profile_data
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -22,8 +25,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--router-config")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
-    parser.add_argument("--request-count", type=int)
+    parser.add_argument(
+        "--request-count",
+        type=int,
+        help="number of synthetic requests; when --turns-per-session > 1, this is the number of sessions",
+    )
     parser.add_argument("--arrival-interval-ms", type=float, default=1.0)
+    parser.add_argument("--turns-per-session", type=int, default=1)
+    parser.add_argument("--shared-prefix-ratio", type=float, default=0.0)
+    parser.add_argument("--num-prefix-groups", type=int, default=0)
+    parser.add_argument("--inter-turn-delay-ms", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--replay-concurrency", type=int)
     parser.add_argument(
@@ -45,7 +56,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     using_trace_file = args.trace_file is not None
     synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
-    using_synthetic = any(value is not None for value in synthetic_args)
+    using_synthetic = any(value is not None for value in synthetic_args) or any(
+        (
+            args.turns_per_session != 1,
+            args.shared_prefix_ratio != 0.0,
+            args.num_prefix_groups != 0,
+            args.inter_turn_delay_ms != 0.0,
+        )
+    )
 
     if using_trace_file == using_synthetic:
         parser.error(
@@ -56,11 +74,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
 
-    extra_engine_args = (
-        MockEngineArgs.from_json(args.extra_engine_args)
-        if args.extra_engine_args is not None
-        else None
-    )
+    # Resolve planner_profile_data directory -> NPZ before passing to Rust.
+    # Rust only accepts NPZ files; resolve_planner_profile_data handles conversion.
+    profile_data_result = None
+    if args.extra_engine_args is not None:
+        raw = json.loads(args.extra_engine_args)
+        if "planner_profile_data" in raw:
+            profile_data_result = resolve_planner_profile_data(
+                Path(raw["planner_profile_data"])
+            )
+            if profile_data_result.npz_path is not None:
+                raw["planner_profile_data"] = str(profile_data_result.npz_path)
+            else:
+                del raw["planner_profile_data"]
+            extra_engine_args = MockEngineArgs.from_json(json.dumps(raw))
+        else:
+            extra_engine_args = MockEngineArgs.from_json(args.extra_engine_args)
+    else:
+        extra_engine_args = None
     router_config = (
         KvRouterConfig.from_json(args.router_config)
         if args.router_config is not None
@@ -91,6 +122,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
             arrival_interval_ms=args.arrival_interval_ms,
+            turns_per_session=args.turns_per_session,
+            shared_prefix_ratio=args.shared_prefix_ratio,
+            num_prefix_groups=args.num_prefix_groups,
+            inter_turn_delay_ms=args.inter_turn_delay_ms,
         )
 
     report_path = write_report_json(report, args.report_json)
