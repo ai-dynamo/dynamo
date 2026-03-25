@@ -12,6 +12,10 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
+# Sentinel value matching u32::MAX from prefill_router.rs SimpleRouter path,
+# indicating no specific data-parallel rank was selected.
+_DP_RANK_UNSET = 2**32 - 1
+
 
 class PrefillWorkerHandler(BaseWorkerHandler):
     """Handler for prefill workers in disaggregated serving mode."""
@@ -133,7 +137,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
 
-        if dp_rank is not None and dp_rank == 2**32 - 1:
+        if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
