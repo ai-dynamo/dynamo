@@ -548,7 +548,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             import ray.util.state as _ray_util_state
 
             class _NodeInfo:
-                __slots__ = ("node_ip", "node_id")
+                __slots__ = ("node_id", "node_ip")
 
                 def __init__(self, d: dict) -> None:
                     self.node_ip: str = d["NodeManagerAddress"]
