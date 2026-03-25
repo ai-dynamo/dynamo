@@ -187,7 +187,7 @@ func TestBuildEngineContainer_EnvVars(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("engine-%d", i), envMap["CONTAINER_NAME"], "engine-%d CONTAINER_NAME", i)
 		assert.Equal(t, "/shared", envMap["TMPDIR"], "engine-%d TMPDIR", i)
 		assert.Equal(t, "/shared/failover.lock", envMap["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
-		assert.Equal(t, "shadow", envMap["DYN_VLLM_GMS_MODE"], "engine-%d DYN_VLLM_GMS_MODE", i)
+		assert.Equal(t, "true", envMap["DYN_VLLM_GMS_SHADOW_MODE"], "engine-%d DYN_VLLM_GMS_SHADOW_MODE", i)
 		assert.Equal(t, "true", envMap["DYN_SYSTEM_ENABLED"], "engine-%d DYN_SYSTEM_ENABLED", i)
 		assert.Equal(t, "notready", envMap["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d DYN_SYSTEM_STARTING_HEALTH_STATUS", i)
 		assert.Equal(t, "kubernetes", envMap[commonconsts.DynamoDiscoveryBackendEnvVar], "engine-%d DYN_DISCOVERY_BACKEND should be preserved from base", i)

@@ -176,8 +176,7 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},
 		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
-		{Name: "DYN_VLLM_GMS_MODE", Value: "shadow"},
-		{Name: "SHADOW_SKIP_KV_CACHE", Value: "1"},
+		{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
 		{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
 		{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
 	}
@@ -200,10 +199,15 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	}
 
 	// Stagger --master-port for multinode TP so each engine group uses a
-	// distinct torch.distributed TCP store. engine-0 keeps the original port,
-	// engine-1 gets original + failoverMasterPortStride.
+	// distinct torch.distributed TCP store. engine-0 keeps the default (29500),
+	// engine-1 gets 29500 + failoverMasterPortStride.
 	if engineID > 0 {
-		staggerMasterPort(&engine, engineID)
+		if hasMasterPortFlag(&engine) {
+			staggerMasterPort(&engine, engineID)
+		} else {
+			// No --master-port in args — inject it explicitly
+			engine.Args = append(engine.Args, failoverMasterPortFlag, strconv.Itoa(29500+engineID*failoverMasterPortStride))
+		}
 	}
 
 	removeGPUResources(&engine)
@@ -212,6 +216,21 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	})
 
 	return engine
+}
+
+// hasMasterPortFlag checks if --master-port appears in the container args or command.
+func hasMasterPortFlag(container *corev1.Container) bool {
+	for _, arg := range container.Args {
+		if arg == failoverMasterPortFlag || strings.Contains(arg, failoverMasterPortFlag+" ") {
+			return true
+		}
+	}
+	for _, cmd := range container.Command {
+		if strings.Contains(cmd, failoverMasterPortFlag+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // staggerMasterPort offsets --master-port in the container args by
