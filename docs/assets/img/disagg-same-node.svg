@@ -160,6 +160,7 @@
     .box-sub-white { font-size: 10px; font-weight: 400; fill: var(--text-on-accent); opacity: 0.75; text-anchor: middle; }
     .conn-label { font-size: 10px; font-weight: 600; text-anchor: middle; }
     .zone-label { font-size: 10px; font-weight: 600; fill: var(--text-subtle); text-anchor: middle; letter-spacing: 1.2px; }
+    .zone-label-desc { font-size: 9px; font-weight: normal; fill: #94A3B8; text-anchor: start; }
     .pill-request { fill: rgba(59,130,246,0.12); stroke: var(--glow-blue); stroke-width: 0.5; }
     .label-request { fill: var(--info); }
     .pill-kv { fill: rgba(217,119,6,0.12); stroke: rgba(217,119,6,0.15); stroke-width: 0.5; }
@@ -187,11 +188,5 @@
   <path d="M185,166 L185,220 L615,220 L615.0,170.0" fill="none" stroke="var(--info)" stroke-width="2.0" marker-end="url(#arrow-info)"/>
   <rect x="336.8" y="202.0" width="126.39999999999995" height="16" rx="8" class="pill-request"/>
   <text x="400" y="213" class="conn-label label-request">RDMA (InfiniBand/RoCE)</text>
-
-  <text x="70" y="270" class="box-label-center" style="font-size:11px;text-anchor:start;fill:var(--text-secondary)">Options (best to worst):</text>
-  <text x="70" y="295" class="box-label-center" style="font-size:10px;text-anchor:start;fill:var(--text-subtle)">1. InfiniBand RDMA with GPUDirect - GPU-to-GPU, bypasses CPU</text>
-  <text x="70" y="315" class="box-label-center" style="font-size:10px;text-anchor:start;fill:var(--text-subtle)">2. RoCE RDMA with GPUDirect - GPU-to-GPU, bypasses CPU</text>
-  <text x="70" y="335" class="box-label-center" style="font-size:10px;text-anchor:start;fill:var(--text-subtle)">3. Host-staged RDMA - GPU-CPU-RDMA-CPU-GPU</text>
-  <text x="70" y="355" class="box-label-center" style="font-size:10px;text-anchor:start;fill:var(--text-subtle)">4. TCP (fallback) - GPU-CPU-TCP-CPU-GPU</text>
 
 </svg>
