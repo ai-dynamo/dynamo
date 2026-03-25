@@ -877,7 +877,7 @@ pub unsafe extern "C" fn add_request(
 
             // Compute overlap_blocks using the public method
             let overlap_blocks = match decode_router
-                .get_overlap_blocks(&tokens, None, worker, Some(&router_config_override))
+                .get_overlap_blocks(&tokens, None, worker, None)
                 .await
             {
                 Ok(overlap) => overlap,
@@ -896,7 +896,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
-                    Some(router_config_override),
+                    Some(&router_config_override),
                 )
                 .await;
 

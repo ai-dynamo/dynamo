@@ -3,9 +3,44 @@
 
 use anyhow::{Result, bail};
 
-use super::OfflineDisaggReplayConfig;
-use super::ReplayRouterMode;
+use super::{OfflineDisaggReplayConfig, ReplayArgsMode, ReplayRouterMode};
 use crate::common::protocols::{MockEngineArgs, WorkerType};
+
+pub fn validate_replay_args_mode(
+    aggregated_args: Option<&MockEngineArgs>,
+    prefill_args: Option<&MockEngineArgs>,
+    decode_args: Option<&MockEngineArgs>,
+    num_workers: usize,
+    num_prefill_workers: usize,
+    num_decode_workers: usize,
+) -> Result<ReplayArgsMode> {
+    if aggregated_args.is_some() && (prefill_args.is_some() || decode_args.is_some()) {
+        bail!("extra_engine_args cannot be combined with prefill_engine_args/decode_engine_args");
+    }
+
+    match (aggregated_args, prefill_args, decode_args) {
+        (Some(_), None, None) | (None, None, None) => {
+            if num_prefill_workers != 1 || num_decode_workers != 1 {
+                bail!(
+                    "num_prefill_workers and num_decode_workers are only used for disagg replay; use num_workers for aggregated replay"
+                );
+            }
+            Ok(ReplayArgsMode::Aggregated)
+        }
+        (None, Some(_), Some(_)) => {
+            if num_workers != 1 {
+                bail!(
+                    "num_workers is only used for aggregated replay; use num_prefill_workers and num_decode_workers for disagg replay"
+                );
+            }
+            Ok(ReplayArgsMode::Disagg)
+        }
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            bail!("prefill_engine_args and decode_engine_args must be provided together")
+        }
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => unreachable!(),
+    }
+}
 
 fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
     if num_workers == 0 {

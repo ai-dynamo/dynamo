@@ -25,6 +25,12 @@ pub enum ReplayRouterMode {
     KvRouter,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayArgsMode {
+    Aggregated,
+    Disagg,
+}
+
 #[derive(Clone, Debug)]
 pub struct OfflineDisaggReplayConfig {
     pub prefill_args: MockEngineArgs,
@@ -62,6 +68,7 @@ pub use entrypoints::{
     simulate_trace_requests_with_router_mode, simulate_trace_workload,
     simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
 };
+pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
     mut requests: Vec<DirectRequest>,

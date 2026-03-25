@@ -13,6 +13,7 @@ use dynamo_mocker::common::protocols::{
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
+use dynamo_mocker::replay::ReplayArgsMode;
 use pyo3::{exceptions::PyException, prelude::*};
 use pythonize::pythonize;
 use uuid::Uuid;
@@ -647,48 +648,28 @@ fn load_replay_args_selection(
     let prefill_args = load_optional_replay_mocker_args(py, prefill_engine_args)?;
     let decode_args = load_optional_replay_mocker_args(py, decode_engine_args)?;
 
-    if aggregated_args.is_some() && (prefill_args.is_some() || decode_args.is_some()) {
-        return Err(PyException::new_err(
-            "extra_engine_args cannot be combined with prefill_engine_args/decode_engine_args",
-        ));
-    }
+    let replay_args_mode = dynamo_mocker::replay::validate_replay_args_mode(
+        aggregated_args.as_ref(),
+        prefill_args.as_ref(),
+        decode_args.as_ref(),
+        num_workers,
+        num_prefill_workers,
+        num_decode_workers,
+    )
+    .map_err(to_pyerr)?;
 
-    match (aggregated_args, prefill_args, decode_args) {
-        (Some(args), None, None) => {
-            if num_prefill_workers != 1 || num_decode_workers != 1 {
-                return Err(PyException::new_err(
-                    "num_prefill_workers and num_decode_workers are only used for disagg replay; use num_workers for aggregated replay",
-                ));
-            }
-            Ok(ReplayArgsSelection::Aggregated(Box::new(args)))
-        }
-        (None, None, None) => {
-            if num_prefill_workers != 1 || num_decode_workers != 1 {
-                return Err(PyException::new_err(
-                    "num_prefill_workers and num_decode_workers are only used for disagg replay; use num_workers for aggregated replay",
-                ));
-            }
-            Ok(ReplayArgsSelection::Aggregated(Box::default()))
-        }
-        (None, Some(prefill_args), Some(decode_args)) => {
-            if num_workers != 1 {
-                return Err(PyException::new_err(
-                    "num_workers is only used for aggregated replay; use num_prefill_workers and num_decode_workers for disagg replay",
-                ));
-            }
-            Ok(ReplayArgsSelection::Disagg(Box::new(
-                dynamo_mocker::replay::OfflineDisaggReplayConfig {
-                    prefill_args,
-                    decode_args,
-                    num_prefill_workers,
-                    num_decode_workers,
-                },
-            )))
-        }
-        (None, Some(_), None) | (None, None, Some(_)) => Err(PyException::new_err(
-            "prefill_engine_args and decode_engine_args must be provided together",
-        )),
-        _ => unreachable!(),
+    match replay_args_mode {
+        ReplayArgsMode::Aggregated => Ok(ReplayArgsSelection::Aggregated(Box::new(
+            aggregated_args.unwrap_or_default(),
+        ))),
+        ReplayArgsMode::Disagg => Ok(ReplayArgsSelection::Disagg(Box::new(
+            dynamo_mocker::replay::OfflineDisaggReplayConfig {
+                prefill_args: prefill_args.expect("validated disagg prefill args"),
+                decode_args: decode_args.expect("validated disagg decode args"),
+                num_prefill_workers,
+                num_decode_workers,
+            },
+        ))),
     }
 }
 
