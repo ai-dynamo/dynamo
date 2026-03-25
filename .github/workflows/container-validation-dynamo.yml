@@ -229,8 +229,8 @@ jobs:
             bash -c '
               MYPYPATH=components/src:lib/bindings/python/src
 
-              # Always check shared code and bindings
-              TARGETS="components/src/dynamo/common components/src/dynamo/frontend components/src/dynamo/router"
+              # Always check shared (non-backend) code
+              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name sglang ! -name vllm ! -name trtllm | sort | tr "\n" " ")
 
               # Add only the backends that changed
               ${{ needs.changed-files.outputs.sglang == 'true' && 'TARGETS="$TARGETS components/src/dynamo/sglang"' || ':' }}
