@@ -152,8 +152,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
-      # grafana-piechart-panel is built-in since Grafana v8+, no install needed
-      - GF_INSTALL_PLUGINS=
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
       # Disable password change requirement
@@ -170,4 +169,3 @@ services:
       - prometheus
       - tempo
       - loki
-

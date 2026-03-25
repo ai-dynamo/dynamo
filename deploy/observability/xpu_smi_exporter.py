@@ -33,7 +33,7 @@ import subprocess
 import sys
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,21 +52,111 @@ DUMP_METRICS = "0,1,2,3,4,5,6,7,18,19,20,31,32,33,34"
 # unit_conversion: multiply raw value by this factor
 # extra_labels: additional Prometheus labels (e.g. location for temperature)
 DUMP_HEADER_MAP = {
-    "GPU Utilization (%)": ("xpu_gpu_utilization_percent", "GPU utilization percentage", "gauge", 1, {}),
-    "GPU Power (W)": ("xpu_power_watts", "GPU power consumption in watts", "gauge", 1, {}),
-    "GPU Frequency (MHz)": ("xpu_frequency_mhz", "GPU core frequency in MHz", "gauge", 1, {}),
-    "GPU Core Temperature (Celsius Degree)": ("xpu_temperature_celsius", "XPU temperature in Celsius", "gauge", 1, {"location": "gpu"}),
-    "GPU Memory Temperature (Celsius Degree)": ("xpu_temperature_celsius", "XPU temperature in Celsius", "gauge", 1, {"location": "memory"}),
-    "GPU Memory Utilization (%)": ("xpu_memory_utilization_percent", "GPU memory utilization percentage", "gauge", 1, {}),
-    "GPU Memory Read (kB/s)": ("xpu_memory_read_bytes_total", "GPU memory read throughput in bytes per second", "gauge", 1024, {}),
-    "GPU Memory Write (kB/s)": ("xpu_memory_write_bytes_total", "GPU memory write throughput in bytes per second", "gauge", 1024, {}),
-    "GPU Memory Used (MiB)": ("xpu_memory_used_bytes", "GPU memory used in bytes", "gauge", 1048576, {}),
-    "PCIe Read (kB/s)": ("xpu_pcie_read_bytes_total", "PCIe read throughput in bytes per second", "gauge", 1024, {}),
-    "PCIe Write (kB/s)": ("xpu_pcie_write_bytes_total", "PCIe write throughput in bytes per second", "gauge", 1024, {}),
-    "Compute engine group utilization (%)": ("xpu_engine_group_compute_engine_util", "Compute engine group utilization percentage", "gauge", 1, {}),
-    "Render engine group utilization (%)": ("xpu_engine_group_render_engine_util", "Render engine group utilization percentage", "gauge", 1, {}),
-    "Media engine group utilization (%)": ("xpu_engine_group_media_engine_util", "Media engine group utilization percentage", "gauge", 1, {}),
-    "Copy engine group utilization (%)": ("xpu_engine_group_copy_engine_util", "Copy engine group utilization percentage", "gauge", 1, {}),
+    "GPU Utilization (%)": (
+        "xpu_gpu_utilization_percent",
+        "GPU utilization percentage",
+        "gauge",
+        1,
+        {},
+    ),
+    "GPU Power (W)": (
+        "xpu_power_watts",
+        "GPU power consumption in watts",
+        "gauge",
+        1,
+        {},
+    ),
+    "GPU Frequency (MHz)": (
+        "xpu_frequency_mhz",
+        "GPU core frequency in MHz",
+        "gauge",
+        1,
+        {},
+    ),
+    "GPU Core Temperature (Celsius Degree)": (
+        "xpu_temperature_celsius",
+        "XPU temperature in Celsius",
+        "gauge",
+        1,
+        {"location": "gpu"},
+    ),
+    "GPU Memory Temperature (Celsius Degree)": (
+        "xpu_temperature_celsius",
+        "XPU temperature in Celsius",
+        "gauge",
+        1,
+        {"location": "memory"},
+    ),
+    "GPU Memory Utilization (%)": (
+        "xpu_memory_utilization_percent",
+        "GPU memory utilization percentage",
+        "gauge",
+        1,
+        {},
+    ),
+    "GPU Memory Read (kB/s)": (
+        "xpu_memory_read_bytes_total",
+        "GPU memory read throughput in bytes per second",
+        "gauge",
+        1024,
+        {},
+    ),
+    "GPU Memory Write (kB/s)": (
+        "xpu_memory_write_bytes_total",
+        "GPU memory write throughput in bytes per second",
+        "gauge",
+        1024,
+        {},
+    ),
+    "GPU Memory Used (MiB)": (
+        "xpu_memory_used_bytes",
+        "GPU memory used in bytes",
+        "gauge",
+        1048576,
+        {},
+    ),
+    "PCIe Read (kB/s)": (
+        "xpu_pcie_read_bytes_total",
+        "PCIe read throughput in bytes per second",
+        "gauge",
+        1024,
+        {},
+    ),
+    "PCIe Write (kB/s)": (
+        "xpu_pcie_write_bytes_total",
+        "PCIe write throughput in bytes per second",
+        "gauge",
+        1024,
+        {},
+    ),
+    "Compute engine group utilization (%)": (
+        "xpu_engine_group_compute_engine_util",
+        "Compute engine group utilization percentage",
+        "gauge",
+        1,
+        {},
+    ),
+    "Render engine group utilization (%)": (
+        "xpu_engine_group_render_engine_util",
+        "Render engine group utilization percentage",
+        "gauge",
+        1,
+        {},
+    ),
+    "Media engine group utilization (%)": (
+        "xpu_engine_group_media_engine_util",
+        "Media engine group utilization percentage",
+        "gauge",
+        1,
+        {},
+    ),
+    "Copy engine group utilization (%)": (
+        "xpu_engine_group_copy_engine_util",
+        "Copy engine group utilization percentage",
+        "gauge",
+        1,
+        {},
+    ),
 }
 
 
@@ -91,14 +181,18 @@ class MetricsCollector:
         try:
             result = subprocess.run(
                 ["xpu-smi", "discovery", "-j"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             data = json.loads(result.stdout)
             self._devices = [d["device_id"] for d in data.get("device_list", [])]
             # Get total memory per device
             for dev_id in self._devices:
                 self._get_device_memory_total(dev_id)
-            logger.info(f"Discovered {len(self._devices)} XPU device(s): {self._devices}")
+            logger.info(
+                f"Discovered {len(self._devices)} XPU device(s): {self._devices}"
+            )
         except Exception as e:
             logger.error(f"Failed to discover devices: {e}")
             self._devices = []
@@ -108,12 +202,16 @@ class MetricsCollector:
         try:
             result = subprocess.run(
                 ["xpu-smi", "discovery", "-d", str(device_id), "-j"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             data = json.loads(result.stdout)
             total = int(data.get("memory_physical_size_byte", 0))
             self._device_memory_total[device_id] = total
-            logger.info(f"Device {device_id}: total memory = {total / (1024**3):.1f} GiB")
+            logger.info(
+                f"Device {device_id}: total memory = {total / (1024**3):.1f} GiB"
+            )
         except Exception as e:
             logger.warning(f"Failed to get memory total for device {device_id}: {e}")
 
@@ -122,8 +220,19 @@ class MetricsCollector:
         metrics = {}
         try:
             result = subprocess.run(
-                ["xpu-smi", "dump", "-d", str(device_id), "-m", DUMP_METRICS, "-n", "1"],
-                capture_output=True, text=True, timeout=15,
+                [
+                    "xpu-smi",
+                    "dump",
+                    "-d",
+                    str(device_id),
+                    "-m",
+                    DUMP_METRICS,
+                    "-n",
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             lines = result.stdout.strip().split("\n")
             if len(lines) < 2:
@@ -137,7 +246,9 @@ class MetricsCollector:
             values = [v.strip() for v in data_line.split(",")]
 
             if len(headers) != len(values):
-                logger.warning(f"Header/value count mismatch: {len(headers)} vs {len(values)}")
+                logger.warning(
+                    f"Header/value count mismatch: {len(headers)} vs {len(values)}"
+                )
                 return metrics
 
             # Skip Timestamp and DeviceId columns
@@ -159,8 +270,12 @@ class MetricsCollector:
                     # Use a composite key to handle metrics with the same name
                     # but different labels (e.g. xpu_temperature_celsius with
                     # location=gpu vs location=memory)
-                    label_suffix = "_".join(f"{k}={v}" for k, v in sorted(extra_labels.items()))
-                    metric_key = f"{prom_name}:{label_suffix}" if label_suffix else prom_name
+                    label_suffix = "_".join(
+                        f"{k}={v}" for k, v in sorted(extra_labels.items())
+                    )
+                    metric_key = (
+                        f"{prom_name}:{label_suffix}" if label_suffix else prom_name
+                    )
                     metrics[metric_key] = {
                         "name": prom_name,
                         "value": val,
@@ -183,7 +298,9 @@ class MetricsCollector:
         try:
             result = subprocess.run(
                 ["xpu-smi", "stats", "-d", str(device_id), "-j"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             data = json.loads(result.stdout)
             labels = {"device_id": str(device_id)}
@@ -261,6 +378,7 @@ class MetricsCollector:
 
     def start_background_collection(self):
         """Start a daemon thread that collects metrics periodically."""
+
         def _loop():
             while True:
                 try:
@@ -268,6 +386,7 @@ class MetricsCollector:
                 except Exception as e:
                     logger.error(f"Background collection error: {e}")
                 time.sleep(self._interval)
+
         t = threading.Thread(target=_loop, daemon=True)
         t.start()
         logger.info(f"Background collection started (interval={self._interval}s)")
@@ -339,7 +458,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
             if self.path == "/metrics" or self.path == "/":
                 output = self.collector.format_prometheus()
                 self.send_response(200)
-                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header(
+                    "Content-Type", "text/plain; version=0.0.4; charset=utf-8"
+                )
                 self.end_headers()
                 self.wfile.write(output.encode("utf-8"))
             elif self.path == "/healthz":
@@ -359,15 +480,17 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Intel XPU-SMI Prometheus Exporter"
-    )
+    parser = argparse.ArgumentParser(description="Intel XPU-SMI Prometheus Exporter")
     parser.add_argument(
-        "--port", type=int, default=9966,
+        "--port",
+        type=int,
+        default=9966,
         help="Port to expose Prometheus metrics on (default: 9966)",
     )
     parser.add_argument(
-        "--interval", type=int, default=5,
+        "--interval",
+        type=int,
+        default=5,
         help="Seconds between background metric collections (default: 5)",
     )
     args = parser.parse_args()
