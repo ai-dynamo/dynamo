@@ -1,0 +1,309 @@
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:325]
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:325]        █     █     █▄   ▄█
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:325]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.15.1
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:325]   █▄█▀ █     █     █     █  model   Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:325]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:325]
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:35 [utils.py:261] non-default args: {'model_tag': 'Qwen/Qwen3-VL-30B-A3B-Instruct-FP8', 'api_server_count': 1, 'model': 'Qwen/Qwen3-VL-30B-A3B-Instruct-FP8', 'max_model_len': 16384, 'enforce_eager': True, 'kv_transfer_config': KVTransferConfig(kv_connector='DynamoConnector', engine_id='83f3ade3-ea8c-4858-8809-e4a1006aa173', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579, kv_connector_extra_config={}, kv_connector_module_path='kvbm.vllm_integration.connector', enable_permute_local_kv=False, kv_load_failure_policy='recompute')}
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:41 [model.py:541] Resolved architecture: Qwen3VLMoeForConditionalGeneration
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:41 [model.py:1561] Using max model len 16384
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:42 [scheduler.py:226] Chunked prefill is enabled with max_num_batched_tokens=2048.
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:42 [vllm.py:624] Asynchronous scheduling is enabled.
+[0;36m(APIServer pid=117)[0;0m WARNING 03-25 18:59:42 [vllm.py:662] Enforce eager set, overriding optimization level to -O0
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 18:59:42 [vllm.py:762] Cudagraph is disabled under eager mode
+[0;36m(APIServer pid=117)[0;0m WARNING 03-25 18:59:42 [vllm.py:980] Turning off hybrid kv cache manager because `--kv-transfer-config` is set. This will reduce the performance of vLLM on LLMs with sliding window attention or Mamba attention. If you are a developer of kv connector, please consider supporting hybrid kv cache manager for your connector by making sure your connector is a subclass of `SupportsHMA` defined in kv_connector/v1/base.py and use --no-disable-hybrid-kv-cache-manager to start vLLM.
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 18:59:49 [core.py:96] Initializing a V1 LLM engine (v0.15.1) with config: model='Qwen/Qwen3-VL-30B-A3B-Instruct-FP8', speculative_config=None, tokenizer='Qwen/Qwen3-VL-30B-A3B-Instruct-FP8', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=16384, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=fp8, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['+quant_fp8', 'all', '+quant_fp8'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None, 'static_all_moe_layers': []}
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 18:59:50 [parallel_state.py:1212] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://192.168.86.26:37799 backend=nccl
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 18:59:50 [parallel_state.py:1423] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:04 [topk_topp_sampler.py:47] Using FlashInfer for top-p & top-k sampling.
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:08 [gpu_model_runner.py:4033] Starting to load model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8...
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:09 [mm_encoder_attention.py:77] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:09 [cuda.py:364] Using FLASH_ATTN attention backend out of potential backends: ('FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION')
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:09 [fp8.py:328] Using TRITON Fp8 MoE backend out of potential backends: ['AITER', 'FLASHINFER_TRTLLM', 'FLASHINFER_CUTLASS', 'DEEPGEMM', 'BATCHED_DEEPGEMM', 'TRITON', 'BATCHED_TRITON', 'MARLIN'].
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:05<00:16,  5.57s/it]
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:05<00:04,  2.45s/it]
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:11<00:04,  4.04s/it]
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:16<00:00,  4.26s/it]
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:16<00:00,  4.09s/it]
+[0;36m(EngineCore_DP0 pid=421)[0;0m
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:26 [default_loader.py:291] Loading weights took 16.54 seconds
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:26 [gpu_model_runner.py:4130] Model loading took 30.32 GiB memory and 17.245312 seconds
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:27 [gpu_model_runner.py:4958] Encoder cache will be initialized with a budget of 16384 tokens, and profiled with 1 image items of the maximum feature size.
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:32 [fp8_utils.py:1175] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=5120,K=2048,device_name=NVIDIA_RTX_6000_Ada_Generation,dtype=fp8_w8a8,block_shape=[128,128].json
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:33 [fp8_utils.py:1175] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=2048,K=4096,device_name=NVIDIA_RTX_6000_Ada_Generation,dtype=fp8_w8a8,block_shape=[128,128].json
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:33 [fused_moe.py:1090] Using default MoE config. Performance might be sub-optimal! Config file not found at /opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/fused_moe/configs/E=128,N=768,device_name=NVIDIA_RTX_6000_Ada_Generation,dtype=fp8_w8a8,block_shape=[128,128].json
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:34 [gpu_worker.py:356] Available KV cache memory: 10.2 GiB
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:34 [kv_cache_utils.py:1307] GPU KV cache size: 111,376 tokens
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:34 [kv_cache_utils.py:1312] Maximum concurrency for 16,384 tokens per request: 6.80x
+[0;36m(EngineCore_DP0 pid=421)[0;0m [2026-03-25 19:00:34] INFO __init__.py:12: Loaded nixl API module: <module 'nixl_cu12._api' from '/opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu12/_api.py'>
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:34 [nixl_connector.py:96] NIXL was already imported, we can't reset UCX_RCACHE_MAX_UNRELEASED. Please set it to '1024' manually.
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:34 [nixl_connector.py:114] NIXL is available
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:34 [factory.py:64] Creating v1 connector with name: DynamoConnector and engine_id: 83f3ade3-ea8c-4858-8809-e4a1006aa173
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:34 [base.py:166] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[2m2026-03-25T19:00:34.950136Z[0m [32m INFO[0m [2m_core::block_manager::vllm::connector::worker[0m[2m:[0m KvConnectorWorker initialized with worker_id: 83f3ade3-ea8c-4858-8809-e4a1006aa173
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:34 [utils.py:38] Connectors do not specify a kv cache layout, defaulting to NHD.
+[2m2026-03-25T19:00:34.958754Z[0m [32m INFO[0m [2m_core::block_manager::vllm::connector::worker[0m[2m:[0m Auto-detected device layout from tensor shape: LayerSeparate { outer_contiguous: true }
+[2m2026-03-25T19:00:34.958822Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m Initializing KvbmWorker with params: num_device_blocks=6961, page_size=16, dtype_width_bytes=2
+[2m2026-03-25T19:00:34.959092Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m Inferred layout: num_layers=48, outer_dim=2, outer_contiguous=true, page_size=16, inner_dim=512
+[2m2026-03-25T19:00:34.959678Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m ZmqActiveMessageWorker: Bound to sub: tcp://127.0.0.1:56001 and push: tcp://127.0.0.1:56002
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:35 [core.py:272] init engine (profile, create kv cache, warmup model) took 8.16 seconds
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:35 [factory.py:64] Creating v1 connector with name: DynamoConnector and engine_id: 83f3ade3-ea8c-4858-8809-e4a1006aa173
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:35 [base.py:166] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[2m2026-03-25T19:00:35.012643Z[0m [32m INFO[0m [2m_core::block_manager::vllm::connector::leader[0m[2m:[0m KvConnectorLeader initialized with worker_id: 83f3ade3-ea8c-4858-8809-e4a1006aa173
+[2m2026-03-25T19:00:35.012676Z[0m [33m WARN[0m [2m_core::block_manager::vllm::connector::leader[0m[2m:[0m DYN_KVBM_METRICS_PORT not present or couldn’t be interpreted, falling back to 6880
+[2m2026-03-25T19:00:35.012672Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m ZmqActiveMessageLeader: Bound to pub: tcp://127.0.0.1:56001 and pull: tcp://127.0.0.1:56002
+[2m2026-03-25T19:00:35.012728Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m Handshake: requesting worker device configs...
+[2m2026-03-25T19:00:37.014539Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m Handshake: requesting worker device configs...
+[2m2026-03-25T19:00:37.015138Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m Handshake: received 1 worker metadata replies in this round.
+[2m2026-03-25T19:00:37.015161Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m Handshake: broadcasting allocation config to workers...
+[2m2026-03-25T19:00:37.015454Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::zmq[0m[2m:[0m Handshake: all workers acked allocation config.
+[2m2026-03-25T19:00:37.015689Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:37.070008Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::block::transfer::context[0m[2m:[0m Creating CUDA memory pool: 10 buffers × 12KB = 0MB total
+[2m2026-03-25T19:00:37.077634Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::block::transfer::context[0m[2m:[0m CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with 0MB)
+E0325 19:00:37.077657     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077691     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077704     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077707     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077709     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077712     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077715     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077719     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077722     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077725     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077727     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077730     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077733     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077735     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077739     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077744     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077746     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077749     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077752     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077755     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077758     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077761     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077764     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077766     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077769     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077772     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077783     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077787     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077789     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077793     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077796     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077798     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077803     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077806     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077810     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077813     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077816     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077818     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077821     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077824     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077827     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077830     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077833     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077836     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077838     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077841     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077844     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:37.077847     970 nixl_agent.cpp:430] registerMem: no available backends for mem type 'VRAM_SEG'
+[2m2026-03-25T19:00:37.517653Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:38.018540Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:38.519443Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:39.020310Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:39.521103Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:40.021877Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:40.523572Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:41.025416Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:41.526108Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:42.026865Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait...
+[2m2026-03-25T19:00:42.096911Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m allocation finished; worker is ping-ACK-able
+[2m2026-03-25T19:00:42.528569Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m Reported ping-ready after first ACK
+[2m2026-03-25T19:00:42.528611Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::worker[0m[2m:[0m worker layout allocation finished.
+[2m2026-03-25T19:00:42.528625Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::distributed::leader[0m[2m:[0m ZMQ handshake complete; workers allocation ready
+[2m2026-03-25T19:00:42.528668Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::state::resources[0m[2m:[0m Using NullEventManager
+[2m2026-03-25T19:00:42.528747Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::pool::managed[0m[2m:[0m building block pool
+[2m2026-03-25T19:00:42.529700Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::pool::managed[0m[2m:[0m building block pool
+[2m2026-03-25T19:00:42.530265Z[0m [33m WARN[0m [2mdynamo_llm::block_manager::offload[0m[2m:[0m Host to Disk offload filter is not provided. All blocks in host will be offloaded to disk. This may result in excessive disk offloading and accelerated SSD degradation.
+[2m2026-03-25T19:00:42.530329Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::block::transfer::context[0m[2m:[0m Creating CUDA memory pool: 10 buffers × 0KB = 0MB total
+[2m2026-03-25T19:00:42.530614Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::block::transfer::context[0m[2m:[0m CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with 0MB)
+[2m2026-03-25T19:00:42.530678Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::block::transfer::context[0m[2m:[0m Creating CUDA memory pool: 10 buffers × 0KB = 0MB total
+[2m2026-03-25T19:00:42.530787Z[0m [32m INFO[0m [2mdynamo_llm::block_manager::block::transfer::context[0m[2m:[0m CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with 0MB)
+[2m2026-03-25T19:00:42.533557Z[0m [32m INFO[0m [2m_core::block_manager::vllm::connector::leader[0m[2m:[0m KvConnectorLeader init complete.
+[0;36m(EngineCore_DP0 pid=421)[0;0m KvConnectorLeader initialized with engine_id: 83f3ade3-ea8c-4858-8809-e4a1006aa173
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:42 [vllm.py:624] Asynchronous scheduling is enabled.
+[0;36m(EngineCore_DP0 pid=421)[0;0m WARNING 03-25 19:00:42 [vllm.py:669] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[0;36m(EngineCore_DP0 pid=421)[0;0m INFO 03-25 19:00:42 [vllm.py:762] Cudagraph is disabled under eager mode
+[0;36m(APIServer pid=117)[0;0m [2026-03-25 19:00:42] INFO __init__.py:12: Loaded nixl API module: <module 'nixl_cu12._api' from '/opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu12/_api.py'>
+[0;36m(APIServer pid=117)[0;0m WARNING 03-25 19:00:42 [nixl_connector.py:96] NIXL was already imported, we can't reset UCX_RCACHE_MAX_UNRELEASED. Please set it to '1024' manually.
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:42 [nixl_connector.py:114] NIXL is available
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:43 [api_server.py:665] Supported tasks: ['generate']
+[0;36m(APIServer pid=117)[0;0m WARNING 03-25 19:00:43 [model.py:1371] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:43 [serving.py:177] Warming up chat template processing...
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [hf.py:310] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [serving.py:212] Chat template warmup completed in 2259.2ms
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [api_server.py:946] Starting vLLM API server 0 on http://0.0.0.0:8000
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:38] Available routes are:
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /openapi.json, Methods: GET, HEAD
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /docs, Methods: GET, HEAD
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /redoc, Methods: GET, HEAD
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /tokenize, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /detokenize, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /pause, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /resume, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /is_paused, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /metrics, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /health, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/responses, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/audio/transcriptions, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/audio/translations, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/completions, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/messages, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/models, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /load, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /version, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /ping, Methods: GET
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /ping, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /invocations, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /classify, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/embeddings, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /score, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/score, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /rerank, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v1/rerank, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /v2/rerank, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:45 [launcher.py:46] Route: /pooling, Methods: POST
+[0;36m(APIServer pid=117)[0;0m INFO:     Started server process [117]
+[0;36m(APIServer pid=117)[0;0m INFO:     Waiting for application startup.
+[0;36m(APIServer pid=117)[0;0m INFO:     Application startup complete.
+[0;36m(APIServer pid=117)[0;0m INFO:     127.0.0.1:47874 - "GET /v1/models HTTP/1.1" 200 OK
+[0;36m(APIServer pid=117)[0;0m INFO:     127.0.0.1:47876 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948] EngineCore encountered a fatal error.
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948] Traceback (most recent call last):
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 939, in run_engine_core
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     engine_core.run_busy_loop()
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 966, in run_busy_loop
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     self._process_engine_step()
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 999, in _process_engine_step
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     outputs, model_executed = self.step_fn()
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]                               ^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 437, in step_with_batch_queue
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     scheduler_output = self.scheduler.schedule()
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py", line 609, in schedule
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     self.connector.get_num_new_matched_tokens(
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/kvbm/vllm_integration/connector/dynamo_connector.py", line 76, in get_num_new_matched_tokens
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     return self._scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/kvbm/vllm_integration/connector_leader.py", line 137, in get_num_new_matched_tokens
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     self._create_slot(request)
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]   File "/opt/dynamo/venv/lib/python3.12/site-packages/kvbm/vllm_integration/connector_leader.py", line 259, in _create_slot
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948]     raise ValueError("Unsupported request - requires mm extra keys")
+[0;36m(EngineCore_DP0 pid=421)[0;0m ERROR 03-25 19:00:54 [core.py:948] ValueError: Unsupported request - requires mm extra keys
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693] AsyncLLM output_handler failed.
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693] Traceback (most recent call last):
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 649, in output_handler
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693]     outputs = await engine_core.get_output_async()
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 894, in get_output_async
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693]     raise self._format_exception(outputs) from None
+[0;36m(APIServer pid=117)[0;0m ERROR 03-25 19:00:54 [async_llm.py:693] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+E0325 19:00:54.089898     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089931     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089936     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089940     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089943     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089947     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089950     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089959     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089962     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089966     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089979     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089984     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089988     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089992     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089995     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.089999     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090003     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090007     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090011     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090016     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090019     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090023     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090027     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090031     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+[0;36m(EngineCore_DP0 pid=421)[0;0m Process EngineCore_DP0:
+E0325 19:00:54.090056     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090070     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090073     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090077     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090081     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090084     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090089     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090093     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090097     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090100     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090106     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090110     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090114     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090118     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090122     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090127     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090130     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090134     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090138     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090143     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090147     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090150     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090154     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+E0325 19:00:54.090157     970 nixl_agent.cpp:497] deregisterMem: no available backends for mem type 'VRAM_SEG'
+[0;36m(EngineCore_DP0 pid=421)[0;0m Traceback (most recent call last):
+[0;36m(APIServer pid=117)[0;0m INFO:     127.0.0.1:47888 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+[0;36m(EngineCore_DP0 pid=421)[0;0m     self.run()
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+[0;36m(EngineCore_DP0 pid=421)[0;0m     self._target(*self._args, **self._kwargs)
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 950, in run_engine_core
+[0;36m(EngineCore_DP0 pid=421)[0;0m     raise e
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 939, in run_engine_core
+[0;36m(EngineCore_DP0 pid=421)[0;0m     engine_core.run_busy_loop()
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 966, in run_busy_loop
+[0;36m(EngineCore_DP0 pid=421)[0;0m     self._process_engine_step()
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 999, in _process_engine_step
+[0;36m(EngineCore_DP0 pid=421)[0;0m     outputs, model_executed = self.step_fn()
+[0;36m(EngineCore_DP0 pid=421)[0;0m                               ^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 437, in step_with_batch_queue
+[0;36m(EngineCore_DP0 pid=421)[0;0m     scheduler_output = self.scheduler.schedule()
+[0;36m(EngineCore_DP0 pid=421)[0;0m                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py", line 609, in schedule
+[0;36m(EngineCore_DP0 pid=421)[0;0m     self.connector.get_num_new_matched_tokens(
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/kvbm/vllm_integration/connector/dynamo_connector.py", line 76, in get_num_new_matched_tokens
+[0;36m(EngineCore_DP0 pid=421)[0;0m     return self._scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
+[0;36m(EngineCore_DP0 pid=421)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/kvbm/vllm_integration/connector_leader.py", line 137, in get_num_new_matched_tokens
+[0;36m(EngineCore_DP0 pid=421)[0;0m     self._create_slot(request)
+[0;36m(EngineCore_DP0 pid=421)[0;0m   File "/opt/dynamo/venv/lib/python3.12/site-packages/kvbm/vllm_integration/connector_leader.py", line 259, in _create_slot
+[0;36m(EngineCore_DP0 pid=421)[0;0m     raise ValueError("Unsupported request - requires mm extra keys")
+[0;36m(EngineCore_DP0 pid=421)[0;0m ValueError: Unsupported request - requires mm extra keys
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:54 [launcher.py:110] Shutting down FastAPI HTTP server.
+[0;36m(APIServer pid=117)[0;0m INFO:     Shutting down
+[0;36m(APIServer pid=117)[0;0m INFO 03-25 19:00:57 [loggers.py:257] Engine 000: Avg prompt throughput: 1.0 tokens/s, Avg generation throughput: 0.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, External prefix cache hit rate: 0.0%, MM cache hit rate: 0.0%
+[0;36m(APIServer pid=117)[0;0m INFO:     Waiting for application shutdown.
+[0;36m(APIServer pid=117)[0;0m INFO:     Application shutdown complete.
