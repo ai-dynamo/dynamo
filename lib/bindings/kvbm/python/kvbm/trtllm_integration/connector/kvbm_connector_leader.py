@@ -132,6 +132,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_block_ids,
                 req.computed_position,
                 req.priorities,  # Pass retention priorities for offload filtering
+                getattr(req, "block_hashes", None),
             )
 
         resumed_from_preemption = False
@@ -143,6 +144,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_block_ids,
                 req.computed_position,
                 req.priorities,  # Pass retention priorities for offload filtering
+                getattr(req, "block_hashes", None),
             )
 
         output.add_num_scheduled_tokens(

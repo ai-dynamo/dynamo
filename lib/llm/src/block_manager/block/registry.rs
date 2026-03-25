@@ -5,8 +5,9 @@
 //!
 //! - This module is responsible for maintaining a registry of all blocks currently within a pool.
 //!   This consists of two components: A global registry of all blocks, and a per-pool registry of blocks.
-//! - The global registry is a mapping of sequences hashes to registration handles. If two blocks in different pools
-//!   have the same sequence hash, then they will share the same registration handle. The global registry is shared across all pools.
+//! - The global registry is a mapping of (sequence hash, storage tier) to registration handles.
+//!   If two blocks in different pools have the same sequence hash but live in different tiers,
+//!   they will have distinct registration handles and distinct event lifetimes.
 //! - The per-pool registry is a mapping of sequence hashes to block handles. This is used to track which blocks are
 //!   currently within a specific pool. The block handle is unique across pools, and is used to track the block's lifetime.
 //! - When a block is in the registered state, it has a unique block handle and a possibly shared registration handle.
@@ -27,12 +28,32 @@ use std::{
 use super::super::events::{EventManager, EventReleaseManager, PublishHandle};
 use super::state::BlockState;
 
+use crate::block_manager::kv_consolidator::StorageTier;
 use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
 
 use derive_getters::Getters;
 use tokio::{runtime::Handle, sync::mpsc};
 
-pub type GlobalRegistry = Arc<Mutex<HashMap<SequenceHash, Weak<RegistrationHandle>>>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegistrationKey {
+    sequence_hash: SequenceHash,
+    storage_tier: StorageTier,
+}
+
+impl RegistrationKey {
+    pub fn new(sequence_hash: SequenceHash, storage_tier: StorageTier) -> Self {
+        Self {
+            sequence_hash,
+            storage_tier,
+        }
+    }
+
+    pub fn sequence_hash(&self) -> SequenceHash {
+        self.sequence_hash
+    }
+}
+
+pub type GlobalRegistry = Arc<Mutex<HashMap<RegistrationKey, Weak<RegistrationHandle>>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockRegistrationError {
@@ -48,17 +69,17 @@ pub enum BlockRegistrationError {
 /// This is different than the registration handle, which is only dropped when the block is no longer in ANY pool.
 #[derive(Debug)]
 pub struct BlockHandle {
-    sequence_hash: SequenceHash,
-    unregister_tx: mpsc::UnboundedSender<SequenceHash>,
+    registration_key: RegistrationKey,
+    unregister_tx: mpsc::UnboundedSender<RegistrationKey>,
 }
 
 impl BlockHandle {
     pub fn new(
-        sequence_hash: SequenceHash,
-        unregister_tx: mpsc::UnboundedSender<SequenceHash>,
+        registration_key: RegistrationKey,
+        unregister_tx: mpsc::UnboundedSender<RegistrationKey>,
     ) -> Self {
         Self {
-            sequence_hash,
+            registration_key,
             unregister_tx,
         }
     }
@@ -66,7 +87,7 @@ impl BlockHandle {
 
 impl Drop for BlockHandle {
     fn drop(&mut self) {
-        let _ = self.unregister_tx.send(self.sequence_hash);
+        let _ = self.unregister_tx.send(self.registration_key);
     }
 }
 
@@ -74,7 +95,8 @@ pub struct BlockRegistry {
     blocks: Arc<Mutex<HashMap<SequenceHash, Weak<BlockHandle>>>>,
     event_manager: Arc<dyn EventManager>,
     global_registry: GlobalRegistry,
-    unregister_tx: mpsc::UnboundedSender<SequenceHash>,
+    unregister_tx: mpsc::UnboundedSender<RegistrationKey>,
+    storage_tier: StorageTier,
 }
 
 impl BlockRegistry {
@@ -82,8 +104,9 @@ impl BlockRegistry {
         event_manager: Arc<dyn EventManager>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        storage_tier: StorageTier,
     ) -> Self {
-        let (unregister_tx, mut unregister_rx) = mpsc::unbounded_channel();
+        let (unregister_tx, mut unregister_rx) = mpsc::unbounded_channel::<RegistrationKey>();
 
         let blocks: Arc<Mutex<HashMap<SequenceHash, Weak<BlockHandle>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -93,9 +116,10 @@ impl BlockRegistry {
         async_runtime.spawn(async move {
             let blocks = blocks_clone;
             let global_registry = global_registry_clone;
-            while let Some(sequence_hash) = unregister_rx.recv().await {
+            while let Some(registration_key) = unregister_rx.recv().await {
                 {
                     let mut blocks = blocks.lock().unwrap();
+                    let sequence_hash = registration_key.sequence_hash();
 
                     if let Some(handle) = blocks.get(&sequence_hash)
                         && handle.upgrade().is_none()
@@ -106,10 +130,10 @@ impl BlockRegistry {
 
                 let mut global_registry = global_registry.lock().unwrap();
 
-                if let Some(entry) = global_registry.get(&sequence_hash)
+                if let Some(entry) = global_registry.get(&registration_key)
                     && entry.upgrade().is_none()
                 {
-                    global_registry.remove(&sequence_hash);
+                    global_registry.remove(&registration_key);
                 }
             }
         });
@@ -119,6 +143,7 @@ impl BlockRegistry {
             event_manager,
             global_registry,
             unregister_tx,
+            storage_tier,
         }
     }
 
@@ -135,6 +160,8 @@ impl BlockRegistry {
     pub fn register_block(
         &mut self,
         block_state: &mut BlockState,
+        event_sequence_hash: Option<SequenceHash>,
+        event_parent_sequence_hash: Option<SequenceHash>,
     ) -> Result<Option<PublishHandle>, BlockRegistrationError> {
         match block_state {
             BlockState::Reset => Err(BlockRegistrationError::InvalidState(
@@ -146,6 +173,7 @@ impl BlockRegistry {
 
             BlockState::Complete(state) => {
                 let sequence_hash = state.token_block().sequence_hash();
+                let registration_key = RegistrationKey::new(sequence_hash, self.storage_tier);
                 let mut blocks = self.blocks.lock().unwrap();
 
                 // If an identical block already exists in this pool, return an error.
@@ -159,15 +187,17 @@ impl BlockRegistry {
 
                 let mut publish_handle = None;
 
-                let block_handle =
-                    Arc::new(BlockHandle::new(sequence_hash, self.unregister_tx.clone()));
+                let block_handle = Arc::new(BlockHandle::new(
+                    registration_key,
+                    self.unregister_tx.clone(),
+                ));
 
                 let reg_handle = 'reg_block: {
                     // Now, check the global registry.
                     let mut global_registry = self.global_registry.lock().unwrap();
 
                     // If an identical block exists in other pool, use the same registration handle.
-                    if let Some(handle) = global_registry.get(&sequence_hash)
+                    if let Some(handle) = global_registry.get(&registration_key)
                         && let Some(handle) = handle.upgrade()
                     {
                         break 'reg_block handle;
@@ -177,11 +207,14 @@ impl BlockRegistry {
                     publish_handle = Some(Self::create_publish_handle(
                         state.token_block(),
                         self.event_manager.clone(),
+                        self.storage_tier,
+                        event_sequence_hash,
+                        event_parent_sequence_hash,
                     ));
                     let reg_handle = publish_handle.as_ref().unwrap().remove_handle();
 
                     // Insert the registration handle into the global registry.
-                    global_registry.insert(sequence_hash, Arc::downgrade(&reg_handle));
+                    global_registry.insert(registration_key, Arc::downgrade(&reg_handle));
 
                     reg_handle
                 };
@@ -205,8 +238,17 @@ impl BlockRegistry {
     fn create_publish_handle(
         token_block: &TokenBlock,
         event_manager: Arc<dyn EventManager>,
+        storage_tier: StorageTier,
+        event_sequence_hash: Option<SequenceHash>,
+        event_parent_sequence_hash: Option<SequenceHash>,
     ) -> PublishHandle {
-        let reg_handle = RegistrationHandle::from_token_block(token_block, event_manager.clone());
+        let reg_handle = RegistrationHandle::from_token_block(
+            token_block,
+            event_manager.clone(),
+            storage_tier,
+            event_sequence_hash,
+            event_parent_sequence_hash,
+        );
 
         PublishHandle::new(reg_handle, event_manager)
     }
@@ -222,6 +264,15 @@ pub struct RegistrationHandle {
 
     #[getter(copy)]
     parent_sequence_hash: Option<SequenceHash>,
+
+    #[getter(copy)]
+    storage_tier: StorageTier,
+
+    #[getter(copy)]
+    event_sequence_hash: Option<SequenceHash>,
+
+    #[getter(copy)]
+    event_parent_sequence_hash: Option<SequenceHash>,
 
     #[getter(skip)]
     release_manager: Arc<dyn EventReleaseManager>,
@@ -243,11 +294,17 @@ impl RegistrationHandle {
     fn from_token_block(
         token_block: &TokenBlock,
         release_manager: Arc<dyn EventReleaseManager>,
+        storage_tier: StorageTier,
+        event_sequence_hash: Option<SequenceHash>,
+        event_parent_sequence_hash: Option<SequenceHash>,
     ) -> Self {
         Self {
             block_hash: token_block.block_hash(),
             sequence_hash: token_block.sequence_hash(),
             parent_sequence_hash: token_block.parent_sequence_hash(),
+            storage_tier,
+            event_sequence_hash,
+            event_parent_sequence_hash,
             release_manager,
             token_block: token_block.clone(),
         }
@@ -258,8 +315,13 @@ impl std::fmt::Debug for RegistrationHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RegistrationHandle {{ sequence_hash: {}; block_hash: {}; parent_sequence_hash: {:?} }}",
-            self.sequence_hash, self.block_hash, self.parent_sequence_hash
+            "RegistrationHandle {{ sequence_hash: {}; block_hash: {}; parent_sequence_hash: {:?}; storage_tier: {:?}; event_sequence_hash: {:?}; event_parent_sequence_hash: {:?} }}",
+            self.sequence_hash,
+            self.block_hash,
+            self.parent_sequence_hash,
+            self.storage_tier,
+            self.event_sequence_hash,
+            self.event_parent_sequence_hash
         )
     }
 }
@@ -274,7 +336,10 @@ impl Drop for RegistrationHandle {
 mod tests {
     use super::*;
 
+    use crate::block_manager::block::state::{BlockState, CompleteState};
+    use crate::block_manager::events::NullEventManager;
     use crate::block_manager::events::tests::{EventType, MockEventManager};
+    use crate::block_manager::kv_consolidator::StorageTier;
     use crate::tokens::{TokenBlockSequence, Tokens};
 
     fn create_sequence() -> TokenBlockSequence {
@@ -303,8 +368,13 @@ mod tests {
 
         let (event_manager, mut rx) = MockEventManager::new();
 
-        let publish_handle =
-            BlockRegistry::create_publish_handle(&sequence.blocks()[0], event_manager.clone());
+        let publish_handle = BlockRegistry::create_publish_handle(
+            &sequence.blocks()[0],
+            event_manager.clone(),
+            StorageTier::Device,
+            None,
+            None,
+        );
 
         // no event should have been triggered
         assert!(rx.try_recv().is_err());
@@ -340,8 +410,13 @@ mod tests {
 
         let (event_manager, mut rx) = MockEventManager::new();
 
-        let publish_handle =
-            BlockRegistry::create_publish_handle(block_to_test, event_manager.clone());
+        let publish_handle = BlockRegistry::create_publish_handle(
+            block_to_test,
+            event_manager.clone(),
+            StorageTier::Device,
+            None,
+            None,
+        );
 
         // Remove the registration handle before dropping the publish handle
         let reg_handle = publish_handle.remove_handle();
@@ -379,6 +454,66 @@ mod tests {
     }
 
     #[test]
+    fn test_registration_handle_preserves_optional_event_hashes() {
+        let sequence = create_sequence();
+        let publish_handle = BlockRegistry::create_publish_handle(
+            &sequence.blocks()[1],
+            NullEventManager::new(),
+            StorageTier::HostPinned,
+            Some(999),
+            Some(555),
+        );
+        let handle = publish_handle.remove_handle();
+
+        assert_eq!(handle.sequence_hash(), sequence.blocks()[1].sequence_hash());
+        assert_eq!(
+            handle.parent_sequence_hash(),
+            sequence.blocks()[1].parent_sequence_hash()
+        );
+        assert_eq!(handle.event_sequence_hash(), Some(999));
+        assert_eq!(handle.event_parent_sequence_hash(), Some(555));
+        assert_eq!(handle.storage_tier(), StorageTier::HostPinned);
+    }
+
+    #[test]
+    fn test_global_registry_is_scoped_by_storage_tier() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut host_registry = BlockRegistry::new(
+            NullEventManager::new(),
+            GlobalRegistry::default(),
+            runtime.handle().clone(),
+            StorageTier::HostPinned,
+        );
+        let mut disk_registry = BlockRegistry::new(
+            NullEventManager::new(),
+            host_registry.global_registry.clone(),
+            runtime.handle().clone(),
+            StorageTier::Disk,
+        );
+        let sequence = create_sequence();
+        let mut host_state = BlockState::Complete(CompleteState::new(sequence.blocks()[0].clone()));
+        let mut disk_state = BlockState::Complete(CompleteState::new(sequence.blocks()[0].clone()));
+
+        let host_publish_handle = host_registry
+            .register_block(&mut host_state, None, None)
+            .unwrap();
+        let disk_publish_handle = disk_registry
+            .register_block(&mut disk_state, None, None)
+            .unwrap();
+
+        assert!(host_publish_handle.is_some());
+        assert!(disk_publish_handle.is_some());
+        assert_eq!(
+            host_publish_handle.unwrap().remove_handle().storage_tier(),
+            StorageTier::HostPinned
+        );
+        assert_eq!(
+            disk_publish_handle.unwrap().remove_handle().storage_tier(),
+            StorageTier::Disk
+        );
+    }
+
+    #[test]
     fn test_mock_event_manager_publisher_multiple_handles_removed() {
         let sequence = create_sequence();
         let block1 = &sequence.blocks()[0];
@@ -389,8 +524,20 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
         let mut publisher = event_manager.publisher();
 
-        let publish_handle1 = BlockRegistry::create_publish_handle(block1, event_manager.clone());
-        let publish_handle2 = BlockRegistry::create_publish_handle(block2, event_manager.clone());
+        let publish_handle1 = BlockRegistry::create_publish_handle(
+            block1,
+            event_manager.clone(),
+            StorageTier::Device,
+            None,
+            None,
+        );
+        let publish_handle2 = BlockRegistry::create_publish_handle(
+            block2,
+            event_manager.clone(),
+            StorageTier::Device,
+            None,
+            None,
+        );
 
         // Remove handles before adding to publisher
         let reg_handle1 = publish_handle1.remove_handle();
@@ -453,7 +600,13 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
         let mut publisher = event_manager.publisher();
 
-        let publish_handle1 = BlockRegistry::create_publish_handle(block1, event_manager.clone());
+        let publish_handle1 = BlockRegistry::create_publish_handle(
+            block1,
+            event_manager.clone(),
+            StorageTier::Device,
+            None,
+            None,
+        );
 
         publisher.take_handle(publish_handle1);
 

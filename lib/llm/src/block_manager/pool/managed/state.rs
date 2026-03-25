@@ -4,6 +4,7 @@
 use crate::block_manager::{
     block::{BlockState, PrivateBlockExt, registry::BlockRegistrationError},
     events::Publisher,
+    kv_consolidator::StorageTier,
 };
 
 use super::*;
@@ -11,17 +12,23 @@ use super::*;
 use active::ActiveBlockPool;
 use inactive::InactiveBlockPool;
 
-impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M> {
+impl<S: Storage + 'static, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M> {
     pub fn new(
         event_manager: Arc<dyn EventManager>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
         global_registry: GlobalRegistry,
+        storage_tier: StorageTier,
         async_runtime: Handle,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
             inactive: InactiveBlockPool::new(),
-            registry: BlockRegistry::new(event_manager.clone(), global_registry, async_runtime),
+            registry: BlockRegistry::new(
+                event_manager.clone(),
+                global_registry,
+                async_runtime,
+                storage_tier,
+            ),
             return_tx,
             event_manager,
         }

@@ -44,6 +44,9 @@
 //! 6.  Dropped [`MutableBlock`]s are automatically returned to the [`InactiveBlockPool`].
 
 use super::*;
+use crate::block_manager::kv_consolidator::StorageTier;
+use crate::block_manager::{DeviceStorage, DiskStorage, PinnedStorage};
+use std::any::TypeId;
 
 pub mod active;
 pub mod controller;
@@ -53,6 +56,20 @@ pub mod state;
 
 use active::ActiveBlockPool;
 use inactive::InactiveBlockPool;
+
+fn storage_tier_for_storage<S: Storage + 'static>() -> StorageTier {
+    let type_id = TypeId::of::<S>();
+
+    if type_id == TypeId::of::<DeviceStorage>() {
+        StorageTier::Device
+    } else if type_id == TypeId::of::<PinnedStorage>() {
+        StorageTier::HostPinned
+    } else if type_id == TypeId::of::<DiskStorage>() {
+        StorageTier::Disk
+    } else {
+        panic!("unsupported storage type for tiered event emission");
+    }
+}
 
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
@@ -76,7 +93,9 @@ pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadat
     default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
 
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuilder<S, L, M> {
+impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata>
+    ManagedBlockPoolArgsBuilder<S, L, M>
+{
     pub fn build(self) -> anyhow::Result<ManagedBlockPool<S, L, M>> {
         let args = self.build_internal()?;
         let (
@@ -154,7 +173,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for ManagedBlockPo
     }
 }
 
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M> {
+impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M> {
     pub fn builder() -> ManagedBlockPoolArgsBuilder<S, L, M> {
         ManagedBlockPoolArgsBuilder::default()
     }
@@ -230,6 +249,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         async_runtime: Handle,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> (Self, ProgressEngine<S, L, M>) {
+        let storage_tier = storage_tier_for_storage::<S>();
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -240,6 +260,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             cancel_token,
             blocks,
             global_registry,
+            storage_tier,
             async_runtime,
         );
 
@@ -505,7 +526,9 @@ pub struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     event_manager: Arc<dyn EventManager>,
 }
 
-impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine<S, L, M> {
+impl<S: Storage + 'static, L: LocalityProvider + 'static, M: BlockMetadata>
+    ProgressEngine<S, L, M>
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_manager: Arc<dyn EventManager>,
@@ -514,11 +537,17 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
+        storage_tier: StorageTier,
         async_runtime: Handle,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state =
-            State::<S, L, M>::new(event_manager, return_tx, global_registry, async_runtime);
+        let mut state = State::<S, L, M>::new(
+            event_manager,
+            return_tx,
+            global_registry,
+            storage_tier,
+            async_runtime,
+        );
 
         let count = blocks.len();
 

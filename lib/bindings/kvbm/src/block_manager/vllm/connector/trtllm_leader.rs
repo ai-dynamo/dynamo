@@ -389,6 +389,7 @@ impl Leader for KvConnectorLeader {
                 new_req.num_computed_tokens,
                 scheduled_tokens,
                 new_req.priorities.as_deref(),
+                new_req.block_hashes.as_deref(),
             )?;
 
             let pending_ops_opt = slot.take_pending_operations();
@@ -440,6 +441,7 @@ impl Leader for KvConnectorLeader {
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
                 cached_req.priorities.as_deref(),
+                cached_req.block_hashes.as_deref(),
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {

@@ -520,7 +520,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> std::fmt::Debug
 // }
 
 #[expect(clippy::type_complexity)]
-pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadata>(
+pub(crate) fn create_block_pool<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata>(
     factory: impl IntoBlocks<S, L>,
     resources: &Resources,
     _pool_name: &str,

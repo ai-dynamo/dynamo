@@ -201,8 +201,14 @@ impl DynamoEventManager {
             rt.spawn(async move {
                 for handle in handles {
                     // Extract block metadata from RegistrationHandle
-                    let block_hash = handle.sequence_hash().to_string();
-                    let parent_hash = handle.parent_sequence_hash().map(|h| h.to_string());
+                    let block_hash = handle
+                        .event_sequence_hash()
+                        .unwrap_or(handle.sequence_hash())
+                        .to_string();
+                    let parent_hash = handle
+                        .event_parent_sequence_hash()
+                        .or(handle.parent_sequence_hash())
+                        .map(|h| h.to_string());
 
                     // Extract block_size and tokens from RegistrationHandle
                     let block_size = handle.block_size(); // usize
@@ -224,7 +230,7 @@ impl DynamoEventManager {
                             parent_hash,
                             block_size,
                             None, // lora_name
-                            None, // tier
+                            Some(handle.storage_tier()),
                             None, // data_parallel_rank
                         )
                         .await;
@@ -242,7 +248,10 @@ impl DynamoEventManager {
     ///
     /// Called when a RegistrationHandle is dropped (block evicted from KVBM).
     fn publish_remove_event(&self, registration_handle: &RegistrationHandle) {
-        let block_hash = registration_handle.sequence_hash().to_string();
+        let block_hash = registration_handle
+            .event_sequence_hash()
+            .unwrap_or(registration_handle.sequence_hash())
+            .to_string();
 
         tracing::debug!(
             "DynamoEventManager::publish_remove_event called: block_hash={}",

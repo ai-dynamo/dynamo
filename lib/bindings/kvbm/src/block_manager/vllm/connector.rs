@@ -42,7 +42,7 @@ impl SchedulerOutput {
 
     // I am surprised that vLLM's NewRequestData does not include the salt hash.
     // It has almost everything else to compute the block hashes worker side.
-    #[pyo3(signature = (request_id, prompt_token_ids, block_ids, num_computed_tokens, priorities=None))]
+    #[pyo3(signature = (request_id, prompt_token_ids, block_ids, num_computed_tokens, priorities=None, block_hashes=None))]
     pub fn add_new_request(
         &mut self,
         request_id: String,
@@ -50,6 +50,7 @@ impl SchedulerOutput {
         block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
         priorities: Option<Vec<u32>>,
+        block_hashes: Option<Vec<u64>>,
     ) {
         self.new_requests.push(NewRequestData {
             request_id,
@@ -57,11 +58,12 @@ impl SchedulerOutput {
             block_ids,
             num_computed_tokens,
             priorities,
+            block_hashes,
         });
     }
 
     /// This is called by the leader to update the cached requests
-    #[pyo3(signature = (request_id, resumed_from_preemption, new_token_ids, new_block_ids, num_computed_tokens, priorities=None))]
+    #[pyo3(signature = (request_id, resumed_from_preemption, new_token_ids, new_block_ids, num_computed_tokens, priorities=None, block_hashes=None))]
     pub fn add_cached_request(
         &mut self,
         request_id: String,
@@ -70,6 +72,7 @@ impl SchedulerOutput {
         new_block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
         priorities: Option<Vec<u32>>,
+        block_hashes: Option<Vec<u64>>,
     ) {
         self.cached_requests.push(CachedRequestData {
             request_id,
@@ -78,6 +81,7 @@ impl SchedulerOutput {
             new_block_ids,
             num_computed_tokens,
             priorities,
+            block_hashes,
         });
     }
 
@@ -108,6 +112,9 @@ pub struct NewRequestData {
     /// Retention priorities for each block (same length as block_ids).
     /// Used for priority-based offload filtering.
     pub priorities: Option<Vec<u32>>,
+    /// Optional framework-provided sequence hashes for this request's blocks.
+    /// When present, KVBM preserves them for lower-tier event emission.
+    pub block_hashes: Option<Vec<u64>>,
 }
 
 impl std::fmt::Debug for NewRequestData {
@@ -117,6 +124,10 @@ impl std::fmt::Debug for NewRequestData {
             .field("num_tokens", &self.prompt_token_ids.len())
             .field("num_blocks", &self.block_ids.len())
             .field("num_computed_tokens", &self.num_computed_tokens)
+            .field(
+                "num_block_hashes",
+                &self.block_hashes.as_ref().map(Vec::len),
+            )
             .finish()
     }
 }
@@ -131,6 +142,9 @@ pub struct CachedRequestData {
     /// Retention priorities for each new block (same length as new_block_ids).
     /// Used for priority-based offload filtering.
     pub priorities: Option<Vec<u32>>,
+    /// Optional framework-provided sequence hashes for this request's blocks.
+    /// When present, KVBM preserves them for lower-tier event emission.
+    pub block_hashes: Option<Vec<u64>>,
 }
 
 impl std::fmt::Debug for CachedRequestData {
@@ -141,6 +155,10 @@ impl std::fmt::Debug for CachedRequestData {
             .field("num_new_tokens", &self.new_token_ids.len())
             .field("num_new_blocks", &self.new_block_ids.len())
             .field("num_computed_tokens", &self.num_computed_tokens)
+            .field(
+                "num_block_hashes",
+                &self.block_hashes.as_ref().map(Vec::len),
+            )
             .finish()
     }
 }
@@ -186,5 +204,45 @@ impl ConnectorMetadata {
 
     pub fn add_operations(&mut self, xfer_reqs: Vec<WorkerTransferRequest>) {
         self.operations.extend(xfer_reqs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_output_preserves_optional_block_hashes() {
+        let mut output = SchedulerOutput::new();
+
+        output.add_new_request(
+            "new-req".to_string(),
+            vec![1, 2, 3],
+            vec![10, 11],
+            0,
+            Some(vec![7, 8]),
+            Some(vec![101, 102]),
+        );
+
+        output.add_cached_request(
+            "cached-req".to_string(),
+            false,
+            vec![4, 5],
+            vec![12],
+            64,
+            None,
+            Some(vec![201, 202, 203]),
+        );
+
+        assert_eq!(output.new_requests.len(), 1);
+        assert_eq!(output.cached_requests.len(), 1);
+        assert_eq!(
+            output.new_requests[0].block_hashes.as_deref(),
+            Some(&[101, 102][..])
+        );
+        assert_eq!(
+            output.cached_requests[0].block_hashes.as_deref(),
+            Some(&[201, 202, 203][..])
+        );
     }
 }

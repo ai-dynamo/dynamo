@@ -16,7 +16,7 @@ use dynamo_llm::{
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
     },
-    tokens::TokenBlock,
+    tokens::{SequenceHash, TokenBlock},
 };
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
@@ -114,6 +114,7 @@ pub trait Slot: std::fmt::Debug {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
+        block_hashes: Option<&[SequenceHash]>,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -394,6 +395,9 @@ pub struct VllmConnectorSlot {
     /// Stored block priorities from previous apply_scheduler_output calls.
     /// Used as fallback when priorities=None in subsequent chunked prefill iterations.
     stored_block_priorities: HashMap<BlockId, u32>,
+
+    /// Optional framework-provided sequence hashes aligned to `self.sequence.blocks()`.
+    stored_block_hashes: Vec<Option<SequenceHash>>,
 }
 
 impl VllmConnectorSlot {
@@ -435,6 +439,7 @@ impl VllmConnectorSlot {
             offload_min_priority,
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
+            stored_block_hashes: Vec::new(),
         }
     }
 
@@ -473,6 +478,7 @@ impl VllmConnectorSlot {
             offload_min_priority,
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
+            stored_block_hashes: Vec::new(),
         }
     }
 
@@ -517,6 +523,54 @@ impl VllmConnectorSlot {
                 );
                 Ok(())
             }
+        }
+    }
+
+    fn update_stored_block_hashes(
+        &mut self,
+        block_hashes: Option<&[SequenceHash]>,
+    ) -> Result<(), SlotError> {
+        let total_blocks = self.sequence.blocks().len();
+        if self.stored_block_hashes.len() < total_blocks {
+            self.stored_block_hashes.resize(total_blocks, None);
+        }
+
+        let Some(block_hashes) = block_hashes else {
+            return Ok(());
+        };
+
+        if block_hashes.is_empty() {
+            return Ok(());
+        }
+
+        if block_hashes.len() != total_blocks {
+            tracing::warn!(
+                request_id = %self.request_id,
+                num_block_hashes = block_hashes.len(),
+                total_blocks,
+                "ignoring framework block hashes due to length mismatch"
+            );
+            return Ok(());
+        }
+
+        self.stored_block_hashes = block_hashes.iter().copied().map(Some).collect();
+        Ok(())
+    }
+
+    fn event_hashes_for_block(&self, block_index: usize) -> EventHashes {
+        let sequence_hash = self.stored_block_hashes.get(block_index).copied().flatten();
+        let parent_sequence_hash = sequence_hash.and_then(|_| {
+            block_index.checked_sub(1).and_then(|parent_index| {
+                self.stored_block_hashes
+                    .get(parent_index)
+                    .copied()
+                    .flatten()
+            })
+        });
+
+        EventHashes {
+            sequence_hash,
+            parent_sequence_hash,
         }
     }
 }
@@ -597,6 +651,7 @@ impl Slot for VllmConnectorSlot {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
+        block_hashes: Option<&[SequenceHash]>,
     ) -> Result<(), SlotError> {
         tracing::debug!(
             "ENTRY: apply_scheduler_output: req={}, tokens.len={}, block_ids.len={}, computed={}, scheduled={}, \
@@ -633,6 +688,8 @@ impl Slot for VllmConnectorSlot {
         } else {
             self.state = SlotState::Prefilling;
         }
+
+        self.update_stored_block_hashes(block_hashes)?;
 
         // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
         // This logic is to prevent redundant block offloading.
@@ -848,11 +905,16 @@ impl Slot for VllmConnectorSlot {
                     .take(num_blocks_to_offload)
                     .copied()
                     .collect();
+                let offload_event_hashes: Vec<EventHashes> = (self.evaluated_blocks
+                    ..self.evaluated_blocks + num_blocks_to_offload)
+                    .map(|block_index| self.event_hashes_for_block(block_index))
+                    .collect();
 
                 self.offload_blocks(
                     &offload_block_ids,
                     &offload_token_blocks,
                     &offload_priorities,
+                    &offload_event_hashes,
                 )
                 .expect("failed to offload blocks");
             } else if self.offload_min_priority > 0 {
@@ -1248,6 +1310,7 @@ impl VllmConnectorSlot {
         block_ids: &[BlockId],
         token_blocks: &[TokenBlock],
         priorities: &[u32],
+        event_hashes: &[EventHashes],
     ) -> Result<(), SlotError> {
         // Check if slot is in Finishing state before creating operations
         // If we're finishing, don't create new operations
@@ -1257,6 +1320,7 @@ impl VllmConnectorSlot {
 
         assert!(block_ids.len() == token_blocks.len());
         assert!(block_ids.len() == priorities.len());
+        assert!(block_ids.len() == event_hashes.len());
         let operation_id = uuid::Uuid::new_v4();
 
         let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
@@ -1264,6 +1328,7 @@ impl VllmConnectorSlot {
             block_ids.to_vec(),
             token_blocks.to_vec(),
             priorities.to_vec(),
+            event_hashes.to_vec(),
             operation_id,
         ));
 
@@ -1354,12 +1419,20 @@ enum LocalTransferRequest {
     Onboard(LocalOnboardRequest),
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct EventHashes {
+    sequence_hash: Option<SequenceHash>,
+    parent_sequence_hash: Option<SequenceHash>,
+}
+
 struct LocalOffloadRequest {
     request_id: String,
     block_ids: Vec<BlockId>,
     token_blocks: Vec<TokenBlock>,
     /// Priorities for each block, used to set BasicMetadata.priority during offload.
     priorities: Vec<u32>,
+    /// Optional event-facing sequence hashes to preserve during offload registration.
+    event_hashes: Vec<EventHashes>,
     operation_id: uuid::Uuid,
 }
 
@@ -1369,15 +1442,18 @@ impl LocalOffloadRequest {
         block_ids: Vec<BlockId>,
         token_blocks: Vec<TokenBlock>,
         priorities: Vec<u32>,
+        event_hashes: Vec<EventHashes>,
         operation_id: uuid::Uuid,
     ) -> Self {
         debug_assert!(block_ids.len() == token_blocks.len());
         debug_assert!(block_ids.len() == priorities.len());
+        debug_assert!(block_ids.len() == event_hashes.len());
         Self {
             request_id,
             block_ids,
             token_blocks,
             priorities,
+            event_hashes,
             operation_id,
         }
     }
@@ -1663,6 +1739,7 @@ where
         .allocate_blocks(offload_req.block_ids.len())
         .await?;
     let token_blocks = offload_req.token_blocks;
+    let event_hashes = offload_req.event_hashes;
 
     let allocated_block_ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
     let block_pairs: Vec<(usize, usize)> = offload_req
@@ -1682,17 +1759,24 @@ where
     let mut blocks_to_register = Vec::new();
     let priorities = offload_req.priorities;
 
-    for ((mut mutable_block, token_block), priority) in blocks
+    for (((mut mutable_block, token_block), priority), event_hashes) in blocks
         .into_iter()
         .zip(token_blocks.into_iter())
         .zip(priorities.into_iter())
+        .zip(event_hashes.into_iter())
     {
         mutable_block
             .apply_token_block(token_block.clone())
             .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
 
         // Set the priority on the block's metadata so it flows through to downstream processing
-        let updated_metadata = mutable_block.metadata().with_priority(priority);
+        let updated_metadata = mutable_block
+            .metadata()
+            .with_priority(priority)
+            .with_event_hashes(
+                event_hashes.sequence_hash,
+                event_hashes.parent_sequence_hash,
+            );
         mutable_block.update_metadata(updated_metadata);
 
         blocks_to_register.push(mutable_block);
@@ -1941,7 +2025,7 @@ mod connector_tests {
         assert_eq!(slot.num_device_blocks_allocated(), 3);
 
         // Step 2: apply_scheduler_output with empty blocks (vLLM pattern)
-        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None, None)
             .unwrap();
 
         // device_blocks should still be exactly 3 — no double-add
@@ -1964,7 +2048,7 @@ mod connector_tests {
 
         // Step 2: apply_scheduler_output with THE SAME blocks (TRT-LLM pattern)
         // Without the dedup guard, this doubles device_blocks to len=6.
-        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None, None)
             .unwrap();
 
         // device_blocks must still be exactly 3 — dedup guard prevented the double-add
@@ -1982,14 +2066,14 @@ mod connector_tests {
 
         // Prefill: append + apply with empty blocks (vLLM pattern)
         slot.append_mutable_device_blocks(&prefill_blocks).unwrap();
-        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None, None)
             .unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 3);
 
         // Decode: new block at boundary (token 96 = block 3)
         let decode_block = block_ids(200, 1);
         let decode_token: Vec<u32> = vec![9999];
-        slot.apply_scheduler_output(&decode_token, &decode_block, 95, 1, None)
+        slot.apply_scheduler_output(&decode_token, &decode_block, 95, 1, None, None)
             .unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 4);
     }
@@ -2024,7 +2108,7 @@ mod connector_tests {
         // Empty tokens → Prefilling state, and next_position(96) == total_tokens(96)
         // so the early-return does not fire and offload proceeds.
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None, None)
             .unwrap();
 
         let offloads = drain_offload_block_ids(&mut rx);
@@ -2045,7 +2129,7 @@ mod connector_tests {
         // Use the TRT-LLM pattern: append_mutable first, then apply with same blocks + priorities.
         // The dedup guard prevents the double-add, but priorities are still processed.
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities))
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities), None)
             .unwrap();
 
         // device_blocks should be 3 (dedup prevented doubling)
@@ -2069,7 +2153,7 @@ mod connector_tests {
         let priorities: Vec<u32> = vec![80, 80, 10, 10];
 
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities))
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities), None)
             .unwrap();
 
         let offloads = drain_offload_block_ids(&mut rx);
@@ -2079,7 +2163,7 @@ mod connector_tests {
         // Because offload was terminated, no further offloading should happen.
         let decode_block = block_ids(200, 1);
         let decode_token: Vec<u32> = vec![9999];
-        slot.apply_scheduler_output(&decode_token, &decode_block, 127, 1, None)
+        slot.apply_scheduler_output(&decode_token, &decode_block, 127, 1, None, None)
             .unwrap();
 
         let further_offloads = drain_offload_block_ids(&mut rx);
@@ -2102,14 +2186,16 @@ mod connector_tests {
         slot.append_mutable_device_blocks(&blocks).unwrap();
 
         // Chunk 1: schedule first 64 tokens → evaluates blocks 0,1
-        slot.apply_scheduler_output(&[], &[], 0, 64, None).unwrap();
+        slot.apply_scheduler_output(&[], &[], 0, 64, None, None)
+            .unwrap();
         let offloads_1 = drain_offload_block_ids(&mut rx);
         assert_eq!(offloads_1.len(), 1);
         assert_eq!(offloads_1[0], vec![100, 101]); // blocks 0,1
 
         // Chunk 2: schedule next 64 tokens → evaluates blocks 2,3
         // (uses cached_request pattern: empty tokens, empty blocks)
-        slot.apply_scheduler_output(&[], &[], 64, 64, None).unwrap();
+        slot.apply_scheduler_output(&[], &[], 64, 64, None, None)
+            .unwrap();
         let offloads_2 = drain_offload_block_ids(&mut rx);
         assert_eq!(offloads_2.len(), 1);
         assert_eq!(offloads_2[0], vec![102, 103]); // blocks 2,3
@@ -2133,7 +2219,7 @@ mod connector_tests {
         // Step 2: apply_scheduler_output with overlapping blocks [12, 13].
         // Suffix [12] of device_blocks matches prefix [12] of block_ids.
         // Only block 13 is new and gets appended.
-        slot.apply_scheduler_output(&[], &[12, 13], 0, 128, None)
+        slot.apply_scheduler_output(&[], &[12, 13], 0, 128, None, None)
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 4);
@@ -2152,7 +2238,7 @@ mod connector_tests {
 
         // Chunk 1: 3 blocks, all high priority, schedule 96 tokens
         slot.append_mutable_device_blocks(&[10, 11, 12]).unwrap();
-        slot.apply_scheduler_output(&[], &[10, 11, 12], 0, 96, Some(&[80, 80, 80]))
+        slot.apply_scheduler_output(&[], &[10, 11, 12], 0, 96, Some(&[80, 80, 80]), None)
             .unwrap();
 
         let offloads_1 = drain_offload_block_ids(&mut rx);
@@ -2171,7 +2257,7 @@ mod connector_tests {
         slot.append_mutable_device_blocks(&[13]).unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 4);
 
-        slot.apply_scheduler_output(&[], &[12, 13], 96, 32, Some(&[80, 10]))
+        slot.apply_scheduler_output(&[], &[12, 13], 96, 32, Some(&[80, 10]), None)
             .unwrap();
 
         // Candidate is block 13 (index 3, evaluated_blocks=3).
@@ -2198,7 +2284,7 @@ mod connector_tests {
 
         // block_ids[0]=11 is found at device_blocks[1], but device_blocks[1..] = [11,12]
         // does NOT match block_ids[..2] = [11,14]. Contract violation.
-        slot.apply_scheduler_output(&[], &[11, 14], 0, 128, None)
+        slot.apply_scheduler_output(&[], &[11, 14], 0, 128, None, None)
             .unwrap();
     }
 
@@ -2218,7 +2304,7 @@ mod connector_tests {
 
         // Overlap: suffix [13,14] matches prefix [13,14], overlap=2.
         // new_ids = [10]. But 10 ∈ device_blocks → contract violation.
-        slot.apply_scheduler_output(&[], &[13, 14, 10], 0, 192, None)
+        slot.apply_scheduler_output(&[], &[13, 14, 10], 0, 192, None, None)
             .unwrap();
     }
 
@@ -2238,7 +2324,7 @@ mod connector_tests {
         // block_ids[0]=10 found at device_blocks[0], suffix_len=3.
         // device_blocks[0..3]=[10,11,12] == block_ids[0..3]=[10,11,12] → overlap=3.
         // new_ids=[13,14], both genuinely new → extend.
-        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14], 0, 160, None)
+        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14], 0, 160, None, None)
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 5);
@@ -2261,7 +2347,7 @@ mod connector_tests {
         assert_eq!(slot.num_device_blocks_allocated(), 5);
 
         // Full overlap of all 5 existing blocks, plus 2 new.
-        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14, 15, 16], 0, 224, None)
+        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14, 15, 16], 0, 224, None, None)
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 7);

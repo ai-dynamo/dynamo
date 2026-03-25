@@ -99,6 +99,25 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// Returns a new metadata instance with the specified priority.
     /// Used to carry priority through the block lifecycle for offload filtering.
     fn with_priority(&self, priority: u32) -> Self;
+
+    /// Returns the optional event-facing sequence hash override for this block.
+    fn event_sequence_hash(&self) -> Option<SequenceHash> {
+        None
+    }
+
+    /// Returns the optional event-facing parent sequence hash override for this block.
+    fn event_parent_sequence_hash(&self) -> Option<SequenceHash> {
+        None
+    }
+
+    /// Returns a new metadata instance with the specified event-facing hashes.
+    fn with_event_hashes(
+        &self,
+        _event_sequence_hash: Option<SequenceHash>,
+        _event_parent_sequence_hash: Option<SequenceHash>,
+    ) -> Self {
+        self.clone()
+    }
 }
 
 /// A trait for blocks that can be returned to the pool.
@@ -407,7 +426,11 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PrivateBlockExt for Bloc
         &mut self,
         registry: &mut registry::BlockRegistry,
     ) -> Result<Option<PublishHandle>, registry::BlockRegistrationError> {
-        registry.register_block(&mut self.state)
+        registry.register_block(
+            &mut self.state,
+            self.metadata.event_sequence_hash(),
+            self.metadata.event_parent_sequence_hash(),
+        )
     }
 }
 
@@ -500,6 +523,10 @@ pub struct BasicMetadata {
     returned_tick: u64,
     #[getter(copy)]
     acquired_tick: u64,
+    #[getter(copy)]
+    event_sequence_hash: Option<SequenceHash>,
+    #[getter(copy)]
+    event_parent_sequence_hash: Option<SequenceHash>,
 }
 
 impl BasicMetadata {
@@ -508,6 +535,22 @@ impl BasicMetadata {
             priority,
             returned_tick: self.returned_tick,
             acquired_tick: self.acquired_tick,
+            event_sequence_hash: self.event_sequence_hash,
+            event_parent_sequence_hash: self.event_parent_sequence_hash,
+        }
+    }
+
+    pub fn update_event_hashes(
+        &self,
+        event_sequence_hash: Option<SequenceHash>,
+        event_parent_sequence_hash: Option<SequenceHash>,
+    ) -> Self {
+        BasicMetadata {
+            priority: self.priority,
+            returned_tick: self.returned_tick,
+            acquired_tick: self.acquired_tick,
+            event_sequence_hash,
+            event_parent_sequence_hash,
         }
     }
 }
@@ -531,6 +574,22 @@ impl BlockMetadata for BasicMetadata {
 
     fn with_priority(&self, priority: u32) -> Self {
         self.update_priority(priority)
+    }
+
+    fn event_sequence_hash(&self) -> Option<SequenceHash> {
+        self.event_sequence_hash
+    }
+
+    fn event_parent_sequence_hash(&self) -> Option<SequenceHash> {
+        self.event_parent_sequence_hash
+    }
+
+    fn with_event_hashes(
+        &self,
+        event_sequence_hash: Option<SequenceHash>,
+        event_parent_sequence_hash: Option<SequenceHash>,
+    ) -> Self {
+        self.update_event_hashes(event_sequence_hash, event_parent_sequence_hash)
     }
 }
 
@@ -557,6 +616,22 @@ mod basic_metadata_tests {
         assert_eq!(updated.priority(), 50);
         assert_eq!(updated.acquired_tick(), 100);
         assert_eq!(updated.returned_tick(), 200);
+    }
+
+    #[test]
+    fn test_basic_metadata_with_event_hashes_preserves_existing_fields() {
+        let mut metadata = BasicMetadata::default();
+        metadata.on_acquired(100);
+        metadata.on_returned(200);
+        let metadata = metadata.with_priority(50);
+
+        let updated = metadata.with_event_hashes(Some(11), Some(7));
+
+        assert_eq!(updated.priority(), 50);
+        assert_eq!(updated.acquired_tick(), 100);
+        assert_eq!(updated.returned_tick(), 200);
+        assert_eq!(updated.event_sequence_hash(), Some(11));
+        assert_eq!(updated.event_parent_sequence_hash(), Some(7));
     }
 }
 
