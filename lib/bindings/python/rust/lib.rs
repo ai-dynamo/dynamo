@@ -71,11 +71,13 @@ mod http;
 mod kserve_grpc;
 mod llm;
 mod parsers;
+mod payload;
 mod planner;
 mod prometheus_metrics;
 
-type JsonServerStreamingIngress =
-    Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+pub use payload::Payload;
+
+type JsonServerStreamingIngress = Ingress<SingleIn<Payload>, ManyOut<RsAnnotated<Payload>>>;
 
 static INIT: OnceCell<()> = OnceCell::new();
 
@@ -108,9 +110,9 @@ fn get_span_for_direct_context(
 
 // Helper to create request context with proper linking and cancellation handling
 fn create_request_context(
-    request: serde_json::Value,
+    request: Payload,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<serde_json::Value> {
+) -> RsContext<Payload> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -507,7 +509,7 @@ struct ModelCardInstanceId {
 #[pyclass]
 #[derive(Clone)]
 struct Client {
-    router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    router: rs::pipeline::PushRouter<Payload, RsAnnotated<Payload>>,
 }
 
 #[pyclass]
@@ -733,19 +735,20 @@ impl DistributedRuntime {
         let callback = Arc::new(callback);
 
         // Wrap Python async callback in Rust async closure
+        // Note: EngineRouteCallback expects serde_json::Value, so we convert Payload <-> Value
         let rust_callback: rs::engine_routes::EngineRouteCallback =
             Arc::new(move |body: serde_json::Value| {
                 let callback = callback.clone();
                 let locals = locals.clone();
+                // Convert serde_json::Value to Payload
+                let body = Payload::from(body);
 
                 // Return a boxed future
                 Box::pin(async move {
                     // Acquire GIL to call Python callback and convert coroutine to future
                     let py_future = Python::with_gil(|py| {
-                        // Convert body to Python dict
-                        let py_body = pythonize::pythonize(py, &body).map_err(|e| {
-                            anyhow::anyhow!("Failed to convert request body to Python: {}", e)
-                        })?;
+                        // Convert body to Python object (dict or bytes)
+                        let py_body: PyObject = body.into_py(py);
 
                         // Call Python async function to get a coroutine
                         let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
@@ -769,8 +772,14 @@ impl DistributedRuntime {
 
                     // Convert result back to serde_json::Value
                     Python::with_gil(|py| {
-                        pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
+                        py_result
+                            .extract::<Payload>(py)
                             .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                            .and_then(|payload| {
+                                payload.into_json().map_err(|e| {
+                                    anyhow::anyhow!("Failed to convert to JSON: {}", e)
+                                })
+                            })
                     })
                 })
             });
@@ -880,12 +889,13 @@ impl Endpoint {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
-            let push_router = rs::pipeline::PushRouter::<
-                serde_json::Value,
-                RsAnnotated<serde_json::Value>,
-            >::from_client(client, router_mode.into())
-            .await
-            .map_err(to_pyerr)?;
+            let push_router =
+                rs::pipeline::PushRouter::<Payload, RsAnnotated<Payload>>::from_client(
+                    client,
+                    router_mode.into(),
+                )
+                .await
+                .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
             })
@@ -988,7 +998,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: Payload = request.extract(py)?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1022,7 +1032,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: Payload = request.extract(py)?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1057,7 +1067,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: Payload = request.extract(py)?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1090,17 +1100,17 @@ impl Client {
 }
 
 async fn process_stream(
-    stream: EngineStream<RsAnnotated<serde_json::Value>>,
+    stream: EngineStream<RsAnnotated<Payload>>,
     tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
-        let annotated: RsAnnotated<serde_json::Value> = response;
-        let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
-                Ok(pyobj) => Ok(pyobj.into()),
-                Err(e) => Err(e.to_string()),
+        let annotated: RsAnnotated<Payload> = response;
+        let annotated: RsAnnotated<PyObject> = annotated.map_data(|data: Payload| {
+            Python::with_gil(|py| {
+                let pyobj: PyObject = data.into_py(py);
+                Ok::<PyObject, String>(pyobj)
             })
         });
 
