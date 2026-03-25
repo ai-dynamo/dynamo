@@ -478,10 +478,10 @@ NIXL INFO falling back to TCP transport
 
 Check Grafana dashboards for:
 - **NIXL transfer bandwidth**: Should show GB/s, not MB/s
-- **KV cache transfer latency**: Should be <500ms for typical workloads
+- **KV cache transfer latency**: Should be under 500ms for typical workloads
 
 **Red flags indicating RDMA issues**:
-- Transfer bandwidth < 1 GB/s
+- Transfer bandwidth under 1 GB/s
 - TTFT > 10 seconds
 - `Unsupported operation` errors in logs
 
@@ -528,7 +528,7 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 
 **Use aggregated architecture when:**
 - Low-latency TTFT is critical
-- Short outputs (OSL < 500 tokens)
+- Short outputs (OSL under 500 tokens)
 - RDMA is not available
 
 ### Break-Even Analysis
@@ -588,7 +588,7 @@ kubectl logs <worker-pod> | grep -i "transport\|UCX\|TCP"
 **Root Cause**: GPU Direct RDMA not functional on kernel ≥6.8 with EFA
 
 **Current Status**: This is a known limitation. Options:
-1. Use kernel < 6.8 (Ubuntu 22.04 with kernel 5.15)
+1. Use kernel before 6.8 (Ubuntu 22.04 with kernel 5.15)
 2. Accept host-staging performance penalty
 3. Wait for AWS to update EFA DMA-BUF support
 
