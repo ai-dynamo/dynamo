@@ -23,7 +23,7 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from dynamo.planner.defaults import SLAPlannerDefaults
+from dynamo.planner.defaults import SLAPlannerDefaults, ScalingMode
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ class PlannerConfig(BaseModel):
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
 
     no_operation: bool = SLAPlannerDefaults.no_operation
+    scaling_mode: ScalingMode = SLAPlannerDefaults.scaling_mode
+    advisory_max_step_size: int = SLAPlannerDefaults.advisory_max_step_size
+    advisory_anomaly_threshold: int = SLAPlannerDefaults.advisory_anomaly_threshold
+    advisory_file_output: bool = SLAPlannerDefaults.advisory_file_output
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
     throughput_adjustment_interval: int = (
         SLAPlannerDefaults.throughput_adjustment_interval
@@ -117,8 +121,32 @@ class PlannerConfig(BaseModel):
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    @property
+    def effective_scaling_mode(self) -> ScalingMode:
+        """Effective scaling mode, respecting no_operation for backward compat with model_construct."""
+        if self.no_operation and self.scaling_mode == ScalingMode.ACTIVE:
+            return ScalingMode.NOOP
+        return self.scaling_mode
+
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
+        # Backward compat: no_operation=True -> scaling_mode=noop
+        if self.no_operation and self.scaling_mode == ScalingMode.ACTIVE:
+            logger.warning(
+                "DEPRECATION: no_operation=True is deprecated. "
+                "Use scaling_mode='noop' instead. "
+                "Automatically mapping no_operation=True to scaling_mode='noop'."
+            )
+            self.scaling_mode = ScalingMode.NOOP
+
+        # advisory_file_output requires log_dir
+        if self.advisory_file_output and not self.log_dir:
+            raise ValueError("advisory_file_output=True requires log_dir to be set")
+
+        # advisory_max_step_size must be positive
+        if self.advisory_max_step_size < 1:
+            raise ValueError("advisory_max_step_size must be >= 1")
+
         # global-planner environment requires a namespace
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(

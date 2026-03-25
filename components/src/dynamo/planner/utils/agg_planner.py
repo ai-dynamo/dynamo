@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.defaults import ScalingMode
 from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
@@ -83,7 +84,7 @@ class AggPlanner:
         await self.planner._async_init()
 
     async def run(self):
-        if not self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.NOOP:
             logger.info("Validating deployment...")
             # Agg mode: only decode component exists (engines serve both P and D)
             await self.planner.connector.validate_deployment(
@@ -104,7 +105,7 @@ class AggPlanner:
             await self.planner.connector.wait_for_deployment_ready()
 
         # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.NOOP:
             model_name = await self.planner._get_model_name(
                 require_prefill=False, require_decode=True
             )
@@ -321,7 +322,15 @@ class AggPlanner:
             ):
                 self.planner.prometheus_metrics.predicted_num_d.set(desired)
 
-            if not self.config.no_operation:
+            # Emit advisory metrics (active + advisory modes)
+            if self.config.effective_scaling_mode in (
+                ScalingMode.ACTIVE,
+                ScalingMode.ADVISORY,
+            ):
+                self.planner._emit_advisory_metrics(0, desired, "load")
+
+            # Advisory mode must NOT call set_component_replicas (would block forever)
+            if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,

@@ -6,6 +6,7 @@ import logging
 import time
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.defaults import ScalingMode
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
@@ -58,7 +59,7 @@ class DisaggPlanner:
         await self.prefill_planner._async_init()
 
     async def run(self):
-        if not self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.NOOP:
             logger.info("Validating deployment...")
             await self.prefill_planner.connector.validate_deployment(
                 prefill_component_name=self.prefill_planner.prefill_component_name,
@@ -79,7 +80,7 @@ class DisaggPlanner:
             await self.prefill_planner.connector.wait_for_deployment_ready()
 
         # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.NOOP:
             model_name = await self.prefill_planner._get_model_name(
                 require_prefill=True, require_decode=True
             )
@@ -146,13 +147,33 @@ class DisaggPlanner:
                     )
                 else:
                     # Throughput-only: apply scaling directly
+                    raw_p, raw_d = next_num_p, next_num_d
                     next_num_p, next_num_d = _apply_global_gpu_budget(
                         next_num_p, next_num_d, self.config
                     )
                     self.prefill_planner.update_predicted_replicas_metric(next_num_p)
                     self.decode_planner.update_predicted_replicas_metric(next_num_d)
 
-                    if not self.config.no_operation:
+                    # Emit advisory metrics (active + advisory modes)
+                    if self.config.effective_scaling_mode in (
+                        ScalingMode.ACTIVE,
+                        ScalingMode.ADVISORY,
+                    ):
+                        self.prefill_planner._emit_advisory_metrics(
+                            next_num_p, next_num_d, "throughput"
+                        )
+                        if raw_p != next_num_p or raw_d != next_num_d:
+                            logger.info(
+                                "[ADVISORY] GPU budget applied: "
+                                f"raw=({raw_p}P, {raw_d}D) -> final=({next_num_p}P, {next_num_d}D)",
+                                extra={
+                                    "event": "advisory_gpu_budget",
+                                    "raw_recommendation": {"prefill": raw_p, "decode": raw_d},
+                                    "final_recommendation": {"prefill": next_num_p, "decode": next_num_d},
+                                },
+                            )
+
+                    if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
                         target_replicas = [
                             TargetReplica(
                                 sub_component_type=SubComponentType.PREFILL,
@@ -237,7 +258,15 @@ class DisaggPlanner:
             self.prefill_planner.update_predicted_replicas_metric(final_p)
             self.decode_planner.update_predicted_replicas_metric(final_d)
 
-            if not self.config.no_operation:
+            # Emit advisory metrics (active + advisory modes)
+            if self.config.effective_scaling_mode in (
+                ScalingMode.ACTIVE,
+                ScalingMode.ADVISORY,
+            ):
+                self.prefill_planner._emit_advisory_metrics(final_p, final_d, "load")
+
+            # Advisory mode must NOT call set_component_replicas (would block forever)
+            if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.PREFILL,

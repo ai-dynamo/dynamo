@@ -19,6 +19,12 @@ import shlex
 from enum import Enum
 from typing import Literal, Optional
 
+
+class ScalingMode(str, Enum):
+    ACTIVE = "active"
+    ADVISORY = "advisory"
+    NOOP = "noop"
+
 from pydantic import BaseModel
 
 from dynamo.planner.utils.exceptions import (
@@ -74,6 +80,12 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
     throughput_metrics_source: Literal["frontend", "router"] = "frontend"
+
+    # Scaling mode (replaces no_operation boolean)
+    scaling_mode = ScalingMode.ACTIVE
+    advisory_max_step_size = 1
+    advisory_anomaly_threshold = 10
+    advisory_file_output = False
 
     # Scaling mode flags
     enable_throughput_scaling = True
