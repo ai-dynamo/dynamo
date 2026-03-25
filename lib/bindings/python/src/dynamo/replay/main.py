@@ -10,6 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
@@ -21,7 +22,9 @@ try:
     )
 except ImportError:
 
-    def resolve_planner_profile_data(planner_profile_data: Path):
+    def resolve_planner_profile_data(planner_profile_data: Path | None) -> Any:
+        if planner_profile_data is None:
+            return SimpleNamespace(npz_path=None)
         return SimpleNamespace(
             npz_path=planner_profile_data
             if planner_profile_data.suffix == ".npz"

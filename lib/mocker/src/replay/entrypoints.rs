@@ -70,8 +70,12 @@ pub fn simulate_trace_file_disagg_with_router_mode(
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     let started_at = Instant::now();
-    let report =
-        crate::replay::offline::simulate_trace_workload_disagg(config, router_config, trace)?;
+    let report = crate::replay::offline::simulate_trace_workload_disagg(
+        config,
+        router_config,
+        trace,
+        router_mode,
+    )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -168,6 +172,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         router_config,
         requests,
         arrival_speedup_ratio,
+        router_mode,
     )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
@@ -407,6 +412,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         router_config,
         requests,
         max_in_flight,
+        router_mode,
     )
 }
 
@@ -453,8 +459,12 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
     let started_at = Instant::now();
-    let report =
-        crate::replay::offline::simulate_trace_workload_disagg(config, router_config, trace)?;
+    let report = crate::replay::offline::simulate_trace_workload_disagg(
+        config,
+        router_config,
+        trace,
+        router_mode,
+    )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -534,6 +544,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
         router_config,
         trace,
         max_in_flight,
+        router_mode,
     )
 }
 

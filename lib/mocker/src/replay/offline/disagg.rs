@@ -18,7 +18,9 @@ use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
-use crate::replay::{OfflineDisaggReplayConfig, TraceCollector, TraceSimulationReport};
+use crate::replay::{
+    OfflineDisaggReplayConfig, ReplayRouterMode, TraceCollector, TraceSimulationReport,
+};
 use crate::scheduler::RouterEventVisibility;
 
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +44,7 @@ enum DisaggPhase {
 }
 
 struct DisaggRequestState {
-    original: DirectRequest,
+    original: Option<DirectRequest>,
     #[cfg(test)]
     arrival_ms: f64,
     phase: DisaggPhase,
@@ -79,12 +81,14 @@ struct DisaggRuntimeStats;
 
 struct DisaggRuntime {
     now_ms: f64,
+    next_prefill_worker_idx: usize,
+    next_decode_worker_idx: usize,
     next_event_seq: u64,
     admission: AdmissionSource,
     prefill_workers: Vec<OfflineWorkerState>,
     decode_workers: Vec<OfflineWorkerState>,
-    prefill_router: OfflineReplayRouter,
-    decode_router: OfflineReplayRouter,
+    prefill_router: Option<OfflineReplayRouter>,
+    decode_router: Option<OfflineReplayRouter>,
     requests: HashMap<Uuid, DisaggRequestState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
@@ -98,12 +102,14 @@ impl DisaggRuntime {
         router_config: Option<KvRouterConfig>,
         pending: VecDeque<DirectRequest>,
         mode: ReplayMode,
+        router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         Self::new_with_source(
             config,
             router_config,
             AdmissionSource::Requests(pending),
             mode,
+            router_mode,
         )
     }
 
@@ -112,12 +118,14 @@ impl DisaggRuntime {
         router_config: Option<KvRouterConfig>,
         driver: WorkloadDriver,
         mode: ReplayMode,
+        router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         Self::new_with_source(
             config,
             router_config,
             AdmissionSource::Workload(driver),
             mode,
+            router_mode,
         )
     }
 
@@ -126,18 +134,43 @@ impl DisaggRuntime {
         router_config: Option<KvRouterConfig>,
         admission: AdmissionSource,
         mode: ReplayMode,
+        router_mode: ReplayRouterMode,
     ) -> Result<Self> {
-        let prefill_router_config =
-            derive_prefill_router_config(&config.prefill_args, router_config.clone());
-        let decode_router_config = derive_decode_router_config(&config.decode_args, router_config);
+        let (prefill_router, decode_router) = match router_mode {
+            ReplayRouterMode::RoundRobin => (None, None),
+            ReplayRouterMode::KvRouter => {
+                let prefill_router_config =
+                    derive_prefill_router_config(&config.prefill_args, router_config.clone());
+                let decode_router_config =
+                    derive_decode_router_config(&config.decode_args, router_config);
+                (
+                    Some(OfflineReplayRouter::new(
+                        &config.prefill_args,
+                        Some(prefill_router_config),
+                        config.num_prefill_workers,
+                    )?),
+                    Some(OfflineReplayRouter::new(
+                        &config.decode_args,
+                        Some(decode_router_config),
+                        config.num_decode_workers,
+                    )?),
+                )
+            }
+        };
 
         Ok(Self {
             now_ms: 0.0,
+            next_prefill_worker_idx: 0,
+            next_decode_worker_idx: 0,
             next_event_seq: 0,
             admission,
             prefill_workers: (0..config.num_prefill_workers)
                 .map(|worker_idx| {
-                    OfflineWorkerState::new(worker_idx, config.prefill_args.clone(), true)
+                    OfflineWorkerState::new(
+                        worker_idx,
+                        config.prefill_args.clone(),
+                        prefill_router.is_some(),
+                    )
                 })
                 .collect(),
             decode_workers: (0..config.num_decode_workers)
@@ -145,16 +178,8 @@ impl DisaggRuntime {
                     OfflineWorkerState::new(worker_idx, config.decode_args.clone(), false)
                 })
                 .collect(),
-            prefill_router: OfflineReplayRouter::new(
-                &config.prefill_args,
-                Some(prefill_router_config),
-                config.num_prefill_workers,
-            )?,
-            decode_router: OfflineReplayRouter::new(
-                &config.decode_args,
-                Some(decode_router_config),
-                config.num_decode_workers,
-            )?,
+            prefill_router,
+            decode_router,
             requests: HashMap::new(),
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
@@ -173,11 +198,29 @@ impl DisaggRuntime {
             .sum::<usize>()
             + self
                 .decode_workers
-                .iter()
-                .map(OfflineWorkerState::in_flight)
-                .sum::<usize>()
-            + self.prefill_router.pending_count()
-            + self.decode_router.pending_count()
+            .iter()
+            .map(OfflineWorkerState::in_flight)
+            .sum::<usize>()
+            + self
+                .prefill_router
+                .as_ref()
+                .map_or(0, OfflineReplayRouter::pending_count)
+            + self
+                .decode_router
+                .as_ref()
+                .map_or(0, OfflineReplayRouter::pending_count)
+    }
+
+    fn next_prefill_worker(&mut self) -> usize {
+        let worker_idx = self.next_prefill_worker_idx;
+        self.next_prefill_worker_idx = (self.next_prefill_worker_idx + 1) % self.prefill_workers.len();
+        worker_idx
+    }
+
+    fn next_decode_worker(&mut self) -> usize {
+        let worker_idx = self.next_decode_worker_idx;
+        self.next_decode_worker_idx = (self.next_decode_worker_idx + 1) % self.decode_workers.len();
+        worker_idx
     }
 
     fn record_router_pending(&mut self) {
@@ -186,11 +229,19 @@ impl DisaggRuntime {
             self.stats.max_prefill_router_pending = self
                 .stats
                 .max_prefill_router_pending
-                .max(self.prefill_router.pending_count());
+                .max(
+                    self.prefill_router
+                        .as_ref()
+                        .map_or(0, OfflineReplayRouter::pending_count),
+                );
             self.stats.max_decode_router_pending = self
                 .stats
                 .max_decode_router_pending
-                .max(self.decode_router.pending_count());
+                .max(
+                    self.decode_router
+                        .as_ref()
+                        .map_or(0, OfflineReplayRouter::pending_count),
+                );
         }
     }
 
@@ -218,19 +269,26 @@ impl DisaggRuntime {
             .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))
     }
 
-    fn prefill_request(state: &DisaggRequestState) -> DirectRequest {
-        let mut request = state.original.clone();
-        request.max_output_tokens = 1;
-        request
+    fn original_request(state: &DisaggRequestState) -> Result<&DirectRequest> {
+        state
+            .original
+            .as_ref()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
     }
 
-    fn decode_request(state: &DisaggRequestState) -> DirectRequest {
-        state.original.clone()
+    fn build_prefill_request(state: &DisaggRequestState) -> Result<DirectRequest> {
+        let mut request = Self::original_request(state)?.clone();
+        request.max_output_tokens = 1;
+        Ok(request)
+    }
+
+    fn build_decode_request(state: &DisaggRequestState) -> Result<DirectRequest> {
+        Ok(Self::original_request(state)?.clone())
     }
 
     fn dispatch_prefill(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
         self.validate_worker_idx(SimulationWorkerStage::Prefill, worker_idx)?;
-        let request = Self::prefill_request(self.state(uuid)?);
+        let request = Self::build_prefill_request(self.state(uuid)?)?;
         self.prefill_workers[worker_idx].receive_request(request);
         let state = self.state_mut(uuid)?;
         state.phase = DisaggPhase::RunningPrefill;
@@ -244,7 +302,7 @@ impl DisaggRuntime {
 
     fn dispatch_decode(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
         self.validate_worker_idx(SimulationWorkerStage::Decode, worker_idx)?;
-        let request = Self::decode_request(self.state(uuid)?);
+        let request = Self::build_decode_request(self.state(uuid)?)?;
         self.decode_workers[worker_idx].receive_request(request);
         let state = self.state_mut(uuid)?;
         state.phase = DisaggPhase::RunningDecode;
@@ -277,10 +335,20 @@ impl DisaggRuntime {
     }
 
     fn enqueue_decode(&mut self, uuid: Uuid) -> Result<()> {
-        let request = Self::decode_request(self.state(uuid)?);
-        let maybe_worker_idx =
-            self.decode_router
-                .submit_request_with_hashes(&request, None, self.now_ms)?;
+        let Some(decode_router) = self.decode_router.as_mut() else {
+            let worker_idx = self.next_decode_worker();
+            self.dispatch_decode(uuid, worker_idx)?;
+            return Ok(());
+        };
+        let maybe_worker_idx = {
+            let requests = &self.requests;
+            let request = Self::original_request(
+                requests.get(&uuid).ok_or_else(|| {
+                    anyhow!("offline disagg replay missing request state for {uuid}")
+                })?,
+            )?;
+            decode_router.submit_request_with_hashes(request, None, self.now_ms)?
+        };
         self.record_router_pending();
         #[cfg(test)]
         {
@@ -312,11 +380,8 @@ impl DisaggRuntime {
             request.max_output_tokens,
         );
 
-        let maybe_worker_idx =
-            self.prefill_router
-                .submit_request_with_hashes(&request, replay_hashes, self.now_ms)?;
         let state = DisaggRequestState {
-            original: request,
+            original: Some(request),
             #[cfg(test)]
             arrival_ms: arrival_time_ms,
             phase: DisaggPhase::QueuedPrefill,
@@ -324,6 +389,20 @@ impl DisaggRuntime {
             decode_worker_idx: None,
         };
         self.requests.insert(uuid, state);
+        let Some(prefill_router) = self.prefill_router.as_mut() else {
+            let worker_idx = self.next_prefill_worker();
+            self.dispatch_prefill(uuid, worker_idx)?;
+            return Ok(uuid);
+        };
+        let maybe_worker_idx = {
+            let requests = &self.requests;
+            let request = Self::original_request(
+                requests.get(&uuid).ok_or_else(|| {
+                    anyhow!("offline disagg replay missing request state for {uuid}")
+                })?,
+            )?;
+            prefill_router.submit_request_with_hashes(request, replay_hashes, self.now_ms)?
+        };
         self.record_router_pending();
         if let Some(worker_idx) = maybe_worker_idx {
             self.dispatch_prefill(uuid, worker_idx)?;
@@ -370,8 +449,11 @@ impl DisaggRuntime {
     }
 
     fn apply_prefill_router_events(&mut self, events: Vec<RouterEvent>) -> Result<()> {
+        let Some(prefill_router) = self.prefill_router.as_mut() else {
+            return Ok(());
+        };
         for event in events {
-            self.prefill_router.apply_event(event)?;
+            prefill_router.apply_event(event)?;
         }
         Ok(())
     }
@@ -381,8 +463,15 @@ impl DisaggRuntime {
             return Ok(());
         }
 
-        let prefill_complete_admissions =
-            self.prefill_router.mark_prefill_completed(signal.uuid)?;
+        let Some(_) = self.prefill_router.as_ref() else {
+            self.enqueue_decode(signal.uuid)?;
+            return Ok(());
+        };
+        let prefill_complete_admissions = self
+            .prefill_router
+            .as_mut()
+            .expect("prefill router must exist after guard")
+            .mark_prefill_completed(signal.uuid)?;
         #[cfg(test)]
         {
             self.stats.prefill_marked_count += 1;
@@ -390,7 +479,11 @@ impl DisaggRuntime {
         self.record_router_pending();
         self.dispatch_prefill_admissions(prefill_complete_admissions)?;
 
-        let admissions = self.prefill_router.free(signal.uuid)?;
+        let admissions = self
+            .prefill_router
+            .as_mut()
+            .expect("prefill router must exist after guard")
+            .free(signal.uuid)?;
         #[cfg(test)]
         {
             self.stats.prefill_freed_count += 1;
@@ -406,17 +499,23 @@ impl DisaggRuntime {
             return Ok(());
         }
 
-        let admissions = self.decode_router.free(signal.uuid)?;
-        #[cfg(test)]
-        {
-            self.stats.decode_freed_count += 1;
-        }
+        let admissions = if let Some(decode_router) = self.decode_router.as_mut() {
+            let admissions = decode_router.free(signal.uuid)?;
+            #[cfg(test)]
+            {
+                self.stats.decode_freed_count += 1;
+            }
+            admissions
+        } else {
+            Vec::new()
+        };
         self.record_router_pending();
-        let state = self.state_mut(signal.uuid)?;
-        state.phase = DisaggPhase::Done;
         if let AdmissionSource::Workload(driver) = &mut self.admission {
             driver.on_complete(signal.uuid, self.now_ms)?;
         }
+        let state = self.state_mut(signal.uuid)?;
+        state.phase = DisaggPhase::Done;
+        state.original = None;
         self.dispatch_decode_admissions(admissions)?;
         Ok(())
     }
@@ -742,10 +841,12 @@ pub(crate) fn simulate_trace_disagg(
     router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     let (collector, _) =
-        DisaggRuntime::new(&config, router_config, pending, ReplayMode::Trace)?.run()?;
+        DisaggRuntime::new(&config, router_config, pending, ReplayMode::Trace, router_mode)?
+            .run()?;
     Ok(collector.finish())
 }
 
@@ -754,6 +855,7 @@ pub(crate) fn simulate_concurrency_disagg(
     router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
+    router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let pending = VecDeque::from(requests);
     let (collector, _) = DisaggRuntime::new(
@@ -761,6 +863,7 @@ pub(crate) fn simulate_concurrency_disagg(
         router_config,
         pending,
         ReplayMode::Concurrency { max_in_flight },
+        router_mode,
     )?
     .run()?;
     Ok(collector.finish())
@@ -770,10 +873,17 @@ pub(crate) fn simulate_trace_workload_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
     trace: Trace,
+    router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let driver = WorkloadDriver::new_trace(trace)?;
-    let (collector, _) =
-        DisaggRuntime::new_workload(&config, router_config, driver, ReplayMode::Trace)?.run()?;
+    let (collector, _) = DisaggRuntime::new_workload(
+        &config,
+        router_config,
+        driver,
+        ReplayMode::Trace,
+        router_mode,
+    )?
+    .run()?;
     Ok(collector.finish())
 }
 
@@ -782,6 +892,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     router_config: Option<KvRouterConfig>,
     trace: Trace,
     max_in_flight: usize,
+    router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let driver = WorkloadDriver::new_concurrency(trace)?;
     let (collector, _) = DisaggRuntime::new_workload(
@@ -789,6 +900,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
         router_config,
         driver,
         ReplayMode::Concurrency { max_in_flight },
+        router_mode,
     )?
     .run()?;
     Ok(collector.finish())
@@ -800,9 +912,10 @@ fn run_trace_collect(
     requests: Vec<DirectRequest>,
     router_config: Option<KvRouterConfig>,
     arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio).unwrap();
-    DisaggRuntime::new(config, router_config, pending, ReplayMode::Trace)
+    DisaggRuntime::new(config, router_config, pending, ReplayMode::Trace, router_mode)
         .unwrap()
         .run()
         .unwrap()
@@ -814,12 +927,14 @@ fn run_concurrency_collect(
     requests: Vec<DirectRequest>,
     router_config: Option<KvRouterConfig>,
     max_in_flight: usize,
+    router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {
     DisaggRuntime::new(
         config,
         router_config,
         VecDeque::from(requests),
         ReplayMode::Concurrency { max_in_flight },
+        router_mode,
     )
     .unwrap()
     .run()
@@ -896,12 +1011,21 @@ mod tests {
         assert!(!decode.router_track_prefill_tokens);
     }
 
-    #[test]
-    fn test_trace_smoke_reports_decode_only_tokens() {
+    #[rstest::rstest]
+    #[case(ReplayRouterMode::RoundRobin)]
+    #[case(ReplayRouterMode::KvRouter)]
+    fn test_trace_smoke_reports_decode_only_tokens(#[case] router_mode: ReplayRouterMode) {
         let config = disagg_config();
         let requests = vec![request(1, 128, 3, 5.0)];
 
-        let (collector, stats) = run_trace_collect(&config, requests, Some(router_config()), 1.0);
+        let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
+        let (collector, stats) = run_trace_collect(
+            &config,
+            requests,
+            router_config,
+            1.0,
+            router_mode,
+        );
         let snapshot = collector.snapshot(Uuid::from_u128(1)).unwrap();
         let report = collector.finish();
 
@@ -916,12 +1040,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_prefill_and_decode_use_separate_worker_pools() {
+    #[rstest::rstest]
+    #[case(ReplayRouterMode::RoundRobin)]
+    #[case(ReplayRouterMode::KvRouter)]
+    fn test_prefill_and_decode_use_separate_worker_pools(#[case] router_mode: ReplayRouterMode) {
         let config = disagg_config();
         let requests = vec![request(1, 128, 2, 0.0), request(2, 128, 2, 10.0)];
 
-        let (_, stats) = run_trace_collect(&config, requests, Some(router_config()), 1.0);
+        let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
+        let (_, stats) = run_trace_collect(
+            &config,
+            requests,
+            router_config,
+            1.0,
+            router_mode,
+        );
 
         for uuid in [Uuid::from_u128(1), Uuid::from_u128(2)] {
             assert!(stats.prefill_assignments.contains_key(&uuid));
@@ -934,7 +1067,13 @@ mod tests {
         let config = disagg_config();
         let requests = vec![request(1, 128, 2, 0.0), request(2, 128, 2, 100.0)];
 
-        let (_, stats) = run_trace_collect(&config, requests, Some(router_config()), 1.0);
+        let (_, stats) = run_trace_collect(
+            &config,
+            requests,
+            Some(router_config()),
+            1.0,
+            ReplayRouterMode::KvRouter,
+        );
 
         assert_eq!(
             stats.prefill_assignments[&Uuid::from_u128(1)],
@@ -942,8 +1081,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_concurrency_backfill_waits_for_decode_completion() {
+    #[rstest::rstest]
+    #[case(ReplayRouterMode::RoundRobin)]
+    #[case(ReplayRouterMode::KvRouter)]
+    fn test_concurrency_backfill_waits_for_decode_completion(
+        #[case] router_mode: ReplayRouterMode,
+    ) {
         let config = disagg_config();
         let requests = vec![
             DirectRequest {
@@ -962,7 +1105,14 @@ mod tests {
             },
         ];
 
-        let (collector, _) = run_concurrency_collect(&config, requests, Some(router_config()), 1);
+        let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
+        let (collector, _) = run_concurrency_collect(
+            &config,
+            requests,
+            router_config,
+            1,
+            router_mode,
+        );
         let first = collector.snapshot(Uuid::from_u128(1)).unwrap();
         let second = collector.snapshot(Uuid::from_u128(2)).unwrap();
 
@@ -975,7 +1125,13 @@ mod tests {
         let config = disagg_config();
         let requests = vec![request(1, 128, 2, 0.0)];
 
-        let (_, stats) = run_trace_collect(&config, requests, Some(router_config()), 1.0);
+        let (_, stats) = run_trace_collect(
+            &config,
+            requests,
+            Some(router_config()),
+            1.0,
+            ReplayRouterMode::KvRouter,
+        );
 
         assert_eq!(stats.prefill_marked_count, 1);
         assert_eq!(stats.prefill_freed_count, 1);

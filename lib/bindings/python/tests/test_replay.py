@@ -278,18 +278,34 @@ def _assert_replay_cli_outputs(completed, report_path):
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
-def test_run_trace_replay_smoke_matrix(tmp_path, engine_type, replay_mode, router_mode):
+@pytest.mark.parametrize("serving_mode", ["agg", "disagg"])
+def test_run_trace_replay_smoke_matrix(
+    tmp_path, engine_type, replay_mode, router_mode, serving_mode
+):
     trace_path = _write_trace_and_args(tmp_path)
-    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
-    num_workers = 1 if router_mode == "round_robin" else 2
-
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=args_path,
-        num_workers=num_workers,
-        replay_mode=replay_mode,
-        router_mode=router_mode,
-    )
+    if serving_mode == "disagg":
+        if replay_mode != "offline":
+            pytest.skip("disagg replay only supports offline mode")
+        report = run_trace_replay(
+            trace_path,
+            prefill_engine_args=_prefill_args(),
+            decode_engine_args=_decode_args(),
+            router_config=_router_config(),
+            num_prefill_workers=2,
+            num_decode_workers=2,
+            replay_mode=replay_mode,
+            router_mode=router_mode,
+        )
+    else:
+        args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
+        num_workers = 1 if router_mode == "round_robin" else 2
+        report = run_trace_replay(
+            trace_path,
+            extra_engine_args=args_path,
+            num_workers=num_workers,
+            replay_mode=replay_mode,
+            router_mode=router_mode,
+        )
 
     _assert_basic_report_counts(
         report,
@@ -359,22 +375,39 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+@pytest.mark.parametrize("serving_mode", ["agg", "disagg"])
 def test_run_synthetic_trace_replay_smoke_matrix(
-    tmp_path, engine_type, replay_mode, router_mode
+    tmp_path, engine_type, replay_mode, router_mode, serving_mode
 ):
-    args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
-    num_workers = 1 if router_mode == "round_robin" else 2
-
-    report = run_synthetic_trace_replay(
-        64,
-        2,
-        2,
-        extra_engine_args=args_path,
-        num_workers=num_workers,
-        replay_mode=replay_mode,
-        router_mode=router_mode,
-        arrival_interval_ms=5.0,
-    )
+    if serving_mode == "disagg":
+        if replay_mode != "offline":
+            pytest.skip("disagg replay only supports offline mode")
+        report = run_synthetic_trace_replay(
+            64,
+            2,
+            2,
+            prefill_engine_args=_prefill_args(),
+            decode_engine_args=_decode_args(),
+            router_config=_router_config(),
+            num_prefill_workers=2,
+            num_decode_workers=2,
+            replay_mode=replay_mode,
+            router_mode=router_mode,
+            arrival_interval_ms=5.0,
+        )
+    else:
+        args_path = _vllm_args() if engine_type == "vllm" else _sglang_args()
+        num_workers = 1 if router_mode == "round_robin" else 2
+        report = run_synthetic_trace_replay(
+            64,
+            2,
+            2,
+            extra_engine_args=args_path,
+            num_workers=num_workers,
+            replay_mode=replay_mode,
+            router_mode=router_mode,
+            arrival_interval_ms=5.0,
+        )
 
     _assert_basic_report_counts(
         report,
@@ -567,7 +600,8 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
     )
 
 
-def test_run_trace_replay_supports_disagg_offline(tmp_path):
+@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+def test_run_trace_replay_supports_disagg_offline(tmp_path, router_mode):
     trace_path = _write_trace_and_args(tmp_path)
 
     report = run_trace_replay(
@@ -578,7 +612,7 @@ def test_run_trace_replay_supports_disagg_offline(tmp_path):
         num_prefill_workers=2,
         num_decode_workers=2,
         replay_mode="offline",
-        router_mode="kv_router",
+        router_mode=router_mode,
     )
 
     _assert_basic_report_counts(
@@ -590,7 +624,10 @@ def test_run_trace_replay_supports_disagg_offline(tmp_path):
     _assert_basic_report_metrics(report)
 
 
-def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens():
+@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens(
+    router_mode,
+):
     report = run_synthetic_trace_replay(
         128,
         7,
@@ -601,7 +638,7 @@ def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens():
         num_prefill_workers=2,
         num_decode_workers=2,
         replay_mode="offline",
-        router_mode="kv_router",
+        router_mode=router_mode,
     )
 
     _assert_basic_report_counts(

@@ -101,8 +101,15 @@ pub(crate) fn simulate_trace_disagg(
     router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    disagg::simulate_trace_disagg(config, router_config, requests, arrival_speedup_ratio)
+    disagg::simulate_trace_disagg(
+        config,
+        router_config,
+        requests,
+        arrival_speedup_ratio,
+        router_mode,
+    )
 }
 
 pub(crate) fn simulate_concurrency_disagg(
@@ -110,16 +117,24 @@ pub(crate) fn simulate_concurrency_disagg(
     router_config: Option<KvRouterConfig>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    disagg::simulate_concurrency_disagg(config, router_config, requests, max_in_flight)
+    disagg::simulate_concurrency_disagg(
+        config,
+        router_config,
+        requests,
+        max_in_flight,
+        router_mode,
+    )
 }
 
 pub(crate) fn simulate_trace_workload_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
     trace: Trace,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    disagg::simulate_trace_workload_disagg(config, router_config, trace)
+    disagg::simulate_trace_workload_disagg(config, router_config, trace, router_mode)
 }
 
 pub(crate) fn simulate_concurrency_workload_disagg(
@@ -127,6 +142,13 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     router_config: Option<KvRouterConfig>,
     trace: Trace,
     max_in_flight: usize,
+    router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    disagg::simulate_concurrency_workload_disagg(config, router_config, trace, max_in_flight)
+    disagg::simulate_concurrency_workload_disagg(
+        config,
+        router_config,
+        trace,
+        max_in_flight,
+        router_mode,
+    )
 }

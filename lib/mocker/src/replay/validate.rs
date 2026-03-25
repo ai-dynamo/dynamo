@@ -156,24 +156,18 @@ fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Resul
 
 pub(super) fn validate_offline_disagg_replay_args(
     config: &OfflineDisaggReplayConfig,
-    router_mode: ReplayRouterMode,
+    _router_mode: ReplayRouterMode,
 ) -> Result<()> {
-    if router_mode != ReplayRouterMode::KvRouter {
-        bail!("offline disagg replay requires router_mode=kv_router");
-    }
     validate_disagg_args(config, "trace replay")
 }
 
 pub(super) fn validate_offline_disagg_concurrency_args(
     config: &OfflineDisaggReplayConfig,
     max_in_flight: usize,
-    router_mode: ReplayRouterMode,
+    _router_mode: ReplayRouterMode,
 ) -> Result<()> {
     if max_in_flight == 0 {
         bail!("concurrency replay requires max_in_flight >= 1");
-    }
-    if router_mode != ReplayRouterMode::KvRouter {
-        bail!("offline disagg replay requires router_mode=kv_router");
     }
     validate_disagg_args(config, "concurrency replay")
 }
