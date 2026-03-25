@@ -9,11 +9,26 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
-from dynamo.mocker.args import resolve_planner_profile_data
+
+try:
+    from dynamo.mocker.args import (
+        resolve_planner_profile_data,  # type: ignore[import-not-found]
+    )
+except ImportError:
+
+    def resolve_planner_profile_data(planner_profile_data: Path):
+        return SimpleNamespace(
+            npz_path=planner_profile_data
+            if planner_profile_data.suffix == ".npz"
+            else None
+        )
+
+
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -23,6 +38,8 @@ def _load_engine_args(raw_args: str | None):
         return None
 
     raw = json.loads(raw_args)
+    if not isinstance(raw, dict):
+        raise ValueError("engine-args must be a JSON object")
     worker_type = raw.pop("worker_type", None)
     if worker_type is not None:
         if "is_prefill" in raw or "is_decode" in raw:

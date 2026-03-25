@@ -128,6 +128,7 @@ pub struct PrefillRouter {
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
     namespace: String,
+    is_eagle: bool,
 }
 
 impl PrefillRouter {
@@ -146,6 +147,7 @@ impl PrefillRouter {
             enforce_disagg,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
+            is_eagle: false,
         })
     }
 
@@ -159,6 +161,7 @@ impl PrefillRouter {
         enforce_disagg: bool,
         model_name: String,
         namespace: String,
+        is_eagle: bool,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -172,6 +175,7 @@ impl PrefillRouter {
             enforce_disagg,
             model_name,
             namespace,
+            is_eagle,
         });
 
         // Spawn background task to wait for activation
@@ -233,6 +237,7 @@ impl PrefillRouter {
                     kv_router_config,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
+                    self.is_eagle,
                 )
                 .await?;
 

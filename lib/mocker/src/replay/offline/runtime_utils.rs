@@ -85,13 +85,15 @@ pub(super) fn pop_ready_worker_completion(
         return None;
     }
     let event = events.pop().expect("event must exist after peek");
-    let SimulationEventKind::WorkerCompletion {
-        stage,
-        worker_idx,
-        completed_requests,
-        output_signals,
-        kv_events,
-    } = event.kind;
+    let (stage, worker_idx, completed_requests, output_signals, kv_events) = match event.kind {
+        SimulationEventKind::WorkerCompletion {
+            stage,
+            worker_idx,
+            completed_requests,
+            output_signals,
+            kv_events,
+        } => (stage, worker_idx, completed_requests, output_signals, kv_events),
+    };
     Some(WorkerCompletionPayload {
         stage,
         worker_idx,
