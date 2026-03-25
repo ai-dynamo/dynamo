@@ -479,6 +479,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
