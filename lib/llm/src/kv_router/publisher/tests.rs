@@ -1172,6 +1172,7 @@ mod test_exponential_backoff {
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
+    use crate::kv_router::KV_METRICS_SUBJECT;
     use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::EventSubscriber;
