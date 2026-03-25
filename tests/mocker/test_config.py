@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from dynamo.llm import EngineType, EntrypointArgs
@@ -137,16 +138,16 @@ def test_entrypoint_args_accept_typed_mocker_engine_args():
     assert entrypoint_args is not None
 
 
-def _planner_profile_data_npz_path() -> Path:
-    return (
-        Path(__file__).resolve().parents[2]
-        / "benchmarks/results/H200_TP1P_TP1D_perf_data.npz"
+def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
+    planner_profile_data = tmp_path / "planner_profile_data.npz"
+    np.savez(
+        planner_profile_data,
+        prefill_isl=np.array([128.0, 256.0]),
+        prefill_ttft_ms=np.array([4.0, 8.0]),
+        decode_active_kv_tokens=np.array([1024.0, 2048.0]),
+        decode_context_length=np.array([128.0, 256.0]),
+        decode_itl=np.array([[1.0, 1.5], [2.0, 2.5]]),
     )
-
-
-def test_build_mocker_engine_args_preserves_cli_mapped_fields():
-    planner_profile_data = _planner_profile_data_npz_path()
-    assert planner_profile_data.exists()
 
     args = argparse.Namespace(
         engine_type="sglang",

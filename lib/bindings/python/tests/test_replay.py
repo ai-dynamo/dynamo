@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
@@ -256,6 +257,26 @@ def _planner_profile_data_npz_path() -> Path:
         Path(__file__).resolve().parents[4]
         / "benchmarks/results/H200_TP1P_TP1D_perf_data.npz"
     )
+
+
+def _planner_profile_data_dir_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[4]
+        / "tests/planner/profiling_results/H200_TP1P_TP1D"
+    )
+
+
+def _write_planner_profile_data_npz(tmp_path: Path) -> Path:
+    planner_profile_data = tmp_path / "planner_profile_data.npz"
+    np.savez(
+        planner_profile_data,
+        prefill_isl=np.array([128.0, 256.0]),
+        prefill_ttft_ms=np.array([4.0, 8.0]),
+        decode_active_kv_tokens=np.array([1024.0, 2048.0]),
+        decode_context_length=np.array([128.0, 256.0]),
+        decode_itl=np.array([[1.0, 1.5], [2.0, 2.5]]),
+    )
+    return planner_profile_data
 
 
 def _run_replay_cli(tmp_path, *args):
@@ -786,6 +807,52 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
         str(report_path),
         "--extra-engine-args",
         '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    _assert_basic_report_counts(
+        report,
+        num_requests=10,
+        input_tokens=250,
+        output_tokens=25,
+    )
+    _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("planner_profile_data_kind", ["dir", "npz"])
+def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data(
+    tmp_path, planner_profile_data_kind
+):
+    report_path = tmp_path / f"synthetic_report_{planner_profile_data_kind}.json"
+    planner_profile_data = (
+        _planner_profile_data_dir_path()
+        if planner_profile_data_kind == "dir"
+        else _write_planner_profile_data_npz(tmp_path)
+    )
+
+    completed = _run_replay_cli(
+        tmp_path,
+        "--input-tokens",
+        "250",
+        "--output-tokens",
+        "25",
+        "--request-count",
+        "10",
+        "--num-workers",
+        "4",
+        "--replay-concurrency",
+        "4",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        json.dumps(
+            {
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+                "planner_profile_data": str(planner_profile_data),
+            }
+        ),
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)
