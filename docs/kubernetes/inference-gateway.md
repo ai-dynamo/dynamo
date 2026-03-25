@@ -17,10 +17,20 @@ If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
+## Version Compatibility
+
+This integration is tested and compatible with:
+
+- **Gateway API Inference Extension (GAIE)**: v1.4.0 or later
+- **kGateway**: Latest stable release
+- **Kubernetes**: 1.27+
+- **Dynamo**: Latest version
+
 ## Prerequisites
 
-- Kubernetes cluster with kubectl configured
+- Kubernetes cluster (v1.27+) with kubectl configured
 - NVIDIA GPU drivers installed on worker nodes
+- GAIE v1.4.0+ installed in your cluster (via kGateway)
 
 ## Installation Steps
 
