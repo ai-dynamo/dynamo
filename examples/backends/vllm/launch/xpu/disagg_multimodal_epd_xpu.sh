@@ -59,6 +59,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Device platform and affinity env name.
+# DEVICE_PLATFORM supports: cuda, xpu
+DEVICE_PLATFORM="${DEVICE_PLATFORM:-cuda}"
+if [[ -z "${DEVICE_AFFINITY_ENV:-}" ]]; then
+    if [[ "${DEVICE_PLATFORM,,}" == "xpu" ]]; then
+        DEVICE_AFFINITY_ENV="ZE_AFFINITY_MASK"
+    else
+        DEVICE_AFFINITY_ENV="CUDA_VISIBLE_DEVICES"
+    fi
+fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 if [[ "$SINGLE_GPU" == "true" ]]; then
@@ -108,19 +118,29 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
 fi
 
+if [[ "${DEVICE_PLATFORM,,}" == "xpu" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --block-size 64"
+    PD_EXTRA_ARGS="--max-model-len 10240"
+fi
+
 # Start encode worker
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+env $DEVICE_AFFINITY_ENV=$DYN_ENCODE_WORKER_GPU \
+python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
-CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+env $DEVICE_AFFINITY_ENV=$DYN_PREFILL_WORKER_GPU \
+python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
-CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+env $DEVICE_AFFINITY_ENV=$DYN_DECODE_WORKER_GPU \
+python -m dynamo.vllm --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
