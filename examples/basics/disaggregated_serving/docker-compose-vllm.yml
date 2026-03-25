@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # This is the image that will be used for the Dynamo Frontend, Prefill, and Decode services
@@ -36,16 +36,16 @@ services:
 
   dynamo-prefill:
     image: *DYNAMO_IMAGE
-    command: > 
-      /bin/bash -c "python -m dynamo.vllm 
-      --model $$MODEL_NAME 
-      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' 
-      --kv-events-config '{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20081\",\"enable_kv_cache_events\":true}' 
-      --max-model-len $$MAX_MODEL_LEN 
-      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE 
-      --max-num-seqs $$MAX_NUM_SEQS 
-      --enable-prefix-caching 
-      --prefix-caching-hash-algo sha256 
+    command: >
+      /bin/bash -c "python -m dynamo.vllm
+      --model $$MODEL_NAME
+      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'
+      --kv-events-config '{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20081\",\"enable_kv_cache_events\":true}'
+      --max-model-len $$MAX_MODEL_LEN
+      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE
+      --max-num-seqs $$MAX_NUM_SEQS
+      --enable-prefix-caching
+      --prefix-caching-hash-algo sha256
       --disaggregation-mode prefill"
     environment:
       <<: *shared-environ
@@ -73,12 +73,12 @@ services:
   dynamo-decode:
     image: *DYNAMO_IMAGE
     command: >
-      /bin/bash -c "python -m dynamo.vllm 
-      --model $$MODEL_NAME 
-      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' 
-      --max-model-len $$MAX_MODEL_LEN 
-      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE 
-      --max-num-seqs $$MAX_NUM_SEQS 
+      /bin/bash -c "python -m dynamo.vllm
+      --model $$MODEL_NAME
+      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'
+      --max-model-len $$MAX_MODEL_LEN
+      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE
+      --max-num-seqs $$MAX_NUM_SEQS
       --enable-prefix-caching
       --prefix-caching-hash-algo sha256
       --disaggregation-mode decode"
