@@ -16,6 +16,7 @@ use dynamo_mocker::loadgen::{
 use dynamo_mocker::replay::ReplayArgsMode;
 use pyo3::{exceptions::PyException, prelude::*};
 use pythonize::pythonize;
+use serde_json::json;
 use uuid::Uuid;
 
 use super::aic_callback::create_aic_callback;
@@ -188,6 +189,7 @@ impl MockEngineArgs {
             .dp_size(dp_size)
             .startup_time(startup_time)
             .worker_type(worker_type)
+            .planner_profile_data(planner_profile_data.clone())
             .aic_backend(aic_backend)
             .aic_system(aic_system)
             .aic_backend_version(aic_backend_version)
@@ -230,6 +232,60 @@ impl MockEngineArgs {
         RsMockEngineArgs::from_json_str(config_json)
             .map(|inner| Self { inner })
             .map_err(|e| PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}")))
+    }
+
+    fn dump_json(&self) -> PyResult<String> {
+        let worker_type = match self.inner.worker_type {
+            RsWorkerType::Aggregated => "aggregated",
+            RsWorkerType::Prefill => "prefill",
+            RsWorkerType::Decode => "decode",
+        };
+        let engine_type = match self.inner.engine_type {
+            RsMockerEngineType::Vllm => "vllm",
+            RsMockerEngineType::Sglang => "sglang",
+        };
+        let preemption_mode = match self.inner.preemption_mode {
+            RsPreemptionMode::Lifo => "lifo",
+            RsPreemptionMode::Fifo => "fifo",
+        };
+        let router_queue_policy = self
+            .inner
+            .router_queue_policy
+            .as_ref()
+            .map(|policy| policy.to_string());
+        let payload = json!({
+            "engine_type": engine_type,
+            "num_gpu_blocks": self.inner.num_gpu_blocks,
+            "block_size": self.inner.block_size,
+            "max_num_seqs": self.inner.max_num_seqs,
+            "max_num_batched_tokens": self.inner.max_num_batched_tokens,
+            "enable_prefix_caching": self.inner.enable_prefix_caching,
+            "enable_chunked_prefill": self.inner.enable_chunked_prefill,
+            "speedup_ratio": self.inner.speedup_ratio,
+            "decode_speedup_ratio": self.inner.decode_speedup_ratio,
+            "dp_size": self.inner.dp_size,
+            "startup_time": self.inner.startup_time,
+            "worker_type": worker_type,
+            "planner_profile_data": self.inner.planner_profile_data,
+            "aic_backend": self.inner.aic_backend,
+            "aic_system": self.inner.aic_system,
+            "aic_backend_version": self.inner.aic_backend_version,
+            "aic_tp_size": self.inner.aic_tp_size,
+            "aic_model_path": self.inner.aic_model_path,
+            "enable_local_indexer": self.inner.enable_local_indexer,
+            "bootstrap_port": self.inner.bootstrap_port,
+            "kv_bytes_per_token": self.inner.kv_bytes_per_token,
+            "kv_transfer_bandwidth": self.inner.kv_transfer_bandwidth,
+            "reasoning": self.inner.reasoning,
+            "zmq_kv_events_port": self.inner.zmq_kv_events_port,
+            "zmq_replay_port": self.inner.zmq_replay_port,
+            "preemption_mode": preemption_mode,
+            "router_queue_policy": router_queue_policy,
+            "sglang": self.inner.sglang,
+            "has_perf_model": true,
+        });
+        serde_json::to_string_pretty(&payload)
+            .map_err(|e| PyException::new_err(format!("Failed to serialize MockEngineArgs: {e}")))
     }
 
     #[getter]

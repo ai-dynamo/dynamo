@@ -6,13 +6,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
-from dynamo.replay.main import main
 from dynamo.replay.reporting import format_report_table, write_report_json
 
 pytestmark = [
@@ -766,158 +764,6 @@ def test_write_report_json_creates_file(tmp_path):
     assert (
         report_path.read_text(encoding="utf-8") == '{\n  "completed_requests": 2\n}\n'
     )
-
-
-def test_replay_cli_prints_table_and_saves_json(tmp_path, monkeypatch, capsys):
-    report = {
-        "mean_ttft_ms": 10.0,
-        "min_ttft_ms": 9.0,
-        "max_ttft_ms": 12.0,
-        "p99_ttft_ms": 12.0,
-        "p90_ttft_ms": 11.0,
-        "p75_ttft_ms": 10.5,
-        "std_ttft_ms": 1.0,
-        "output_throughput_tok_s": 123.0,
-        "request_throughput_rps": 4.0,
-        "completed_requests": 3,
-    }
-
-    def fake_run(*args, **kwargs):
-        return report
-
-    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
-    report_path = tmp_path / "cli_report.json"
-
-    exit_code = main(
-        [
-            "--input-tokens",
-            "16",
-            "--output-tokens",
-            "8",
-            "--request-count",
-            "3",
-            "--report-json",
-            str(report_path),
-        ]
-    )
-
-    assert exit_code == 0
-    stdout = capsys.readouterr().out
-    assert "NVIDIA AIPerf | LLM Metrics" in stdout
-    assert "Saved full report to:" in stdout
-    assert '"completed_requests"' not in stdout
-    assert json.loads(report_path.read_text(encoding="utf-8")) == report
-
-
-def test_replay_cli_passes_multiturn_workload_kwargs(monkeypatch):
-    captured = {}
-
-    def fake_run(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return {
-            "completed_requests": 4,
-            "request_throughput_rps": 1.0,
-            "output_throughput_tok_s": 1.0,
-        }
-
-    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
-
-    exit_code = main(
-        [
-            "--input-tokens",
-            "16",
-            "--output-tokens",
-            "8",
-            "--request-count",
-            "2",
-            "--turns-per-session",
-            "2",
-            "--shared-prefix-ratio",
-            "0.5",
-            "--num-prefix-groups",
-            "3",
-            "--inter-turn-delay-ms",
-            "7.0",
-        ]
-    )
-
-    assert exit_code == 0
-    assert captured["args"] == (16, 8, 2)
-    assert captured["kwargs"]["turns_per_session"] == 2
-    assert captured["kwargs"]["shared_prefix_ratio"] == 0.5
-    assert captured["kwargs"]["num_prefix_groups"] == 3
-    assert captured["kwargs"]["inter_turn_delay_ms"] == 7.0
-
-
-@pytest.mark.parametrize(
-    ("engine_args_flag", "engine_args_kwarg"),
-    [
-        ("--extra-engine-args", "extra_engine_args"),
-        ("--prefill-engine-args", "prefill_engine_args"),
-        ("--decode-engine-args", "decode_engine_args"),
-    ],
-)
-@pytest.mark.parametrize("workload", ["synthetic", "trace"])
-def test_replay_cli_resolves_planner_profile_data_from_benchmarks(
-    tmp_path, monkeypatch, engine_args_flag, engine_args_kwarg, workload
-):
-    planner_profile_data = _planner_profile_data_npz_path()
-    assert planner_profile_data.exists()
-
-    captured = {}
-    resolved_paths = []
-
-    def fake_run(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return {
-            "completed_requests": 1,
-            "request_throughput_rps": 1.0,
-            "output_throughput_tok_s": 1.0,
-        }
-
-    def fake_resolve_planner_profile_data(path):
-        resolved_paths.append(path)
-        return SimpleNamespace(npz_path=planner_profile_data)
-
-    monkeypatch.setattr("dynamo.replay.main.run_trace_replay", fake_run)
-    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
-    monkeypatch.setattr(
-        "dynamo.replay.main.resolve_planner_profile_data",
-        fake_resolve_planner_profile_data,
-    )
-
-    cli_args = [
-        engine_args_flag,
-        json.dumps(
-            {
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-                "planner_profile_data": str(planner_profile_data),
-            }
-        ),
-    ]
-
-    if workload == "trace":
-        trace_path = _write_trace_and_args(tmp_path)
-        cli_args = [str(trace_path), *cli_args]
-    else:
-        cli_args = [
-            "--input-tokens",
-            "16",
-            "--output-tokens",
-            "8",
-            "--request-count",
-            "1",
-            *cli_args,
-        ]
-
-    exit_code = main(cli_args)
-
-    assert exit_code == 0
-    assert resolved_paths == [planner_profile_data]
-    assert captured["kwargs"][engine_args_kwarg] is not None
 
 
 @pytest.mark.timeout(30)

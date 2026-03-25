@@ -286,6 +286,10 @@ pub struct MockEngineArgs {
     #[builder(default = "WorkerType::Aggregated")]
     pub worker_type: WorkerType,
 
+    /// Original planner profile NPZ path used to materialize `perf_model`.
+    #[builder(default = "None")]
+    pub planner_profile_data: Option<PathBuf>,
+
     /// Performance model for timing predictions (not serialized, loaded from planner_profile_data)
     #[serde(skip)]
     #[builder(default = "Arc::new(PerfModel::default())")]
@@ -691,6 +695,7 @@ impl MockEngineArgs {
             && let Some(path_str) = path_str.as_str()
         {
             let npz_path = PathBuf::from(path_str);
+            builder = builder.planner_profile_data(Some(npz_path.clone()));
             match PerfModel::from_npz(&npz_path) {
                 Ok(model) => {
                     tracing::info!("Successfully loaded performance model from: {:?}", npz_path);
