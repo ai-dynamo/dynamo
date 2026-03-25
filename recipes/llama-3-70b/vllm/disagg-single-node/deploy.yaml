@@ -66,7 +66,7 @@ spec:
             - name: HF_HOME
               value: /opt/models
             - name: UCX_TLS
-              value: "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc"
+              value: "rc,cuda_copy"
             - name: UCX_RNDV_SCHEME
               value: "get_zcopy"
             - name: UCX_RNDV_THRESH
@@ -129,7 +129,7 @@ spec:
             - name: HF_HOME
               value: /opt/models
             - name: UCX_TLS
-              value: "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc"
+              value: "rc,cuda_copy"
             - name: UCX_RNDV_SCHEME
               value: "get_zcopy"
             - name: UCX_RNDV_THRESH

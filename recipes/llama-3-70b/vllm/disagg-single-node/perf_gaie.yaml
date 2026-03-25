@@ -109,7 +109,7 @@ spec:
         - name: GATEWAY_HOST
           value: llama3-70b-disagg.example.com
         - name: CONCURRENCY_PER_GPU
-          value: "2"
+          value: "16"
         - name: DEPLOYMENT_GPU_COUNT
           value: "8"
         - name: ISL

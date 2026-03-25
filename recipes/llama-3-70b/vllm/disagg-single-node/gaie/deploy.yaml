@@ -108,11 +108,25 @@ spec:
             - name: HF_HOME
               value: /opt/models
             - name: UCX_TLS
-              value: "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc"
-            - name: UCX_RNDV_SCHEME
-              value: "get_zcopy"
-            - name: UCX_RNDV_THRESH
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: NCCL_IB_DISABLE
               value: "0"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -177,11 +191,25 @@ spec:
             - name: HF_HOME
               value: /opt/models
             - name: UCX_TLS
-              value: "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc"
-            - name: UCX_RNDV_SCHEME
-              value: "get_zcopy"
-            - name: UCX_RNDV_THRESH
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: NCCL_IB_DISABLE
               value: "0"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
