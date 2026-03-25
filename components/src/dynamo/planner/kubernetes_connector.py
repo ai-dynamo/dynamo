@@ -507,17 +507,46 @@ class KubernetesConnector(PlannerConnector):
         self._backend_hint = backend
         entries = self._extract_mdc_entries()
 
-        # Find the matching MDC entry
+        # Resolve the expected component name so we can scope card selection
+        # and avoid picking up LoRA-adapter cards that share the same CR but
+        # carry a different component/model identity.
+        expected_component: Optional[str] = None
+        try:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            service = get_service_from_sub_component_type_or_name(
+                deployment, sub_component_type
+            )
+            expected_component = service.name
+        except PlannerError:
+            expected_component = build_worker_info_from_defaults(
+                backend, sub_component_type
+            ).component_name
+
         for entry in entries:
             is_prefill = self._mdc_entry_is_prefill(entry)
-            if sub_component_type == SubComponentType.PREFILL and is_prefill:
-                info = self._build_worker_info_from_mdc(entry, sub_component_type)
-                logger.info(f"Built prefill WorkerInfo from MDC: {info.summary()}")
-                return info
-            if sub_component_type == SubComponentType.DECODE and not is_prefill:
-                info = self._build_worker_info_from_mdc(entry, sub_component_type)
-                logger.info(f"Built decode WorkerInfo from MDC: {info.summary()}")
-                return info
+            if sub_component_type == SubComponentType.PREFILL and not is_prefill:
+                continue
+            if sub_component_type == SubComponentType.DECODE and is_prefill:
+                continue
+
+            entry_component = entry.get("component")
+            if (
+                entry_component
+                and expected_component
+                and entry_component != expected_component
+            ):
+                logger.debug(
+                    f"Skipping MDC entry with component={entry_component!r}, "
+                    f"expected {expected_component!r} for {sub_component_type.value}"
+                )
+                continue
+
+            info = self._build_worker_info_from_mdc(entry, sub_component_type)
+            logger.info(
+                f"Built {sub_component_type.value} WorkerInfo from MDC: "
+                f"{info.summary()}"
+            )
+            return info
 
         # No MDC entry found -- fall back entirely to defaults + DGD arg parsing
         logger.warning(
