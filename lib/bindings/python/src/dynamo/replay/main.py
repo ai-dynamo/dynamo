@@ -18,10 +18,42 @@ from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
 
+def _load_engine_args(raw_args: str | None):
+    if raw_args is None:
+        return None
+
+    raw = json.loads(raw_args)
+    worker_type = raw.pop("worker_type", None)
+    if worker_type is not None:
+        if "is_prefill" in raw or "is_decode" in raw:
+            raise ValueError(
+                "worker_type cannot be combined with is_prefill or is_decode"
+            )
+        if worker_type == "prefill":
+            raw["is_prefill"] = True
+        elif worker_type == "decode":
+            raw["is_decode"] = True
+        elif worker_type != "aggregated":
+            raise ValueError(
+                "worker_type must be one of 'aggregated', 'prefill', or 'decode'"
+            )
+    if "planner_profile_data" in raw:
+        profile_data_result = resolve_planner_profile_data(
+            Path(raw["planner_profile_data"])
+        )
+        if profile_data_result.npz_path is not None:
+            raw["planner_profile_data"] = str(profile_data_result.npz_path)
+        else:
+            del raw["planner_profile_data"]
+    return MockEngineArgs.from_json(json.dumps(raw))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
     parser.add_argument("trace_file", nargs="?")
     parser.add_argument("--extra-engine-args")
+    parser.add_argument("--prefill-engine-args")
+    parser.add_argument("--decode-engine-args")
     parser.add_argument("--router-config")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
@@ -36,6 +68,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--num-prefix-groups", type=int, default=0)
     parser.add_argument("--inter-turn-delay-ms", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--num-prefill-workers", type=int, default=1)
+    parser.add_argument("--num-decode-workers", type=int, default=1)
     parser.add_argument("--replay-concurrency", type=int)
     parser.add_argument(
         "--replay-mode",
@@ -74,24 +108,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
 
-    # Resolve planner_profile_data directory -> NPZ before passing to Rust.
-    # Rust only accepts NPZ files; resolve_planner_profile_data handles conversion.
-    profile_data_result = None
-    if args.extra_engine_args is not None:
-        raw = json.loads(args.extra_engine_args)
-        if "planner_profile_data" in raw:
-            profile_data_result = resolve_planner_profile_data(
-                Path(raw["planner_profile_data"])
-            )
-            if profile_data_result.npz_path is not None:
-                raw["planner_profile_data"] = str(profile_data_result.npz_path)
-            else:
-                del raw["planner_profile_data"]
-            extra_engine_args = MockEngineArgs.from_json(json.dumps(raw))
-        else:
-            extra_engine_args = MockEngineArgs.from_json(args.extra_engine_args)
-    else:
-        extra_engine_args = None
+    extra_engine_args = _load_engine_args(args.extra_engine_args)
+    prefill_engine_args = _load_engine_args(args.prefill_engine_args)
+    decode_engine_args = _load_engine_args(args.decode_engine_args)
     router_config = (
         KvRouterConfig.from_json(args.router_config)
         if args.router_config is not None
@@ -102,8 +121,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = run_trace_replay(
             args.trace_file,
             extra_engine_args=extra_engine_args,
+            prefill_engine_args=prefill_engine_args,
+            decode_engine_args=decode_engine_args,
             router_config=router_config,
             num_workers=args.num_workers,
+            num_prefill_workers=args.num_prefill_workers,
+            num_decode_workers=args.num_decode_workers,
             replay_concurrency=args.replay_concurrency,
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
@@ -115,8 +138,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output_tokens,
             args.request_count,
             extra_engine_args=extra_engine_args,
+            prefill_engine_args=prefill_engine_args,
+            decode_engine_args=decode_engine_args,
             router_config=router_config,
             num_workers=args.num_workers,
+            num_prefill_workers=args.num_prefill_workers,
+            num_decode_workers=args.num_decode_workers,
             replay_concurrency=args.replay_concurrency,
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,

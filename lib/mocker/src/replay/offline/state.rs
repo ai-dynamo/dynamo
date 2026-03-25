@@ -91,6 +91,10 @@ impl OfflineWorkerState {
         self.core.execute_pass(collector, now_ms)
     }
 
+    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        self.core.execute_hidden_pass(now_ms)
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_snapshot(&self) -> OfflineWorkerSnapshot {
         OfflineWorkerSnapshot {

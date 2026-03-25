@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::events::SimulationEvent;
+use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::normalize_trace_requests;
 use super::runtime_utils::{
     WorkerCompletionPayload, next_timestamp as choose_next_timestamp, pop_next_concurrency_ready,
@@ -386,12 +386,14 @@ impl OfflineRuntime {
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
         while let Some(WorkerCompletionPayload {
+            stage,
             worker_idx,
             completed_requests,
             output_signals,
             kv_events,
         }) = pop_ready_worker_completion(&mut self.events, self.now_ms)
         {
+            debug_assert_eq!(stage, SimulationWorkerStage::Aggregated);
             self.workers[worker_idx].mark_idle();
             self.process_completed_pass(worker_idx, completed_requests, output_signals, kv_events)?;
             changed = true;
@@ -513,6 +515,7 @@ impl OfflineRuntime {
                     &mut self.next_event_seq,
                     executed.end_ms,
                     WorkerCompletionPayload {
+                        stage: SimulationWorkerStage::Aggregated,
                         worker_idx,
                         completed_requests: executed.completed_requests,
                         output_signals: executed.output_signals,

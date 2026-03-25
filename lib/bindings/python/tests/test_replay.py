@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -195,6 +196,14 @@ def _sglang_args():
     return MockEngineArgs.from_json(json.dumps(_sglang_args_payload()))
 
 
+def _prefill_args():
+    return MockEngineArgs(block_size=64, speedup_ratio=1000.0, worker_type="prefill")
+
+
+def _decode_args():
+    return MockEngineArgs(block_size=64, speedup_ratio=1000.0, worker_type="decode")
+
+
 def _write_router_config(tmp_path):
     config_path = tmp_path / "router_config.json"
     config_path.write_text(
@@ -230,8 +239,12 @@ def _assert_basic_report_metrics(report):
 
 
 def _replay_cli_env() -> dict[str, str]:
+    repo_root = Path(__file__).resolve().parents[4]
     env = os.environ.copy()
-    pythonpath_entries = ["lib/bindings/python/src", "components/src"]
+    pythonpath_entries = [
+        str(repo_root / "lib/bindings/python/src"),
+        str(repo_root / "components/src"),
+    ]
     existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
         pythonpath_entries.append(existing_pythonpath)
@@ -554,6 +567,82 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
     )
 
 
+def test_run_trace_replay_supports_disagg_offline(tmp_path):
+    trace_path = _write_trace_and_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        prefill_engine_args=_prefill_args(),
+        decode_engine_args=_decode_args(),
+        router_config=_router_config(),
+        num_prefill_workers=2,
+        num_decode_workers=2,
+        replay_mode="offline",
+        router_mode="kv_router",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+    _assert_basic_report_metrics(report)
+
+
+def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens():
+    report = run_synthetic_trace_replay(
+        128,
+        7,
+        6,
+        prefill_engine_args=_prefill_args(),
+        decode_engine_args=_decode_args(),
+        router_config=_router_config(),
+        num_prefill_workers=2,
+        num_decode_workers=2,
+        replay_mode="offline",
+        router_mode="kv_router",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=6,
+        input_tokens=128,
+        output_tokens=7,
+    )
+    _assert_basic_report_metrics(report)
+
+
+def test_run_trace_replay_rejects_partial_disagg_args(tmp_path):
+    trace_path = _write_trace_and_args(tmp_path)
+
+    with pytest.raises(Exception, match="must be provided together"):
+        run_trace_replay(
+            trace_path,
+            prefill_engine_args=_prefill_args(),
+            replay_mode="offline",
+            router_mode="kv_router",
+        )
+
+
+def test_run_trace_replay_rejects_online_disagg(tmp_path):
+    trace_path = _write_trace_and_args(tmp_path)
+
+    with pytest.raises(
+        Exception, match="disagg replay only supports replay_mode='offline'"
+    ):
+        run_trace_replay(
+            trace_path,
+            prefill_engine_args=_prefill_args(),
+            decode_engine_args=_decode_args(),
+            router_config=_router_config(),
+            num_prefill_workers=2,
+            num_decode_workers=2,
+            replay_mode="online",
+            router_mode="kv_router",
+        )
+
+
 def test_format_report_table_matches_aiperf_shape():
     report = {
         "mean_ttft_ms": 18.26,
@@ -787,6 +876,40 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
         str(report_path),
         "--extra-engine-args",
         '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    _assert_basic_report_counts(
+        report,
+        num_requests=10,
+        input_tokens=250,
+        output_tokens=25,
+    )
+    _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_trace_disagg_smoke(tmp_path):
+    trace_path = _write_cli_smoke_trace(tmp_path)
+    report_path = tmp_path / "trace_disagg_report.json"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "offline",
+        "--router-mode",
+        "kv_router",
+        "--num-prefill-workers",
+        "2",
+        "--num-decode-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--prefill-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0,"worker_type":"prefill"}',
+        "--decode-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0,"worker_type":"decode"}',
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)

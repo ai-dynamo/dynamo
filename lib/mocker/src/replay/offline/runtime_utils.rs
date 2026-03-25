@@ -5,11 +5,12 @@ use std::collections::{BinaryHeap, VecDeque};
 
 use dynamo_kv_router::protocols::RouterEvent;
 
-use super::events::{SimulationEvent, SimulationEventKind};
+use super::events::{SimulationEvent, SimulationEventKind, SimulationWorkerStage};
 use crate::common::protocols::{DirectRequest, OutputSignal};
 
 #[derive(Debug)]
 pub(super) struct WorkerCompletionPayload {
+    pub stage: SimulationWorkerStage,
     pub worker_idx: usize,
     pub completed_requests: usize,
     pub output_signals: Vec<OutputSignal>,
@@ -65,6 +66,7 @@ pub(super) fn push_worker_completion(
         at_ms,
         seq_no: *next_event_seq,
         kind: SimulationEventKind::WorkerCompletion {
+            stage: payload.stage,
             worker_idx: payload.worker_idx,
             completed_requests: payload.completed_requests,
             output_signals: payload.output_signals,
@@ -84,12 +86,14 @@ pub(super) fn pop_ready_worker_completion(
     }
     let event = events.pop().expect("event must exist after peek");
     let SimulationEventKind::WorkerCompletion {
+        stage,
         worker_idx,
         completed_requests,
         output_signals,
         kv_events,
     } = event.kind;
     Some(WorkerCompletionPayload {
+        stage,
         worker_idx,
         completed_requests,
         output_signals,
@@ -100,6 +104,7 @@ pub(super) fn pop_ready_worker_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replay::offline::events::SimulationWorkerStage;
     use uuid::Uuid;
 
     fn direct_request(uuid: u128, arrival_timestamp_ms: Option<f64>) -> DirectRequest {
@@ -163,6 +168,7 @@ mod tests {
             &mut next_event_seq,
             10.0,
             WorkerCompletionPayload {
+                stage: SimulationWorkerStage::Aggregated,
                 worker_idx: 7,
                 completed_requests: 1,
                 output_signals: vec![OutputSignal {
@@ -177,6 +183,7 @@ mod tests {
             &mut next_event_seq,
             10.0,
             WorkerCompletionPayload {
+                stage: SimulationWorkerStage::Aggregated,
                 worker_idx: 8,
                 completed_requests: 2,
                 output_signals: vec![OutputSignal {
@@ -191,8 +198,10 @@ mod tests {
 
         let first = pop_ready_worker_completion(&mut events, 10.0).unwrap();
         let second = pop_ready_worker_completion(&mut events, 10.0).unwrap();
+        assert_eq!(first.stage, SimulationWorkerStage::Aggregated);
         assert_eq!(first.worker_idx, 7);
         assert_eq!(first.completed_requests, 1);
+        assert_eq!(second.stage, SimulationWorkerStage::Aggregated);
         assert_eq!(second.worker_idx, 8);
         assert_eq!(second.completed_requests, 2);
         assert!(events.is_empty());

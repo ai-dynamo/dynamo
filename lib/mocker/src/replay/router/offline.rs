@@ -103,6 +103,7 @@ struct PendingRequest {
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
     overlaps: OverlapScores,
+    track_prefill_tokens: bool,
     expected_output_tokens: Option<u32>,
 }
 
@@ -123,7 +124,7 @@ impl PendingRequest {
             overlaps: self.overlaps.clone(),
             decode_blocks,
             prefill_tokens,
-            track_prefill_tokens: true,
+            track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             update_states: true,
             lora_name: None,
@@ -252,7 +253,6 @@ impl OfflineReplayRouter {
         self.drain_pending()
     }
 
-    #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -363,6 +363,7 @@ impl OfflineReplayRouter {
             token_seq,
             isl_tokens: request.tokens.len(),
             overlaps,
+            track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
                 u32::try_from(request.max_output_tokens)
                     .context("max_output_tokens does not fit into u32")?,
@@ -392,7 +393,7 @@ impl OfflineReplayRouter {
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
-                track_prefill_tokens: true,
+                track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: None,

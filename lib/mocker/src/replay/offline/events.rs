@@ -5,9 +5,17 @@ use std::cmp::Ordering;
 
 use crate::common::protocols::OutputSignal;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SimulationWorkerStage {
+    Aggregated,
+    Prefill,
+    Decode,
+}
+
 #[derive(Debug)]
 pub(crate) enum SimulationEventKind {
     WorkerCompletion {
+        stage: SimulationWorkerStage,
         worker_idx: usize,
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,

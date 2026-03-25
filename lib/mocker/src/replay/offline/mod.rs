@@ -3,11 +3,13 @@
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::Trace;
+use crate::replay::OfflineDisaggReplayConfig;
 pub(crate) use crate::replay::normalize_trace_requests;
 use crate::replay::{ReplayRouterMode, TraceSimulationReport};
 use dynamo_kv_router::config::KvRouterConfig;
 
 pub(crate) mod core;
+pub(crate) mod disagg;
 pub(crate) mod events;
 pub(crate) mod multi;
 pub(crate) mod runtime_utils;
@@ -92,4 +94,39 @@ pub(crate) fn simulate_concurrency_workload(
             router_mode,
         )
     }
+}
+
+pub(crate) fn simulate_trace_disagg(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
+) -> anyhow::Result<TraceSimulationReport> {
+    disagg::simulate_trace_disagg(config, router_config, requests, arrival_speedup_ratio)
+}
+
+pub(crate) fn simulate_concurrency_disagg(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+) -> anyhow::Result<TraceSimulationReport> {
+    disagg::simulate_concurrency_disagg(config, router_config, requests, max_in_flight)
+}
+
+pub(crate) fn simulate_trace_workload_disagg(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+) -> anyhow::Result<TraceSimulationReport> {
+    disagg::simulate_trace_workload_disagg(config, router_config, trace)
+}
+
+pub(crate) fn simulate_concurrency_workload_disagg(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    max_in_flight: usize,
+) -> anyhow::Result<TraceSimulationReport> {
+    disagg::simulate_concurrency_workload_disagg(config, router_config, trace, max_in_flight)
 }

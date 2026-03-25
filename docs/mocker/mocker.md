@@ -126,10 +126,12 @@ python -m dynamo.mocker \
 
 The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
 `offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
-admission, and synthetic workload generation directly:
+admission, synthetic workload generation, and offline disaggregated prefill/decode replay directly:
 
-The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Engine settings
-such as `block_size`, `engine_type`, and compute speedups still belong in `--extra-engine-args`.
+The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Aggregated
+replay uses `--extra-engine-args`. Offline disagg replay instead uses
+`--prefill-engine-args` plus `--decode-engine-args`, together with
+`--num-prefill-workers` and `--num-decode-workers`.
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
@@ -196,6 +198,31 @@ For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay
 Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay uses canonical
 `block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
 as it matches `block_size` when both are provided.
+
+Offline replay also supports disaggregated `kv_router` mode. In that mode:
+
+- `--prefill-engine-args` must describe a prefill worker
+- `--decode-engine-args` must describe a decode worker
+- `--router-mode` must be `kv_router`
+- only offline replay is supported
+
+Example:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 4096 \
+    --output-tokens 256 \
+    --request-count 100 \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --replay-concurrency 32 \
+    --num-prefill-workers 2 \
+    --num-decode-workers 6 \
+    --prefill-engine-args '{"worker_type":"prefill","block_size":512}' \
+    --decode-engine-args '{"worker_type":"decode","block_size":512}' \
+    --router-config '{"router_queue_policy":"wspt"}' \
+    --report-json /tmp/replay-report.json
+```
 
 ## Performance Modeling Setup
 

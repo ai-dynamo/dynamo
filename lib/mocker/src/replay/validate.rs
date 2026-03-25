@@ -3,6 +3,7 @@
 
 use anyhow::{Result, bail};
 
+use super::OfflineDisaggReplayConfig;
 use super::ReplayRouterMode;
 use crate::common::protocols::{MockEngineArgs, WorkerType};
 
@@ -74,4 +75,70 @@ pub(super) fn validate_online_concurrency_args(
     }
 
     validate_replay_args(args, num_workers, "online replay")
+}
+
+fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
+    if config.num_prefill_workers == 0 {
+        bail!("{mode} requires num_prefill_workers >= 1");
+    }
+    if config.num_decode_workers == 0 {
+        bail!("{mode} requires num_decode_workers >= 1");
+    }
+    if config.prefill_args.worker_type != WorkerType::Prefill {
+        bail!(
+            "{mode} requires prefill_engine_args.worker_type=prefill, got {:?}",
+            config.prefill_args.worker_type,
+        );
+    }
+    if config.decode_args.worker_type != WorkerType::Decode {
+        bail!(
+            "{mode} requires decode_engine_args.worker_type=decode, got {:?}",
+            config.decode_args.worker_type,
+        );
+    }
+    if config.prefill_args.dp_size != 1 {
+        bail!(
+            "{mode} only supports prefill data_parallel_size=1, got {}",
+            config.prefill_args.dp_size,
+        );
+    }
+    if config.decode_args.dp_size != 1 {
+        bail!(
+            "{mode} only supports decode data_parallel_size=1, got {}",
+            config.decode_args.dp_size,
+        );
+    }
+    if config.prefill_args.block_size != config.decode_args.block_size {
+        bail!(
+            "{mode} requires matching prefill/decode block_size, got {} and {}",
+            config.prefill_args.block_size,
+            config.decode_args.block_size,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn validate_offline_disagg_replay_args(
+    config: &OfflineDisaggReplayConfig,
+    router_mode: ReplayRouterMode,
+) -> Result<()> {
+    if router_mode != ReplayRouterMode::KvRouter {
+        bail!("offline disagg replay requires router_mode=kv_router");
+    }
+    validate_disagg_args(config, "trace replay")
+}
+
+pub(super) fn validate_offline_disagg_concurrency_args(
+    config: &OfflineDisaggReplayConfig,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<()> {
+    if max_in_flight == 0 {
+        bail!("concurrency replay requires max_in_flight >= 1");
+    }
+    if router_mode != ReplayRouterMode::KvRouter {
+        bail!("offline disagg replay requires router_mode=kv_router");
+    }
+    validate_disagg_args(config, "concurrency replay")
 }
