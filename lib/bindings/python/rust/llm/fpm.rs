@@ -10,10 +10,11 @@
 //!   - **tracking mode**: call `start_tracking()` once, then `get_recent_stats()` to
 //!     retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 
+use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
@@ -265,8 +266,6 @@ fn read_u32(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u32> {
 // Subscriber: event plane -> consumer
 // ---------------------------------------------------------------------------
 
-type StatsMap = HashMap<(String, i64), Vec<u8>>;
-
 /// Subscriber for ForwardPassMetrics from the event plane.
 ///
 /// Auto-discovers engine publishers via the discovery plane (K8s CRD / etcd / file).
@@ -287,16 +286,14 @@ type StatsMap = HashMap<(String, i64), Vec<u8>>;
 /// - **`get_recent_stats()`** (Python thread): reads both `latest_stats` and
 ///   `known_workers` to produce a filtered snapshot.
 ///
-/// `get_recent_stats()` uses **read locks only** on both collections.  This is
-/// deliberate: Task 1 is the hot path (~20k writes/s at 200 engines) and must
-/// never be blocked by the planner's polling.  Read locks coexist with other
-/// readers and only block on writers, so `get_recent_stats()` never contends
-/// with Task 1's writes to `latest_stats`.
+/// Both collections use `DashMap`/`DashSet` (sharded concurrent maps) so that
+/// `get_recent_stats()` never blocks Task 1's high-frequency writes.  Per-shard
+/// locking means readers and writers only contend if they happen to hit the same
+/// shard, which is rare in practice.
 ///
 /// Ghost entries (FPM arriving after its worker's MDC `Removed` event) are
-/// filtered out by the `known_workers` check in `get_recent_stats()` but not
-/// pruned from `latest_stats`.  This avoids a write lock and the memory is
-/// negligible (bounded by in-flight FPMs at the instant of worker death).
+/// filtered out by the `known_workers` check in `get_recent_stats()` and eagerly
+/// pruned from `latest_stats` on `Removed` events.
 #[pyclass]
 pub(crate) struct FpmEventSubscriber {
     component: Component,
@@ -308,11 +305,11 @@ pub(crate) struct FpmEventSubscriber {
 
     // tracking mode state
     tracking_started: Arc<AtomicBool>,
-    latest_stats: Arc<std::sync::RwLock<StatsMap>>,
+    latest_stats: Arc<DashMap<(String, i64), Vec<u8>>>,
     // Worker IDs currently registered in MDC.  Maintained by Task 2
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
-    // to filter out ghost entries without taking a write lock on latest_stats.
-    known_workers: Arc<std::sync::RwLock<HashSet<String>>>,
+    // to filter out ghost entries without contending with Task 1's writes.
+    known_workers: Arc<DashSet<String>>,
 }
 
 #[pymethods]
@@ -333,8 +330,8 @@ impl FpmEventSubscriber {
             recv_started: Arc::new(AtomicBool::new(false)),
             rx: Arc::new(std::sync::Mutex::new(None)),
             tracking_started: Arc::new(AtomicBool::new(false)),
-            latest_stats: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            known_workers: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            latest_stats: Arc::new(DashMap::new()),
+            known_workers: Arc::new(DashSet::new()),
         })
     }
 
@@ -424,8 +421,8 @@ impl FpmEventSubscriber {
     ///
     /// 1. **Event consumption** (Task 1): subscribes to FPM events, extracts
     ///    `(worker_id, dp_rank)` from the msgpack payload, stores the latest
-    ///    raw bytes in `latest_stats`.  This is the hot path and only takes a
-    ///    write lock on `latest_stats`.
+    ///    raw bytes in `latest_stats`.  Uses per-shard locking via `DashMap`
+    ///    so contention with concurrent readers is minimal.
     ///
     /// 2. **MDC discovery watch** (Task 2): monitors `ComponentModels` for the
     ///    target component.  Maintains `known_workers` (the set of currently
@@ -451,10 +448,12 @@ impl FpmEventSubscriber {
 
         // Task 1: event consumption.
         //
-        // Blindly inserts every FPM into latest_stats without checking
-        // known_workers.  This avoids extra lock contention on the hot path.
+        // Inserts every FPM into latest_stats without checking known_workers.
         // Ghost entries (from workers that have already been removed) are
-        // filtered out by get_recent_stats() at read time.
+        // filtered out by get_recent_stats() at read time.  DashMap's
+        // per-shard locking keeps contention low but does not eliminate it
+        // entirely -- a concurrent reader hitting the same shard will briefly
+        // wait for the insert to complete.
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
@@ -483,9 +482,7 @@ impl FpmEventSubscriber {
                                 Some(Ok(envelope)) => {
                                     let payload = envelope.payload.to_vec();
                                     if let Some(key) = extract_fpm_key(&payload) {
-                                        if let Ok(mut map) = stats.write() {
-                                            map.insert(key, payload);
-                                        }
+                                        stats.insert(key, payload);
                                     } else {
                                         tracing::warn!(
                                             "FPM tracker: failed to extract key from payload ({} bytes)",
@@ -548,30 +545,23 @@ impl FpmEventSubscriber {
                             match event {
                                 Some(Ok(DiscoveryEvent::Added(instance))) => {
                                     let wid = instance.instance_id().to_string();
-                                    if let Ok(mut set) = known.write() {
-                                        set.insert(wid.clone());
-                                    }
+                                    known.insert(wid.clone());
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::Removed(id))) => {
                                     let removed_id = id.instance_id().to_string();
-
-                                    if let Ok(mut set) = known.write() {
-                                        set.remove(&removed_id);
-                                    }
+                                    known.remove(&removed_id);
 
                                     // Eagerly prune latest_stats for the common case
                                     // (worker removed cleanly before any late FPMs arrive).
-                                    if let Ok(mut map) = stats.write() {
-                                        let before = map.len();
-                                        map.retain(|(worker_id, _), _| *worker_id != removed_id);
-                                        let removed = before - map.len();
-                                        if removed > 0 {
-                                            tracing::info!(
-                                                "FPM tracker: removed {removed} entries for \
-                                                 worker_id={removed_id} (MDC removed)"
-                                            );
-                                        }
+                                    let before = stats.len();
+                                    stats.retain(|(worker_id, _), _| *worker_id != removed_id);
+                                    let removed = before - stats.len();
+                                    if removed > 0 {
+                                        tracing::info!(
+                                            "FPM tracker: removed {removed} entries for \
+                                             worker_id={removed_id} (MDC removed)"
+                                        );
                                     }
                                 }
                                 Some(Err(e)) => {
@@ -595,11 +585,9 @@ impl FpmEventSubscriber {
     ///
     /// The returned snapshot is filtered against `known_workers` so that
     /// ghost entries (late FPMs from already-removed workers) are excluded.
-    /// Both `latest_stats` and `known_workers` are accessed via **read locks**
-    /// to avoid contending with Task 1's high-frequency writes.  Ghost entries
-    /// remain in `latest_stats` memory but are never returned to Python; they
-    /// are bounded by the number of in-flight FPMs at the instant of worker
-    /// death (typically 1-2 per engine) and are harmless.
+    /// Uses `DashMap`/`DashSet` with per-shard locking so contention with
+    /// the hot-path writer is minimal (but not zero -- a reader and writer
+    /// hitting the same shard will briefly contend).
     ///
     /// Returns:
     ///     dict mapping `(worker_id: str, dp_rank: int)` to raw msgspec bytes.
@@ -610,20 +598,11 @@ impl FpmEventSubscriber {
             ));
         }
 
-        let known = self
-            .known_workers
-            .read()
-            .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;
-
-        let stats = self
+        let snapshot = self
             .latest_stats
-            .read()
-            .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;
-
-        let snapshot = stats
             .iter()
-            .filter(|((worker_id, _), _)| known.contains(worker_id))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter(|entry| self.known_workers.contains(&entry.key().0))
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
 
         Ok(snapshot)

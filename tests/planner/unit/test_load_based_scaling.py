@@ -334,7 +334,9 @@ class TestPrefillFpmScaling:
         planner.model_name = "test-model"
         planner.prefill_worker_info = WorkerInfo(max_num_batched_tokens=2048)
 
-        for tokens in range(200, 1200, 100):
+        # Train with short ISL (100 tokens each) so avg_isl stays low.
+        # Regression: wall_time ≈ 0.001 * prefill_tokens
+        for tokens in range(100, 600, 50):
             fpm = _make_fpm(
                 sum_prefill_tokens=tokens,
                 num_prefill_requests=1,
@@ -342,7 +344,9 @@ class TestPrefillFpmScaling:
             )
             planner.ttft_regression.add_observation(fpm)
 
-        # All engines idle (no queued prefill)
+        # All engines idle (no queued prefill).
+        # estimate_next_ttft: total = 0 + avg_isl(~100) = ~100 tokens
+        # predicted wall_time ≈ 0.001 * 100 = 0.1s = 100ms < 500ms SLA
         stats = {
             (f"w{i}", 0): _make_fpm(
                 worker_id=f"w{i}",
