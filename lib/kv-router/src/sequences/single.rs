@@ -271,7 +271,10 @@ impl ActiveSequences {
         self.new_blocks(token_sequence) + self.active_blocks()
     }
 
-    /// Free all blocks associated with a request
+    /// Free all blocks associated with a request.
+    ///
+    /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need
+    /// to invoke both when the request is finishing.
     pub fn free(&mut self, request_id: &RequestId) -> usize {
         self.mark_prefill_completed(request_id);
 

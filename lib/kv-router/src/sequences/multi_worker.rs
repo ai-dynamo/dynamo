@@ -533,6 +533,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// Note: This operation is idempotent. Calling it multiple times for the same request
     /// will log a warning but not return an error (double free is allowed).
+    ///
+    /// This also performs the underlying prefill-complete cleanup via
+    /// [`ActiveSequences::free`], so callers do not need to call
+    /// [`Self::mark_prefill_completed`] before freeing a completed request.
     pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
         if !self.request_to_worker.contains_key(request_id) {
             tracing::debug!("Request {request_id} not found, already freed (idempotent)");
