@@ -303,7 +303,7 @@ class ProphetPredictor(BasePredictor):
         model.fit(df)
 
         # Create future dataframe for next timestamp
-        next_timestamp = self.start_date + timedelta(seconds=self.curr_step)
+        next_timestamp = self.start_date + timedelta(seconds=self.curr_step * self.step_size)
         future_df = pd.DataFrame({"ds": [next_timestamp]})
 
         # Make prediction
