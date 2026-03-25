@@ -134,20 +134,23 @@ fn recover_nested_tool_calls(
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
     let start_token = config.tool_call_start.as_str();
-    let nested_start = block[start_token.len()..]
-        .find(start_token)
-        .map(|pos| pos + start_token.len());
-    let Some(nested_start) = nested_start else {
-        return Ok(None);
-    };
-
-    let nested_block = &block[nested_start..];
-    let (normal_text, calls) = extract_tool_calls(nested_block, config, tools)?;
-    if calls.is_empty() {
-        return Ok(None);
+    let mut nested_starts = Vec::new();
+    let mut search_offset = start_token.len();
+    while let Some(relative_start) = block[search_offset..].find(start_token) {
+        let nested_start = search_offset + relative_start;
+        nested_starts.push(nested_start);
+        search_offset = nested_start + start_token.len();
     }
 
-    Ok(Some((normal_text, calls)))
+    for nested_start in nested_starts.into_iter().rev() {
+        let nested_block = &block[nested_start..];
+        let (normal_text, calls) = extract_tool_calls(nested_block, config, tools)?;
+        if !calls.is_empty() {
+            return Ok(Some((normal_text, calls)));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Decode XML character entities in a string.
@@ -255,6 +258,9 @@ fn parse_tool_call_block(
 
     if function_name.is_empty() {
         anyhow::bail!("Empty function name in tool call");
+    }
+    if function_name.contains('<') || function_name.contains('>') {
+        anyhow::bail!("Malformed function name '{}'", function_name);
     }
 
     // Parse key-value pairs
@@ -525,6 +531,39 @@ mod tests {
         let args: HashMap<String, Value> =
             serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["message"], "inspect repo");
+        assert_eq!(normal_text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_recovers_last_nested_valid_tool_call_from_repeated_prefixes() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "wait_agent".to_string(),
+            parameters: None,
+        }];
+
+        let message = concat!(
+            "<tool_call>",
+            "Good, the agent spawned successfully with ID /root/run_ls_simple and nickname Huygens. ",
+            "Now I need to wait for it to finish its task (running ls) and then close it.</think>",
+            "Agent spawned. Waiting for it to complete `ls`, then will close.",
+            "<tool_call>wait",
+            "Good, the agent spawned successfully with ID /root/run_ls_simple and nickname Huygens. ",
+            "Now I need to wait for it to finish its task (running ls) and then close it.</think>",
+            "Agent spawned. Waiting for it to complete `ls`, then will close.",
+            "<tool_call>wait_agent",
+            "<arg_key>ids</arg_key><arg_value>[\"/root/run_ls_simple\"]</arg_value>",
+            "</tool_call>"
+        );
+
+        let (calls, normal_text) =
+            try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "wait_agent");
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["ids"], serde_json::json!(["/root/run_ls_simple"]));
         assert_eq!(normal_text, Some("".to_string()));
     }
 
