@@ -1190,4 +1190,32 @@ mod tests {
             } if request_id == "req-123"
         ));
     }
+
+    #[test]
+    fn test_active_sequence_add_request_serialization_preserves_track_prefill_tokens() {
+        let event = ActiveSequenceEvent {
+            request_id: "req-123".to_string(),
+            worker: WorkerWithDpRank::new(7, 0),
+            data: ActiveSequenceEventData::AddRequest {
+                token_sequence: Some(vec![11, 22]),
+                isl: 128,
+                overlap: 1,
+                track_prefill_tokens: false,
+                expected_output_tokens: Some(32),
+            },
+            router_id: 9,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: ActiveSequenceEvent = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized.data {
+            ActiveSequenceEventData::AddRequest {
+                track_prefill_tokens,
+                ..
+            } => assert!(!track_prefill_tokens),
+            _ => panic!("expected add request event"),
+        }
+    }
 }

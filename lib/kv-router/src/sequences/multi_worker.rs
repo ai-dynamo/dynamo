@@ -400,6 +400,22 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             });
         }
 
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: token_sequence.clone(),
+                    isl,
+                    overlap,
+                    track_prefill_tokens,
+                    expected_output_tokens,
+                },
+                router_id: self.router_id,
+                lora_name: lora_name.clone(),
+            };
+            self.publisher.publish_event(&event).await?;
+        }
         self.request_to_worker.insert(request_id.clone(), worker);
 
         if let Some(lora) = lora_name {
