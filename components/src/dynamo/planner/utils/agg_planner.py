@@ -103,6 +103,11 @@ class AggPlanner:
             )
 
             await self.planner.connector.wait_for_deployment_ready()
+            logger.info(
+                f"[ADVISORY] Deployment validated. "
+                f"Scaling mode: {self.config.effective_scaling_mode.value}, "
+                f"metrics port: {self.config.metric_reporting_prometheus_port}"
+            )
 
         # Model name discovery runs in all modes (needed for metrics collection)
         if self.config.effective_scaling_mode != ScalingMode.NOOP:

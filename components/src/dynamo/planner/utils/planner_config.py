@@ -139,9 +139,23 @@ class PlannerConfig(BaseModel):
             )
             self.scaling_mode = ScalingMode.NOOP
 
-        # advisory_file_output requires log_dir
+        # Env var PLANNER_PROMETHEUS_PORT always takes precedence over config JSON
+        env_port = int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
+        if env_port != 0 and self.metric_reporting_prometheus_port != env_port:
+            logger.warning(
+                f"metric_reporting_prometheus_port ({self.metric_reporting_prometheus_port}) "
+                f"differs from PLANNER_PROMETHEUS_PORT env ({env_port}). "
+                f"The Kubernetes PodMonitor expects port {env_port}. "
+                f"Using env value to ensure Prometheus scraping works correctly."
+            )
+            self.metric_reporting_prometheus_port = env_port
+
+        # advisory_file_output: auto-use default log_dir if not set
         if self.advisory_file_output and not self.log_dir:
-            raise ValueError("advisory_file_output=True requires log_dir to be set")
+            self.log_dir = "/tmp/planner"
+            logger.info(
+                f"advisory_file_output enabled, using default log_dir: {self.log_dir}"
+            )
 
         # advisory_max_step_size must be positive
         if self.advisory_max_step_size < 1:

@@ -1,0 +1,253 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-advisory-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  advisory-dashboard.json: |-
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "description": "Dynamo Planner Advisory Mode dashboard - scaling recommendations, SLA headroom, and decision context",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [
+        {
+          "asDropdown": false,
+          "icon": "external link",
+          "includeVars": true,
+          "keepTime": true,
+          "tags": [],
+          "targetBlank": true,
+          "title": "Dynamo Planner - SLA & Scaling",
+          "tooltip": "Cross-reference with main Planner dashboard",
+          "type": "link",
+          "url": "/d/dynamo-planner"
+        }
+      ],
+      "panels": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "Recommended replicas (dashed) vs actual replicas (solid). Gap indicates what Planner would do in active mode.",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2, "spanNulls": false },
+              "unit": "short"
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Recommended Prefill" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [8, 4], "fill": "dash" } }, { "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "Recommended Decode" },  "properties": [{ "id": "custom.lineStyle", "value": { "dash": [8, 4], "fill": "dash" } }, { "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "Actual Prefill" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "Actual Decode" },  "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "id": 1,
+          "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+          "targets": [
+            { "expr": "planner:advisory_recommended_p{namespace=~\"$namespace\"}", "legendFormat": "Recommended Prefill", "refId": "A" },
+            { "expr": "planner:advisory_recommended_d{namespace=~\"$namespace\"}", "legendFormat": "Recommended Decode",  "refId": "B" },
+            { "expr": "planner:advisory_current_p{namespace=~\"$namespace\"}",     "legendFormat": "Actual Prefill",      "refId": "C" },
+            { "expr": "planner:advisory_current_d{namespace=~\"$namespace\"}",     "legendFormat": "Actual Decode",       "refId": "D" }
+          ],
+          "title": "Recommended vs Actual Replicas",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "Scaling action over time: 1=scale up (green), 0=hold (gray), -1=scale down (blue)",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "mappings": [
+                { "options": { "-1": { "color": "#5794F2", "text": "Scale Down" }, "0": { "color": "#73BF69", "text": "Hold" }, "1": { "color": "#F2495C", "text": "Scale Up" } }, "type": "value" }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "#5794F2", "value": null }, { "color": "#73BF69", "value": 0 }, { "color": "#F2495C", "value": 1 }] },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "id": 2,
+          "options": { "colWidth": 0.9, "legend": { "displayMode": "list", "placement": "bottom" }, "rowHeight": 0.9, "showValue": "always", "tooltip": { "mode": "single" } },
+          "targets": [
+            { "expr": "planner:advisory_scaling_action{namespace=~\"$namespace\"}", "legendFormat": "Scaling Action", "refId": "A" }
+          ],
+          "title": "Scaling Action Timeline",
+          "type": "state-timeline"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "SLA headroom = SLA target - estimated latency. Positive = safe, negative = SLA violation risk.",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2, "spanNulls": false },
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "id": 3,
+          "options": {
+            "legend": { "calcs": ["lastNotNull", "min"], "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            { "expr": "planner:advisory_ttft_headroom{namespace=~\"$namespace\"}", "legendFormat": "TTFT Headroom (ms)", "refId": "A" },
+            { "expr": "planner:advisory_itl_headroom{namespace=~\"$namespace\"}",  "legendFormat": "ITL Headroom (ms)",  "refId": "B" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] },
+          "title": "SLA Headroom (positive = safe)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "Estimated TTFT (from profiling data) vs observed TTFT (actual). Divergence indicates estimation accuracy.",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2, "spanNulls": false },
+              "unit": "ms"
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Estimated TTFT" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [8, 4], "fill": "dash" } }] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "id": 4,
+          "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "planner:advisory_est_ttft{namespace=~\"$namespace\"}", "legendFormat": "Estimated TTFT", "refId": "A" },
+            { "expr": "planner:observed_ttft{namespace=~\"$namespace\"}",     "legendFormat": "Observed TTFT",  "refId": "B" }
+          ],
+          "title": "Estimated vs Actual TTFT",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "Recommendation frequency per minute. A healthy Planner should mostly hold with occasional scale events.",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2, "spanNulls": false, "fillOpacity": 10, "stacking": { "group": "A", "mode": "normal" } },
+              "unit": "reqpm"
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Scale Up/min" },   "properties": [{ "id": "color", "value": { "fixedColor": "#F2495C", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "Scale Down/min" }, "properties": [{ "id": "color", "value": { "fixedColor": "#5794F2", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "Hold/min" },       "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "id": 5,
+          "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "rate(planner:advisory_scaleup_total{namespace=~\"$namespace\"}[5m]) * 60",   "legendFormat": "Scale Up/min",   "refId": "A" },
+            { "expr": "rate(planner:advisory_scaledown_total{namespace=~\"$namespace\"}[5m]) * 60", "legendFormat": "Scale Down/min", "refId": "B" },
+            { "expr": "rate(planner:advisory_hold_total{namespace=~\"$namespace\"}[5m]) * 60",      "legendFormat": "Hold/min",       "refId": "C" }
+          ],
+          "title": "Recommendation Statistics (per minute)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "Full decision chain: observed traffic → predicted load → recommended replicas",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2, "spanNulls": false },
+              "unit": "reqps"
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Recommended Prefill" }, "properties": [{ "id": "unit", "value": "short" }, { "id": "custom.axisPlacement", "value": "right" }] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "id": 6,
+          "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "planner:observed_request_rate{namespace=~\"$namespace\"}",     "legendFormat": "Observed Req Rate",   "refId": "A" },
+            { "expr": "planner:predicted_request_rate{namespace=~\"$namespace\"}",    "legendFormat": "Predicted Req Rate",  "refId": "B" },
+            { "expr": "planner:advisory_recommended_p{namespace=~\"$namespace\"}",    "legendFormat": "Recommended Prefill", "refId": "C" }
+          ],
+          "title": "Decision Context Timeline",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "Delta = recommended - actual. Positive = needs more replicas, negative = can release.",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2, "spanNulls": false },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+          "id": 7,
+          "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "planner:advisory_delta_p{namespace=~\"$namespace\"}", "legendFormat": "Prefill Delta", "refId": "A" },
+            { "expr": "planner:advisory_delta_d{namespace=~\"$namespace\"}", "legendFormat": "Decode Delta",  "refId": "B" }
+          ],
+          "title": "Advisory Delta (recommended - actual)",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["dynamo", "planner", "advisory"],
+      "templating": {
+        "list": [
+          {
+            "current": {},
+            "hide": 0,
+            "includeAll": false,
+            "label": "Data Source",
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "type": "datasource"
+          },
+          {
+            "current": {},
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "definition": "label_values(planner:num_p_workers, namespace)",
+            "hide": 0,
+            "includeAll": true,
+            "label": "Namespace",
+            "name": "namespace",
+            "query": { "query": "label_values(planner:num_p_workers, namespace)", "refId": "A" },
+            "refresh": 2,
+            "type": "query"
+          }
+        ]
+      },
+      "time": { "from": "now-30m", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "Dynamo Planner - Advisory Mode",
+      "uid": "dynamo-planner-advisory",
+      "version": 1
+    }

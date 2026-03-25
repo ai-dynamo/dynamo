@@ -1,0 +1,17 @@
+# Planner Noop Mode Configuration
+#
+# In noop mode, the Planner does nothing: no scaling, no metrics, no advisory output.
+# Equivalent to the deprecated no_operation: true flag.
+#
+# Use this mode if you want to deploy the Planner binary but keep it completely
+# passive (e.g., during infrastructure testing).
+#
+# How to use as a Kubernetes ConfigMap:
+#   kubectl create configmap planner-config \
+#     --from-file=config.yaml=noop-mode.yaml \
+#     -n <your-namespace>
+
+scaling_mode: noop
+backend: vllm
+mode: disagg
+model_name: your-model-name    # required in noop mode (no connector to discover it)

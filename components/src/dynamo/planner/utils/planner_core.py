@@ -515,6 +515,27 @@ class BasePlanner:
                     _start_planner_http_server(self.prometheus_port)
                 except Exception as e:
                     logger.error(f"Failed to start Planner HTTP server: {e}")
+
+            # Startup self-check log (修改 1)
+            if start_prometheus_server:
+                port_source = (
+                    "env PLANNER_PROMETHEUS_PORT"
+                    if os.environ.get("PLANNER_PROMETHEUS_PORT")
+                    else "config"
+                )
+                file_output_status = (
+                    f"enabled → {config.log_dir}/advisory_history.jsonl"
+                    if config.advisory_file_output and config.log_dir
+                    else "disabled"
+                )
+                logger.info(
+                    "[ADVISORY] Self-check:\n"
+                    f"  - Scaling mode: {config.effective_scaling_mode.value}\n"
+                    f"  - Metrics server: port {self.prometheus_port} (source: {port_source})\n"
+                    f"  - Metrics endpoint: /metrics (15 advisory metrics registered)\n"
+                    f"  - Advisory status endpoint: /advisory/status\n"
+                    f"  - Advisory file output: {file_output_status}"
+                )
         else:
             self.prometheus_port = 0
             self.prometheus_metrics = prometheus_metrics
@@ -1177,6 +1198,7 @@ class BasePlanner:
             return
         import os
 
+        os.makedirs(self.config.log_dir, exist_ok=True)
         filepath = os.path.join(self.config.log_dir, "advisory_history.jsonl")
         try:
             with open(filepath, "a") as f:
@@ -1312,6 +1334,9 @@ class BasePlanner:
         """Main loop for the planner"""
         require_prefill = self.component_type == SubComponentType.PREFILL
         require_decode = self.component_type == SubComponentType.DECODE
+
+        # Print full parsed config at startup for debugging (修改 5)
+        logger.info(f"Planner starting with config:\n{self.config.model_dump_json(indent=2)}")
 
         if self.config.effective_scaling_mode != ScalingMode.NOOP:
             logger.info("Validating deployment...")

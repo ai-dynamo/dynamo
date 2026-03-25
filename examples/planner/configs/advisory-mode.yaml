@@ -1,0 +1,34 @@
+# Planner Advisory Mode Configuration
+#
+# In advisory mode, the Planner observes traffic and outputs scaling recommendations
+# via Prometheus metrics and /advisory/status HTTP endpoint, but does NOT execute
+# any actual scaling. Use this mode to validate Planner decisions before enabling
+# active scaling in production.
+#
+# How to use as a Kubernetes ConfigMap:
+#   kubectl create configmap planner-config \
+#     --from-file=config.yaml=advisory-mode.yaml \
+#     -n <your-namespace>
+#
+# Then mount it in your DGD and set:
+#   args: ["--config", "/etc/planner/config.yaml"]
+#
+# After deploying, check:
+#   curl http://<planner-pod>:9085/advisory/status
+#   curl http://<planner-pod>:9085/metrics | grep advisory
+
+scaling_mode: advisory
+backend: vllm
+mode: disagg
+
+# Scaling algorithm settings
+enable_throughput_scaling: true
+enable_load_scaling: false
+ttft: 2000       # TTFT SLA target in milliseconds
+itl: 50          # ITL SLA target in milliseconds
+no_correction: true
+load_predictor: constant
+
+# Optional: enable JSONL file output for audit trail
+# advisory_file_output: true
+# log_dir: /tmp/planner    # default if not set
