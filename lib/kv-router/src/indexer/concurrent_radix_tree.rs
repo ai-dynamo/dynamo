@@ -345,8 +345,13 @@ impl ConcurrentRadixTree {
 
         let mut needs_worker_insert = false;
 
-        let num_blocks_added = op.blocks.len();
+        let mut num_blocks_added = 0;
 
+        // In each iteration, we lock the parent block and insert the worker into it from
+        // the previous iteration. This avoids locking a block twice.
+        //
+        // Track tree size from worker_lookup insertions so it matches the single-threaded
+        // radix tree's `lookup.len()` semantics and naturally includes the tail block.
         for block_data in op.blocks {
             let child = {
                 let mut parent_guard = current.write();
@@ -392,9 +397,20 @@ impl ConcurrentRadixTree {
             };
 
             // Update lookup
-            worker_lookup.insert(block_data.block_hash, child.clone());
+            if worker_lookup
+                .insert(block_data.block_hash, child.clone())
+                .is_none()
+            {
+                num_blocks_added += 1;
+            }
 
             current = child;
+        }
+
+        // Insert worker into the last child (not yet handled since there is
+        // no subsequent iteration to pick it up).
+        if needs_worker_insert {
+            current.write().workers.insert(worker);
         }
 
         match self.tree_sizes.get(&worker) {
@@ -405,10 +421,6 @@ impl ConcurrentRadixTree {
                 self.tree_sizes
                     .insert(worker, AtomicUsize::new(num_blocks_added));
             }
-        }
-
-        if needs_worker_insert {
-            current.write().workers.insert(worker);
         }
 
         Ok(())

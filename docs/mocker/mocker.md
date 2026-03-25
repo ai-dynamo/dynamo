@@ -73,9 +73,6 @@ python -m dynamo.mocker \
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
 | `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
-| `--trace-file` | None | Run offline trace replay from a Mooncake-style JSONL trace file |
-| `--output-file` | `TRACE_STEM.replay.json` | Write replay metrics JSON to this path |
-| `--replay-concurrency` | None | Run offline replay in closed-loop concurrency mode with this many in-flight requests |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
@@ -127,28 +124,22 @@ python -m dynamo.mocker \
 
 ## Trace Replay
 
-The mocker also supports replaying Mooncake-style traces through both the original mocker CLI and
-the dedicated replay harness.
+The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
+`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
+admission, and synthetic workload generation directly:
 
-For the original mocker CLI flow:
-
-```bash
-python -m dynamo.mocker \
-    --trace-file /path/to/mooncake_trace.jsonl \
-    --model-path Qwen/Qwen3-0.6B
-```
-
-For the standalone replay CLI, which exposes `offline|online`, `round_robin|kv_router`,
-`arrival_speedup_ratio`, `router_queue_policy`, and the synthetic replay path directly:
+The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Engine settings
+such as `block_size`, `engine_type`, and compute speedups still belong in `--extra-engine-args`.
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode kv_router \
-    --router-queue-policy fcfs \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args /path/to/mocker_args.json
+    --extra-engine-args '{"block_size":512}' \
+    --router-config '{"router_queue_policy":"fcfs"}' \
+    --report-json /tmp/replay-report.json
 ```
 
 The same CLI also supports synthetic replay without a trace file:
@@ -162,11 +153,43 @@ python -m dynamo.replay \
     --num-workers 1 \
     --replay-mode offline \
     --replay-concurrency 100 \
-    --extra-engine-args /path/to/mocker_args.json
+    --extra-engine-args '{"block_size":512}' \
+    --report-json /tmp/replay-report.json
 ```
 
-The standalone replay CLI prints the replay report JSON directly to stdout. The `dynamo.mocker`
-trace-file flow still writes a report file and prints a `Replay Summary` table.
+Synthetic replay also supports workload-style generation for shared-prefix and multi-turn tests:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 5000 \
+    --output-tokens 500 \
+    --request-count 200 \
+    --turns-per-session 3 \
+    --shared-prefix-ratio 0.5 \
+    --num-prefix-groups 8 \
+    --inter-turn-delay-ms 250 \
+    --replay-mode offline \
+    --replay-concurrency 32 \
+    --extra-engine-args '{"block_size":512}' \
+    --report-json /tmp/replay-report.json
+```
+
+For trace files, replay also understands multi-turn sessions when records share `session_id`. The
+first turn uses `timestamp`/`created_time`; later turns can use `delay` or `delay_ms`:
+
+```json
+{"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
+{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+```
+
+The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
+report JSON to disk.
+
+Timing semantics:
+
+- trace mode honors first-turn timestamps and inter-turn delays
+- concurrency mode ignores first-turn timestamps but still enforces inter-turn delays
+- in concurrency mode, TTFT is measured from actual dispatch under the in-flight cap
 
 For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
 
@@ -210,6 +233,15 @@ python -m dynamo.mocker \
 ```
 
 The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
+
+When using `python -m dynamo.replay`, there are no dedicated AIC flags. Pass the equivalent fields directly via `--extra-engine-args`:
+
+```bash
+python -m dynamo.replay /path/to/trace.jsonl \
+    --extra-engine-args '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
+```
+
+The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
 
 Example `--reasoning` configuration:
 
@@ -384,6 +416,8 @@ The mocker is particularly useful for:
 | [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
 
 ## Feature Gaps (WIP)
+
+> For the broader mocker enhancement roadmap, see [#6383](https://github.com/ai-dynamo/dynamo/issues/6383).
 
 The following features are not yet supported by the mocker:
 

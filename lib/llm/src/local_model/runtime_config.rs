@@ -61,6 +61,9 @@ pub struct ModelRuntimeConfig {
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
+
+    #[serde(default = "default_eagle")]
+    pub enable_eagle: bool,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -79,6 +82,10 @@ const fn default_exclude_tools_when_tool_choice_none() -> bool {
     true
 }
 
+const fn default_eagle() -> bool {
+    false
+}
+
 impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -94,6 +101,7 @@ impl Default for ModelRuntimeConfig {
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,
+            enable_eagle: false,
         }
     }
 }

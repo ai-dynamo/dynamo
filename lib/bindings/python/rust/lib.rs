@@ -46,6 +46,7 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 pub enum RouterMode {
     RoundRobin,
     Random,
+    PowerOfTwoChoices,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
@@ -57,6 +58,7 @@ impl From<RouterMode> for RsRouterMode {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
+            RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
         }
@@ -777,6 +779,17 @@ impl DistributedRuntime {
             .engine_routes()
             .register(&route_name, rust_callback);
         tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
+    }
+
+    /// Set the system-level health status (Ready / NotReady).
+    fn set_health_status(&self, ready: bool) -> PyResult<()> {
+        let status = if ready {
+            config::HealthStatus::Ready
+        } else {
+            config::HealthStatus::NotReady
+        };
+        self.inner.system_health().lock().set_health_status(status);
         Ok(())
     }
 

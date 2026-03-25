@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::loadgen::Trace;
 pub(crate) use crate::replay::normalize_trace_requests;
 use crate::replay::{ReplayRouterMode, TraceSimulationReport};
 use dynamo_kv_router::config::KvRouterConfig;
@@ -49,6 +50,42 @@ pub(crate) fn simulate_concurrency(
             args,
             router_config,
             requests,
+            max_in_flight,
+            num_workers,
+            router_mode,
+        )
+    }
+}
+
+pub(crate) fn simulate_trace_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> anyhow::Result<TraceSimulationReport> {
+    if num_workers == 1 && args.engine_type == crate::common::protocols::EngineType::Vllm {
+        single::simulate_trace_workload_single(args, trace)
+    } else {
+        multi::simulate_trace_workload_multi(args, router_config, trace, num_workers, router_mode)
+    }
+}
+
+pub(crate) fn simulate_concurrency_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> anyhow::Result<TraceSimulationReport> {
+    if num_workers == 1 && args.engine_type == crate::common::protocols::EngineType::Vllm {
+        single::simulate_concurrency_workload_single(args, trace, max_in_flight)
+    } else {
+        multi::simulate_concurrency_workload_multi(
+            args,
+            router_config,
+            trace,
             max_in_flight,
             num_workers,
             router_mode,
