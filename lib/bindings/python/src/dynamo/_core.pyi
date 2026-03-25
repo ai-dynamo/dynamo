@@ -771,6 +771,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        storage_tier: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -791,7 +792,9 @@ class KvEventPublisher:
         """
         ...
 
-    def publish_removed(self, block_hashes: List[int]) -> None:
+    def publish_removed(
+        self, block_hashes: List[int], storage_tier: Optional[str] = None
+    ) -> None:
         """
         Publish a KV removed event.
 

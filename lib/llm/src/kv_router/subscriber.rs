@@ -99,6 +99,7 @@ async fn start_kv_router_background_event_plane(
                         event.event.dp_rank,
                         event.event.event_id
                     );
+                    dbg!(&event);
                     worker_query_client.handle_live_event(event).await;
                 }
             }

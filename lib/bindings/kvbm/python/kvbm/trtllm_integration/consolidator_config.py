@@ -73,6 +73,46 @@ def should_enable_consolidator(arg_map) -> bool:
     return True
 
 
+def _get_kvbm_pub_port() -> int:
+    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
+    return int(kvbm_pub_port_str)
+
+
+def _get_output_port(kvbm_pub_port: int) -> int:
+    port_offset = 1000
+    output_port = kvbm_pub_port + port_offset
+
+    if output_port > 65535:
+        raise ValueError(
+            f"Derived KVBM KV event port {output_port} exceeds maximum (65535). "
+            f"KVBM port {kvbm_pub_port} is too high. Use a lower base port."
+        )
+
+    return output_port
+
+
+def get_kvbm_event_relay_endpoints() -> tuple[str, str]:
+    """
+    Get the bind/connect endpoints for the direct KVBM -> TRT-LLM ZMQ relay.
+
+    Returns:
+        Tuple of (bind_endpoint, connect_endpoint)
+    """
+    kvbm_pub_port = _get_kvbm_pub_port()
+    output_port = _get_output_port(kvbm_pub_port)
+    bind_endpoint = f"tcp://0.0.0.0:{output_port}"
+    connect_endpoint = f"tcp://127.0.0.1:{output_port}"
+
+    logger.info(
+        "KVBM relay endpoints: bind=%s, connect=%s (derived from KVBM port %s)",
+        bind_endpoint,
+        connect_endpoint,
+        kvbm_pub_port,
+    )
+
+    return bind_endpoint, connect_endpoint
+
+
 def get_consolidator_endpoints() -> tuple[str, str, str]:
     """
     Get consolidator endpoints for TensorRT-LLM (matching vLLM pattern).
@@ -91,8 +131,7 @@ def get_consolidator_endpoints() -> tuple[str, str, str]:
         Tuple of (trtllm_endpoint, output_bind_endpoint, output_connect_endpoint)
     """
     # Get KVBM leader ZMQ pub port (default 56001, matching vLLM)
-    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
-    kvbm_pub_port = int(kvbm_pub_port_str)
+    kvbm_pub_port = _get_kvbm_pub_port()
 
     # Check for explicit TRTLLM port override
     trtllm_port_env = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
@@ -111,15 +150,7 @@ def get_consolidator_endpoints() -> tuple[str, str, str]:
 
     # Derive consolidator output port deterministically (matching vLLM)
     # Use 1000 as the offset. This needs to be aligned with the offset used in the kvbm connector leader.
-    consolidator_port_offset = 1000
-    output_port = kvbm_pub_port + consolidator_port_offset
-
-    # Validate the derived port is within valid range
-    if output_port > 65535:
-        raise ValueError(
-            f"Derived consolidator port {output_port} exceeds maximum (65535). "
-            f"KVBM port {kvbm_pub_port} is too high. Use a lower base port."
-        )
+    output_port = _get_output_port(kvbm_pub_port)
 
     # Build endpoints
     # TRTLLM binds to all interfaces, consolidator connects to 127.0.0.1

@@ -221,6 +221,10 @@ impl Placement {
     pub fn is_local_gpu(&self) -> bool {
         matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_gpu()
     }
+
+    pub fn is_local_offload(&self) -> bool {
+        matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier != StorageTier::Device
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

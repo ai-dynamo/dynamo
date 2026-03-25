@@ -249,6 +249,7 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
+    event_manager: Option<Arc<dyn dynamo_llm::block_manager::events::EventManager>>,
     consolidator_config: Option<(String, Option<String>, EventSource)>, // (engine_endpoint, output_endpoint (optional), engine_source)
 }
 
@@ -282,6 +283,14 @@ impl BlockManagerBuilder {
         metrics: dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics,
     ) -> Self {
         self.kvbm_metrics = Some(metrics);
+        self
+    }
+
+    pub fn event_manager(
+        mut self,
+        event_manager: Arc<dyn dynamo_llm::block_manager::events::EventManager>,
+    ) -> Self {
+        self.event_manager = Some(event_manager);
         self
     }
 
@@ -363,6 +372,10 @@ impl BlockManagerBuilder {
         let mut config_builder = config;
         if let Some(kvbm_metrics) = self.kvbm_metrics {
             config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
+        }
+
+        if let Some(event_manager) = self.event_manager {
+            config_builder = config_builder.event_manager(Some(event_manager));
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {

@@ -14,7 +14,7 @@ use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRe
 use crate::get_current_tokio_handle;
 use anyhow;
 use dynamo_llm::block_manager::connector::protocol::RequestType;
-use dynamo_llm::block_manager::kv_consolidator::EventSource;
+use dynamo_llm::block_manager::events::ZmqRelayEventManager;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -69,8 +69,7 @@ impl KvConnectorLeader {
         worker_id: u64,
         page_size: usize,
         leader_py: PyKvbmLeader,
-        consolidator_trtllm_endpoint: Option<String>,
-        consolidator_output_endpoint: Option<String>,
+        kv_event_endpoint: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -92,9 +91,7 @@ impl KvConnectorLeader {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
-            // Capture consolidator endpoints for the async block
-            let consolidator_trtllm_ep = consolidator_trtllm_endpoint.clone();
-            let consolidator_output_ep = consolidator_output_endpoint.clone();
+            let kv_event_endpoint = kv_event_endpoint.clone();
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -112,24 +109,16 @@ impl KvConnectorLeader {
                     .disable_device_pool(false)
                     .kvbm_metrics(kvbm_metrics_clone.clone());
 
-                // Add consolidator config if endpoint is provided
-                // For TRTLLM: engine_endpoint is where TRTLLM publishes, output_endpoint is where consolidator publishes
-                if let Some(trtllm_ep) = consolidator_trtllm_ep.clone() {
+                if let Some(kv_event_endpoint) = kv_event_endpoint.clone() {
                     tracing::info!(
-                        "Consolidator config: trtllm_endpoint={}, consolidated_output_endpoint={:?}",
-                        trtllm_ep,
-                        consolidator_output_ep
+                        "Using direct KVBM ZMQ relay event endpoint: {}",
+                        kv_event_endpoint
                     );
-
-                    block_manager_builder = block_manager_builder.consolidator_config(
-                        trtllm_ep,
-                        consolidator_output_ep,
-                        EventSource::Trtllm,
-                    );
+                    block_manager_builder = block_manager_builder
+                        .event_manager(ZmqRelayEventManager::new(kv_event_endpoint));
                 }
 
-                let block_manager = match block_manager_builder.build().await
-                {
+                let block_manager = match block_manager_builder.build().await {
                     Ok(bm) => bm,
                     Err(e) => {
                         tracing::error!("Failed to build BlockManager: {}", e);
@@ -520,14 +509,13 @@ pub struct PyTrtllmKvConnectorLeader {
 #[pymethods]
 impl PyTrtllmKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_trtllm_endpoint=None, consolidator_output_endpoint=None))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, kv_event_endpoint=None))]
     pub fn new(
         worker_id: u64,
         drt: Option<PyObject>,
         page_size: usize,
         leader: PyKvbmLeader,
-        consolidator_trtllm_endpoint: Option<String>,
-        consolidator_output_endpoint: Option<String>,
+        kv_event_endpoint: Option<String>,
     ) -> PyResult<Self> {
         let _ = &drt; // drt is currently un-used in leader
 
@@ -535,8 +523,7 @@ impl PyTrtllmKvConnectorLeader {
             worker_id,
             page_size,
             leader,
-            consolidator_trtllm_endpoint,
-            consolidator_output_endpoint,
+            kv_event_endpoint,
         ));
         Ok(Self { connector_leader })
     }

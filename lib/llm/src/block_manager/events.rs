@@ -2,8 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::block::registry::RegistrationHandle;
+use bytes::Bytes;
+use rmp_serde::Serializer;
+use serde::Serialize;
+use tokio::sync::mpsc;
+use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
 use crate::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::kv_consolidator::KvEventConsolidator;
@@ -145,6 +151,171 @@ impl EventReleaseManager for NullEventManager {
     fn block_release(&self, _registration_handle: &RegistrationHandle) {}
 }
 
+fn required_event_sequence_hash(handle: &RegistrationHandle) -> SequenceHash {
+    handle.event_sequence_hash().unwrap_or_else(|| {
+        panic!(
+            "missing framework event sequence hash for registered block sequence_hash={} tier={:?}",
+            handle.sequence_hash(),
+            handle.storage_tier()
+        )
+    })
+}
+
+fn required_event_parent_sequence_hash(handle: &RegistrationHandle) -> Option<SequenceHash> {
+    match (
+        handle.parent_sequence_hash(),
+        handle.event_parent_sequence_hash(),
+    ) {
+        (Some(_), Some(parent_hash)) => Some(parent_hash),
+        (Some(parent_hash), None) => {
+            panic!(
+                "missing framework event parent sequence hash for registered block sequence_hash={} parent_sequence_hash={} tier={:?}",
+                handle.sequence_hash(),
+                parent_hash,
+                handle.storage_tier()
+            )
+        }
+        (None, _) => None,
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RelayKvEvent {
+    Stored {
+        block_hash: u64,
+        parent_hash: Option<u64>,
+        storage_tier: String,
+        token_ids: Vec<u32>,
+        lora_name: Option<String>,
+    },
+    Removed {
+        block_hashes: Vec<u64>,
+        storage_tier: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct RelayKvEventBatch(f64, Vec<RelayKvEvent>, Option<i32>);
+
+pub struct ZmqRelayEventManager {
+    tx: mpsc::UnboundedSender<RelayKvEventBatch>,
+}
+
+impl ZmqRelayEventManager {
+    pub fn new(endpoint: String) -> Arc<Self> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(Self::run_publisher_loop(endpoint, rx));
+        Arc::new(Self { tx })
+    }
+
+    async fn run_publisher_loop(
+        endpoint: String,
+        mut rx: mpsc::UnboundedReceiver<RelayKvEventBatch>,
+    ) {
+        let mut socket = PubSocket::new();
+        if let Err(error) = socket.bind(&endpoint).await {
+            tracing::error!(
+                endpoint,
+                %error,
+                "Failed to bind KVBM ZMQ relay event publisher",
+            );
+            return;
+        }
+
+        tracing::info!(endpoint, "Bound KVBM ZMQ relay event publisher");
+
+        let sequence = AtomicU64::new(0);
+
+        while let Some(batch) = rx.recv().await {
+            let mut payload = Vec::new();
+            let mut serializer = Serializer::new(&mut payload).with_struct_map();
+            if let Err(error) = batch.serialize(&mut serializer) {
+                tracing::error!(%error, "Failed to serialize KVBM relay event batch");
+                continue;
+            }
+
+            let seq = sequence.fetch_add(1, Ordering::SeqCst);
+            let seq_bytes = seq.to_be_bytes();
+            let frames = vec![
+                Bytes::from(""),
+                Bytes::from(seq_bytes.to_vec()),
+                Bytes::from(payload),
+            ];
+            let message = match ZmqMessage::try_from(frames) {
+                Ok(message) => message,
+                Err(_) => {
+                    tracing::error!("Failed to create multipart ZMQ message for KVBM relay batch");
+                    continue;
+                }
+            };
+
+            if let Err(error) = socket.send(message).await {
+                tracing::error!(%error, "Failed to publish KVBM relay event batch");
+            }
+        }
+    }
+
+    fn enqueue(&self, events: Vec<RelayKvEvent>, data_parallel_rank: Option<i32>) {
+        let batch = RelayKvEventBatch(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64(),
+            events,
+            data_parallel_rank,
+        );
+
+        if let Err(error) = self.tx.send(batch) {
+            tracing::error!(%error, "Failed to enqueue KVBM relay event batch");
+        }
+    }
+}
+
+impl std::fmt::Debug for ZmqRelayEventManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ZmqRelayEventManager")
+    }
+}
+
+impl EventManager for ZmqRelayEventManager {}
+
+impl EventPublisher for ZmqRelayEventManager {
+    fn publish(&self, handles: Vec<Arc<RegistrationHandle>>) {
+        if handles.is_empty() {
+            return;
+        }
+
+        let events = handles
+            .into_iter()
+            .map(|handle| RelayKvEvent::Stored {
+                block_hash: required_event_sequence_hash(&handle),
+                parent_hash: required_event_parent_sequence_hash(&handle),
+                storage_tier: handle.storage_tier().to_vllm_medium().to_string(),
+                token_ids: handle.tokens().iter().copied().collect(),
+                lora_name: None,
+            })
+            .collect();
+
+        self.enqueue(events, None);
+    }
+}
+
+impl EventReleaseManager for ZmqRelayEventManager {
+    fn block_release(&self, registration_handle: &RegistrationHandle) {
+        self.enqueue(
+            vec![RelayKvEvent::Removed {
+                block_hashes: vec![required_event_sequence_hash(registration_handle)],
+                storage_tier: registration_handle
+                    .storage_tier()
+                    .to_vllm_medium()
+                    .to_string(),
+            }],
+            None,
+        );
+    }
+}
+
 /// Event manager that sends KVBM events to the kv event consolidator
 pub struct DynamoEventManager {
     consolidator_handle: Arc<crate::block_manager::kv_consolidator::KvEventConsolidatorHandle>,
@@ -153,34 +324,6 @@ pub struct DynamoEventManager {
 }
 
 impl DynamoEventManager {
-    fn required_event_sequence_hash(handle: &RegistrationHandle) -> SequenceHash {
-        handle.event_sequence_hash().unwrap_or_else(|| {
-            panic!(
-                "missing framework event sequence hash for registered block sequence_hash={} tier={:?}",
-                handle.sequence_hash(),
-                handle.storage_tier()
-            )
-        })
-    }
-
-    fn required_event_parent_sequence_hash(handle: &RegistrationHandle) -> Option<SequenceHash> {
-        match (
-            handle.parent_sequence_hash(),
-            handle.event_parent_sequence_hash(),
-        ) {
-            (Some(_), Some(parent_hash)) => Some(parent_hash),
-            (Some(parent_hash), None) => {
-                panic!(
-                    "missing framework event parent sequence hash for registered block sequence_hash={} parent_sequence_hash={} tier={:?}",
-                    handle.sequence_hash(),
-                    parent_hash,
-                    handle.storage_tier()
-                )
-            }
-            (None, _) => None,
-        }
-    }
-
     /// Create a new DynamoEventManager with a consolidator handle
     pub fn new(
         consolidator_handle: Arc<crate::block_manager::kv_consolidator::KvEventConsolidatorHandle>,
@@ -230,9 +373,9 @@ impl DynamoEventManager {
             rt.spawn(async move {
                 for handle in handles {
                     // Extract block metadata from RegistrationHandle
-                    let block_hash = Self::required_event_sequence_hash(&handle).to_string();
+                    let block_hash = required_event_sequence_hash(&handle).to_string();
                     let parent_hash =
-                        Self::required_event_parent_sequence_hash(&handle).map(|h| h.to_string());
+                        required_event_parent_sequence_hash(&handle).map(|h| h.to_string());
 
                     // Extract block_size and tokens from RegistrationHandle
                     let block_size = handle.block_size(); // usize
@@ -272,7 +415,7 @@ impl DynamoEventManager {
     ///
     /// Called when a RegistrationHandle is dropped (block evicted from KVBM).
     fn publish_remove_event(&self, registration_handle: &RegistrationHandle) {
-        let block_hash = Self::required_event_sequence_hash(registration_handle).to_string();
+        let block_hash = required_event_sequence_hash(registration_handle).to_string();
         let storage_tier = registration_handle.storage_tier();
 
         tracing::debug!(
@@ -417,27 +560,21 @@ pub mod tests {
     fn test_required_event_hashes_accept_root_block_without_parent_override() {
         let handle = registration_handle_with_event_hashes(0, Some(999), None);
 
-        assert_eq!(
-            DynamoEventManager::required_event_sequence_hash(&handle),
-            999
-        );
-        assert_eq!(
-            DynamoEventManager::required_event_parent_sequence_hash(&handle),
-            None
-        );
+        assert_eq!(required_event_sequence_hash(&handle), 999);
+        assert_eq!(required_event_parent_sequence_hash(&handle), None);
     }
 
     #[test]
     #[should_panic(expected = "missing framework event sequence hash")]
     fn test_required_event_hashes_panic_without_sequence_override() {
         let handle = registration_handle_with_event_hashes(0, None, None);
-        let _ = DynamoEventManager::required_event_sequence_hash(&handle);
+        let _ = required_event_sequence_hash(&handle);
     }
 
     #[test]
     #[should_panic(expected = "missing framework event parent sequence hash")]
     fn test_required_event_hashes_panic_without_parent_override_for_non_root_block() {
         let handle = registration_handle_with_event_hashes(1, Some(1001), None);
-        let _ = DynamoEventManager::required_event_parent_sequence_hash(&handle);
+        let _ = required_event_parent_sequence_hash(&handle);
     }
 }

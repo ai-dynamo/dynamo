@@ -148,6 +148,9 @@ struct BatchingState {
     /// dp_rank of the events in the current pending batch.
     /// A change signals that the batch must be flushed before accumulating further.
     last_dp_rank: u32,
+    /// Storage tier of the events in the current pending batch.
+    /// A change signals that the batch must be flushed before accumulating further.
+    last_storage_tier: StorageTier,
     /// When we last flushed (or initialized). Used to detect stale pending data:
     /// if a new event arrives after a long idle period (exceeding timeout),
     /// we flush immediately for lower latency on sparse important events.
@@ -161,6 +164,7 @@ impl BatchingState {
             pending_stored: None,
             next_publish_id: 1,
             last_dp_rank: 0,
+            last_storage_tier: StorageTier::Device,
             last_flush_time: Instant::now(),
         }
     }
@@ -456,7 +460,18 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
+        self.publish_with_storage_tier(event, StorageTier::Device)
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let placement_event = PlacementEvent::new(
+            Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+            event,
+        );
         match self.tx.send(placement_event) {
             Ok(()) => Ok(()),
             Err(err) => Err(mpsc::error::SendError(err.0.event)),
@@ -515,8 +530,9 @@ async fn emit<P: RouterEventSink>(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     event: KvCacheEvent,
+    storage_tier: StorageTier,
 ) {
-    let router_event = RouterEvent::new(worker_id, event);
+    let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
     if let Some(indexer) = local_indexer
         && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
     {
@@ -541,6 +557,7 @@ impl BatchingState {
         }
         let id = self.next_publish_id;
         let dp_rank = self.last_dp_rank;
+        let storage_tier = self.last_storage_tier;
         if let Some(data) = self.pending_removed.take() {
             emit(
                 publisher,
@@ -551,6 +568,7 @@ impl BatchingState {
                     data: KvCacheEventData::Removed(data),
                     dp_rank,
                 },
+                storage_tier,
             )
             .await;
         }
@@ -564,6 +582,7 @@ impl BatchingState {
                     data: KvCacheEventData::Stored(data),
                     dp_rank,
                 },
+                storage_tier,
             )
             .await;
         }
@@ -637,25 +656,28 @@ async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
                 }
                 last_raw_input_id = Some(raw_event_id);
 
-                if !placement_event.placement.is_local_gpu() {
+                let PlacementOwner::LocalWorker(_) = placement_event.placement.owner else {
                     tracing::trace!(
                         worker_id,
                         ?placement_event.placement,
                         event_id = placement_event.event.event_id,
-                        "Skipping non-local-GPU placement event"
+                        "Skipping non-local-worker placement event"
                     );
                     continue;
-                }
+                };
 
+                let storage_tier = placement_event.placement.tier;
                 let event = placement_event.event;
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
 
                 let dp_rank_changed = batching_state.has_pending()
                     && event.dp_rank != batching_state.last_dp_rank;
+                let storage_tier_changed = batching_state.has_pending()
+                    && storage_tier != batching_state.last_storage_tier;
 
                 match event.data {
                     KvCacheEventData::Removed(data) => {
-                        if batching_state.pending_stored.is_some() || dp_rank_changed {
+                        if batching_state.pending_stored.is_some() || dp_rank_changed || storage_tier_changed {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
                         match &mut batching_state.pending_removed {
@@ -669,6 +691,7 @@ async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
                         // Flush if: type switch, dp_rank change, or the chain is broken
                         // (new event's parent_hash doesn't continue from the last stored block).
                         let should_flush = dp_rank_changed
+                            || storage_tier_changed
                             || batching_state.pending_removed.is_some()
                             || batching_state.pending_stored.as_ref().is_some_and(|p| {
                                 data.parent_hash != p.blocks.last().map(|b| b.block_hash)
@@ -690,13 +713,14 @@ async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
                             event_id: batching_state.next_publish_id,
                             data: KvCacheEventData::Cleared,
                             dp_rank: event.dp_rank,
-                        }).await;
+                        }, storage_tier).await;
                         batching_state.next_publish_id += 1;
                     }
                 }
 
                 // Track dp_rank after the match so in-flight flushes use the old value.
                 batching_state.last_dp_rank = event.dp_rank;
+                batching_state.last_storage_tier = storage_tier;
 
                 // Flush after every event when disabled (None), or when the window has elapsed,
                 // or when the batch exceeds the max block count.
@@ -2486,6 +2510,10 @@ mod event_processor_tests {
         PlacementEvent::local_gpu(1, event)
     }
 
+    fn local_worker_event(event: KvCacheEvent, tier: StorageTier) -> PlacementEvent {
+        PlacementEvent::new(Placement::local_worker(1, event.dp_rank, tier), event)
+    }
+
     /// Test that pushing N removed events results in batched output
     /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]
@@ -2506,6 +2534,49 @@ mod event_processor_tests {
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_3() {
         test_removed_events_batching(3, Some(10)).await; // 3 events, 10ms timeout
+    }
+
+    #[tokio::test]
+    async fn test_run_event_processor_loop_preserves_storage_tier_for_direct_events() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                None,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_worker_event(
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(42)],
+                }),
+                dp_rank: 0,
+            },
+            StorageTier::HostPinned,
+        ))
+        .unwrap();
+        drop(tx);
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
     }
 
     /// Helper function to test removed events batching with configurable count and timeout

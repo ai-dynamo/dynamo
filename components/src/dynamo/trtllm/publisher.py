@@ -17,6 +17,7 @@ Key Components:
 Event Flow:
 - With Consolidator: Engine → ZmqKvEventPublisher (ZMQ PUB) → Consolidator → KvEventPublisher (dynamo.llm, ZMQ SUB) → NATS → Router
 - Without Consolidator: Engine → KvEventPublisher (NATS PUB) → Router
+- With KVBM Relay: KVBM (ZMQ PUB) → Python relay → shared KvEventPublisher (NATS PUB) → Router
 """
 
 import asyncio
@@ -287,11 +288,13 @@ class Publisher:
 
     Retrieves KV cache events and stats from TensorRT-LLM engine and publishes them:
     - KV Events: Routes to either ZMQ (if consolidator enabled) or NATS (if no consolidator)
+    - KVBM relay events: Optionally forwards KVBM ZMQ events into the same direct publishers
     - Metrics: Always publishes to NATS via WorkerMetricsPublisher
 
     Publisher Selection Logic:
     - If zmq_endpoint provided: Uses ZmqKvEventPublisher (ZMQ PUB) → Consolidator → NATS
     - If zmq_endpoint None: Uses KvEventPublisher (NATS PUB) → Router directly
+    - If kvbm_zmq_endpoint is also provided in direct mode: relays KVBM events into those same publishers
 
     Note: The ZmqKvEventPublisher used here is the pure Python ZMQ publisher defined
     in this module, not the Rust-based KvEventPublisher from dynamo.llm (which is
@@ -307,6 +310,7 @@ class Publisher:
         metrics_labels: Any,
         component_gauges: LLMBackendMetrics,
         zmq_endpoint: Optional[str] = None,
+        kvbm_zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
     ) -> None:
@@ -319,6 +323,7 @@ class Publisher:
         self.component_gauges = component_gauges
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
+        self.kvbm_zmq_endpoint = kvbm_zmq_endpoint
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -332,6 +337,9 @@ class Publisher:
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
+        self.kvbm_zmq_ctx = None
+        self.kvbm_zmq_socket = None
+        self.kvbm_zmq_relay_thread: Optional[threading.Thread] = None
         self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
         self.publish_stats_thread: Optional[ManagedThread] = None
         # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
@@ -383,6 +391,11 @@ class Publisher:
                 "Consolidator will publish consolidated events to NATS."
             )
             self.kv_event_publishers = None
+            if self.kvbm_zmq_endpoint:
+                logging.warning(
+                    "Ignoring kvbm_zmq_endpoint=%s because consolidator mode is enabled",
+                    self.kvbm_zmq_endpoint,
+                )
         else:
             # No consolidator: use NATS publisher (router subscribes directly)
             # Create one KvEventPublisher per attention_dp_rank (similar to vLLM's DP pattern)
@@ -398,9 +411,190 @@ class Publisher:
             logging.info(
                 f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
             )
+            self._init_kvbm_zmq_relay_thread()
 
         # Always initialize the thread - it routes to either ZMQ or NATS publisher
         self._init_publish_kv_cache_events_thread()
+
+    def _init_kvbm_zmq_relay_thread(self) -> None:
+        if not self.kvbm_zmq_endpoint:
+            return
+
+        if not self.kv_event_publishers:
+            logging.warning(
+                "KVBM relay requested but no direct KvEventPublisher instances are available"
+            )
+            return
+
+        self.kvbm_zmq_ctx = zmq.Context()
+        self.kvbm_zmq_socket = self.kvbm_zmq_ctx.socket(zmq.SUB)
+        self.kvbm_zmq_socket.setsockopt(zmq.SUBSCRIBE, b"")
+        self.kvbm_zmq_socket.setsockopt(zmq.RCVTIMEO, 100)
+        self.kvbm_zmq_socket.connect(self.kvbm_zmq_endpoint)
+
+        self.kvbm_zmq_relay_thread = threading.Thread(
+            target=self._relay_kvbm_zmq_events_loop,
+            name="kvbm_zmq_relay_thread",
+            daemon=True,
+        )
+        self.kvbm_zmq_relay_thread.start()
+        logging.info(
+            "Started direct KVBM ZMQ relay thread from %s into shared KvEventPublisher",
+            self.kvbm_zmq_endpoint,
+        )
+
+    def _relay_kvbm_zmq_events_loop(self) -> None:
+        assert self.kvbm_zmq_socket is not None
+
+        while not self._stop_event.is_set():
+            try:
+                frames = self.kvbm_zmq_socket.recv_multipart(flags=0)
+            except zmq.Again:
+                continue
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logging.error(
+                        "Error receiving KVBM relay ZMQ event: %s", e, exc_info=True
+                    )
+                continue
+
+            if not frames:
+                continue
+
+            payload = frames[-1]
+            try:
+                batch = msgpack.unpackb(payload, raw=False)
+            except Exception as e:
+                logging.warning(
+                    "Failed to decode KVBM relay msgpack payload: %s", e, exc_info=True
+                )
+                continue
+
+            if not isinstance(batch, list) or len(batch) != 3:
+                logging.warning("Unexpected KVBM relay batch format: %r", batch)
+                continue
+
+            _, events, attention_dp_rank = batch
+            if not isinstance(events, list):
+                logging.warning("Unexpected KVBM relay events payload: %r", batch)
+                continue
+
+            if not isinstance(attention_dp_rank, int):
+                attention_dp_rank = 0
+
+            for event in events:
+                self._handle_kvbm_relay_event(event, attention_dp_rank)
+
+        logging.info("KVBM ZMQ relay thread stopped")
+
+    def _normalize_kvbm_relay_event(self, event: Any) -> Optional[dict[str, Any]]:
+        if isinstance(event, dict):
+            return event
+
+        if isinstance(event, (list, tuple)) and event:
+            event_type = event[0]
+            if event_type == "stored" and len(event) == 6:
+                return {
+                    "type": event_type,
+                    "block_hash": event[1],
+                    "parent_hash": event[2],
+                    "storage_tier": event[3],
+                    "token_ids": event[4],
+                    "lora_name": event[5],
+                }
+            if event_type == "removed" and len(event) == 3:
+                return {
+                    "type": event_type,
+                    "block_hashes": event[1],
+                    "storage_tier": event[2],
+                }
+
+        return None
+
+    def _handle_kvbm_relay_event(self, event: dict, attention_dp_rank: int) -> None:
+        event = self._normalize_kvbm_relay_event(event)
+        if event is None:
+            logging.warning("Unexpected KVBM relay event payload: %r", event)
+            return
+
+        if not self.kv_event_publishers:
+            logging.warning("No KvEventPublisher instances available for KVBM relay")
+            return
+
+        publisher = self.kv_event_publishers.get(attention_dp_rank)
+        if publisher is None:
+            logging.warning(
+                "No publisher for KVBM relay attention_dp_rank=%s, available ranks: %s",
+                attention_dp_rank,
+                list(self.kv_event_publishers.keys()),
+            )
+            return
+
+        event_type = event.get("type")
+        if event_type == "stored":
+            block_hash = _to_signed_i64(event.get("block_hash"))
+            if block_hash is None:
+                logging.warning("Skipping KVBM relay stored event with missing block hash")
+                return
+
+            storage_tier = event.get("storage_tier")
+            if not isinstance(storage_tier, str):
+                logging.warning(
+                    "Skipping KVBM relay stored event with missing storage_tier: %r",
+                    event,
+                )
+                return
+
+            token_ids = event.get("token_ids", [])
+            if not isinstance(token_ids, list):
+                logging.warning("Skipping KVBM relay stored event with invalid token_ids")
+                return
+
+            logging.debug(
+                "Forwarding KVBM relay stored event into shared KvEventPublisher: "
+                "attention_dp_rank=%s storage_tier=%s block_hash=%s parent_hash=%s num_tokens=%s",
+                attention_dp_rank,
+                storage_tier,
+                block_hash,
+                _to_signed_i64(event.get("parent_hash")),
+                len(token_ids),
+            )
+            publisher.publish_stored(
+                token_ids,
+                [len(token_ids)],
+                [block_hash],
+                _to_signed_i64(event.get("parent_hash")),
+                None,
+                lora_name=event.get("lora_name"),
+                storage_tier=storage_tier,
+            )
+        elif event_type == "removed":
+            storage_tier = event.get("storage_tier")
+            if not isinstance(storage_tier, str):
+                logging.warning(
+                    "Skipping KVBM relay removed event with missing storage_tier: %r",
+                    event,
+                )
+                return
+
+            block_hashes = [
+                signed_hash
+                for raw_hash in event.get("block_hashes", [])
+                if (signed_hash := _to_signed_i64(raw_hash)) is not None
+            ]
+            if block_hashes:
+                logging.debug(
+                    "Forwarding KVBM relay removed event into shared KvEventPublisher: "
+                    "attention_dp_rank=%s storage_tier=%s block_hashes=%s",
+                    attention_dp_rank,
+                    storage_tier,
+                    block_hashes,
+                )
+                publisher.publish_removed(block_hashes, storage_tier=storage_tier)
+        elif event_type == "cleared":
+            logging.debug("Ignoring KVBM relay cleared event (no direct publisher API)")
+        else:
+            logging.warning("Unknown KVBM relay event type: %r", event_type)
 
     def _init_publish_metrics_thread(self):
         # Need to publish stats once so that worker can be selected.
@@ -733,6 +927,19 @@ class Publisher:
         if self.zmq_kv_event_publisher:
             self.zmq_kv_event_publisher.shutdown()
 
+        if self.kvbm_zmq_relay_thread and self.kvbm_zmq_relay_thread.is_alive():
+            self.kvbm_zmq_relay_thread.join(timeout=cleanup_timeout)
+            if self.kvbm_zmq_relay_thread.is_alive():
+                logging.warning("KVBM relay thread did not stop within timeout")
+
+        if self.kvbm_zmq_socket is not None:
+            self.kvbm_zmq_socket.close()
+            self.kvbm_zmq_socket = None
+
+        if self.kvbm_zmq_ctx is not None:
+            self.kvbm_zmq_ctx.term()
+            self.kvbm_zmq_ctx = None
+
     def update_max_window_size(self, event: dict) -> None:
         if "window_size" in event:
             window_size = event["window_size"]
@@ -779,6 +986,7 @@ async def get_publisher(
     metrics_labels: Any,
     component_gauges: LLMBackendMetrics,
     zmq_endpoint: Optional[str] = None,
+    kvbm_zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
 ) -> AsyncGenerator[Publisher, None]:
@@ -790,6 +998,7 @@ async def get_publisher(
         metrics_labels,
         component_gauges=component_gauges,
         zmq_endpoint=zmq_endpoint,
+        kvbm_zmq_endpoint=kvbm_zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
     )

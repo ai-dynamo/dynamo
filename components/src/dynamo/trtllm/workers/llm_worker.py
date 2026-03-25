@@ -242,14 +242,22 @@ async def init_llm_worker(
     consolidator_output_endpoint = (
         None  # Endpoint where consolidator publishes (workers subscribe to this)
     )
+    kvbm_relay_connect_endpoint = None
 
     try:
         from kvbm.trtllm_integration.consolidator_config import (
+            get_kvbm_event_relay_endpoints,
             get_consolidator_endpoints,
             should_enable_consolidator,
         )
 
-        if should_enable_consolidator(arg_map):
+        if config.has_connector("kvbm") and config.publish_events_and_metrics:
+            _, kvbm_relay_connect_endpoint = get_kvbm_event_relay_endpoints()
+            logging.info(
+                "Using direct KVBM ZMQ relay endpoint for shared KV publishing: %s",
+                kvbm_relay_connect_endpoint,
+            )
+        elif should_enable_consolidator(arg_map):
             # get_consolidator_endpoints returns (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
             consolidator_endpoints = get_consolidator_endpoints()
             trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
@@ -515,7 +523,7 @@ async def init_llm_worker(
             # Create worker-side publisher for consolidated events if consolidator is enabled
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
             consolidator_publisher = None
-            if consolidator_output_endpoint:
+            if consolidator_output_endpoint and kvbm_relay_connect_endpoint is None:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
                     endpoint=endpoint,
@@ -536,6 +544,7 @@ async def init_llm_worker(
                 metrics_labels,
                 component_gauges=component_gauges,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
+                kvbm_zmq_endpoint=kvbm_relay_connect_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
             ) as publisher:

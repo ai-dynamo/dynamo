@@ -350,6 +350,7 @@ pub(crate) async fn start_kv_router_background(
                                 }
                             };
 
+                            dbg!(&event);
                             // Forward the RouterEvent to the indexer
                             indexer.apply_event(event).await;
                         },
