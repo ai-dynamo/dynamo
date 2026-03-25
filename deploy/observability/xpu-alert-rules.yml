@@ -77,7 +77,7 @@ groups:
       - alert: XPULowComputeUtilizationDuringLoad
         expr: |
           xpu_engine_group_compute_engine_util < 10
-          and on() dynamo_frontend_requests_total > 0
+          and on() sum(rate(dynamo_frontend_requests_total[5m])) > 0
         for: 5m
         labels:
           severity: warning
@@ -88,7 +88,7 @@ groups:
       - alert: XPUWorkerLivenessLost
         expr: |
           absent(xpu_engine_group_compute_engine_util)
-          and on() dynamo_frontend_requests_total > 0
+          and on() sum(rate(dynamo_frontend_requests_total[5m])) > 0
         for: 2m
         labels:
           severity: critical

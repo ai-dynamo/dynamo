@@ -829,7 +829,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(xpu_engine_group_compute_engine_util)",
+          "expr": "avg(xpu_engine_group_compute_engine_util{device_id=~\"$device_id\"})",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -896,7 +896,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(xpu_temperature_celsius{location=\"gpu\"})",
+          "expr": "max(xpu_temperature_celsius{device_id=~\"$device_id\", location=\"gpu\"})",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -917,24 +917,29 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": {
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(xpu_engine_group_compute_engine_util, device_id)",
+        "definition": "label_values(xpu_frequency_mhz, device_id)",
         "hide": 0,
         "includeAll": true,
         "multi": true,
         "name": "device_id",
         "options": [],
         "query": {
-          "query": "label_values(xpu_engine_group_compute_engine_util, device_id)",
+          "query": "label_values(xpu_frequency_mhz, device_id)",
           "refId": "StandardVariableQuery"
         },
-        "refresh": 2,
+        "refresh": 1,
         "regex": "",
-        "sort": 0,
+        "sort": 1,
         "type": "query",
         "label": "XPU Device"
       }

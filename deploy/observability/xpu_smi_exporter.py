@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import subprocess
+import sys
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -47,30 +48,25 @@ logger = logging.getLogger("xpu-smi-exporter")
 # 31=ComputeEngGrp%, 32=RenderEngGrp%, 33=MediaEngGrp%, 34=CopyEngGrp%
 DUMP_METRICS = "0,1,2,3,4,5,6,7,18,19,20,31,32,33,34"
 
-# Metric name in dump header -> (prometheus_name, help, type, unit_conversion)
+# Metric name in dump header -> (prometheus_name, help, type, unit_conversion, extra_labels)
 # unit_conversion: multiply raw value by this factor
+# extra_labels: additional Prometheus labels (e.g. location for temperature)
 DUMP_HEADER_MAP = {
-    "GPU Utilization (%)": ("xpu_gpu_utilization_percent", "GPU utilization percentage", "gauge", 1),
-    "GPU Power (W)": ("xpu_power_watts", "GPU power consumption in watts", "gauge", 1),
-    "GPU Frequency (MHz)": ("xpu_frequency_mhz", "GPU core frequency in MHz", "gauge", 1),
-    "GPU Core Temperature (Celsius Degree)": ("xpu_temperature_celsius", "GPU core temperature in Celsius", "gauge", 1),
-    "GPU Memory Temperature (Celsius Degree)": ("xpu_memory_temperature_celsius", "GPU memory temperature in Celsius", "gauge", 1),
-    "GPU Memory Utilization (%)": ("xpu_memory_utilization_percent", "GPU memory utilization percentage", "gauge", 1),
-    "GPU Memory Read (kB/s)": ("xpu_memory_read_bytes_total", "GPU memory read throughput in bytes per second", "gauge", 1024),
-    "GPU Memory Write (kB/s)": ("xpu_memory_write_bytes_total", "GPU memory write throughput in bytes per second", "gauge", 1024),
-    "GPU Memory Used (MiB)": ("xpu_memory_used_bytes", "GPU memory used in bytes", "gauge", 1048576),
-    "PCIe Read (kB/s)": ("xpu_pcie_read_bytes_total", "PCIe read throughput in bytes per second", "gauge", 1024),
-    "PCIe Write (kB/s)": ("xpu_pcie_write_bytes_total", "PCIe write throughput in bytes per second", "gauge", 1024),
-    "Compute engine group utilization (%)": ("xpu_engine_group_compute_engine_util", "Compute engine group utilization percentage", "gauge", 1),
-    "Render engine group utilization (%)": ("xpu_engine_group_render_engine_util", "Render engine group utilization percentage", "gauge", 1),
-    "Media engine group utilization (%)": ("xpu_engine_group_media_engine_util", "Media engine group utilization percentage", "gauge", 1),
-    "Copy engine group utilization (%)": ("xpu_engine_group_copy_engine_util", "Copy engine group utilization percentage", "gauge", 1),
-}
-
-# Location labels for temperature metrics
-TEMP_LOCATION = {
-    "xpu_temperature_celsius": "gpu",
-    "xpu_memory_temperature_celsius": "memory",
+    "GPU Utilization (%)": ("xpu_gpu_utilization_percent", "GPU utilization percentage", "gauge", 1, {}),
+    "GPU Power (W)": ("xpu_power_watts", "GPU power consumption in watts", "gauge", 1, {}),
+    "GPU Frequency (MHz)": ("xpu_frequency_mhz", "GPU core frequency in MHz", "gauge", 1, {}),
+    "GPU Core Temperature (Celsius Degree)": ("xpu_temperature_celsius", "XPU temperature in Celsius", "gauge", 1, {"location": "gpu"}),
+    "GPU Memory Temperature (Celsius Degree)": ("xpu_temperature_celsius", "XPU temperature in Celsius", "gauge", 1, {"location": "memory"}),
+    "GPU Memory Utilization (%)": ("xpu_memory_utilization_percent", "GPU memory utilization percentage", "gauge", 1, {}),
+    "GPU Memory Read (kB/s)": ("xpu_memory_read_bytes_total", "GPU memory read throughput in bytes per second", "gauge", 1024, {}),
+    "GPU Memory Write (kB/s)": ("xpu_memory_write_bytes_total", "GPU memory write throughput in bytes per second", "gauge", 1024, {}),
+    "GPU Memory Used (MiB)": ("xpu_memory_used_bytes", "GPU memory used in bytes", "gauge", 1048576, {}),
+    "PCIe Read (kB/s)": ("xpu_pcie_read_bytes_total", "PCIe read throughput in bytes per second", "gauge", 1024, {}),
+    "PCIe Write (kB/s)": ("xpu_pcie_write_bytes_total", "PCIe write throughput in bytes per second", "gauge", 1024, {}),
+    "Compute engine group utilization (%)": ("xpu_engine_group_compute_engine_util", "Compute engine group utilization percentage", "gauge", 1, {}),
+    "Render engine group utilization (%)": ("xpu_engine_group_render_engine_util", "Render engine group utilization percentage", "gauge", 1, {}),
+    "Media engine group utilization (%)": ("xpu_engine_group_media_engine_util", "Media engine group utilization percentage", "gauge", 1, {}),
+    "Copy engine group utilization (%)": ("xpu_engine_group_copy_engine_util", "Copy engine group utilization percentage", "gauge", 1, {}),
 }
 
 
@@ -156,13 +152,17 @@ class MetricsCollector:
                 if not mapping:
                     continue
 
-                prom_name, help_text, metric_type, conversion = mapping
+                prom_name, help_text, metric_type, conversion, extra_labels = mapping
                 try:
                     val = float(raw_val) * conversion
-                    labels = {"device_id": str(device_id)}
-                    if prom_name in TEMP_LOCATION:
-                        labels["location"] = TEMP_LOCATION[prom_name]
-                    metrics[prom_name] = {
+                    labels = {"device_id": str(device_id), **extra_labels}
+                    # Use a composite key to handle metrics with the same name
+                    # but different labels (e.g. xpu_temperature_celsius with
+                    # location=gpu vs location=memory)
+                    label_suffix = "_".join(f"{k}={v}" for k, v in sorted(extra_labels.items()))
+                    metric_key = f"{prom_name}:{label_suffix}" if label_suffix else prom_name
+                    metrics[metric_key] = {
+                        "name": prom_name,
                         "value": val,
                         "help": help_text,
                         "type": metric_type,
@@ -196,6 +196,7 @@ class MetricsCollector:
                     continue
                 if mtype == "XPUM_STATS_POWER":
                     metrics["xpu_power_watts"] = {
+                        "name": "xpu_power_watts",
                         "value": float(val),
                         "help": "GPU power consumption in watts",
                         "type": "gauge",
@@ -227,6 +228,7 @@ class MetricsCollector:
                     # Memory used: sum across tiles, convert MiB -> bytes
                     mem_used_bytes = mem_used_sum * 1048576
                     metrics["xpu_memory_used_bytes"] = {
+                        "name": "xpu_memory_used_bytes",
                         "value": mem_used_bytes,
                         "help": "GPU memory used in bytes",
                         "type": "gauge",
@@ -236,6 +238,7 @@ class MetricsCollector:
                     total = self._device_memory_total.get(device_id, 0)
                     if total > 0:
                         metrics["xpu_memory_free_bytes"] = {
+                            "name": "xpu_memory_free_bytes",
                             "value": max(0, total - mem_used_bytes),
                             "help": "GPU memory free in bytes",
                             "type": "gauge",
@@ -243,6 +246,7 @@ class MetricsCollector:
                         }
                     # Average frequency across tiles
                     metrics["xpu_frequency_mhz"] = {
+                        "name": "xpu_frequency_mhz",
                         "value": freq_sum / tile_count,
                         "help": "GPU core frequency in MHz",
                         "type": "gauge",
@@ -300,8 +304,17 @@ class MetricsCollector:
         with self._lock:
             metrics = self._metrics.copy()
 
+        # Group entries by actual Prometheus metric name (from 'name' field)
+        grouped: dict = {}
+        for _key, entries in metrics.items():
+            for entry in entries:
+                metric_name = entry.get("name", _key)
+                if metric_name not in grouped:
+                    grouped[metric_name] = []
+                grouped[metric_name].append(entry)
+
         lines = []
-        for metric_name, entries in sorted(metrics.items()):
+        for metric_name, entries in sorted(grouped.items()):
             if not entries:
                 continue
             first = entries[0]
@@ -362,7 +375,7 @@ def main():
     collector = MetricsCollector(interval=args.interval)
     if not collector._devices:
         logger.error("No XPU devices found. Exiting.")
-        return
+        sys.exit(1)
 
     # Do an initial collection to verify it works
     collector.collect()
