@@ -866,6 +866,59 @@ class BasePlanner:
         await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     @staticmethod
+    def _reconcile_fpm_worker_count(
+        fpm_stats: "dict[tuple[str, int], ForwardPassMetrics]",
+        dgd_count: int,
+        label: str,
+    ) -> bool:
+        """Validate that FPM coverage matches DGD worker count, accounting for DP.
+
+        With attention DP, each worker emits FPM per dp_rank. We check that
+        the number of unique worker IDs matches DGD, and that all workers
+        have the same number of dp_ranks (complete coverage).
+
+        Returns True if counts match, False otherwise.
+        """
+        workers_to_dp: dict[str, set[int]] = {}
+        for wid, dp in fpm_stats:
+            workers_to_dp.setdefault(wid, set()).add(dp)
+
+        fpm_worker_count = len(workers_to_dp)
+        if fpm_worker_count != dgd_count:
+            logger.warning(
+                f"Worker count mismatch: DGD reports {dgd_count}, "
+                f"FPM reports {fpm_worker_count} workers for {label}. "
+                "Skipping scaling."
+            )
+            return False
+
+        dp_sizes = {len(dps) for dps in workers_to_dp.values()}
+        if len(dp_sizes) > 1:
+            logger.warning(
+                f"Inconsistent DP ranks across workers for {label}: "
+                f"{dict(workers_to_dp)}. Skipping scaling."
+            )
+            return False
+
+        dp_size = dp_sizes.pop() if dp_sizes else 1
+        expected_total = dgd_count * dp_size
+        actual_total = len(fpm_stats)
+        if actual_total != expected_total:
+            logger.warning(
+                f"Incomplete FPM coverage for {label}: expected "
+                f"{dgd_count} workers × {dp_size} dp_ranks = {expected_total}, "
+                f"got {actual_total}. Skipping scaling."
+            )
+            return False
+
+        if dp_size > 1:
+            logger.info(
+                f"FPM {label}: {fpm_worker_count} workers × {dp_size} dp_ranks "
+                f"= {actual_total} engines"
+            )
+        return True
+
+    @staticmethod
     def _log_fpm(wid: str, dp: int, fpm: "ForwardPassMetrics", label: str) -> None:
         sched = fpm.scheduled_requests
         queued = fpm.queued_requests
@@ -1047,17 +1100,12 @@ class BasePlanner:
                     )
                     continue
 
-            # Reconcile DGD worker count with FPM engine count
-            fpm_worker_count = len({wid for (wid, _) in fpm_stats})
             dgd_count = (
                 num_p if self.component_type == SubComponentType.PREFILL else num_d
             )
-            if fpm_worker_count != dgd_count:
-                logger.warning(
-                    f"Worker count mismatch: DGD reports {dgd_count}, "
-                    f"FPM reports {fpm_worker_count} engines for "
-                    f"{self.component_type.value}. Skipping scaling."
-                )
+            if not self._reconcile_fpm_worker_count(
+                fpm_stats, dgd_count, self.component_type.value
+            ):
                 continue
 
             desired_replicas = self.load_plan_adjustment()

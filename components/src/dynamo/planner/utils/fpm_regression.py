@@ -26,15 +26,25 @@ logger = logging.getLogger(__name__)
 
 
 class _MovingAverage:
-    """Fixed-window moving average."""
+    """Fixed-window moving average that skips leading zeros.
 
-    __slots__ = ("_window", "_sum")
+    Initial zero values (pre-traffic idle period) are ignored until the
+    first non-zero value arrives, matching the throughput planner's
+    load predictor behavior.
+    """
+
+    __slots__ = ("_window", "_sum", "_seen_nonzero")
 
     def __init__(self, window_size: int):
         self._window: deque[float] = deque(maxlen=window_size)
         self._sum: float = 0.0
+        self._seen_nonzero: bool = False
 
     def add(self, value: float) -> None:
+        if value == 0.0 and not self._seen_nonzero:
+            return
+        if value != 0.0:
+            self._seen_nonzero = True
         if len(self._window) == self._window.maxlen:
             self._sum -= self._window[0]
         self._window.append(value)

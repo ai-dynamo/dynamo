@@ -10,6 +10,7 @@ from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
+    BasePlanner,
     PlannerPrometheusMetrics,
     PlannerSharedState,
     _apply_global_gpu_budget,
@@ -194,15 +195,13 @@ class DisaggPlanner:
                 logger.warning("No FPM data for either prefill or decode, skipping")
                 continue
 
-            # Reconcile DGD worker counts with FPM engine counts
-            p_fpm_count = len({wid for (wid, _) in p_stats}) if p_stats else 0
-            d_fpm_count = len({wid for (wid, _) in d_stats}) if d_stats else 0
-            if p_fpm_count != num_p or d_fpm_count != num_d:
-                logger.warning(
-                    f"Worker count mismatch: DGD reports P={num_p}, D={num_d}; "
-                    f"FPM reports P={p_fpm_count}, D={d_fpm_count}. "
-                    "Skipping load-based scaling."
-                )
+            if p_stats and not BasePlanner._reconcile_fpm_worker_count(
+                p_stats, num_p, "prefill"
+            ):
+                continue
+            if d_stats and not BasePlanner._reconcile_fpm_worker_count(
+                d_stats, num_d, "decode"
+            ):
                 continue
 
             p_desired = self.prefill_planner.load_plan_adjustment()

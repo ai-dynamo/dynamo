@@ -151,13 +151,9 @@ class AggPlanner:
                     )
                     continue
 
-            # Reconcile DGD worker count with FPM engine count
-            fpm_worker_count = len({wid for (wid, _) in fpm_stats})
-            if fpm_worker_count != num_workers:
-                logger.warning(
-                    f"Worker count mismatch: DGD reports {num_workers}, "
-                    f"FPM reports {fpm_worker_count} engines. Skipping scaling."
-                )
+            if not BasePlanner._reconcile_fpm_worker_count(
+                fpm_stats, num_workers, "agg"
+            ):
                 continue
 
             if not self.regression.has_sufficient_data():
