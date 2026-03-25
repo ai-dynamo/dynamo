@@ -85,3 +85,4 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
           platform_arch: amd64
+          extra_pytest_args: -m framework_only

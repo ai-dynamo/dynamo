@@ -2,7 +2,6 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import logging
 import os
 import tempfile
@@ -90,92 +89,6 @@ def resolve_planner_profile_data(
     )
 
 
-def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
-    """
-    Create a temporary JSON file with MockEngineArgs from CLI arguments.
-    Returns the path to the temporary file.
-    """
-    engine_args = {}
-
-    # Only include non-None values that differ from defaults
-    # Note: argparse converts hyphens to underscores in attribute names
-    # Extract all potential engine arguments, using None as default for missing attributes
-    engine_args = {
-        "num_gpu_blocks": getattr(args, "num_gpu_blocks", None),
-        "block_size": getattr(args, "block_size", None),
-        "max_num_seqs": getattr(args, "max_num_seqs", None),
-        "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
-        "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
-        "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "preemption_mode": getattr(args, "preemption_mode", None),
-        "speedup_ratio": getattr(args, "speedup_ratio", None),
-        "decode_speedup_ratio": getattr(args, "decode_speedup_ratio", None),
-        "dp_size": getattr(args, "dp_size", None),
-        "startup_time": getattr(args, "startup_time", None),
-        "planner_profile_data": (
-            str(getattr(args, "planner_profile_data", None))
-            if getattr(args, "planner_profile_data", None)
-            else None
-        ),
-        "is_prefill": getattr(args, "is_prefill_worker", None),
-        "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
-        # Note: bootstrap_port and zmq_kv_events_port are NOT included here
-        # - they are per-worker and set in launch_workers()
-        # Note: kv_bytes_per_token and kv_cache_dtype are NOT included here
-        # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
-        # - kv_cache_dtype is only used Python-side for the auto-computation.
-        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
-        "engine_type": getattr(args, "engine_type", None),
-    }
-
-    # If --aic-perf-model is set, add AIC fields
-    if getattr(args, "aic_perf_model", False):
-        engine_type = getattr(args, "engine_type", None) or "vllm"
-        engine_args["aic_backend"] = engine_type
-        if getattr(args, "aic_system", None):
-            engine_args["aic_system"] = args.aic_system
-        if getattr(args, "aic_backend_version", None):
-            engine_args["aic_backend_version"] = args.aic_backend_version
-        if getattr(args, "aic_tp_size", None):
-            engine_args["aic_tp_size"] = args.aic_tp_size
-        if getattr(args, "model_path", None):
-            engine_args["aic_model_path"] = args.model_path
-
-    # Parse --reasoning JSON string into a nested object
-    reasoning_str = getattr(args, "reasoning", None)
-    if reasoning_str:
-        engine_args["reasoning"] = json.loads(reasoning_str)
-
-    # Build nested sglang config from individual CLI flags
-    sglang_args = {
-        "schedule_policy": getattr(args, "sglang_schedule_policy", None),
-        "page_size": getattr(args, "sglang_page_size", None),
-        "max_prefill_tokens": getattr(args, "sglang_max_prefill_tokens", None),
-        "chunked_prefill_size": getattr(args, "sglang_chunked_prefill_size", None),
-        "clip_max_new_tokens": getattr(args, "sglang_clip_max_new_tokens", None),
-        "schedule_conservativeness": getattr(
-            args, "sglang_schedule_conservativeness", None
-        ),
-    }
-    sglang_args = {k: v for k, v in sglang_args.items() if v is not None}
-    if sglang_args:
-        engine_args["sglang"] = sglang_args
-
-    # Remove None values to only include explicitly set arguments
-    engine_args = {k: v for k, v in engine_args.items() if v is not None}
-
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(engine_args, f, indent=2)
-        temp_path = Path(f.name)
-
-    logger.debug(f"Created temporary MockEngineArgs file at {temp_path}")
-    logger.debug(f"MockEngineArgs: {engine_args}")
-
-    return temp_path
-
-
 def validate_worker_type_args(args: argparse.Namespace) -> None:
     """
     Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
@@ -261,31 +174,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Model name for API responses (default: derived from model-path)",
     )
-    parser.add_argument(
-        "--trace-file",
-        type=Path,
-        default=None,
-        help="Run offline trace replay from a Mooncake-style JSONL trace file.",
-    )
-    parser.add_argument(
-        "--output-file",
-        type=Path,
-        default=None,
-        help="Write replay metrics JSON to this path. Defaults to a replay JSON next to the trace file.",
-    )
-    parser.add_argument(
-        "--replay-concurrency",
-        type=int,
-        default=None,
-        help="Run offline replay in closed-loop concurrency mode with this many in-flight requests.",
-    )
 
     # MockEngineArgs parameters (similar to vLLM style)
     parser.add_argument(
         "--num-gpu-blocks-override",
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
-        default=None,
+        default=16384,
         help="Number of GPU blocks for KV cache (default: 16384)",
     )
     parser.add_argument(
@@ -297,20 +192,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-num-seqs",
         type=int,
-        default=None,
+        default=256,
         help="Maximum number of sequences per iteration (default: 256)",
     )
     parser.add_argument(
         "--max-num-batched-tokens",
         type=int,
-        default=None,
+        default=8192,
         help="Maximum number of batched tokens per iteration (default: 8192)",
     )
     parser.add_argument(
         "--enable-prefix-caching",
         action="store_true",
         dest="enable_prefix_caching",
-        default=None,
+        default=True,
         help="Enable automatic prefix caching (default: True)",
     )
     parser.add_argument(
@@ -324,7 +219,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--enable-chunked-prefill",
         action="store_true",
         dest="enable_chunked_prefill",
-        default=None,
+        default=True,
         help="Enable chunked prefill (default: True)",
     )
     parser.add_argument(
@@ -337,7 +232,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preemption-mode",
         type=str,
-        default=None,
+        default="lifo",
         choices=["lifo", "fifo"],
         help="Preemption mode for decode eviction under memory pressure. "
         "'lifo' (default) evicts the newest request (matches vLLM v1), "
@@ -346,13 +241,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--speedup-ratio",
         type=float,
-        default=None,
+        default=1.0,
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--decode-speedup-ratio",
         type=float,
-        default=None,
+        default=1.0,
         help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
         "Models speculative decoding (e.g. Eagle) where decode throughput improves "
         "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
@@ -361,7 +256,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-parallel-size",
         type=int,
         dest="dp_size",
-        default=None,
+        default=1,
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
@@ -426,7 +321,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--engine-type",
         type=str,
-        default=None,
+        default="vllm",
         choices=["vllm", "sglang"],
         help="Engine simulation type: 'vllm' (default) or 'sglang'.",
     )
@@ -603,9 +498,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     validate_worker_type_args(args)
-
-    if args.replay_concurrency is not None and args.trace_file is None:
-        raise ValueError("--replay-concurrency requires --trace-file")
 
     # Validate num_workers
     if args.num_workers < 1:

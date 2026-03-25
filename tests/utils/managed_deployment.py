@@ -67,6 +67,20 @@ class ServiceSpec:
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     @property
+    def frontend_sidecar_image(self) -> Optional[str]:
+        """Container image for the frontendSidecar (if present)."""
+        try:
+            return self._spec["frontendSidecar"]["image"]
+        except KeyError:
+            return None
+
+    @frontend_sidecar_image.setter
+    def frontend_sidecar_image(self, value: str):
+        if "frontendSidecar" not in self._spec:
+            self._spec["frontendSidecar"] = {}
+        self._spec["frontendSidecar"]["image"] = value
+
+    @property
     def envs(self) -> list[dict[str, str]]:
         """Environment variables for the service"""
         return self._spec.get("envs", [])
@@ -229,6 +243,16 @@ class DeploymentSpec:
             services = [self[service_name]]
         for service in services:
             service.image = image
+
+    def set_frontend_sidecar_image(
+        self, image: str, service_name: Optional[str] = None
+    ):
+        if service_name is None:
+            services = self.services
+        else:
+            services = [self[service_name]]
+        for service in services:
+            service.frontend_sidecar_image = image
 
     def set_tensor_parallel(self, tp_size: int, service_names: Optional[list] = None):
         """Scale deployment for different tensor parallel configurations
