@@ -5,12 +5,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_kv_router::{
+    config::RouterConfigOverride,
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
-use crate::kv_router::protocols::{BlockExtraInfo, WorkerId};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -187,6 +189,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Optional request timestamp in milliseconds forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
 
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]

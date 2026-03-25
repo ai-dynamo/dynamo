@@ -2082,7 +2082,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
- "dynamo-runtime",
  "dynamo-tokens",
  "ndarray 0.16.1",
  "ndarray-interp",
@@ -2091,6 +2090,8 @@ dependencies = [
  "rstest 0.18.2",
  "serde",
  "serde_json",
+ "slotmap",
+ "tempfile",
  "tokio",
  "tokio-timerfd",
  "tokio-util",
@@ -2135,6 +2136,7 @@ dependencies = [
  "chrono",
  "console-subscriber",
  "criterion 0.5.1",
+ "cudarc",
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
@@ -3984,14 +3986,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "bincode 2.0.1",
  "bytes",
  "derive_builder",
  "dynamo-tokens",
  "futures",
+ "indexmap 2.13.0",
  "lru 0.16.3",
  "parking_lot",
  "prometheus",
  "proptest",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "rmp-serde",
  "rstest 0.26.1",
  "serde",
@@ -4000,6 +4006,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-subscriber",
  "xxhash-rust",
 ]
 
@@ -4067,6 +4074,7 @@ dependencies = [
  "anyhow",
  "async-once-cell",
  "cbindgen",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
  "libc",
@@ -7360,6 +7368,15 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slotmap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
+dependencies = [
+ "version_check",
+]
 
 [[package]]
 name = "smallvec"

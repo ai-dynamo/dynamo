@@ -24,7 +24,7 @@ func TestManifestRoundTrip(t *testing.T) {
 		},
 		NewSourcePodManifest("ctr-abc", 42, "node-1", "my-pod", "default", []string{"pipe:[111]", "pipe:[222]", "pipe:[333]"}),
 		OverlayManifest{
-			Exclusions:     OverlaySettings{SystemDirs: []string{"/proc", "/sys"}},
+			Exclusions:     OverlaySettings{Exclusions: []string{"/proc", "/sys"}},
 			UpperDir:       "/var/lib/containerd/upper",
 			ExternalPaths:  []string{"/proc/acpi"},
 			BindMountDests: []string{"/data"},

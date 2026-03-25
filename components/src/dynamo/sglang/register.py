@@ -194,6 +194,9 @@ async def _get_runtime_config(
     if max_prefill_tokens:
         runtime_config.max_num_batched_tokens = max_prefill_tokens
 
+    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+        runtime_config.enable_eagle = True
+
     try:
         # Try to check if the engine has a scheduler attribute with the computed values
         if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:

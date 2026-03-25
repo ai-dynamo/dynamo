@@ -11,7 +11,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use dynamo_llm::kv_router::{protocols::*, publisher::KvEventPublisher};
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::*,
+};
+use dynamo_llm::kv_router::publisher::KvEventPublisher;
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
@@ -19,9 +24,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -30,6 +33,12 @@ static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
+
+struct DiscoveredModelBootstrap {
+    preprocessor: Arc<OpenAIPreprocessor>,
+    card: ModelDeploymentCard,
+    actual_namespace: String,
+}
 
 /// Convert a C string pointer to a Rust string, falling back to a default when:
 /// - the pointer is NULL,
@@ -219,8 +228,10 @@ fn kv_event_create_stored_block_from_parts(
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
-        None,
-        lora_name,
+        BlockHashOptions {
+            lora_name,
+            ..Default::default()
+        },
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
@@ -433,7 +444,7 @@ impl RouterHandles {
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
-        block_mm_infos: Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
+        block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
@@ -643,19 +654,25 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        let (preprocessor, block_size, model_name, actual_namespace) =
-            match init_preprocessor(&drt, &namespace_str).await {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to initialize preprocessor");
-                    return Err(QueryRouterResult::ErrInitFailed);
-                }
-            };
+        let DiscoveredModelBootstrap {
+            preprocessor,
+            card,
+            actual_namespace,
+        } = match init_preprocessor(&drt, &namespace_str).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize preprocessor");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+        let block_size = card.kv_cache_block_size;
+        let model_name = card.display_name.clone();
+        let enable_eagle = card.runtime_config.enable_eagle;
 
         if actual_namespace != namespace_str {
             tracing::info!(
-                base_namespace = namespace_str,
-                actual_namespace = actual_namespace,
+                base_namespace = %namespace_str,
+                actual_namespace = %actual_namespace,
                 "Worker namespace has rolling-update suffix"
             );
         }
@@ -690,6 +707,7 @@ pub unsafe extern "C" fn create_routers(
                 Some(kv_router_config.clone()),
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
+                enable_eagle,
             )
             .await
         {
@@ -760,7 +778,8 @@ pub unsafe extern "C" fn create_routers(
                     Some(prefill_config),
                     enforce_disagg,
                     model_name.clone(),
-                    namespace_str.clone(),
+                    actual_namespace.clone(),
+                    enable_eagle,
                 )
             }
             None if enforce_disagg => {
@@ -780,7 +799,7 @@ pub unsafe extern "C" fn create_routers(
             decode_router,
             model_manager,
             namespace_str,
-            preprocessor,
+            Some(preprocessor),
         ))
     });
 
@@ -846,7 +865,7 @@ pub unsafe extern "C" fn add_request(
 
             // Compute overlap_blocks using the public method
             let overlap_blocks = match decode_router
-                .get_overlap_blocks(&tokens, worker, None)
+                .get_overlap_blocks(&tokens, None, worker, None)
                 .await
             {
                 Ok(overlap) => overlap,
@@ -860,6 +879,7 @@ pub unsafe extern "C" fn add_request(
                 .add_request(
                     request_id_str.clone(),
                     &tokens,
+                    None,
                     overlap_blocks,
                     None,
                     worker,
@@ -1277,16 +1297,15 @@ pub unsafe extern "C" fn route_decode_request(
     }
 }
 
-/// Initialize the preprocessor, block size, and model name.
+/// Initialize the preprocessor and fetch the model card used for routing.
 ///
 /// Waits for discovery to sync (model card must be available for tokenization),
-/// then creates the preprocessor from the model card. The `kv_cache_block_size`
-/// and `model_name` are taken from the model card to ensure consistency with
-/// the worker configuration.
+/// then creates the preprocessor from the model card. Router settings are
+/// derived directly from the returned card by the caller.
 async fn init_preprocessor(
     drt: &DistributedRuntime,
     target_namespace: &str,
-) -> anyhow::Result<(Option<Arc<OpenAIPreprocessor>>, u32, String, String)> {
+) -> anyhow::Result<DiscoveredModelBootstrap> {
     let instance_count = wait_for_discovery_sync(drt).await;
     if instance_count == 0 {
         anyhow::bail!("Discovery sync failed: no worker instances found. Is the backend running?");
@@ -1298,7 +1317,7 @@ async fn init_preprocessor(
 
     // Retry fetching the preprocessor: model card metadata may arrive after
     // worker endpoints are registered.
-    let (prep, block_size, model_name, actual_namespace) = loop {
+    let bootstrap = loop {
         match fetch_preprocessor_from_discovery(drt, target_namespace).await {
             Ok(result) => break result,
             Err(e) => {
@@ -1313,13 +1332,14 @@ async fn init_preprocessor(
     };
 
     tracing::info!(
-        kv_cache_block_size = block_size,
-        model_name = model_name,
-        actual_namespace = actual_namespace,
+        kv_cache_block_size = bootstrap.card.kv_cache_block_size,
+        model_name = %bootstrap.card.display_name,
+        actual_namespace = %bootstrap.actual_namespace,
+        enable_eagle = bootstrap.card.runtime_config.enable_eagle,
         "Preprocessor initialized from model card"
     );
 
-    Ok((Some(prep), block_size, model_name, actual_namespace))
+    Ok(bootstrap)
 }
 
 /// Fetch model card via discovery and create preprocessor.
@@ -1329,12 +1349,11 @@ async fn init_preprocessor(
 /// 2. Finds the first model in the target namespace (decode workers only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
-/// 5. Returns the preprocessor, the kv_cache_block_size, and model_name from the model card
+/// 5. Returns the preprocessor, the model card, and the resolved worker namespace
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     target_namespace: &str,
-) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32, String, String)> {
-    use dynamo_llm::model_card::ModelDeploymentCard;
+) -> anyhow::Result<DiscoveredModelBootstrap> {
     use dynamo_runtime::discovery::DiscoveryInstance;
 
     let discovery = drt.discovery();
@@ -1381,12 +1400,11 @@ async fn fetch_preprocessor_from_discovery(
         )
     })?;
 
-    let kv_cache_block_size = card.kv_cache_block_size;
-    let model_name = card.name().to_string();
     tracing::info!(
-        model_name = model_name,
-        kv_cache_block_size = kv_cache_block_size,
-        actual_namespace = actual_namespace,
+        model_name = %card.display_name,
+        kv_cache_block_size = card.kv_cache_block_size,
+        actual_namespace = %actual_namespace,
+        enable_eagle = card.runtime_config.enable_eagle,
         "Found model card via discovery"
     );
 
@@ -1394,13 +1412,12 @@ async fn fetch_preprocessor_from_discovery(
     card.download_config().await?;
 
     // Create preprocessor
-    let preprocessor = OpenAIPreprocessor::new(card)?;
-    Ok((
+    let preprocessor = OpenAIPreprocessor::new(card.clone())?;
+    Ok(DiscoveredModelBootstrap {
         preprocessor,
-        kv_cache_block_size,
-        model_name,
+        card,
         actual_namespace,
-    ))
+    })
 }
 
 /// Find a prefill endpoint from already-discovered instances (one-time filter).

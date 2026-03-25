@@ -35,13 +35,13 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
     .replace("_", "-")
 }
 
+use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
+use dynamo_kv_router::protocols::*;
 pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 use dynamo_kv_router::zmq_wire::*;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-    indexer::{KvIndexerMetrics, LocalKvIndexer},
-    protocols::*,
     worker_query::start_worker_kv_query_endpoint,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
@@ -225,10 +225,11 @@ impl KvEventSource {
     /// Start the event source from a [`KvEventSourceConfig`].
     fn start(
         component: Component,
+        worker_id: WorkerId,
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<KvCacheEvent>,
+        tx: mpsc::UnboundedSender<PlacementEvent>,
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
@@ -240,6 +241,7 @@ impl KvEventSource {
                     .spawn(start_zmq_listener(
                         endpoint,
                         topic,
+                        worker_id,
                         tx,
                         cancellation_token.clone(),
                         kv_block_size,
@@ -269,8 +271,10 @@ pub struct KvEventPublisher {
     source: Option<KvEventSource>,
     /// The cancellation token.
     cancellation_token: CancellationToken,
+    /// The ID of the local worker emitting placement events.
+    worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<KvCacheEvent>,
+    tx: mpsc::UnboundedSender<PlacementEvent>,
     /// Internal monotonic event ID counter - ensures each event gets a unique, incrementing ID.
     /// Shared with the ZMQ listener (if any) to maintain consistency.
     next_event_id: Arc<AtomicU64>,
@@ -317,7 +321,7 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
@@ -345,6 +349,7 @@ impl KvEventPublisher {
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
                 component.clone(),
+                worker_id,
                 kv_block_size,
                 config,
                 cancellation_token.clone(),
@@ -444,13 +449,18 @@ impl KvEventPublisher {
             kv_block_size,
             source,
             cancellation_token,
+            worker_id,
             tx,
             next_event_id,
         })
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        self.tx.send(event)
+        let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
+        match self.tx.send(placement_event) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+        }
     }
 
     /// Get and increment the next event ID atomically.
@@ -480,11 +490,11 @@ impl Drop for KvEventPublisher {
     }
 }
 
-use dynamo_kv_router::EventSink;
+use dynamo_kv_router::RouterEventSink;
 
 struct EventPlanePublisher(EventPublisher);
 
-impl EventSink for EventPlanePublisher {
+impl RouterEventSink for EventPlanePublisher {
     fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
         self.0.publish(event)
     }
@@ -492,7 +502,7 @@ impl EventSink for EventPlanePublisher {
 
 struct JetStreamPublisher(NatsQueue);
 
-impl EventSink for JetStreamPublisher {
+impl RouterEventSink for JetStreamPublisher {
     fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
         NatsQueue::publish_event(&self.0, KV_EVENT_SUBJECT, event)
     }
@@ -500,7 +510,7 @@ impl EventSink for JetStreamPublisher {
 
 /// Publishes a single [`KvCacheEvent`] to the event sink and, when present, the local indexer.
 /// Errors are logged and swallowed so the caller loop can continue uninterrupted.
-async fn emit<P: EventSink>(
+async fn emit<P: RouterEventSink>(
     publisher: &P,
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
@@ -520,7 +530,7 @@ async fn emit<P: EventSink>(
 impl BatchingState {
     /// Publishes any pending batch as a single [`RouterEvent`] and advances the monotonic
     /// batch ID. No-ops when nothing is pending, so callers may call unconditionally.
-    async fn flush<P: EventSink + Send + Sync + 'static>(
+    async fn flush<P: RouterEventSink + Send + Sync + 'static>(
         &mut self,
         publisher: &P,
         local_indexer: &Option<Arc<LocalKvIndexer>>,
@@ -571,11 +581,11 @@ impl BatchingState {
 /// - A `Stored` event's `parent_hash` breaks the sequential chain
 /// - The batch window expires (`Some(timeout_ms)`; `None` = disabled, flush every event)
 /// - Channel is closed or a cancellation signal is received
-async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
+async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    mut rx: mpsc::UnboundedReceiver<PlacementEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
@@ -594,7 +604,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 break;
             }
             event = rx.recv() => {
-                let Some(event) = event else {
+                let Some(placement_event) = event else {
                     tracing::debug!("Event processor channel closed.");
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                     break;
@@ -602,7 +612,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 
                 // Warn if the raw input event_id is not consecutive — events were dropped
                 // (e.g. channel send error) before they reached the batching layer.
-                let raw_event_id = event.event_id;
+                let raw_event_id = placement_event.event.event_id;
                 if let Some(last_id) = last_raw_input_id
                     && raw_event_id > last_id + 1
                 {
@@ -627,6 +637,17 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 }
                 last_raw_input_id = Some(raw_event_id);
 
+                if !placement_event.placement.is_local_gpu() {
+                    tracing::trace!(
+                        worker_id,
+                        ?placement_event.placement,
+                        event_id = placement_event.event.event_id,
+                        "Skipping non-local-GPU placement event"
+                    );
+                    continue;
+                }
+
+                let event = placement_event.event;
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
 
                 let dp_rank_changed = batching_state.has_pending()
@@ -698,11 +719,11 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor for ephemeral transports (NATS Core / ZMQ).
-async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
+async fn start_event_processor<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    rx: mpsc::UnboundedReceiver<PlacementEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {
@@ -719,11 +740,11 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor using JetStream (durable).
-async fn start_event_processor_jetstream<P: EventSink + Send + Sync + 'static>(
+async fn start_event_processor_jetstream<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    rx: mpsc::UnboundedReceiver<PlacementEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {
@@ -750,7 +771,8 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
 pub async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
-    tx: mpsc::UnboundedSender<KvCacheEvent>,
+    worker_id: WorkerId,
+    tx: mpsc::UnboundedSender<PlacementEvent>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
@@ -868,8 +890,14 @@ pub async fn start_zmq_listener(
                 for raw_event in batch.events.into_iter() {
                     // Use shared monotonic event_id counter instead of engine's sequence number
                     let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
-
-                    let event = convert_event(raw_event, event_id, kv_block_size, dp_rank, &warning_count);
+                    let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                    let event = convert_event(
+                        raw_event,
+                        event_id,
+                        kv_block_size,
+                        worker,
+                        &warning_count,
+                    );
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
@@ -1020,7 +1048,7 @@ impl WorkerMetricsPublisher {
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use crate::kv_router::protocols::compute_block_hash_for_seq;
+    use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
@@ -1032,10 +1060,11 @@ mod test_event_processing {
         let blk_hash = 0xdead_beef;
 
         let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
+            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None)[0];
+        let expected_hash =
+            compute_block_hash_for_seq(&token_ids, 4, BlockHashOptions::default())[0];
         assert_eq!(stored.tokens_hash, expected_hash);
         assert!(stored.mm_extra_info.is_none());
     }
@@ -1058,6 +1087,7 @@ mod test_event_processing {
             &block_hashes,
             None,
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         );
 
@@ -1082,6 +1112,7 @@ mod test_event_processing {
             None,
             &warning_count,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -1103,10 +1134,17 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
 
-        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
-        assert!(matches!(out.data, KvCacheEventData::Stored(_)));
+        let out = convert_event(
+            raw_evt,
+            42,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &Arc::new(AtomicU32::new(0)),
+        );
+        assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
     }
 
     #[test]
@@ -1122,6 +1160,7 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -1131,17 +1170,30 @@ mod test_event_processing {
             medium: None,
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
+            is_eagle: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
-        let base_out = convert_event(base_evt, 1, kv_block_size, 0, &wc);
-        let lora_out = convert_event(lora_evt, 2, kv_block_size, 0, &wc);
+        let base_out = convert_event(
+            base_evt,
+            1,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &wc,
+        );
+        let lora_out = convert_event(
+            lora_evt,
+            2,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &wc,
+        );
 
-        let base_hash = match &base_out.data {
+        let base_hash = match &base_out.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
             _ => panic!("expected Stored"),
         };
-        let lora_hash = match &lora_out.data {
+        let lora_hash = match &lora_out.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
             _ => panic!("expected Stored"),
         };
@@ -1165,6 +1217,7 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -1174,16 +1227,29 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         };
 
-        let out1 = convert_event(evt1, 1, kv_block_size, 0, &wc);
-        let out2 = convert_event(evt2, 2, kv_block_size, 0, &wc);
+        let out1 = convert_event(
+            evt1,
+            1,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &wc,
+        );
+        let out2 = convert_event(
+            evt2,
+            2,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &wc,
+        );
 
-        let hash1 = match &out1.data {
+        let hash1 = match &out1.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
             _ => panic!("expected Stored"),
         };
-        let hash2 = match &out2.data {
+        let hash2 = match &out2.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
             _ => panic!("expected Stored"),
         };
@@ -1256,17 +1322,29 @@ mod test_event_processing {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
         };
-        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(
+            raw_evt,
+            7,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &Arc::new(AtomicU32::new(0)),
+        );
 
-        assert!(matches!(out.data, KvCacheEventData::Removed(_)));
+        assert!(matches!(out.event.data, KvCacheEventData::Removed(_)));
     }
 
     #[test]
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
-        assert!(matches!(out.data, KvCacheEventData::Cleared));
+        let out = convert_event(
+            raw_evt,
+            1,
+            kv_block_size,
+            WorkerWithDpRank::from_worker_id(1),
+            &Arc::new(AtomicU32::new(0)),
+        );
+        assert!(matches!(out.event.data, KvCacheEventData::Cleared));
     }
 
     #[test]
@@ -1382,9 +1460,9 @@ mod test_event_processing {
 mod tests_startup_helpers {
     use super::*;
     use crate::kv_router::KvIndexer;
-    use crate::kv_router::indexer::KvIndexerInterface;
-    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use bytes::Bytes;
+    use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexerInterface};
+    use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
     use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
@@ -1411,7 +1489,7 @@ mod tests_startup_helpers {
         }
     }
 
-    impl EventSink for MockComponent {
+    impl RouterEventSink for MockComponent {
         fn publish_event(
             &self,
             event: &RouterEvent,
@@ -1423,6 +1501,10 @@ mod tests_startup_helpers {
                 .push((KV_EVENT_SUBJECT.to_string(), bytes));
             async { Ok(()) }
         }
+    }
+
+    fn local_gpu_event(worker_id: WorkerId, event: KvCacheEvent) -> PlacementEvent {
+        PlacementEvent::local_gpu(worker_id, event)
     }
 
     //--------------------------------------------------------------------
@@ -1441,8 +1523,8 @@ mod tests_startup_helpers {
         };
 
         let token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-        tx.send(event).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        tx.send(local_gpu_event(1, event)).unwrap();
         drop(tx);
 
         let handle = tokio::spawn(start_event_processor(
@@ -1498,8 +1580,8 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-        tx.send(event).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        tx.send(local_gpu_event(1, event)).unwrap();
         drop(tx);
 
         // Start event processor with local indexer
@@ -1534,7 +1616,7 @@ mod tests_startup_helpers {
             // Try up to 20 times (200ms total)
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
-                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .send(GetWorkersRequest { resp: resp_tx })
                 .await
                 .unwrap();
             let workers: Vec<u64> = resp_rx.await.unwrap();
@@ -1583,8 +1665,8 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-        tx.send(store_event).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        tx.send(local_gpu_event(1, store_event)).unwrap();
 
         // Start event processor with local indexer
         let handle = tokio::spawn(start_event_processor(
@@ -1604,7 +1686,7 @@ mod tests_startup_helpers {
             }),
             dp_rank: 0,
         };
-        tx.send(remove_event).unwrap();
+        tx.send(local_gpu_event(1, remove_event)).unwrap();
         drop(tx);
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1665,8 +1747,8 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-        tx.send(store_event).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        tx.send(local_gpu_event(1, store_event)).unwrap();
 
         // Clear all blocks
         let clear_event = KvCacheEvent {
@@ -1674,7 +1756,7 @@ mod tests_startup_helpers {
             data: KvCacheEventData::Cleared,
             dp_rank: 0,
         };
-        tx.send(clear_event).unwrap();
+        tx.send(local_gpu_event(1, clear_event)).unwrap();
         drop(tx);
 
         // Create event processor and wait
@@ -1743,8 +1825,8 @@ mod tests_startup_helpers {
         };
 
         let new_token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-        tx.send(event).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        tx.send(local_gpu_event(1, event)).unwrap();
         drop(tx);
 
         // Despite local indexer being cancelled, event processor should continue
@@ -1774,7 +1856,7 @@ mod tests_startup_helpers {
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
         // Prepare channel that listener should fill
-        let (tx, mut rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
         // ZMQ TCP endpoint using localhost with fixed port
         let endpoint = "tcp://127.0.0.1:15555";
@@ -1792,7 +1874,7 @@ mod tests_startup_helpers {
         // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4, next_event_id)
+            start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
         });
 
         // Give time for the connection to establish
@@ -1809,6 +1891,7 @@ mod tests_startup_helpers {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            is_eagle: None,
         }];
 
         let batch = KvEventBatch {
@@ -1835,7 +1918,7 @@ mod tests_startup_helpers {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Check that we received the message
-        let event = rx.try_recv().expect("no message received");
+        let event = rx.try_recv().expect("no message received").event;
 
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
@@ -1872,7 +1955,7 @@ mod tests_startup_helpers {
             100, // buffer size
         ));
 
-        let (worker_tx, worker_rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (worker_tx, worker_rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
         // Start worker's event processor
         tokio::spawn(start_event_processor(
@@ -1912,7 +1995,9 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        worker_tx.send(event_1.clone()).unwrap();
+        worker_tx
+            .send(local_gpu_event(worker_1_id, event_1.clone()))
+            .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Simulate JetStream: forward worker's published event to router
@@ -1938,7 +2023,7 @@ mod tests_startup_helpers {
         for _ in 0..20 {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
-                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .send(GetWorkersRequest { resp: resp_tx })
                 .await
                 .unwrap();
             let workers: Vec<u64> = resp_rx.await.unwrap();
@@ -1978,7 +2063,9 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        worker_tx.send(event_2.clone()).unwrap(); // send to worker but not to router
+        worker_tx
+            .send(local_gpu_event(worker_1_id, event_2.clone()))
+            .unwrap(); // send to worker but not to router
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // assert: Worker published event_2 to "NATS" (MockComponent)
@@ -2007,7 +2094,7 @@ mod tests_startup_helpers {
             .unwrap();
         let router_overlap = overlap
             .scores
-            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .get(&dynamo_kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -2023,9 +2110,9 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
-            crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
-            crate::kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")
             }
             other => panic!("Unexpected response: {:?}", other),
@@ -2051,7 +2138,7 @@ mod tests_startup_helpers {
         let overlap = router_indexer.find_matches(block_hashes_2).await.unwrap();
         let router_overlap_after = overlap
             .scores
-            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .get(&dynamo_kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -2115,7 +2202,7 @@ mod test_exponential_backoff {
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
-    use crate::kv_router::protocols::ActiveLoad;
+    use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -2388,11 +2475,15 @@ mod event_processor_tests {
         }
     }
 
-    impl EventSink for MockPublisher {
+    impl RouterEventSink for MockPublisher {
         fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
             self.events.lock().unwrap().push(event.clone());
             async { Ok(()) }
         }
+    }
+
+    fn local_gpu_event(event: KvCacheEvent) -> PlacementEvent {
+        PlacementEvent::local_gpu(1, event)
     }
 
     /// Test that pushing N removed events results in batched output
@@ -2419,7 +2510,7 @@ mod event_processor_tests {
 
     /// Helper function to test removed events batching with configurable count and timeout
     async fn test_removed_events_batching(event_count: usize, timeout_ms: Option<u64>) {
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2445,7 +2536,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(event).unwrap();
+            tx.send(local_gpu_event(event)).unwrap();
             // Yield to allow event processor to process the event
             tokio::task::yield_now().await;
         }
@@ -2516,7 +2607,7 @@ mod event_processor_tests {
 
     /// Helper function to test stored events batching with configurable count and timeout
     async fn test_stored_events_batching(event_count: usize, timeout_ms: Option<u64>) {
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2554,7 +2645,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(event).unwrap();
+            tx.send(local_gpu_event(event)).unwrap();
             // Small sleep to allow event processor to batch events
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
@@ -2614,7 +2705,7 @@ mod event_processor_tests {
     async fn test_run_event_processor_loop_non_sequential_flush() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2646,7 +2737,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(event).unwrap();
+            tx.send(local_gpu_event(event)).unwrap();
         }
 
         drop(tx);
@@ -2677,6 +2768,116 @@ mod event_processor_tests {
         assert_eq!(total_blocks, 3, "All 3 blocks should be accounted for");
     }
 
+    /// Test that reusing an older parent hash breaks the current sequential batch.
+    #[tokio::test]
+    async fn test_run_event_processor_loop_reused_parent_hash_breaks_chain() {
+        let timeout_ms = Some(100); // 100ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(2),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(3),
+                    tokens_hash: LocalBlockHash(300),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        assert_eq!(
+            events.len(),
+            2,
+            "Reused parent hash should flush the current batch before starting a new one"
+        );
+
+        if let KvCacheEventData::Stored(data) = &events[0].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                2,
+                "First batch should keep the valid chain"
+            );
+            assert_eq!(
+                data.parent_hash, None,
+                "First batch should preserve the original root parent"
+            );
+        } else {
+            panic!("Expected first event to be Stored");
+        }
+
+        if let KvCacheEventData::Stored(data) = &events[1].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                1,
+                "Second batch should contain only the inconsistent event"
+            );
+            assert_eq!(
+                data.parent_hash,
+                Some(ExternalSequenceBlockHash(1)),
+                "Second batch should preserve the reused parent hash"
+            );
+        } else {
+            panic!("Expected second event to be Stored");
+        }
+    }
+
     /// Test that with short timeout and slow input, events are NOT batched
     /// Parametrized over different timeout values: 0ms, 0.1ms, 0.2ms
     /// All use 2ms delay between events, so each event times out before the next arrives
@@ -2697,7 +2898,7 @@ mod event_processor_tests {
 
     /// Helper function to test no batching with slow input
     async fn test_no_batching_with_slow_input(timeout_ms: Option<u64>) {
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2725,7 +2926,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(event).unwrap();
+            tx.send(local_gpu_event(event)).unwrap();
             // Wait 2ms between events (much longer than the timeout)
             // This ensures each event times out before the next one arrives
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -2770,7 +2971,7 @@ mod event_processor_tests {
     async fn test_event_type_switching_causes_flush() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2789,20 +2990,20 @@ mod event_processor_tests {
         });
 
         // Send a Removed event
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(0)],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
 
         // Small sleep
         tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
 
         // Send a Stored event (should cause flush of the Removed event)
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
@@ -2813,7 +3014,7 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
 
         // Give time for processing
@@ -2837,7 +3038,7 @@ mod event_processor_tests {
     async fn test_dp_rank_change_causes_flush() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2857,26 +3058,26 @@ mod event_processor_tests {
 
         // Send events with dp_rank=0
         for i in 0..3 {
-            tx.send(KvCacheEvent {
+            tx.send(local_gpu_event(KvCacheEvent {
                 event_id: i as u64,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
                 }),
                 dp_rank: 0,
-            })
+            }))
             .unwrap();
             tokio::task::yield_now().await;
         }
 
         // Send events with dp_rank=1 (should cause flush of previous batch)
         for i in 3..6 {
-            tx.send(KvCacheEvent {
+            tx.send(local_gpu_event(KvCacheEvent {
                 event_id: i as u64,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
                 }),
                 dp_rank: 1,
-            })
+            }))
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -2929,7 +3130,7 @@ mod event_processor_tests {
     async fn test_flushed_events_have_correct_metadata() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2949,13 +3150,13 @@ mod event_processor_tests {
 
         // Send first batch: 3 events with dp_rank=0, event_ids 10-12
         for i in 0..3 {
-            tx.send(KvCacheEvent {
+            tx.send(local_gpu_event(KvCacheEvent {
                 event_id: 10 + i as u64,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
                 }),
                 dp_rank: 0,
-            })
+            }))
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -2963,13 +3164,13 @@ mod event_processor_tests {
         // Send second batch: 2 events with dp_rank=1, event_ids 20-21
         // This should flush the first batch with dp_rank=0
         for i in 0..2 {
-            tx.send(KvCacheEvent {
+            tx.send(local_gpu_event(KvCacheEvent {
                 event_id: 20 + i as u64,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash((i + 3) as u64)],
                 }),
                 dp_rank: 1,
-            })
+            }))
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -3015,7 +3216,7 @@ mod event_processor_tests {
     async fn test_first_event_after_idle_flushes_immediately_then_batches() {
         let timeout_ms = Some(50); // 50ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3039,13 +3240,13 @@ mod event_processor_tests {
         // Send 3 events rapidly - first should flush immediately (stale timer),
         // remaining 2 should batch together
         for i in 0..3 {
-            tx.send(KvCacheEvent {
+            tx.send(local_gpu_event(KvCacheEvent {
                 event_id: i as u64,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
                 }),
                 dp_rank: 0,
-            })
+            }))
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -3085,7 +3286,7 @@ mod event_processor_tests {
     async fn test_stored_events_with_dp_rank_change_correct_metadata() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3104,7 +3305,7 @@ mod event_processor_tests {
         });
 
         // Send first batch: 2 sequential stored events with dp_rank=0, event_ids 100-101
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 100,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
@@ -3115,11 +3316,11 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
         tokio::task::yield_now().await;
 
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 101,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
@@ -3130,13 +3331,13 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
         tokio::task::yield_now().await;
 
         // Send second batch: 1 event with dp_rank=1, event_id=200
         // This should flush the first batch with dp_rank=0, event_id=101
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 200,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
@@ -3147,7 +3348,7 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 1,
-        })
+        }))
         .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -3202,7 +3403,7 @@ mod event_processor_tests {
     async fn test_batch_parent_hash_preserved_when_extending() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3221,7 +3422,7 @@ mod event_processor_tests {
         });
 
         // First event: parent_hash=None, block_hash=1
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None, // Root block with no parent
@@ -3232,12 +3433,12 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
         tokio::task::yield_now().await;
 
         // Second event: parent_hash=Some(1), block_hash=2 (sequential)
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
@@ -3248,12 +3449,12 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
         tokio::task::yield_now().await;
 
         // Third event: parent_hash=Some(2), block_hash=3 (sequential)
-        tx.send(KvCacheEvent {
+        tx.send(local_gpu_event(KvCacheEvent {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(2)),
@@ -3264,7 +3465,7 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        })
+        }))
         .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;

@@ -5,9 +5,70 @@
 
 use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
-use cudarc::driver::sys;
 use std::any::Any;
 use std::sync::Arc;
+
+/// Whether to use write-combined pinned allocations.
+///
+/// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
+/// is set, or if a test allocation reveals the hardware does not support it
+/// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
+/// a CUDA context has been bound to the current thread.
+static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    if dynamo_config::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
+        tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
+        return false;
+    }
+    // Probe hardware support with a 1-byte test allocation.
+    // SAFETY: called from an allocation path that has already bound a CUDA context.
+    unsafe {
+        match cudarc::driver::result::malloc_host(
+            1,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+        ) {
+            Ok(ptr) => {
+                let _ = cudarc::driver::result::free_host(ptr);
+                true
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Write-combined memory not supported on this system; \
+                     will use regular pinned memory"
+                );
+                false
+            }
+        }
+    }
+});
+
+/// Allocates pinned host memory, using write-combined if [`USE_WRITE_COMBINED`]
+/// allows it, otherwise falling back to `CU_MEMHOSTALLOC_DEVICEMAP`.
+///
+/// # Safety
+/// Caller must ensure a valid CUDA context is bound to the current thread.
+unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
+    if *USE_WRITE_COMBINED {
+        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+            )
+        }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(StorageError::Cuda)
+    } else {
+        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP,
+            )
+        }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(StorageError::Cuda)
+    }
+}
 
 /// CUDA pinned host memory allocated via cudaHostAlloc.
 #[derive(Debug)]
@@ -97,10 +158,8 @@ impl PinnedStorage {
             unsafe {
                 ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-                let ptr = cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_DEVICEMAP)
-                    .map_err(StorageError::Cuda)?;
+                let ptr = malloc_host_prefer_writecombined(len)?;
 
-                let ptr = ptr as *mut u8;
                 assert!(!ptr.is_null(), "Failed to allocate pinned memory");
                 assert!(ptr.is_aligned(), "Pinned memory is not aligned");
                 assert!(len < isize::MAX as usize);
@@ -127,6 +186,11 @@ impl PinnedStorage {
     /// and that there are no other references to this memory.
     pub unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
         self.ptr as *mut u8
+    }
+
+    /// Get a reference to the CUDA context used for this allocation.
+    pub fn ctx(&self) -> &Arc<CudaContext> {
+        &self.ctx
     }
 }
 

@@ -10,6 +10,10 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
@@ -21,8 +25,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::protocols::WorkerId,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
+    kv_router::KvPushRouter,
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
@@ -114,6 +117,7 @@ pub struct PrefillRouter {
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
     namespace: String,
+    is_eagle: bool,
 }
 
 impl PrefillRouter {
@@ -132,6 +136,7 @@ impl PrefillRouter {
             enforce_disagg,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
+            is_eagle: false,
         })
     }
 
@@ -145,6 +150,7 @@ impl PrefillRouter {
         enforce_disagg: bool,
         model_name: String,
         namespace: String,
+        is_eagle: bool,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -158,6 +164,7 @@ impl PrefillRouter {
             enforce_disagg,
             model_name,
             namespace,
+            is_eagle,
         });
 
         // Spawn background task to wait for activation
@@ -219,6 +226,7 @@ impl PrefillRouter {
                     kv_router_config,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
+                    self.is_eagle,
                 )
                 .await?;
 

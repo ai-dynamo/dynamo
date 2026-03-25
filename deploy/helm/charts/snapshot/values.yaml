@@ -34,7 +34,8 @@ storage:
     storageClass: ""
     # Access mode - ReadWriteMany required for multi-pod access
     accessMode: ReadWriteMany
-    # Base path for checkpoints (mounted in pods)
+    # PVC mount path inside the snapshot-agent pod.
+    # This must match the operator checkpoint.storage.pvc.basePath setting.
     basePath: /checkpoints
 
   # S3 configuration (when type=s3)
@@ -123,17 +124,15 @@ rbac:
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
   overlay:
-    # Virtual FS dirs are COW artifacts in the overlay upperdir.
-    systemDirs:
+    # Rootfs diff tar exclusions. Absolute-looking paths are normalized
+    # relative to the tar root, and patterns starting with * are passed
+    # through as tar globs unchanged.
+    exclusions:
       - /proc
       - /sys
       - /dev
-    # Cache directories to exclude (reduces checkpoint size)
-    cacheDirs:
-      - /.cache/huggingface
-    # Python bytecode is already loaded in memory at restore time and
-    # regenerated automatically on cold start.
-    additionalExclusions:
+      - "*/.cache/huggingface"
+      - "*/.cache/vllm/torch_compile_cache"
       - "*/__pycache__"
       - "*.pyc"
 
@@ -157,7 +156,8 @@ config:
     # K8s-specific options (recommended defaults for containers)
     leaveRunning: true      # Keep process running after checkpoint
     shellJob: true          # Containers are often session leaders
-    tcpClose: true          # Pod IPs change on restore/migration
+    tcpClose: true          # Close non-listening TCP sockets on restore
+    tcpEstablished: false   # Preserve established TCP sockets during restore
     fileLocks: true         # Applications use file locks
     orphanPtsMaster: true   # Containers with TTYs
     extUnixSk: true         # External Unix sockets

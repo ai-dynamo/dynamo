@@ -432,6 +432,7 @@ impl PositionalIndexer {
 
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
+                    storage_tier: crate::protocols::StorageTier::Device,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
