@@ -52,7 +52,7 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
-from .args import Config, _uses_dynamo_connector, parse_args
+from .args import Config, _uses_dynamo_connector, _uses_pegaflow_connector, parse_args
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import (
@@ -460,9 +460,16 @@ def setup_vllm_engine(config, stat_logger=None):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
+    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled.
+    # PegaFlow does NOT need a consolidator or KV event publishing — it relies
+    # on approximate KV-aware routing (--no-router-kv-events).
     consolidator_endpoints = None
-    if _uses_dynamo_connector(config.engine_args):
+    if _uses_pegaflow_connector(config.engine_args):
+        logger.info(
+            "PegaFlow connector detected: skipping consolidator and KV event setup. "
+            "Use --no-router-kv-events on the frontend for approximate KV-aware routing."
+        )
+    elif _uses_dynamo_connector(config.engine_args):
         try:
             from kvbm.vllm_integration.consolidator_config import (
                 get_consolidator_endpoints,
