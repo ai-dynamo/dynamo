@@ -13,6 +13,7 @@ Parallels test_vllm_unit.py for the vLLM backend.
 import pytest
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -26,7 +27,6 @@ from dynamo.frontend.sglang_processor import (
     _init_worker,
     _map_finish_reason,
 )
-import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
 
 MODEL = "Qwen/Qwen3-0.6B"
