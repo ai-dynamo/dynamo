@@ -56,6 +56,10 @@ fn remove_known_non_jinja2_tags(template: &str) -> String {
         .replace("{% endgeneration %}", "")
 }
 
+fn rewrite_python_dict_items_calls(template: &str) -> String {
+    template.replace(".items()", "|items")
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -112,7 +116,8 @@ impl HfTokenizerConfigJsonFormatter {
                     supports_add_generation_prompt = Some(true);
                 }
                 // Remove known non-standard tags before validation (they don't affect output)
-                let template_cleaned = remove_known_non_jinja2_tags(x);
+                let template_cleaned =
+                    rewrite_python_dict_items_calls(&remove_known_non_jinja2_tags(x));
                 env.add_template_owned("default", template_cleaned.clone())?;
                 env.add_template_owned("tool_use", template_cleaned)?;
             }
@@ -137,7 +142,8 @@ impl HfTokenizerConfigJsonFormatter {
                             supports_add_generation_prompt = Some(false);
                         }
                         // Remove known non-standard tags before validation (they don't affect output)
-                        let template_cleaned = remove_known_non_jinja2_tags(v);
+                        let template_cleaned =
+                            rewrite_python_dict_items_calls(&remove_known_non_jinja2_tags(v));
                         env.add_template_owned(k.to_string(), template_cleaned)?;
                     }
                 }
@@ -197,5 +203,15 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    #[test]
+    fn test_rewrite_python_dict_items_calls() {
+        let template = "{{ args.items() }} {% for k, v in data.items() %}{{ k }}{% endfor %}";
+        let result = rewrite_python_dict_items_calls(template);
+        assert_eq!(
+            result,
+            "{{ args|items }} {% for k, v in data|items %}{{ k }}{% endfor %}"
+        );
     }
 }

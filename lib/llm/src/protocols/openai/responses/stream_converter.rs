@@ -1038,4 +1038,18 @@ mod tests {
             "output_item.done inline after text: {tool_types:?}"
         );
     }
+
+    #[test]
+    fn test_dangling_think_close_does_not_leak_hidden_prefix() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        let events = conv.process_chunk(&text_chunk("private reasoning</think>Visible answer."));
+        let types = event_types(&events);
+        assert!(
+            types.contains(&"response.output_text.delta".to_string()),
+            "visible text delta should still be emitted: {types:?}"
+        );
+        assert_eq!(conv.accumulated_text, "Visible answer.");
+    }
 }

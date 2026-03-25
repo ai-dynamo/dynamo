@@ -591,32 +591,81 @@ fn parse_tool_call_text(text: &str) -> Vec<(String, String)> {
     results
 }
 
+fn extract_think_blocks(text: &str) -> Vec<String> {
+    if !text.contains("<think>") && !text.contains("</think>") {
+        return Vec::new();
+    }
+
+    let mut extracted = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        let next_open = remaining.find("<think>");
+        let next_close = remaining.find("</think>");
+
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                let content_start = open + "<think>".len();
+                let think = remaining[content_start..close].trim();
+                if !think.is_empty() {
+                    extracted.push(think.to_string());
+                }
+                remaining = &remaining[close + "</think>".len()..];
+            }
+            (_, Some(close)) => {
+                let think = remaining[..close].trim();
+                if !think.is_empty() {
+                    extracted.push(think.to_string());
+                }
+                remaining = &remaining[close + "</think>".len()..];
+            }
+            (Some(_), None) | (None, None) => break,
+        }
+    }
+
+    extracted
+}
+
 /// Strip `<tool_call>...</tool_call>` blocks and any `<think>...</think>` blocks from text.
 /// Returns the original string (no allocation) if no tags are present.
 fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
     let has_tool = text.contains("<tool_call>");
-    let has_think = text.contains("<think>");
+    let has_think = text.contains("<think>") || text.contains("</think>");
     if !has_tool && !has_think {
         return std::borrow::Cow::Borrowed(text);
     }
 
-    fn strip_tag(input: &mut String, open: &str, close: &str) {
-        while let Some(start) = input.find(open) {
-            if let Some(end_offset) = input[start..].find(close) {
-                input.replace_range(start..start + end_offset + close.len(), "");
-            } else {
-                input.truncate(start);
-                break;
+    fn strip_tag(
+        input: &mut String,
+        open: &str,
+        close: &str,
+        strip_prefix_for_dangling_close: bool,
+    ) {
+        loop {
+            let next_open = input.find(open);
+            let next_close = input.find(close);
+
+            match (next_open, next_close) {
+                (Some(start), Some(end)) if start < end => {
+                    input.replace_range(start..end + close.len(), "");
+                }
+                (Some(start), _) => {
+                    input.truncate(start);
+                    break;
+                }
+                (_, Some(end)) if strip_prefix_for_dangling_close => {
+                    input.replace_range(0..end + close.len(), "");
+                }
+                _ => break,
             }
         }
     }
 
     let mut result = text.to_string();
     if has_tool {
-        strip_tag(&mut result, "<tool_call>", "</tool_call>");
+        strip_tag(&mut result, "<tool_call>", "</tool_call>", false);
     }
     if has_think {
-        strip_tag(&mut result, "<think>", "</think>");
+        strip_tag(&mut result, "<think>", "</think>", true);
     }
     std::borrow::Cow::Owned(result)
 }
@@ -719,22 +768,6 @@ pub fn chat_completion_to_response(
         }
 
         // Map reasoning_content to a Reasoning output item
-        if let Some(reasoning_text) = choice.message.reasoning_content
-            && !reasoning_text.is_empty()
-        {
-            output.push(OutputItem::Reasoning(ReasoningItem {
-                id: format!("rs_{}", Uuid::new_v4().simple()),
-                summary: vec![SummaryPart::SummaryText(Summary {
-                    text: reasoning_text,
-                })],
-                content: None,
-                encrypted_content: None,
-                status: Some(OutputStatus::Completed),
-            }));
-        }
-
-        // Handle text content -- also parse <tool_call> blocks from models
-        // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
             Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(text)) => {
                 Some(text)
@@ -747,15 +780,46 @@ pub fn chat_completion_to_response(
             }
             None => None,
         };
+
+        if let Some(reasoning_text) = choice.message.reasoning_content
+            && !reasoning_text.is_empty()
+        {
+            output.push(OutputItem::Reasoning(ReasoningItem {
+                id: format!("rs_{}", Uuid::new_v4().simple()),
+                summary: vec![SummaryPart::SummaryText(Summary {
+                    text: reasoning_text,
+                })],
+                content: None,
+                encrypted_content: None,
+                status: Some(OutputStatus::Completed),
+            }));
+        } else if let Some(content_text) = content_text.as_ref() {
+            let think_blocks = extract_think_blocks(content_text);
+            if !think_blocks.is_empty() {
+                output.push(OutputItem::Reasoning(ReasoningItem {
+                    id: format!("rs_{}", Uuid::new_v4().simple()),
+                    summary: think_blocks
+                        .into_iter()
+                        .map(|text| SummaryPart::SummaryText(Summary { text }))
+                        .collect(),
+                    content: None,
+                    encrypted_content: None,
+                    status: Some(OutputStatus::Completed),
+                }));
+            }
+        }
+
+        // Handle text content -- also parse <tool_call> blocks from models
+        // that emit tool calls as text (e.g. Qwen3)
         if let Some(content_text) = content_text
             && !content_text.is_empty()
         {
             let parsed_calls = parse_tool_call_text(&content_text);
+            let remaining = strip_tool_call_text(&content_text);
             if !parsed_calls.is_empty() {
                 for (name, arguments) in parsed_calls {
                     output.push(make_function_call(name, arguments));
                 }
-                let remaining = strip_tool_call_text(&content_text);
                 if !remaining.trim().is_empty() {
                     output.push(make_text_message(
                         message_id.clone(),
@@ -763,7 +827,10 @@ pub fn chat_completion_to_response(
                     ));
                 }
             } else {
-                output.push(make_text_message(message_id.clone(), content_text));
+                let visible_text = remaining.into_owned();
+                if !visible_text.trim().is_empty() {
+                    output.push(make_text_message(message_id.clone(), visible_text));
+                }
             }
         }
 
@@ -1321,6 +1388,35 @@ thinking
         assert!(!stripped.contains("<think>"));
     }
 
+    #[test]
+    fn test_strip_tool_call_text_with_dangling_think_close_hides_prefix() {
+        let text = "private reasoning</think>Visible answer.";
+        let stripped = strip_tool_call_text(text);
+        assert_eq!(stripped, "Visible answer.");
+    }
+
+    #[test]
+    fn test_extract_think_blocks() {
+        let text = r#"<think>
+first
+</think>
+visible
+<think>second</think>"#;
+        assert_eq!(
+            extract_think_blocks(text),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_extract_think_blocks_with_dangling_close() {
+        let text = "private reasoning</think>Visible answer.";
+        assert_eq!(
+            extract_think_blocks(text),
+            vec!["private reasoning".to_string()]
+        );
+    }
+
     // ── PR1: reasoning / text.format / service_tier pass-through tests ──
 
     #[test]
@@ -1446,6 +1542,69 @@ thinking
         let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         let reasoning = resp.inner.reasoning.unwrap();
         assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn test_response_salvages_raw_think_blocks_and_hides_them_from_visible_text() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            id: "chatcmpl-think".into(),
+            choices: vec![dynamo_async_openai::types::ChatChoice {
+                index: 0,
+                message: dynamo_async_openai::types::ChatCompletionResponseMessage {
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "<think>private chain of thought</think>Public answer.".to_string(),
+                        ),
+                    ),
+                    refusal: None,
+                    tool_calls: None,
+                    role: dynamo_async_openai::types::Role::Assistant,
+                    function_call: None,
+                    audio: None,
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+                stop_reason: None,
+                logprobs: None,
+            }],
+            created: 0,
+            model: "test-model".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".to_string(),
+            usage: None,
+            nvext: None,
+        };
+
+        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
+        assert_eq!(wrapped.inner.output.len(), 2);
+
+        match &wrapped.inner.output[0] {
+            OutputItem::Reasoning(reasoning) => {
+                assert_eq!(reasoning.summary.len(), 1);
+                match &reasoning.summary[0] {
+                    SummaryPart::SummaryText(summary) => {
+                        assert_eq!(summary.text, "private chain of thought");
+                    }
+                    _ => panic!("expected reasoning summary text"),
+                }
+            }
+            other => panic!("expected reasoning item, got {other:?}"),
+        }
+
+        match &wrapped.inner.output[1] {
+            OutputItem::Message(message) => {
+                assert_eq!(message.content.len(), 1);
+                match &message.content[0] {
+                    OutputMessageContent::OutputText(text) => {
+                        assert_eq!(text.text, "Public answer.");
+                        assert!(!text.text.contains("<think>"));
+                    }
+                    _ => panic!("expected output text"),
+                }
+            }
+            other => panic!("expected output message, got {other:?}"),
+        }
     }
 
     #[test]
