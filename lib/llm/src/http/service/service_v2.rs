@@ -503,6 +503,7 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
+            super::clear_kv_blocks::clear_kv_blocks_router(state.clone(), Some("/reset_prefix_cache".to_string())),
         ];
 
         let endpoint_routes =
