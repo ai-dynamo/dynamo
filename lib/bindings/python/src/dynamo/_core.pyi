@@ -838,8 +838,8 @@ class FpmEventSubscriber:
     1. **recv mode** (default): call ``recv()`` to pull individual messages.
     2. **tracking mode**: call ``start_tracking()`` once, then poll
        ``get_recent_stats()`` to retrieve the latest FPM bytes keyed by
-       ``(worker_id, dp_rank)``.  Stale entries are cleaned up via MDC
-       discovery watch and TTL.
+       ``(worker_id, dp_rank)``.  Stale entries are cleaned up when
+       workers are removed (via discovery watch).
     """
 
     def __init__(self, endpoint: Endpoint) -> None:

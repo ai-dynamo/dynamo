@@ -189,7 +189,7 @@ Three specialized regression models (`fpm_regression.py`):
 
 - **Prefill/Decode**: Scale up if ALL engines' estimated TTFT/ITL > SLA; scale down if ALL < SLA * sensitivity
 - **Agg**: Scale up if (ALL TTFT > SLA) OR (ALL ITL > SLA); scale down if (ALL TTFT < SLA * sensitivity) AND (ALL ITL < SLA * sensitivity)
-- Only scales by +/-1 per interval (blocking)
+- Only scales by +/-1 per interval (non-blocking with pending-desired guard: metrics continue to be observed while scaling is in progress, but no new scaling action is issued until the previous one completes)
 
 ### Co-existence with Throughput-Based Scaling
 

@@ -323,7 +323,14 @@ class KubernetesConnector(PlannerConnector):
         )
 
     def _list_worker_metadata_crs(self) -> list[dict]:
-        """List all DynamoWorkerMetadata CRs in the current namespace."""
+        """List all DynamoWorkerMetadata CRs in the current namespace.
+
+        Returns an empty list only when the CRD is not yet installed (404).
+        Other API errors (RBAC, connectivity) are re-raised so callers can
+        handle them explicitly.
+        """
+        from kubernetes.client import ApiException
+
         try:
             result = self.kube_api.custom_api.list_namespaced_custom_object(
                 group="nvidia.com",
@@ -332,21 +339,33 @@ class KubernetesConnector(PlannerConnector):
                 plural="dynamoworkermetadatas",
             )
             return result.get("items", [])
-        except Exception as e:
-            logger.warning(f"Failed to list DynamoWorkerMetadata CRs: {e}")
-            return []
+        except ApiException as e:
+            if e.status == 404:
+                logger.info("DynamoWorkerMetadata CRD not found, skipping MDC")
+                return []
+            raise
 
     def _extract_mdc_entries(
         self,
     ) -> list[dict]:
-        """Extract all MDC entries from DynamoWorkerMetadata CRs.
+        """Extract MDC entries belonging to this DGD.
+
+        CRs are named after the worker pod (e.g. ``<dgd>-0-<service>-<hash>``),
+        so we filter by the DGD name prefix to avoid picking up entries from
+        other deployments sharing the namespace.
 
         Returns a list of dicts, each containing:
             namespace, component, endpoint, instance_id, card_json
         """
         crs = self._list_worker_metadata_crs()
+        dgd_prefix = f"{self.graph_deployment_name}-"
+
         entries: list[dict] = []
         for cr in crs:
+            cr_name = cr.get("metadata", {}).get("name", "")
+            if not cr_name.startswith(dgd_prefix):
+                continue
+
             data = cr.get("spec", {}).get("data", {})
             if isinstance(data, str):
                 try:

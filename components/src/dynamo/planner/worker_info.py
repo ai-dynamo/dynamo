@@ -177,7 +177,6 @@ def resolve_worker_info(
                 "Please set model_name in the config."
             )
 
-    model_name = model_name.lower()
     prefill_info.model_name = model_name
     decode_info.model_name = model_name
 

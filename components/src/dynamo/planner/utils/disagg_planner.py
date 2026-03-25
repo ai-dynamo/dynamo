@@ -97,10 +97,13 @@ class DisaggPlanner:
         self.decode_planner.decode_worker_info = self.prefill_planner.decode_worker_info
         self.decode_planner.model_name = self.prefill_planner.model_name
 
-        # Start FPM tracking for the decode planner (prefill's was started
-        # in its own _async_init -> _init_fpm_subscriber).
-        if self.enable_load and self.decode_planner.runtime is not None:
-            await self.decode_planner._init_fpm_subscriber()
+        # Start FPM tracking for both planners. DisaggPlanner bypasses each
+        # sub-planner's _async_init(), so we init subscribers explicitly here.
+        if self.enable_load:
+            if self.prefill_planner.runtime is not None:
+                await self.prefill_planner._init_fpm_subscriber()
+            if self.decode_planner.runtime is not None:
+                await self.decode_planner._init_fpm_subscriber()
 
     async def run(self):
         """Main scaling loop. Call _async_init() before this."""
