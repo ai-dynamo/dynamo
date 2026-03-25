@@ -85,7 +85,7 @@ fn extract_tool_calls(
             let abs_start = cursor + start_pos;
 
             // Add text before tool call to normal parts
-            normal_parts.push(&text[cursor..abs_start]);
+            normal_parts.push(text[cursor..abs_start].to_string());
 
             // Find the corresponding end token
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -98,25 +98,56 @@ fn extract_tool_calls(
                     Ok(parsed_call) => calls.push(parsed_call),
                     Err(e) => {
                         warn!("Failed to parse GLM-4.7 tool call block: {e}");
-                        normal_parts.push(block);
+                        if let Some((recovered_text, mut recovered_calls)) =
+                            recover_nested_tool_calls(block, config, tools)?
+                        {
+                            if !recovered_text.is_empty() {
+                                normal_parts.push(recovered_text);
+                            }
+                            calls.append(&mut recovered_calls);
+                        } else {
+                            normal_parts.push(block.to_string());
+                        }
                     }
                 }
 
                 cursor = abs_end;
             } else {
                 // No end token found -> treat the rest as normal text
-                normal_parts.push(&text[abs_start..]);
+                normal_parts.push(text[abs_start..].to_string());
                 break;
             }
         } else {
             // No more tool calls
-            normal_parts.push(&text[cursor..]);
+            normal_parts.push(text[cursor..].to_string());
             break;
         }
     }
 
     let normal_text = normal_parts.join("").trim().to_string();
     Ok((normal_text, calls))
+}
+
+fn recover_nested_tool_calls(
+    block: &str,
+    config: &Glm47ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let start_token = config.tool_call_start.as_str();
+    let nested_start = block[start_token.len()..]
+        .find(start_token)
+        .map(|pos| pos + start_token.len());
+    let Some(nested_start) = nested_start else {
+        return Ok(None);
+    };
+
+    let nested_block = &block[nested_start..];
+    let (normal_text, calls) = extract_tool_calls(nested_block, config, tools)?;
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some((normal_text, calls)))
 }
 
 /// Decode XML character entities in a string.
@@ -467,6 +498,34 @@ mod tests {
             text.contains("unknown_func"),
             "Unparseable block should be in normal text, got: {text}"
         );
+    }
+
+    #[test]
+    fn test_recovers_nested_valid_tool_call_from_malformed_block() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "spawn_agent".to_string(),
+            parameters: None,
+        }];
+
+        let message = concat!(
+            "<tool_call>",
+            "The agent name needs to use only lowercase letters, digits, and underscores. ",
+            "Let me fix that \"explore_ubuntu_home\" task name.</think>",
+            "<tool_call>spawn_agent",
+            "<arg_key>message</arg_key><arg_value>inspect repo</arg_value>",
+            "</tool_call>"
+        );
+
+        let (calls, normal_text) =
+            try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "spawn_agent");
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["message"], "inspect repo");
+        assert_eq!(normal_text, Some("".to_string()));
     }
 
     #[test]
