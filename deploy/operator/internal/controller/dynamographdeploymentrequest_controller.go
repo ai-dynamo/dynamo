@@ -1364,6 +1364,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			},
 		}
 
+		ttlSeconds := int32(600) // 10 minutes
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1375,7 +1376,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				},
 			},
 			Spec: batchv1.JobSpec{
-				BackoffLimit: &backoffLimit,
+				BackoffLimit:            &backoffLimit,
+				TTLSecondsAfterFinished: &ttlSeconds,
 				Template: corev1.PodTemplateSpec{
 					Spec: podSpec,
 				},
