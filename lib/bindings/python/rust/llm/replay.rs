@@ -10,6 +10,9 @@ use dynamo_mocker::common::protocols::{
     PreemptionMode as RsPreemptionMode, ReasoningConfig as RsReasoningConfig,
     SglangArgs as RsSglangArgs, WorkerType as RsWorkerType,
 };
+use dynamo_mocker::loadgen::{
+    ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
+};
 use pyo3::{exceptions::PyException, prelude::*};
 use pythonize::pythonize;
 use uuid::Uuid;
@@ -356,7 +359,7 @@ pub fn run_mocker_trace_replay(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, router_config=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, router_config=None, num_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -371,6 +374,10 @@ pub fn run_mocker_synthetic_trace_replay(
     router_mode: &str,
     arrival_speedup_ratio: f64,
     arrival_interval_ms: f64,
+    turns_per_session: usize,
+    shared_prefix_ratio: f64,
+    num_prefix_groups: usize,
+    inter_turn_delay_ms: f64,
 ) -> PyResult<PyObject> {
     let args = load_replay_mocker_args(py, extra_engine_args)?;
     let router_config = load_replay_router_config(router_config);
@@ -378,6 +385,73 @@ pub fn run_mocker_synthetic_trace_replay(
     let router_mode = parse_replay_router_mode(router_mode)?;
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let use_workload = turns_per_session > 1
+            || shared_prefix_ratio > 0.0
+            || num_prefix_groups > 0
+            || inter_turn_delay_ms > 0.0;
+
+        if use_workload {
+            let mut trace = build_synthetic_workload(
+                args.block_size.max(1),
+                input_tokens,
+                output_tokens,
+                request_count,
+                arrival_interval_ms,
+                turns_per_session,
+                shared_prefix_ratio,
+                num_prefix_groups,
+                inter_turn_delay_ms,
+            )?;
+            if replay_concurrency.is_none() {
+                trace = trace.speed_up_timing(arrival_speedup_ratio)?;
+            }
+
+            return match (replay_mode.as_str(), replay_concurrency) {
+                ("offline", Some(max_in_flight)) => {
+                    dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode(
+                        args,
+                        router_config.clone(),
+                        trace,
+                        max_in_flight,
+                        num_workers,
+                        router_mode,
+                    )
+                }
+                ("offline", None) => {
+                    dynamo_mocker::replay::simulate_trace_workload_with_router_mode(
+                        args,
+                        router_config.clone(),
+                        trace,
+                        num_workers,
+                        router_mode,
+                    )
+                }
+                ("online", Some(max_in_flight)) => {
+                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                        args,
+                        router_config.clone(),
+                        trace,
+                        max_in_flight,
+                        num_workers,
+                        router_mode,
+                    )
+                }
+                ("online", None) => {
+                    dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode(
+                        args,
+                        router_config.clone(),
+                        trace,
+                        num_workers,
+                        router_mode,
+                    )
+                }
+                (other, _) => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{}'",
+                    other
+                ),
+            };
+        }
+
         let requests = build_synthetic_requests(
             input_tokens,
             output_tokens,
@@ -507,6 +581,69 @@ fn parse_replay_concurrency(replay_concurrency: Option<isize>) -> anyhow::Result
         Some(value) => Ok(Some(value as usize)),
         None => Ok(None),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_synthetic_workload(
+    block_size: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    request_count: usize,
+    arrival_interval_ms: f64,
+    turns_per_session: usize,
+    shared_prefix_ratio: f64,
+    num_prefix_groups: usize,
+    inter_turn_delay_ms: f64,
+) -> anyhow::Result<RsTrace> {
+    if input_tokens == 0 {
+        anyhow::bail!("input_tokens must be at least 1");
+    }
+    if output_tokens == 0 {
+        anyhow::bail!("output_tokens must be at least 1");
+    }
+    if request_count == 0 {
+        anyhow::bail!("request_count must be at least 1");
+    }
+    if turns_per_session == 0 {
+        anyhow::bail!("turns_per_session must be at least 1");
+    }
+    if !arrival_interval_ms.is_finite() || arrival_interval_ms < 0.0 {
+        anyhow::bail!("arrival_interval_ms must be a finite non-negative number");
+    }
+    if !inter_turn_delay_ms.is_finite() || inter_turn_delay_ms < 0.0 {
+        anyhow::bail!("inter_turn_delay_ms must be a finite non-negative number");
+    }
+
+    let first_turn_arrivals = if arrival_interval_ms == 0.0 {
+        ArrivalSpec::Burst
+    } else {
+        ArrivalSpec::ConstantQps {
+            qps: 1000.0 / arrival_interval_ms,
+        }
+    };
+
+    RsTrace::synthetic(SyntheticTraceSpec {
+        block_size,
+        num_sessions: request_count,
+        turns_per_session,
+        input_tokens: LengthSpec {
+            mean: input_tokens,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: output_tokens,
+            stddev: 0.0,
+        },
+        shared_prefix_ratio,
+        num_prefix_groups,
+        first_turn_arrivals,
+        inter_turn_delays: if inter_turn_delay_ms == 0.0 {
+            DelaySpec::None
+        } else {
+            DelaySpec::ConstantMs(inter_turn_delay_ms)
+        },
+        seed: 42,
+    })
 }
 
 fn build_synthetic_requests(

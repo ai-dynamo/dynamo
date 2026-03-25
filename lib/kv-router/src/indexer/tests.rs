@@ -547,7 +547,10 @@ mod interface_tests {
 
         // Empty index should return no matches
         let tokens = vec![1, 2, 3, 4];
-        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
+        let scores = index
+            .find_matches_for_request(&tokens, None, None)
+            .await
+            .unwrap();
         assert!(scores.scores.is_empty());
 
         // Store some data and verify we can find it via tokens
@@ -559,7 +562,10 @@ mod interface_tests {
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
         // For this test, we just verify the method works without error.
-        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
+        let scores = index
+            .find_matches_for_request(&tokens, None, None)
+            .await
+            .unwrap();
         // The tokens [1,2,3,4] won't match our stored [1,2,3] local hashes
         // because find_matches_for_request computes different hashes from raw tokens
         assert!(scores.scores.is_empty() || !scores.scores.is_empty());
@@ -883,9 +889,16 @@ mod lora_tests {
         // Same token sequence for both base model and LoRA adapter
         let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
 
-        let base_hashes = compute_block_hash_for_seq(&tokens, kv_block_size, None, None);
-        let lora_hashes =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"));
+        let base_hashes =
+            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
+        let lora_hashes = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
 
         // Hashes must differ despite identical tokens
         assert_ne!(
@@ -970,9 +983,16 @@ mod lora_tests {
         let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
 
         // With LoRA-aware hashing, base and adapter produce different LocalBlockHash
-        let base_local = compute_block_hash_for_seq(&tokens, kv_block_size, None, None);
-        let lora_local =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"));
+        let base_local =
+            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
+        let lora_local = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(
             base_local, lora_local,
@@ -1044,8 +1064,22 @@ mod lora_tests {
 
         let tokens: Vec<u32> = (0..kv_block_size * 2).collect();
 
-        let hashes_a = compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-a"));
-        let hashes_b = compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-b"));
+        let hashes_a = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let hashes_b = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(
             hashes_a, hashes_b,

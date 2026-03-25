@@ -339,6 +339,11 @@ pub fn make_engine<'p>(
             } else {
                 // Mocker only needs tokenizer, not weights
                 let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                // Preserve the original HF model ID as source_path so the
+                // frontend can resolve model metadata even when the served
+                // model name differs (e.g., --model-name model-1 --model-path
+                // Qwen/Qwen3-0.6B).
+                builder.source_path(model_path.clone());
                 LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
                     .await
                     .map_err(to_pyerr)?

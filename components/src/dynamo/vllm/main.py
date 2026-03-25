@@ -609,7 +609,20 @@ async def register_vllm_model(
         f"Getting engine runtime configuration metadata from vLLM engine for {model_type}..."
     )
     runtime_values = get_engine_cache_info(engine_client)
-    runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+    num_gpu_blocks = runtime_values["num_gpu_blocks"]
+    if num_gpu_blocks is None:
+        # TODO(upstream-vllm): remove this workaround once vLLM propagates
+        # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.
+        # With Ray-based data-parallel backend, num_gpu_blocks is computed inside
+        # Ray worker processes and is never written back to the main-process
+        # vllm_config.  Use 0 as a sentinel so the Rust runtime can still register
+        # the model; KV-cache capacity metrics will be unavailable in this mode.
+        logging.warning(
+            "num_gpu_blocks is None (expected when using --data-parallel-backend ray). "
+            "Setting total_kv_blocks=0 for model registration."
+        )
+        num_gpu_blocks = 0
+    runtime_config.total_kv_blocks = num_gpu_blocks
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
@@ -622,6 +635,9 @@ async def register_vllm_model(
     if model_type != ModelType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)

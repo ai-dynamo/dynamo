@@ -12,6 +12,15 @@ pub(crate) struct OfflineWorkerState {
     in_flight: usize,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OfflineWorkerSnapshot {
+    pub(crate) busy: bool,
+    pub(crate) in_flight: usize,
+    pub(crate) ready: bool,
+    pub(crate) drained: bool,
+}
+
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
         let core = match args.engine_type {
@@ -80,5 +89,15 @@ impl OfflineWorkerState {
         now_ms: f64,
     ) -> EnginePassResult {
         self.core.execute_pass(collector, now_ms)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_snapshot(&self) -> OfflineWorkerSnapshot {
+        OfflineWorkerSnapshot {
+            busy: self.busy,
+            in_flight: self.in_flight,
+            ready: self.is_ready(),
+            drained: self.is_drained(),
+        }
     }
 }
