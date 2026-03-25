@@ -139,6 +139,8 @@ impl PrefillCost {
 pub struct OutputSignal {
     pub uuid: Uuid,
     pub completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_delay_ms: Option<f64>,
 }
 
 /// Preemption policy for evicting decode requests under memory pressure

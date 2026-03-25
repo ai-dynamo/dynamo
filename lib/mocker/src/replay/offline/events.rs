@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 
 use crate::common::protocols::OutputSignal;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SimulationWorkerStage {
@@ -20,6 +21,9 @@ pub(crate) enum SimulationEventKind {
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
+    },
+    DecodeHandoff {
+        uuid: Uuid,
     },
 }
 

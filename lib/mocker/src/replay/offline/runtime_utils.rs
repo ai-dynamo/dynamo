@@ -84,6 +84,9 @@ pub(super) fn pop_ready_worker_completion(
     if event.at_ms != now_ms {
         return None;
     }
+    let SimulationEventKind::WorkerCompletion { .. } = &event.kind else {
+        return None;
+    };
     let event = events.pop().expect("event must exist after peek");
     let (stage, worker_idx, completed_requests, output_signals, kv_events) = match event.kind {
         SimulationEventKind::WorkerCompletion {
@@ -99,6 +102,9 @@ pub(super) fn pop_ready_worker_completion(
             output_signals,
             kv_events,
         ),
+        SimulationEventKind::DecodeHandoff { .. } => {
+            unreachable!("peeked worker completion event must match popped event")
+        }
     };
     Some(WorkerCompletionPayload {
         stage,
@@ -107,6 +113,38 @@ pub(super) fn pop_ready_worker_completion(
         output_signals,
         kv_events,
     })
+}
+
+pub(super) fn push_decode_handoff(
+    events: &mut BinaryHeap<SimulationEvent>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+    uuid: uuid::Uuid,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::DecodeHandoff { uuid },
+    });
+    *next_event_seq += 1;
+}
+
+pub(super) fn pop_ready_decode_handoff(
+    events: &mut BinaryHeap<SimulationEvent>,
+    now_ms: f64,
+) -> Option<uuid::Uuid> {
+    let event = events.peek()?;
+    if event.at_ms != now_ms {
+        return None;
+    }
+    let SimulationEventKind::DecodeHandoff { .. } = &event.kind else {
+        return None;
+    };
+    let event = events.pop().expect("event must exist after peek");
+    let SimulationEventKind::DecodeHandoff { uuid } = event.kind else {
+        unreachable!("peeked decode handoff event must match popped event");
+    };
+    Some(uuid)
 }
 
 #[cfg(test)]
@@ -182,6 +220,7 @@ mod tests {
                 output_signals: vec![OutputSignal {
                     uuid: Uuid::from_u128(7),
                     completed: true,
+                    handoff_delay_ms: None,
                 }],
                 kv_events: Vec::new(),
             },
@@ -197,6 +236,7 @@ mod tests {
                 output_signals: vec![OutputSignal {
                     uuid: Uuid::from_u128(8),
                     completed: false,
+                    handoff_delay_ms: None,
                 }],
                 kv_events: Vec::new(),
             },

@@ -12,7 +12,8 @@ use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::normalize_trace_requests;
 use super::runtime_utils::{
     WorkerCompletionPayload, next_timestamp as choose_next_timestamp, pop_next_concurrency_ready,
-    pop_next_trace_ready, pop_ready_worker_completion, push_worker_completion,
+    pop_next_trace_ready, pop_ready_decode_handoff, pop_ready_worker_completion,
+    push_decode_handoff, push_worker_completion,
 };
 use super::state::OfflineWorkerState;
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
@@ -454,35 +455,31 @@ impl DisaggRuntime {
             return Ok(());
         }
 
-        let Some(_) = self.prefill_router.as_ref() else {
-            self.enqueue_decode(signal.uuid)?;
-            return Ok(());
-        };
-        let prefill_complete_admissions = self
-            .prefill_router
-            .as_mut()
-            .expect("prefill router must exist after guard")
-            .mark_prefill_completed(signal.uuid)?;
-        #[cfg(test)]
-        {
-            self.stats.prefill_marked_count += 1;
-        }
-        self.record_router_pending();
-        self.dispatch_prefill_admissions(prefill_complete_admissions)?;
+        if self.prefill_router.is_some() {
+            let prefill_complete_admissions = {
+                let prefill_router = self.prefill_router.as_mut().expect("router checked above");
+                prefill_router.mark_prefill_completed(signal.uuid)?
+            };
+            #[cfg(test)]
+            {
+                self.stats.prefill_marked_count += 1;
+            }
+            self.record_router_pending();
+            self.dispatch_prefill_admissions(prefill_complete_admissions)?;
 
-        let admissions = self
-            .prefill_router
-            .as_mut()
-            .expect("prefill router must exist after guard")
-            .free(signal.uuid)?;
-        #[cfg(test)]
-        {
-            self.stats.prefill_freed_count += 1;
+            let admissions = {
+                let prefill_router = self.prefill_router.as_mut().expect("router checked above");
+                prefill_router.free(signal.uuid)?
+            };
+            #[cfg(test)]
+            {
+                self.stats.prefill_freed_count += 1;
+            }
+            self.record_router_pending();
+            self.dispatch_prefill_admissions(admissions)?;
         }
-        self.record_router_pending();
-        self.dispatch_prefill_admissions(admissions)?;
-        self.enqueue_decode(signal.uuid)?;
-        Ok(())
+
+        self.enqueue_decode_after_handoff(signal.uuid, signal.handoff_delay_ms)
     }
 
     fn process_decode_signal(&mut self, signal: OutputSignal) -> Result<()> {
@@ -570,6 +567,35 @@ impl DisaggRuntime {
             changed = true;
         }
         Ok(changed)
+    }
+
+    fn apply_decode_handoffs(&mut self) -> Result<bool> {
+        let mut changed = false;
+        while let Some(uuid) = pop_ready_decode_handoff(&mut self.events, self.now_ms) {
+            self.enqueue_decode(uuid)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn enqueue_decode_after_handoff(
+        &mut self,
+        uuid: Uuid,
+        handoff_delay_ms: Option<f64>,
+    ) -> Result<()> {
+        if let Some(delay_ms) = handoff_delay_ms
+            && delay_ms > 0.0
+        {
+            push_decode_handoff(
+                &mut self.events,
+                &mut self.next_event_seq,
+                self.now_ms + delay_ms,
+                uuid,
+            );
+            return Ok(());
+        }
+
+        self.enqueue_decode(uuid)
     }
 
     fn release_trace_arrivals(&mut self) -> Result<bool> {
@@ -738,6 +764,7 @@ impl DisaggRuntime {
     fn drain_current_timestamp(&mut self) -> Result<()> {
         loop {
             let mut changed = self.apply_worker_completions()?;
+            changed |= self.apply_decode_handoffs()?;
 
             changed |= match self.mode {
                 ReplayMode::Trace => self.release_trace_arrivals()?,
@@ -972,6 +999,13 @@ mod tests {
         }
     }
 
+    fn disagg_config_with_handoff_delay() -> OfflineDisaggReplayConfig {
+        let mut config = disagg_config();
+        config.prefill_args.kv_transfer_bandwidth = Some(1.0);
+        config.prefill_args.kv_bytes_per_token = Some(1_000_000);
+        config
+    }
+
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(1.25),
@@ -1122,5 +1156,35 @@ mod tests {
         assert_eq!(stats.prefill_marked_count, 1);
         assert_eq!(stats.prefill_freed_count, 1);
         assert_eq!(stats.decode_freed_count, 1);
+    }
+
+    #[test]
+    fn test_handoff_delay_increases_decode_visible_ttft() {
+        let requests = vec![request(1, 128, 2, 0.0)];
+
+        let (baseline_collector, _) = run_trace_collect(
+            &disagg_config(),
+            requests.clone(),
+            None,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+        );
+        let (delayed_collector, _) = run_trace_collect(
+            &disagg_config_with_handoff_delay(),
+            requests,
+            None,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        let baseline = baseline_collector.snapshot(Uuid::from_u128(1)).unwrap();
+        let delayed = delayed_collector.snapshot(Uuid::from_u128(1)).unwrap();
+        let baseline_ttft = baseline.first_token_ms.unwrap() - baseline.arrival_time_ms;
+        let delayed_ttft = delayed.first_token_ms.unwrap() - delayed.arrival_time_ms;
+
+        assert!(
+            delayed_ttft >= baseline_ttft + 120.0,
+            "expected delayed TTFT to include roughly 128ms of handoff delay, baseline={baseline_ttft}, delayed={delayed_ttft}"
+        );
     }
 }
