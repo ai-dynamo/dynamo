@@ -201,17 +201,23 @@ async fn test_nvext_passthrough_aggregation() {
     ];
 
     let stream = futures::stream::iter(deltas);
-    let result = NvCreateChatCompletionResponse::from_annotated_stream(
-        stream,
-        ParsingOptions::default(),
-    )
-    .await
-    .unwrap();
+    let result =
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, ParsingOptions::default())
+            .await
+            .unwrap();
 
     assert_eq!(result.nvext, Some(nvext_value));
     assert_eq!(
         get_text(
-            result.inner.choices.first().unwrap().message.content.as_ref().unwrap()
+            result
+                .inner
+                .choices
+                .first()
+                .unwrap()
+                .message
+                .content
+                .as_ref()
+                .unwrap()
         ),
         "Hello world!"
     );
@@ -230,12 +236,10 @@ async fn test_nvext_last_value_wins() {
     ];
 
     let stream = futures::stream::iter(deltas);
-    let result = NvCreateChatCompletionResponse::from_annotated_stream(
-        stream,
-        ParsingOptions::default(),
-    )
-    .await
-    .unwrap();
+    let result =
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, ParsingOptions::default())
+            .await
+            .unwrap();
 
     assert_eq!(result.nvext, Some(last_nvext));
 }
@@ -243,17 +247,13 @@ async fn test_nvext_last_value_wins() {
 /// Verify that nvext remains None when no delta carries it.
 #[tokio::test]
 async fn test_nvext_none_when_absent() {
-    let deltas = vec![
-        make_stream_delta(Some("hello"), None),
-    ];
+    let deltas = vec![make_stream_delta(Some("hello"), None)];
 
     let stream = futures::stream::iter(deltas);
-    let result = NvCreateChatCompletionResponse::from_annotated_stream(
-        stream,
-        ParsingOptions::default(),
-    )
-    .await
-    .unwrap();
+    let result =
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, ParsingOptions::default())
+            .await
+            .unwrap();
 
     assert_eq!(result.nvext, None);
 }
