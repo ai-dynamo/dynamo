@@ -16,7 +16,8 @@
 set -Eeuo pipefail
 
 # ===== Namespace ensure =====
-: "${NAMESPACE:=dynamo}"
+# The documented GAIE flow sets NAMESPACE explicitly; the fallback matches the installer.
+: "${NAMESPACE:=default}"
 : "${GATEWAY_CONTROLLER_NAMESPACE:=${AGW_NAMESPACE:-agentgateway-system}}"
 
 ok()  { printf "✅ %s\n" "$*"; }
