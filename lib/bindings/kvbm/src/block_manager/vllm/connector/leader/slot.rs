@@ -1688,7 +1688,7 @@ where
         .zip(priorities.into_iter())
     {
         mutable_block
-            .apply_token_block(token_block.clone())
+            .apply_token_block(token_block)
             .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
 
         // Set the priority on the block's metadata so it flows through to downstream processing

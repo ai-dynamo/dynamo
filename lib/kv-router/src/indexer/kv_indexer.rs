@@ -48,7 +48,10 @@ fn apply_event_with_prune_tracking(
     let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
-    let event_for_prune = prune_manager.is_some().then(|| event.clone());
+    // Extract block entries before apply_event consumes the event
+    let block_entries_for_prune = prune_manager
+        .as_ref()
+        .and_then(|_| stored_block_entries(&event));
     let result = trie.apply_event(event);
     let result_is_ok = result.is_ok();
     let tree_size = trie.current_size();
@@ -63,10 +66,7 @@ fn apply_event_with_prune_tracking(
     if !result_is_ok {
         return;
     }
-    let Some(ref event) = event_for_prune else {
-        return;
-    };
-    let Some(block_entries) = stored_block_entries(event) else {
+    let Some(block_entries) = block_entries_for_prune else {
         return;
     };
 
