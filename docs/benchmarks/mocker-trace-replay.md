@@ -174,7 +174,12 @@ Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
 - `--decode-engine-args` for the decode worker config
 - `--num-prefill-workers` and `--num-decode-workers` for pool sizes
 
-The staged JSON accepts `worker_type: "prefill" | "decode"` for CLI convenience.
+For offline disagg replay, the staged JSON must set `worker_type` explicitly:
+
+- `--prefill-engine-args` must use `worker_type: "prefill"`
+- `--decode-engine-args` must use `worker_type: "decode"`
+
+The staged configs must also use the same `block_size`.
 
 ### Synthetic Replay
 
@@ -337,6 +342,7 @@ Shared replay constraints:
 - disagg replay requires both `prefill_engine_args` and `decode_engine_args`
 - disagg replay requires `router_mode=kv_router`
 - replay `dp_size` must be `1`
+- disagg replay requires matching `block_size` in `prefill_engine_args` and `decode_engine_args`
 
 Additional offline constraints:
 

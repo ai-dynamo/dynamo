@@ -654,8 +654,22 @@ fn load_replay_args_selection(
     }
 
     match (aggregated_args, prefill_args, decode_args) {
-        (Some(args), None, None) => Ok(ReplayArgsSelection::Aggregated(Box::new(args))),
-        (None, None, None) => Ok(ReplayArgsSelection::Aggregated(Box::default())),
+        (Some(args), None, None) => {
+            if num_prefill_workers != 1 || num_decode_workers != 1 {
+                return Err(PyException::new_err(
+                    "num_prefill_workers and num_decode_workers are only used for disagg replay; use num_workers for aggregated replay",
+                ));
+            }
+            Ok(ReplayArgsSelection::Aggregated(Box::new(args)))
+        }
+        (None, None, None) => {
+            if num_prefill_workers != 1 || num_decode_workers != 1 {
+                return Err(PyException::new_err(
+                    "num_prefill_workers and num_decode_workers are only used for disagg replay; use num_workers for aggregated replay",
+                ));
+            }
+            Ok(ReplayArgsSelection::Aggregated(Box::default()))
+        }
         (None, Some(prefill_args), Some(decode_args)) => {
             if num_workers != 1 {
                 return Err(PyException::new_err(

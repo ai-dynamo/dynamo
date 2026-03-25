@@ -643,6 +643,23 @@ def test_run_trace_replay_rejects_online_disagg(tmp_path):
         )
 
 
+def test_run_trace_replay_rejects_disagg_worker_counts_for_aggregated_mode(tmp_path):
+    trace_path = _write_trace_and_args(tmp_path)
+
+    with pytest.raises(
+        Exception,
+        match="num_prefill_workers and num_decode_workers are only used for disagg replay",
+    ):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+            num_workers=1,
+            num_prefill_workers=2,
+            num_decode_workers=2,
+            replay_mode="offline",
+        )
+
+
 def test_format_report_table_matches_aiperf_shape():
     report = {
         "mean_ttft_ms": 18.26,

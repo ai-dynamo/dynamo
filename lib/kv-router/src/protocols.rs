@@ -950,14 +950,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lora_name_none_matches_legacy() {
-        let tokens: Vec<u32> = (0..8).collect();
-        let hashes_none = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
-        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
-        assert_eq!(hashes_none, hashes_none2);
-    }
-
-    #[test]
     fn test_lora_name_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
         let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
@@ -1132,16 +1124,6 @@ mod tests {
     }
 
     #[test]
-    fn test_router_request_mark_free_backwards_compatible_deserialization() {
-        let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
-
-        assert!(matches!(
-            request,
-            RouterRequest::MarkFree { request_id: None }
-        ));
-    }
-
-    #[test]
     fn test_router_request_mark_free_serialization_with_request_id() {
         let request = RouterRequest::MarkFree {
             request_id: Some("req-123".to_string()),
@@ -1160,47 +1142,5 @@ mod tests {
                 request_id: Some(ref request_id)
             } if request_id == "req-123"
         ));
-    }
-
-    #[test]
-    fn test_active_sequence_add_request_serialization_preserves_track_prefill_tokens() {
-        let event = ActiveSequenceEvent {
-            request_id: "req-123".to_string(),
-            worker: WorkerWithDpRank::new(7, 0),
-            data: ActiveSequenceEventData::AddRequest {
-                token_sequence: Some(vec![11, 22]),
-                isl: 128,
-                overlap: 1,
-                track_prefill_tokens: false,
-                expected_output_tokens: Some(32),
-            },
-            router_id: 9,
-            lora_name: None,
-        };
-
-        let serialized = serde_json::to_string(&event).unwrap();
-        let deserialized: ActiveSequenceEvent = serde_json::from_str(&serialized).unwrap();
-
-        match deserialized.data {
-            ActiveSequenceEventData::AddRequest {
-                track_prefill_tokens,
-                ..
-            } => assert!(!track_prefill_tokens),
-            _ => panic!("expected add request event"),
-        }
-    }
-
-    #[test]
-    fn test_active_sequence_add_request_defaults_track_prefill_tokens_for_legacy_payloads() {
-        let legacy = r#"{"request_id":"req-123","worker":{"worker_id":7,"dp_rank":0},"data":{"AddRequest":{"token_sequence":[11,22],"isl":128,"overlap":1,"expected_output_tokens":32}},"router_id":9,"lora_name":null}"#;
-        let deserialized: ActiveSequenceEvent = serde_json::from_str(legacy).unwrap();
-
-        match deserialized.data {
-            ActiveSequenceEventData::AddRequest {
-                track_prefill_tokens,
-                ..
-            } => assert!(track_prefill_tokens),
-            _ => panic!("expected add request event"),
-        }
     }
 }

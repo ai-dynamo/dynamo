@@ -92,7 +92,13 @@ pub(super) fn pop_ready_worker_completion(
             completed_requests,
             output_signals,
             kv_events,
-        } => (stage, worker_idx, completed_requests, output_signals, kv_events),
+        } => (
+            stage,
+            worker_idx,
+            completed_requests,
+            output_signals,
+            kv_events,
+        ),
     };
     Some(WorkerCompletionPayload {
         stage,

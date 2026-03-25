@@ -7,6 +7,20 @@ from dynamo._core import (
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 
 
+def _validate_worker_pool_args(
+    prefill_engine_args,
+    decode_engine_args,
+    num_prefill_workers,
+    num_decode_workers,
+):
+    if prefill_engine_args is not None or decode_engine_args is not None:
+        return
+    if num_prefill_workers != 1 or num_decode_workers != 1:
+        raise ValueError(
+            "num_prefill_workers and num_decode_workers are only used for disagg replay; use num_workers for aggregated replay"
+        )
+
+
 def run_trace_replay(
     trace_file,
     *,
@@ -22,6 +36,12 @@ def run_trace_replay(
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
 ):
+    _validate_worker_pool_args(
+        prefill_engine_args,
+        decode_engine_args,
+        num_prefill_workers,
+        num_decode_workers,
+    )
     return _run_mocker_trace_replay(
         trace_file,
         extra_engine_args=extra_engine_args,
@@ -60,6 +80,12 @@ def run_synthetic_trace_replay(
     num_prefix_groups=0,
     inter_turn_delay_ms=0.0,
 ):
+    _validate_worker_pool_args(
+        prefill_engine_args,
+        decode_engine_args,
+        num_prefill_workers,
+        num_decode_workers,
+    )
     return _run_mocker_synthetic_trace_replay(
         input_tokens,
         output_tokens,
