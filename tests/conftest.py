@@ -133,6 +133,13 @@ def download_models(model_list=None, ignore_weights=False):
         )
 
         try:
+            import time as _time
+
+            _dl_start = _time.monotonic()
+            logging.info(
+                f"[DIAG-FIXTURE] snapshot_download(repo_id={model_id!r}, revision=None)  "
+                f"— downloading default (main) revision"
+            )
             if ignore_weights:
                 # Weight file patterns to exclude (based on hub.rs implementation)
                 weight_patterns = [
@@ -144,17 +151,21 @@ def download_models(model_list=None, ignore_weights=False):
                 ]
 
                 # Download everything except weight files
-                snapshot_download(
+                _local_path = snapshot_download(
                     repo_id=model_id,
                     token=hf_token,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
-                snapshot_download(
+                _local_path = snapshot_download(
                     repo_id=model_id,
                     token=hf_token,
                 )
+            _dl_elapsed = _time.monotonic() - _dl_start
+            logging.info(
+                f"[DIAG-FIXTURE] Finished {model_id} in {_dl_elapsed:.1f}s → {_local_path}"
+            )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
         except Exception as exc:

@@ -73,15 +73,47 @@ from PIL import Image
 from huggingface_hub import snapshot_download
 from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
 
+import time as _time, pathlib
+
 model_id   = os.environ["MODEL_PATH"]
 revision   = os.environ.get("MODEL_REVISION", "") or None
 image_url  = os.environ.get("TEST_IMAGE_URL",
     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png")
 output     = os.environ.get("EMBEDDINGS_FILE", "/tmp/llava_embeddings.pt")
 
+# ── DIAG: check what the fixture already downloaded ──
+_hf_cache = pathlib.Path.home() / ".cache" / "huggingface" / "hub"
+_model_dir = _hf_cache / f"models--{model_id.replace('/', '--')}"
+_refs_dir = _model_dir / "refs"
+_snaps_dir = _model_dir / "snapshots"
+print(f"[DIAG-SCRIPT] HF_HUB_OFFLINE = {os.environ.get('HF_HUB_OFFLINE', '<unset>')}")
+print(f"[DIAG-SCRIPT] model_id = {model_id}, revision = {revision}")
+print(f"[DIAG-SCRIPT] Cache dir exists: {_model_dir.exists()}")
+if _refs_dir.exists():
+    for ref in sorted(_refs_dir.iterdir()):
+        print(f"[DIAG-SCRIPT]   ref {ref.name} → {ref.read_text().strip()}")
+if _snaps_dir.exists():
+    for snap in sorted(_snaps_dir.iterdir()):
+        _n_files = sum(1 for _ in snap.iterdir()) if snap.is_dir() else 0
+        _size_mb = sum(f.stat().st_size for f in snap.rglob('*') if f.is_file()) / 1e6 if snap.is_dir() else 0
+        print(f"[DIAG-SCRIPT]   snapshot {snap.name}  ({_n_files} files, {_size_mb:.0f} MB)")
+
 # ── Download / resolve model ──
-print(f"Resolving model {model_id} (revision={revision}) …")
+print(f"[DIAG-SCRIPT] snapshot_download(repo_id={model_id!r}, revision={revision!r})  — starting")
+_dl_start = _time.monotonic()
 model_path = snapshot_download(model_id, revision=revision)
+_dl_elapsed = _time.monotonic() - _dl_start
+print(f"[DIAG-SCRIPT] snapshot_download finished in {_dl_elapsed:.1f}s → {model_path}")
+
+# ── DIAG: check cache state AFTER download ──
+if _refs_dir.exists():
+    for ref in sorted(_refs_dir.iterdir()):
+        print(f"[DIAG-SCRIPT]   ref(post) {ref.name} → {ref.read_text().strip()}")
+if _snaps_dir.exists():
+    for snap in sorted(_snaps_dir.iterdir()):
+        _n_files = sum(1 for _ in snap.iterdir()) if snap.is_dir() else 0
+        _size_mb = sum(f.stat().st_size for f in snap.rglob('*') if f.is_file()) / 1e6 if snap.is_dir() else 0
+        print(f"[DIAG-SCRIPT]   snapshot(post) {snap.name}  ({_n_files} files, {_size_mb:.0f} MB)")
 print(f"Model path: {model_path}")
 
 # ── Load model (vision tower + projector) ──
