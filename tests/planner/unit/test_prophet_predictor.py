@@ -21,14 +21,17 @@ Regression test for the bug where predict_next() computed:
 instead of:
     next_timestamp = start_date + timedelta(seconds=curr_step * step_size)
 
-With the default step_size=180 this meant the forecast target was 180× too
+With the default step_size=180 this meant the forecast target was 180x too
 early — Prophet was asked to extrapolate into the past, producing garbage.
 """
 
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
+
+from dynamo.planner.utils.load_predictor import ProphetPredictor
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -59,49 +62,44 @@ class TestProphetPredictorTimestampAlignment:
 
     @pytest.mark.parametrize("step_size", [1, 180])
     def test_forecast_target_is_one_step_ahead(self, step_size):
-        """The forecast timestamp must equal the last stored timestamp + step_size seconds."""
-        from dynamo.planner.utils.load_predictor import ProphetPredictor
+        """predict_next() must pass start_date + curr_step * step_size to Prophet.predict().
 
+        This test patches Prophet.predict() to intercept the actual future_df argument,
+        so it will fail if the * self.step_size multiplier is missing in predict_next().
+        """
         cfg = _make_config(step_size=step_size)
         predictor = ProphetPredictor(cfg)
 
         n_points = 6  # > minimum_data_points (5)
-        stored_timestamps = self._collect_stored_timestamps(predictor, n_points)
+        self._collect_stored_timestamps(predictor, n_points)
 
-        assert len(stored_timestamps) == n_points, (
-            f"Expected {n_points} stored points, got {len(stored_timestamps)}"
-        )
-
-        # The last stored timestamp corresponds to step index (n_points - 1).
-        # After all add_data_point() calls, curr_step == n_points.
-        # The forecast target should be start_date + n_points * step_size.
+        # After n_points add_data_point() calls, curr_step == n_points.
+        # The forecast target should be start_date + curr_step * step_size.
         expected_next_ts = predictor.start_date + timedelta(
             seconds=predictor.curr_step * step_size
         )
-        last_stored_ts = stored_timestamps[-1]
-        expected_step_delta = timedelta(seconds=step_size)
 
-        # The gap between consecutive stored timestamps must equal step_size.
-        if len(stored_timestamps) >= 2:
-            actual_delta = stored_timestamps[-1] - stored_timestamps[-2]
-            assert actual_delta == expected_step_delta, (
-                f"step_size={step_size}: consecutive timestamp delta "
-                f"{actual_delta.total_seconds()}s != expected {step_size}s"
-            )
+        with patch("dynamo.planner.utils.load_predictor.Prophet") as MockProphet:
+            mock_model = MagicMock()
+            MockProphet.return_value = mock_model
+            mock_model.predict.return_value = pd.DataFrame({"yhat": [10.0]})
 
-        # The forecast target must be exactly one step_size ahead of the last stored point.
-        actual_gap = expected_next_ts - last_stored_ts
-        assert actual_gap == expected_step_delta, (
-            f"step_size={step_size}: forecast target is {actual_gap.total_seconds()}s "
-            f"ahead of last stored timestamp, expected {step_size}s. "
-            "This indicates the * self.step_size multiplier is missing in predict_next()."
+            predictor.predict_next()
+
+            call_args = mock_model.predict.call_args
+            assert call_args is not None, "Prophet.predict() was never called"
+            future_df = call_args[0][0]
+
+        actual_ts = future_df["ds"].iloc[0]
+        assert actual_ts == expected_next_ts, (
+            f"step_size={step_size}: predict_next() passed {actual_ts} "
+            f"to Prophet.predict(), expected {expected_next_ts}. "
+            "The * self.step_size multiplier may be missing in predict_next()."
         )
 
     @pytest.mark.parametrize("step_size", [1, 180])
     def test_forecast_target_not_in_the_past(self, step_size):
         """The forecast timestamp must be strictly after all stored timestamps."""
-        from dynamo.planner.utils.load_predictor import ProphetPredictor
-
         cfg = _make_config(step_size=step_size)
         predictor = ProphetPredictor(cfg)
 
@@ -109,8 +107,6 @@ class TestProphetPredictorTimestampAlignment:
         self._collect_stored_timestamps(predictor, n_points)
 
         # Replicate exactly what predict_next() computes for the next_timestamp.
-        from datetime import timedelta
-
         next_timestamp = predictor.start_date + timedelta(
             seconds=predictor.curr_step * predictor.step_size
         )
@@ -124,8 +120,6 @@ class TestProphetPredictorTimestampAlignment:
 
     def test_predict_next_returns_nonnegative(self):
         """End-to-end: predict_next() should return a non-negative value."""
-        from dynamo.planner.utils.load_predictor import ProphetPredictor
-
         cfg = _make_config(step_size=180)
         predictor = ProphetPredictor(cfg)
 
@@ -138,8 +132,6 @@ class TestProphetPredictorTimestampAlignment:
 
     def test_predict_next_returns_last_value_below_minimum_data_points(self):
         """With fewer than minimum_data_points, predict_next() falls back to last value."""
-        from dynamo.planner.utils.load_predictor import ProphetPredictor
-
         cfg = _make_config(step_size=180)
         predictor = ProphetPredictor(cfg)
 
