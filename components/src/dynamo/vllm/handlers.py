@@ -13,7 +13,16 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    Final,
+    Generic,
+    Optional,
+    TypeVar,
+)
 
 import torch
 from vllm.config import VllmConfig
