@@ -45,6 +45,9 @@ except ImportError as e:
 
 IMAGE_URL_KEY = "image_url"
 
+# Deliberate mypy error to test CI scoped mypy coverage — revert after verification
+_MYPY_TEST: int = "this is not an int"
+
 
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
