@@ -17,9 +17,9 @@ use crate::replay::ReplayRouterMode;
 use crate::replay::router::ReplayRouter;
 
 use super::live_runtime::{
-    pop_ready_trace_requests, simulate_concurrency_requests_with_stats,
-    simulate_concurrency_workload_with_stats, simulate_trace_requests,
-    simulate_trace_requests_with_stats, simulate_trace_workload_with_stats,
+    simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
+    simulate_trace_requests, simulate_trace_requests_with_stats,
+    simulate_trace_workload_with_stats,
 };
 use super::state::{LiveReplayMode, SharedLiveRuntimeStats, WorkloadDispatchState, record_arrival};
 use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
@@ -149,33 +149,6 @@ async fn test_record_arrival_uses_caller_arrival_timestamp() {
     assert_eq!(recorded_uuid, uuid);
     assert_eq!(arrival.uuid, uuid);
     assert_eq!(arrival.at_ms, arrival_at_ms);
-}
-
-#[test]
-fn test_pop_ready_trace_requests_drains_all_ready_arrivals() {
-    let mut pending = VecDeque::from(vec![
-        request(1, 11, Some(0.0)),
-        request(2, 22, Some(0.0)),
-        request(3, 33, Some(0.1)),
-        request(4, 44, Some(0.2)),
-    ]);
-
-    let ready = pop_ready_trace_requests(&mut pending, 0.1);
-
-    assert_eq!(
-        ready
-            .iter()
-            .map(|request| request.uuid.unwrap())
-            .collect::<Vec<_>>(),
-        vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3),]
-    );
-    assert_eq!(
-        pending
-            .iter()
-            .map(|request| request.uuid.unwrap())
-            .collect::<Vec<_>>(),
-        vec![Uuid::from_u128(4)]
-    );
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use dashmap::DashMap;
 use dynamo_kv_router::config::KvRouterConfig;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -23,67 +23,7 @@ use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,
     record_arrival,
 };
-use super::task::{
-    RequestTaskContext, commit_request_dispatch, prepare_request_dispatch, run_request_task,
-    wait_for_request_completion, wait_for_workload_progress,
-};
-
-struct PendingDispatch {
-    request: DirectRequest,
-    arrival_at_ms: f64,
-    permit: Option<OwnedSemaphorePermit>,
-}
-
-pub(super) fn pop_ready_trace_requests(
-    pending: &mut VecDeque<DirectRequest>,
-    now_ms: f64,
-) -> Vec<DirectRequest> {
-    let mut ready = Vec::new();
-    while pending
-        .front()
-        .and_then(|request| request.arrival_timestamp_ms)
-        .is_some_and(|arrival_ms| arrival_ms <= now_ms)
-    {
-        ready.push(
-            pending
-                .pop_front()
-                .expect("front request must exist while draining ready arrivals"),
-        );
-    }
-    ready
-}
-
-async fn dispatch_batch(
-    arrival_tx: &mpsc::UnboundedSender<super::state::ArrivalEvent>,
-    tasks: &mut JoinSet<Result<()>>,
-    task_ctx: &RequestTaskContext,
-    batch: Vec<PendingDispatch>,
-) -> Result<()> {
-    if batch.is_empty() {
-        return Ok(());
-    }
-
-    for pending in &batch {
-        record_arrival(arrival_tx, &pending.request, pending.arrival_at_ms)?;
-    }
-
-    let mut prepared = Vec::with_capacity(batch.len());
-    for pending in batch {
-        let prepared_request = prepare_request_dispatch(task_ctx, pending.request).await?;
-        prepared.push((prepared_request, pending.permit));
-    }
-
-    for (prepared_request, permit) in prepared {
-        let dispatched = commit_request_dispatch(task_ctx, prepared_request)?;
-        tasks.spawn(wait_for_request_completion(
-            task_ctx.clone(),
-            dispatched,
-            permit,
-        ));
-    }
-
-    Ok(())
-}
+use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
 
 struct LiveRuntime {
     pending: VecDeque<DirectRequest>,
@@ -182,26 +122,13 @@ impl LiveRuntime {
 
         match self.mode {
             LiveReplayMode::Trace => {
-                while !self.pending.is_empty() {
-                    let arrival_ms = self
-                        .pending
-                        .front()
-                        .and_then(|request| request.arrival_timestamp_ms)
-                        .ok_or_else(|| {
-                            anyhow!("online trace replay request missing arrival timestamp")
-                        })?;
+                while let Some(request) = self.pending.pop_front() {
+                    let arrival_ms = request.arrival_timestamp_ms.unwrap_or(0.0);
                     let deadline =
                         start + tokio::time::Duration::from_secs_f64(arrival_ms / 1000.0);
                     tokio::time::sleep_until(deadline).await;
-                    let batch = pop_ready_trace_requests(&mut self.pending, now_ms(start))
-                        .into_iter()
-                        .map(|request| PendingDispatch {
-                            arrival_at_ms: request.arrival_timestamp_ms.unwrap_or(0.0),
-                            request,
-                            permit: None,
-                        })
-                        .collect();
-                    dispatch_batch(&arrival_tx, &mut tasks, &task_ctx, batch).await?;
+                    record_arrival(&arrival_tx, &request, arrival_ms)?;
+                    tasks.spawn(run_request_task(task_ctx.clone(), request, None));
                 }
             }
             LiveReplayMode::Concurrency { max_in_flight } => {
@@ -295,19 +222,6 @@ impl LiveRuntime {
                     .unwrap()
                     .pop_ready(now, dispatch_limit);
                 if !ready_turns.is_empty() {
-                    if matches!(self.mode, LiveReplayMode::Trace) {
-                        let batch = ready_turns
-                            .into_iter()
-                            .map(|ready_turn| PendingDispatch {
-                                arrival_at_ms: ready_turn.scheduled_ready_at_ms,
-                                request: ready_turn.request,
-                                permit: None,
-                            })
-                            .collect();
-                        dispatch_batch(&arrival_tx, &mut tasks, &task_ctx, batch).await?;
-                        continue;
-                    }
-
                     for ready_turn in ready_turns {
                         let permit = match &semaphore {
                             Some(semaphore) => {

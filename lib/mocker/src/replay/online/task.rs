@@ -8,7 +8,6 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
-use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::replay::router::ReplayRouter;
@@ -25,18 +24,6 @@ pub(super) struct RequestTaskContext {
     pub(super) requests: RequestRegistry,
     pub(super) stats: Arc<SharedLiveRuntimeStats>,
     pub(super) workload: Option<Arc<WorkloadDispatchState>>,
-}
-
-pub(super) struct PreparedRequestDispatch {
-    request: DirectRequest,
-    uuid: Uuid,
-    worker_idx: usize,
-    state: Arc<RequestState>,
-}
-
-pub(super) struct DispatchedRequest {
-    uuid: Uuid,
-    state: Arc<RequestState>,
 }
 
 pub(super) async fn wait_for_workload_progress<F>(
@@ -84,16 +71,8 @@ pub(super) async fn run_request_task(
     request: DirectRequest,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Result<()> {
-    let prepared = prepare_request_dispatch(&ctx, request).await?;
-    let dispatched = commit_request_dispatch(&ctx, prepared)?;
-    wait_for_request_completion(ctx, dispatched, permit).await
-}
-
-pub(super) async fn prepare_request_dispatch(
-    ctx: &RequestTaskContext,
-    request: DirectRequest,
-) -> Result<PreparedRequestDispatch> {
     let uuid = request_uuid(&request)?;
+
     let worker_idx = ctx
         .router
         .select_worker(&request, ctx.senders.len())
@@ -102,51 +81,26 @@ pub(super) async fn prepare_request_dispatch(
         bail!("online replay selected unknown worker index {worker_idx}");
     }
 
-    Ok(PreparedRequestDispatch {
-        request,
-        uuid,
-        worker_idx,
-        state: Arc::new(RequestState::default()),
-    })
-}
-
-pub(super) fn commit_request_dispatch(
-    ctx: &RequestTaskContext,
-    prepared: PreparedRequestDispatch,
-) -> Result<DispatchedRequest> {
-    ctx.requests
-        .insert(prepared.uuid, Arc::clone(&prepared.state));
-    if let Err(error) = ctx.senders[prepared.worker_idx].send(prepared.request) {
-        ctx.requests.remove(&prepared.uuid);
+    let state = Arc::new(RequestState::default());
+    ctx.requests.insert(uuid, Arc::clone(&state));
+    if let Err(error) = ctx.senders[worker_idx].send(request) {
+        ctx.requests.remove(&uuid);
         return Err(anyhow!(
-            "online replay failed to dispatch request to worker {}: {}",
-            prepared.worker_idx,
-            error
+            "online replay failed to dispatch request to worker {worker_idx}: {error}"
         ));
     }
 
-    ctx.stats.record_dispatch(prepared.worker_idx);
-    Ok(DispatchedRequest {
-        uuid: prepared.uuid,
-        state: prepared.state,
-    })
-}
-
-pub(super) async fn wait_for_request_completion(
-    ctx: RequestTaskContext,
-    dispatched: DispatchedRequest,
-    permit: Option<OwnedSemaphorePermit>,
-) -> Result<()> {
-    dispatched.state.wait_for_completion().await;
+    ctx.stats.record_dispatch(worker_idx);
+    state.wait_for_completion().await;
     ctx.stats.record_completion();
-    ctx.requests.remove(&dispatched.uuid);
+    ctx.requests.remove(&uuid);
     if let Some(workload) = ctx.workload.as_ref() {
         let completion_ms = now_ms(workload.start);
         workload
             .driver
             .lock()
             .unwrap()
-            .on_complete(dispatched.uuid, completion_ms)?;
+            .on_complete(uuid, completion_ms)?;
         workload.wakeup.notify_waiters();
     }
     drop(permit);
