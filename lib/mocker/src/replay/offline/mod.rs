@@ -10,6 +10,7 @@ use dynamo_kv_router::config::KvRouterConfig;
 pub(crate) mod core;
 pub(crate) mod events;
 pub(crate) mod multi;
+pub(crate) mod runtime_utils;
 pub(crate) mod single;
 pub(crate) mod state;
 
