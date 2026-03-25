@@ -198,9 +198,9 @@ impl DisaggRuntime {
             .sum::<usize>()
             + self
                 .decode_workers
-            .iter()
-            .map(OfflineWorkerState::in_flight)
-            .sum::<usize>()
+                .iter()
+                .map(OfflineWorkerState::in_flight)
+                .sum::<usize>()
             + self
                 .prefill_router
                 .as_ref()
@@ -213,7 +213,8 @@ impl DisaggRuntime {
 
     fn next_prefill_worker(&mut self) -> usize {
         let worker_idx = self.next_prefill_worker_idx;
-        self.next_prefill_worker_idx = (self.next_prefill_worker_idx + 1) % self.prefill_workers.len();
+        self.next_prefill_worker_idx =
+            (self.next_prefill_worker_idx + 1) % self.prefill_workers.len();
         worker_idx
     }
 
@@ -226,22 +227,16 @@ impl DisaggRuntime {
     fn record_router_pending(&mut self) {
         #[cfg(test)]
         {
-            self.stats.max_prefill_router_pending = self
-                .stats
-                .max_prefill_router_pending
-                .max(
-                    self.prefill_router
-                        .as_ref()
-                        .map_or(0, OfflineReplayRouter::pending_count),
-                );
-            self.stats.max_decode_router_pending = self
-                .stats
-                .max_decode_router_pending
-                .max(
-                    self.decode_router
-                        .as_ref()
-                        .map_or(0, OfflineReplayRouter::pending_count),
-                );
+            self.stats.max_prefill_router_pending = self.stats.max_prefill_router_pending.max(
+                self.prefill_router
+                    .as_ref()
+                    .map_or(0, OfflineReplayRouter::pending_count),
+            );
+            self.stats.max_decode_router_pending = self.stats.max_decode_router_pending.max(
+                self.decode_router
+                    .as_ref()
+                    .map_or(0, OfflineReplayRouter::pending_count),
+            );
         }
     }
 
@@ -342,11 +337,9 @@ impl DisaggRuntime {
         };
         let maybe_worker_idx = {
             let requests = &self.requests;
-            let request = Self::original_request(
-                requests.get(&uuid).ok_or_else(|| {
-                    anyhow!("offline disagg replay missing request state for {uuid}")
-                })?,
-            )?;
+            let request = Self::original_request(requests.get(&uuid).ok_or_else(|| {
+                anyhow!("offline disagg replay missing request state for {uuid}")
+            })?)?;
             decode_router.submit_request_with_hashes(request, None, self.now_ms)?
         };
         self.record_router_pending();
@@ -396,11 +389,9 @@ impl DisaggRuntime {
         };
         let maybe_worker_idx = {
             let requests = &self.requests;
-            let request = Self::original_request(
-                requests.get(&uuid).ok_or_else(|| {
-                    anyhow!("offline disagg replay missing request state for {uuid}")
-                })?,
-            )?;
+            let request = Self::original_request(requests.get(&uuid).ok_or_else(|| {
+                anyhow!("offline disagg replay missing request state for {uuid}")
+            })?)?;
             prefill_router.submit_request_with_hashes(request, replay_hashes, self.now_ms)?
         };
         self.record_router_pending();
@@ -844,9 +835,14 @@ pub(crate) fn simulate_trace_disagg(
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let (collector, _) =
-        DisaggRuntime::new(&config, router_config, pending, ReplayMode::Trace, router_mode)?
-            .run()?;
+    let (collector, _) = DisaggRuntime::new(
+        &config,
+        router_config,
+        pending,
+        ReplayMode::Trace,
+        router_mode,
+    )?
+    .run()?;
     Ok(collector.finish())
 }
 
@@ -915,10 +911,16 @@ fn run_trace_collect(
     router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio).unwrap();
-    DisaggRuntime::new(config, router_config, pending, ReplayMode::Trace, router_mode)
-        .unwrap()
-        .run()
-        .unwrap()
+    DisaggRuntime::new(
+        config,
+        router_config,
+        pending,
+        ReplayMode::Trace,
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -1019,13 +1021,8 @@ mod tests {
         let requests = vec![request(1, 128, 3, 5.0)];
 
         let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
-        let (collector, stats) = run_trace_collect(
-            &config,
-            requests,
-            router_config,
-            1.0,
-            router_mode,
-        );
+        let (collector, stats) =
+            run_trace_collect(&config, requests, router_config, 1.0, router_mode);
         let snapshot = collector.snapshot(Uuid::from_u128(1)).unwrap();
         let report = collector.finish();
 
@@ -1048,13 +1045,7 @@ mod tests {
         let requests = vec![request(1, 128, 2, 0.0), request(2, 128, 2, 10.0)];
 
         let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
-        let (_, stats) = run_trace_collect(
-            &config,
-            requests,
-            router_config,
-            1.0,
-            router_mode,
-        );
+        let (_, stats) = run_trace_collect(&config, requests, router_config, 1.0, router_mode);
 
         for uuid in [Uuid::from_u128(1), Uuid::from_u128(2)] {
             assert!(stats.prefill_assignments.contains_key(&uuid));
@@ -1106,13 +1097,8 @@ mod tests {
         ];
 
         let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
-        let (collector, _) = run_concurrency_collect(
-            &config,
-            requests,
-            router_config,
-            1,
-            router_mode,
-        );
+        let (collector, _) =
+            run_concurrency_collect(&config, requests, router_config, 1, router_mode);
         let first = collector.snapshot(Uuid::from_u128(1)).unwrap();
         let second = collector.snapshot(Uuid::from_u128(2)).unwrap();
 

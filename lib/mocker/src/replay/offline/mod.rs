@@ -119,13 +119,7 @@ pub(crate) fn simulate_concurrency_disagg(
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
 ) -> anyhow::Result<TraceSimulationReport> {
-    disagg::simulate_concurrency_disagg(
-        config,
-        router_config,
-        requests,
-        max_in_flight,
-        router_mode,
-    )
+    disagg::simulate_concurrency_disagg(config, router_config, requests, max_in_flight, router_mode)
 }
 
 pub(crate) fn simulate_trace_workload_disagg(
