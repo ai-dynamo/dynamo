@@ -8,24 +8,24 @@ use std::sync::Arc;
 
 use dynamo_runtime::{discovery::DiscoveryQuery, pipeline::PushRouter, stream::StreamExt};
 
-pub const CLEAR_KV_ENDPOINT: &str = "clear_kv_blocks";
+pub const RESET_PREFIX_CACHE_ENDPOINT: &str = "reset_prefix_cache";
 
-pub fn clear_kv_blocks_router(
+pub fn reset_prefix_cache_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or_else(|| "/clear_kv_blocks".to_string());
+    let path = path.unwrap_or_else(|| "/reset_prefix_cache".to_string());
 
     let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::POST, &path)];
 
     let router = Router::new()
-        .route(&path, post(clear_kv_blocks_handler))
+        .route(&path, post(reset_prefix_cache_handler))
         .with_state(state);
 
     (docs, router)
 }
 
-async fn clear_kv_blocks_handler(
+async fn reset_prefix_cache_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
     let model_entries = state.manager().get_model_entries();
@@ -58,7 +58,7 @@ async fn clear_kv_blocks_handler(
                                  message: Option<String>| {
         let mut result = json!({
             "name": name,
-            "endpoint": format!("{}/{}/{}", ns, comp, CLEAR_KV_ENDPOINT),
+            "endpoint": format!("{}/{}/{}", ns, comp, RESET_PREFIX_CACHE_ENDPOINT),
             "status": status,
         });
         if success {
@@ -113,7 +113,7 @@ async fn clear_kv_blocks_handler(
         };
 
         let endpoint: dynamo_runtime::component::Endpoint =
-            component_obj.endpoint(CLEAR_KV_ENDPOINT);
+            component_obj.endpoint(RESET_PREFIX_CACHE_ENDPOINT);
 
         let client = match endpoint.client().await {
             Ok(c) => c,
@@ -154,7 +154,7 @@ async fn clear_kv_blocks_handler(
         let discovery_key = DiscoveryQuery::Endpoint {
             namespace: namespace.clone(),
             component: component.clone(),
-            endpoint: CLEAR_KV_ENDPOINT.to_string(),
+            endpoint: RESET_PREFIX_CACHE_ENDPOINT.to_string(),
         };
 
         let discovery_instances = match discovery_client.list(discovery_key).await {
@@ -176,7 +176,7 @@ async fn clear_kv_blocks_handler(
             add_worker_result(
                 false,
                 entry_name,
-                "No instances found for clear_kv_blocks endpoint",
+                "No instances found for reset_prefix_cache endpoint",
                 namespace,
                 component,
                 None,
@@ -200,7 +200,7 @@ async fn clear_kv_blocks_handler(
                         add_worker_result(
                             true,
                             instance_name,
-                            "Successfully cleared kv blocks for instance",
+                            "Successfully reset prefix cache for instance",
                             namespace,
                             component,
                             Some(response.to_string()),

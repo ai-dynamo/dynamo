@@ -22,11 +22,13 @@ mod anthropic;
 mod openai;
 
 pub mod busy_threshold;
+pub mod clear_kv_blocks;
 pub mod disconnect;
 pub mod error;
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
+pub mod reset_prefix_cache;
 pub mod service_v2;
 
 pub use axum;
