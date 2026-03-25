@@ -50,7 +50,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.17.1",
+    "vllm[flashinfer,runai,otel]==0.18.0",
     # vllm-omni 0.16.0 is now on PyPI; install only future rc builds from source in container builds
     # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
     # not include vllm-omni — install it separately from source if needed.
@@ -254,6 +254,8 @@ markers = [
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
     "deploy: marks tests as deployment tests",
+    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
+    "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     # Built-in markers
     "skip: skip this test",
     "skipif: skip if condition is true",
@@ -402,6 +404,8 @@ module = [
     "gradio.*",
     "kubernetes_asyncio",
     "kubernetes_asyncio.*",
+    "ray",
+    "ray.*",
     "pydantic_core",
     "aiconfigurator",
     "aiconfigurator.*",

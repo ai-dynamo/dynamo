@@ -9,7 +9,9 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+use crate::protocols::{
+    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 
 const fn default_min_initial_workers() -> usize {
     1
@@ -217,7 +219,8 @@ impl KvRouterConfig {
         tokens: &[u32],
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
-        lora_name: Option<&str>,
+        hash_options: BlockHashOptions<'_>,
+        precomputed_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -233,8 +236,14 @@ impl KvRouterConfig {
             .unwrap_or(self.router_assume_kv_reuse);
 
         if assume_kv_reuse {
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
-            Some(compute_seq_hash_for_block(&block_hashes))
+            let block_hashes = match precomputed_block_hashes {
+                Some(block_hashes) => block_hashes,
+                None => {
+                    let computed = compute_block_hash_for_seq(tokens, block_size, hash_options);
+                    return Some(compute_seq_hash_for_block(&computed));
+                }
+            };
+            Some(compute_seq_hash_for_block(block_hashes))
         } else {
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
@@ -257,6 +266,7 @@ impl KvRouterConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 
     #[test]
     fn router_queue_policy_display_and_parse_support_lcfs() {
@@ -287,5 +297,55 @@ mod tests {
             ..KvRouterConfig::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
+        let cfg = KvRouterConfig::default();
+        let tokens = vec![1, 2, 3, 4];
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![],
+                }],
+            }),
+            None,
+        ];
+
+        let without_mm = cfg
+            .compute_seq_hashes_for_tracking(&tokens, 2, None, BlockHashOptions::default(), None)
+            .unwrap();
+        let with_mm = cfg
+            .compute_seq_hashes_for_tracking(
+                &tokens,
+                2,
+                None,
+                BlockHashOptions {
+                    block_mm_infos: Some(&mm_infos),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_ne!(without_mm, with_mm);
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_uses_precomputed_block_hashes() {
+        let config = KvRouterConfig::default();
+        let tokens: Vec<u32> = (0..8).collect();
+        let precomputed = vec![LocalBlockHash(11), LocalBlockHash(29)];
+
+        let seq_hashes = config.compute_seq_hashes_for_tracking(
+            &tokens,
+            4,
+            None,
+            BlockHashOptions::default(),
+            Some(&precomputed),
+        );
+
+        assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
     }
 }

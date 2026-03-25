@@ -181,11 +181,15 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
-            help="How to route the request.",
+            help="How to route the request. power-of-two picks 2 random workers and "
+            "routes to the one with fewer in-flight requests. In disaggregated prefill "
+            "mode, power-of-two skips bootstrap optimization and falls back to the "
+            "synchronous prefill path.",
             choices=[
                 "round-robin",
                 "device-aware-weighted",
                 "random",
+                "power-of-two",
                 "kv",
                 "direct",
             ],

@@ -647,6 +647,7 @@ class DisaggMockerProcess:
         pytest.param("kv", True, id="kv-durable"),
         pytest.param("round-robin", False, id="roundrobin"),
         pytest.param("random", False, id="random"),
+        pytest.param("power-of-two", False, id="power-of-two"),
     ],
     indirect=["durable_kv_events"],
 )
@@ -762,7 +763,6 @@ def test_mocker_two_kv_router(
         )
 
 
-@pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
