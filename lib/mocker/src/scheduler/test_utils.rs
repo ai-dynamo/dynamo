@@ -254,7 +254,7 @@ pub(crate) async fn assert_scheduler_completes_all(
     let expected_tokens = num_requests * max_output_tokens;
     let mut received_tokens = 0;
 
-    let timeout = tokio::time::sleep(Duration::from_secs(2));
+    let timeout = tokio::time::sleep(Duration::from_millis(200));
     tokio::pin!(timeout);
 
     loop {
@@ -265,7 +265,7 @@ pub(crate) async fn assert_scheduler_completes_all(
                 if received_tokens >= expected_tokens {
                     break;
                 }
-                timeout.set(tokio::time::sleep(Duration::from_secs(2)));
+                timeout.set(tokio::time::sleep(Duration::from_millis(200)));
             }
             _ = &mut timeout => break,
         }
@@ -276,7 +276,6 @@ pub(crate) async fn assert_scheduler_completes_all(
         "Expected {expected_tokens} output signals, got {received_tokens}"
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let metrics = scheduler.metrics_receiver().borrow().clone();
     assert_eq!(
         metrics.active_decode_blocks, 0,

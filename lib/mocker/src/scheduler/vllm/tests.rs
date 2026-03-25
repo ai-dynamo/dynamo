@@ -477,7 +477,7 @@ mod live_scheduler {
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(500)
             .block_size(64)
-            .speedup_ratio(10.0)
+            .speedup_ratio(1000.0)
             .enable_prefix_caching(enable_prefix_caching)
             .enable_chunked_prefill(enable_chunked_prefill)
             .build()

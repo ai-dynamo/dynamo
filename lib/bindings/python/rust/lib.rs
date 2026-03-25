@@ -46,6 +46,7 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 pub enum RouterMode {
     RoundRobin,
     Random,
+    PowerOfTwoChoices,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
@@ -57,6 +58,7 @@ impl From<RouterMode> for RsRouterMode {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
+            RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
         }

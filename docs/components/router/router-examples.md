@@ -19,9 +19,10 @@ The `KvRouter` provides the following methods:
 
 - **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
 
-- **`best_worker(token_ids, router_config_override=None, request_id=None)`**: Query which worker would be selected for given tokens. Returns `(worker_id, dp_rank, overlap_blocks)`.
+- **`best_worker(token_ids, router_config_override=None, request_id=None, update_indexer=False)`**: Query which worker would be selected for given tokens. Returns `(worker_id, dp_rank, overlap_blocks)`.
   - Without `request_id`: Query-only, doesn't update router state
-  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+  - With `request_id`: Updates router lifecycle state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+  - With `update_indexer=True`: Records the selected worker in the approximate indexer for future overlap predictions. This is only meaningful when `use_kv_events=False`
 
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
@@ -165,7 +166,11 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 ### 2. Manual State Management (Advanced)
 Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, _dp_rank, overlap = await router.best_worker(tokens, request_id="req-123")
+worker_id, _dp_rank, overlap = await router.best_worker(
+    tokens,
+    request_id="req-123",
+    update_indexer=True,  # needed for approximate mode (use_kv_events=False)
+)
 response = await client.generate(tokens, request_id="req-123")
 # await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
@@ -175,6 +180,7 @@ await router.free("req-123")  # After completion
 ```
 - **Best for**: Custom request handling with router state tracking
 - **Requires**: Calling `mark_prefill_complete()` and `free()` at correct lifecycle points
+- **Approximate mode**: Pass `update_indexer=True` when `use_kv_events=False` so the router learns from manual worker selections
 - **Caution**: Incorrect lifecycle management degrades load balancing accuracy
 
 ### 3. Hierarchical Router Probing

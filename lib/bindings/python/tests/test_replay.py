@@ -2,16 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.main import main
+from dynamo.replay.reporting import format_report_table, write_report_json
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
+    pytest.mark.unit,
 ]
 
 MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]}
@@ -37,6 +43,50 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 """
 
 
+def _vllm_args_payload():
+    return {
+        "block_size": 64,
+        "speedup_ratio": 1000.0,
+    }
+
+
+def _sglang_args_payload():
+    return {
+        "engine_type": "sglang",
+        "num_gpu_blocks": 512,
+        "block_size": 64,
+        "speedup_ratio": 1000.0,
+        "sglang": {
+            "page_size": 64,
+        },
+    }
+
+
+def _router_config_payload():
+    return {
+        "router_queue_threshold": 1.25,
+        "router_event_threads": 1,
+        "router_queue_policy": "wspt",
+        "router_temperature": 0.0,
+        "overlap_score_weight": 1.0,
+        "use_kv_events": True,
+        "durable_kv_events": False,
+        "router_replica_sync": False,
+        "router_track_active_blocks": True,
+        "router_track_output_blocks": False,
+        "router_assume_kv_reuse": True,
+        "router_snapshot_threshold": 1000000,
+        "router_reset_states": False,
+        "router_ttl_secs": 120.0,
+        "router_max_tree_size": 1048576,
+        "router_prune_target_ratio": 0.8,
+        "router_enable_cache_control": False,
+        "skip_initial_worker_wait": False,
+        "min_initial_workers": 1,
+        "remote_indexer_component": None,
+    }
+
+
 def _write_trace_and_args(tmp_path):
     trace_path = tmp_path / "trace.jsonl"
     records = [
@@ -60,125 +110,101 @@ def _write_trace_and_args(tmp_path):
     return trace_path
 
 
+def _write_multiturn_trace(tmp_path):
+    trace_path = tmp_path / "multiturn_trace.jsonl"
+    records = [
+        {
+            "session_id": "session-a",
+            "timestamp": 1000.0,
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [101],
+        },
+        {
+            "session_id": "session-b",
+            "timestamp": 1002.0,
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [202],
+        },
+        {
+            "session_id": "session-a",
+            "delay": 5.0,
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [303],
+        },
+        {
+            "session_id": "session-b",
+            "delay": 1.0,
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [404],
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return trace_path
+
+
+def _write_cli_smoke_trace(tmp_path):
+    trace_path = tmp_path / "cli_smoke_trace.jsonl"
+    records = []
+    for index in range(10):
+        records.append(
+            {
+                "timestamp": 1000.0 + index,
+                "input_length": 250,
+                "output_length": 25,
+                "hash_ids": [index, index + 1, index + 2, index + 3],
+            }
+        )
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return trace_path
+
+
 def _write_vllm_args(tmp_path):
     args_path = tmp_path / "args.json"
     args_path.write_text(
-        json.dumps(
-            {
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-            }
-        ),
+        json.dumps(_vllm_args_payload()),
         encoding="utf-8",
     )
     return args_path
 
 
 def _vllm_args():
-    return MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-            }
-        )
-    )
+    return MockEngineArgs.from_json(json.dumps(_vllm_args_payload()))
 
 
 def _write_sglang_args(tmp_path):
     args_path = tmp_path / "sglang_args.json"
     args_path.write_text(
-        json.dumps(
-            {
-                "engine_type": "sglang",
-                "num_gpu_blocks": 512,
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-                "sglang": {
-                    "page_size": 64,
-                },
-            }
-        ),
+        json.dumps(_sglang_args_payload()),
         encoding="utf-8",
     )
     return args_path
 
 
 def _sglang_args():
-    return MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "engine_type": "sglang",
-                "num_gpu_blocks": 512,
-                "block_size": 64,
-                "speedup_ratio": 1000.0,
-                "sglang": {
-                    "page_size": 64,
-                },
-            }
-        )
-    )
+    return MockEngineArgs.from_json(json.dumps(_sglang_args_payload()))
 
 
 def _write_router_config(tmp_path):
     config_path = tmp_path / "router_config.json"
     config_path.write_text(
-        json.dumps(
-            {
-                "router_queue_threshold": 1.25,
-                "router_event_threads": 1,
-                "router_queue_policy": "wspt",
-                "router_temperature": 0.0,
-                "overlap_score_weight": 1.0,
-                "use_kv_events": True,
-                "durable_kv_events": False,
-                "router_replica_sync": False,
-                "router_track_active_blocks": True,
-                "router_track_output_blocks": False,
-                "router_assume_kv_reuse": True,
-                "router_snapshot_threshold": 1000000,
-                "router_reset_states": False,
-                "router_ttl_secs": 120.0,
-                "router_max_tree_size": 1048576,
-                "router_prune_target_ratio": 0.8,
-                "router_enable_cache_control": False,
-                "skip_initial_worker_wait": False,
-                "min_initial_workers": 1,
-                "remote_indexer_component": None,
-            }
-        ),
+        json.dumps(_router_config_payload()),
         encoding="utf-8",
     )
     return config_path
 
 
 def _router_config():
-    return KvRouterConfig.from_json(
-        json.dumps(
-            {
-                "router_queue_threshold": 1.25,
-                "router_event_threads": 1,
-                "router_queue_policy": "wspt",
-                "router_temperature": 0.0,
-                "overlap_score_weight": 1.0,
-                "use_kv_events": True,
-                "durable_kv_events": False,
-                "router_replica_sync": False,
-                "router_track_active_blocks": True,
-                "router_track_output_blocks": False,
-                "router_assume_kv_reuse": True,
-                "router_snapshot_threshold": 1000000,
-                "router_reset_states": False,
-                "router_ttl_secs": 120.0,
-                "router_max_tree_size": 1048576,
-                "router_prune_target_ratio": 0.8,
-                "router_enable_cache_control": False,
-                "skip_initial_worker_wait": False,
-                "min_initial_workers": 1,
-                "remote_indexer_component": None,
-            }
-        )
-    )
+    return KvRouterConfig.from_json(json.dumps(_router_config_payload()))
 
 
 def _partial_router_config():
@@ -194,6 +220,45 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
     assert report["completed_requests"] == num_requests
     assert report["total_input_tokens"] == num_requests * input_tokens
     assert report["total_output_tokens"] == num_requests * output_tokens
+
+
+def _assert_basic_report_metrics(report):
+    assert report["request_throughput_rps"] > 0
+    assert report["output_throughput_tok_s"] > 0
+    assert report["duration_ms"] > 0
+
+
+def _replay_cli_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pythonpath_entries = ["lib/bindings/python/src", "components/src"]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = ":".join(pythonpath_entries)
+    return env
+
+
+def _run_replay_cli(tmp_path, *args):
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.replay",
+            *args,
+        ],
+        capture_output=True,
+        check=True,
+        cwd=str(tmp_path),
+        env=_replay_cli_env(),
+        text=True,
+    )
+
+
+def _assert_replay_cli_outputs(completed, report_path):
+    assert "NVIDIA AIPerf | LLM Metrics" in completed.stdout
+    assert "Saved full report to:" in completed.stdout
+    assert '"completed_requests"' not in completed.stdout
+    return json.loads(report_path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -255,6 +320,26 @@ def test_run_trace_replay_invariant_counts_match(tmp_path, engine_type, replay_m
     ):
         assert single[field] == multi_round_robin[field]
         assert single[field] == multi_kv_router[field]
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
+    trace_path = _write_multiturn_trace(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode=replay_mode,
+        router_mode="kv_router",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=4,
+        input_tokens=64,
+        output_tokens=2,
+    )
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -330,6 +415,53 @@ def test_run_synthetic_trace_replay_invariant_counts_match(
     ):
         assert single[field] == multi_round_robin[field]
         assert single[field] == multi_kv_router[field]
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, replay_mode):
+    report = run_synthetic_trace_replay(
+        64,
+        2,
+        3,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode=replay_mode,
+        router_mode="kv_router",
+        turns_per_session=2,
+        inter_turn_delay_ms=5.0,
+        shared_prefix_ratio=0.5,
+        num_prefix_groups=2,
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=6,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens", "expected_message"),
+    [
+        (0, 2, "input_tokens must be at least 1"),
+        (2, 0, "output_tokens must be at least 1"),
+    ],
+)
+def test_run_synthetic_trace_replay_workload_validates_zero_token_lengths(
+    input_tokens, output_tokens, expected_message
+):
+    with pytest.raises(Exception, match=expected_message):
+        run_synthetic_trace_replay(
+            input_tokens,
+            output_tokens,
+            2,
+            extra_engine_args=_vllm_args(),
+            num_workers=2,
+            replay_mode="offline",
+            router_mode="kv_router",
+            turns_per_session=2,
+        )
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -419,3 +551,278 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
         input_tokens=64,
         output_tokens=2,
     )
+
+
+def test_format_report_table_matches_aiperf_shape():
+    report = {
+        "mean_ttft_ms": 18.26,
+        "min_ttft_ms": 11.22,
+        "max_ttft_ms": 106.32,
+        "p99_ttft_ms": 68.82,
+        "p90_ttft_ms": 27.76,
+        "p75_ttft_ms": 16.62,
+        "std_ttft_ms": 12.07,
+        "mean_ttst_ms": 11.40,
+        "min_ttst_ms": 0.02,
+        "max_ttst_ms": 85.91,
+        "p99_ttst_ms": 34.54,
+        "p90_ttst_ms": 12.59,
+        "p75_ttst_ms": 11.65,
+        "std_ttst_ms": 7.01,
+        "mean_e2e_latency_ms": 487.30,
+        "min_e2e_latency_ms": 267.07,
+        "max_e2e_latency_ms": 769.57,
+        "p99_e2e_latency_ms": 715.99,
+        "p90_e2e_latency_ms": 580.83,
+        "p75_e2e_latency_ms": 536.17,
+        "std_e2e_latency_ms": 79.60,
+        "mean_itl_ms": 11.23,
+        "min_itl_ms": 8.80,
+        "max_itl_ms": 13.17,
+        "p99_itl_ms": 12.48,
+        "p90_itl_ms": 11.73,
+        "p75_itl_ms": 11.37,
+        "std_itl_ms": 0.45,
+        "mean_output_token_throughput_per_user": 89.23,
+        "min_output_token_throughput_per_user": 75.93,
+        "max_output_token_throughput_per_user": 113.60,
+        "p99_output_token_throughput_per_user": 102.28,
+        "p90_output_token_throughput_per_user": 90.91,
+        "p75_output_token_throughput_per_user": 90.29,
+        "std_output_token_throughput_per_user": 3.70,
+        "output_throughput_tok_s": 10944.03,
+        "request_throughput_rps": 255.54,
+        "completed_requests": 711,
+        "wall_time_ms": 4046.31,
+        "prefix_cache_reused_ratio": 0.3587,
+    }
+
+    rendered = format_report_table(report)
+
+    assert "NVIDIA AIPerf | LLM Metrics" in rendered
+    assert "Time to First Token (ms)" in rendered
+    assert "Output Token Throughput (tokens/sec)" in rendered
+    assert "Request Throughput (requests/sec)" in rendered
+    assert "Prefix Cache Reused Ratio: 0.36" in rendered
+    assert "10,944.03" in rendered
+    assert "255.54" in rendered
+    assert "N/A" in rendered
+
+
+def test_write_report_json_creates_file(tmp_path):
+    report_path = write_report_json({"completed_requests": 2}, tmp_path / "report.json")
+    assert (
+        report_path.read_text(encoding="utf-8") == '{\n  "completed_requests": 2\n}\n'
+    )
+
+
+def test_replay_cli_prints_table_and_saves_json(tmp_path, monkeypatch, capsys):
+    report = {
+        "mean_ttft_ms": 10.0,
+        "min_ttft_ms": 9.0,
+        "max_ttft_ms": 12.0,
+        "p99_ttft_ms": 12.0,
+        "p90_ttft_ms": 11.0,
+        "p75_ttft_ms": 10.5,
+        "std_ttft_ms": 1.0,
+        "output_throughput_tok_s": 123.0,
+        "request_throughput_rps": 4.0,
+        "completed_requests": 3,
+    }
+
+    def fake_run(*args, **kwargs):
+        return report
+
+    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
+    report_path = tmp_path / "cli_report.json"
+
+    exit_code = main(
+        [
+            "--input-tokens",
+            "16",
+            "--output-tokens",
+            "8",
+            "--request-count",
+            "3",
+            "--report-json",
+            str(report_path),
+        ]
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "NVIDIA AIPerf | LLM Metrics" in stdout
+    assert "Saved full report to:" in stdout
+    assert '"completed_requests"' not in stdout
+    assert json.loads(report_path.read_text(encoding="utf-8")) == report
+
+
+def test_replay_cli_passes_multiturn_workload_kwargs(monkeypatch):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {
+            "completed_requests": 4,
+            "request_throughput_rps": 1.0,
+            "output_throughput_tok_s": 1.0,
+        }
+
+    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
+
+    exit_code = main(
+        [
+            "--input-tokens",
+            "16",
+            "--output-tokens",
+            "8",
+            "--request-count",
+            "2",
+            "--turns-per-session",
+            "2",
+            "--shared-prefix-ratio",
+            "0.5",
+            "--num-prefix-groups",
+            "3",
+            "--inter-turn-delay-ms",
+            "7.0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["args"] == (16, 8, 2)
+    assert captured["kwargs"]["turns_per_session"] == 2
+    assert captured["kwargs"]["shared_prefix_ratio"] == 0.5
+    assert captured["kwargs"]["num_prefix_groups"] == 3
+    assert captured["kwargs"]["inter_turn_delay_ms"] == 7.0
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
+    report_path = tmp_path / "synthetic_report.json"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        "--input-tokens",
+        "250",
+        "--output-tokens",
+        "25",
+        "--request-count",
+        "10",
+        "--num-workers",
+        "4",
+        "--replay-concurrency",
+        "4",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    _assert_basic_report_counts(
+        report,
+        num_requests=10,
+        input_tokens=250,
+        output_tokens=25,
+    )
+    _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_synthetic_multiturn_smoke(tmp_path):
+    report_path = tmp_path / "synthetic_multiturn_report.json"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        "--input-tokens",
+        "64",
+        "--output-tokens",
+        "4",
+        "--request-count",
+        "3",
+        "--turns-per-session",
+        "2",
+        "--shared-prefix-ratio",
+        "0.5",
+        "--num-prefix-groups",
+        "2",
+        "--inter-turn-delay-ms",
+        "5.0",
+        "--num-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    _assert_basic_report_counts(
+        report,
+        num_requests=6,
+        input_tokens=64,
+        output_tokens=4,
+    )
+    _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_trace_smoke(tmp_path):
+    trace_path = _write_cli_smoke_trace(tmp_path)
+    report_path = tmp_path / "trace_report.json"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "offline",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "4",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    _assert_basic_report_counts(
+        report,
+        num_requests=10,
+        input_tokens=250,
+        output_tokens=25,
+    )
+    _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_multiturn_trace_smoke(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "multiturn_trace_report.json"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "online",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    _assert_basic_report_counts(
+        report,
+        num_requests=4,
+        input_tokens=64,
+        output_tokens=2,
+    )
+    _assert_basic_report_metrics(report)
