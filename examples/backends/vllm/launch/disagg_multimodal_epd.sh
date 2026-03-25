@@ -140,7 +140,7 @@ echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
 env $DEVICE_AFFINITY_ENV=$DYN_DECODE_WORKER_GPU \
 python -m dynamo.vllm --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
-    
+
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
