@@ -101,6 +101,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_images_models().is_empty()
     } else if model_type == ModelType::Videos {
         manager.list_videos_models().is_empty()
+    } else if model_type == ModelType::Audios {
+        manager.list_audios_models().is_empty()
     } else if model_type == ModelType::TensorBased {
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Prefill {
@@ -646,7 +648,16 @@ impl ModelWatcher {
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
 
-            // TODO: add audio models support
+            if card.model_type.supports_audios() {
+                let audios_router = PushRouter::<
+                    crate::protocols::openai::audios::NvCreateAudioSpeechRequest,
+                    Annotated<crate::protocols::openai::audios::NvAudiosResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                worker_set.audios_engine = Some(Arc::new(audios_router));
+            }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case: Text + Chat (pure text-to-text, no diffusion)
             let push_router = PushRouter::<

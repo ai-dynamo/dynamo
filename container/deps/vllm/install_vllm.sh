@@ -27,7 +27,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.6"
 LMCACHE_REF="0.4.2"
-VLLM_OMNI_REF="v0.16.0"
+VLLM_OMNI_REF="v0.17.0rc1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in

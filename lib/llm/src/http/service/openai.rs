@@ -46,6 +46,7 @@ use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
+    audios::{NvAudiosResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -2199,6 +2200,101 @@ pub fn videos_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc, stream_doc], router)
+}
+
+async fn audios(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateAudioSpeechRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    let request_id = get_or_create_request_id(None, &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+
+    // Audio generation is non-streaming to the client
+    let streaming = false;
+
+    let model = request.model.clone();
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    // Get the audio generation engine
+    let engine = state
+        .manager()
+        .get_audios_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Audios, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Audio is returned as a single response (non-streaming)
+    // Fold the internal stream into a single response
+    let response = NvAudiosResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold audios stream for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to fold audios stream")
+        })?;
+
+    inflight.mark_ok();
+
+    // Decode base64 and return raw binary audio (matching OpenAI convention)
+    let audio_bytes = base64::prelude::BASE64_STANDARD
+        .decode(&response.audio_b64)
+        .map_err(|e| {
+            tracing::error!("Failed to decode audio base64 for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to decode audio response")
+        })?;
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, &response.content_type)
+        .body(Body::from(audio_bytes))
+        .map(|r| r.into_response())
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!("Failed to build audio response: {e}"))
+        })
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Audio Speech endpoint
+/// If no path is provided, the default path is `/v1/audio/speech`
+pub fn audios_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/audio/speech".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(audios))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
 }
 
 #[cfg(test)]

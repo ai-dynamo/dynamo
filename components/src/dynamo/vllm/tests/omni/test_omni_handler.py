@@ -8,6 +8,10 @@ import pytest
 try:
     from PIL import Image
 
+    from dynamo.common.protocols.audio_protocol import (
+        AudioNvExt,
+        NvCreateAudioSpeechRequest,
+    )
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
@@ -118,11 +122,44 @@ class TestBuildEngineInputs:
         assert inputs.prompt["prompt"] == "a drone"
         assert inputs.fps > 0
 
-    def test_audio_not_implemented(self):
-        """Audio generation raises NotImplementedError."""
+    def test_audio_generation(self):
+        """Audio request parses input text and sets request type."""
         handler = _make_handler()
-        with pytest.raises(NotImplementedError):
-            handler.build_engine_inputs({}, RequestType.AUDIO_GENERATION)
+        req = NvCreateAudioSpeechRequest(
+            input="Hello world", model="test-tts", voice="vivian"
+        )
+        inputs = handler.build_engine_inputs(req, RequestType.AUDIO_GENERATION)
+        assert inputs.request_type == RequestType.AUDIO_GENERATION
+        assert inputs.prompt["additional_information"]["text"] == ["Hello world"]
+
+    def test_audio_generation_with_nvext(self):
+        """Audio request with nvext forwards seed and max_new_tokens."""
+        handler = _make_handler()
+        req = NvCreateAudioSpeechRequest(
+            input="Test",
+            model="test-tts",
+            voice="vivian",
+            speed=1.5,
+            nvext=AudioNvExt(seed=42, max_new_tokens=1024),
+        )
+        inputs = handler.build_engine_inputs(req, RequestType.AUDIO_GENERATION)
+        assert inputs.request_type == RequestType.AUDIO_GENERATION
+        assert inputs.audio_response_format is None
+        assert inputs.sampling_params_list is not None
+        assert inputs.prompt["additional_information"]["speed"] == [1.5]
+        assert inputs.prompt["additional_information"]["max_new_tokens"] == [1024]
+
+    def test_audio_generation_response_format(self):
+        """Audio request preserves response_format in audio_response_format."""
+        handler = _make_handler()
+        req = NvCreateAudioSpeechRequest(
+            input="Test",
+            model="test-tts",
+            voice="vivian",
+            response_format="wav",
+        )
+        inputs = handler.build_engine_inputs(req, RequestType.AUDIO_GENERATION)
+        assert inputs.audio_response_format == "wav"
 
 
 class TestFormatTextChunk:
@@ -249,6 +286,54 @@ class TestFormatVideoChunk:
             chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
+
+
+class TestFormatAudioChunk:
+    def test_empty_bytes_returns_none(self):
+        """Empty audio bytes returns None."""
+        handler = _make_handler()
+        result = handler._format_audio_chunk(b"", "req-1")
+        assert result is None
+
+    def test_default_wav_mime(self):
+        """Default format returns audio/wav MIME type (PCM wrapped in WAV)."""
+        handler = _make_handler()
+        chunk = handler._format_audio_chunk(b"\xff\xfb\x90\x00", "req-1")
+        assert chunk is not None
+        assert chunk["content_type"] == "audio/wav"
+        assert chunk["model"] == "test-model"
+        assert "audio_b64" in chunk
+
+    def test_wav_mime(self):
+        """WAV format returns audio/wav MIME type."""
+        handler = _make_handler()
+        chunk = handler._format_audio_chunk(
+            b"RIFF\x00\x00\x00\x00WAVE", "req-1", response_format="wav"
+        )
+        assert chunk["content_type"] == "audio/wav"
+
+    def test_opus_falls_back_to_wav(self):
+        """Non-PCM formats are wrapped in WAV container."""
+        handler = _make_handler()
+        chunk = handler._format_audio_chunk(b"\x00", "req-1", response_format="opus")
+        assert chunk["content_type"] == "audio/wav"
+
+    def test_base64_encoding(self):
+        """Audio bytes are WAV-wrapped and correctly base64-encoded."""
+        import base64
+
+        handler = _make_handler()
+        audio_data = b"test audio data"
+        chunk = handler._format_audio_chunk(audio_data, "req-1")
+        decoded = base64.b64decode(chunk["audio_b64"])
+        assert decoded[:4] == b"RIFF"
+        assert audio_data in decoded
+
+    def test_unknown_format_defaults_to_wav(self):
+        """Unknown response_format falls back to WAV wrapping."""
+        handler = _make_handler()
+        chunk = handler._format_audio_chunk(b"\x00", "req-1", response_format="unknown")
+        assert chunk["content_type"] == "audio/wav"
 
 
 class TestI2VEngineInputs:

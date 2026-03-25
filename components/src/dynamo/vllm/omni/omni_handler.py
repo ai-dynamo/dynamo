@@ -17,6 +17,10 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
+from dynamo.common.protocols.audio_protocol import (
+    NvAudiosResponse,
+    NvCreateAudioSpeechRequest,
+)
 from dynamo.common.protocols.image_protocol import (
     ImageData,
     NvCreateImageRequest,
@@ -42,6 +46,62 @@ logger = logging.getLogger(__name__)
 DEFAULT_VIDEO_FPS = 16
 
 
+def _single_item_to_bytes(item) -> bytes | None:
+    """Convert a single audio tensor / ndarray / bytes to raw PCM bytes."""
+    if isinstance(item, bytes):
+        return item
+    if hasattr(item, "numpy"):
+        # torch Tensor
+        return item.cpu().float().numpy().tobytes()
+    if hasattr(item, "tobytes"):
+        # numpy array
+        return item.tobytes()
+    return None
+
+
+def _audio_val_to_bytes(audio_val) -> bytes | None:
+    """Convert multimodal_output["audio"] to raw PCM bytes.
+
+    The value can be:
+    - A single tensor or ndarray (one waveform)
+    - A list of tensors/ndarrays (accumulated chunks)
+    - Raw bytes
+    """
+    if isinstance(audio_val, bytes):
+        return audio_val
+
+    # Single tensor / ndarray
+    if hasattr(audio_val, "numpy") or hasattr(audio_val, "tobytes"):
+        return _single_item_to_bytes(audio_val)
+
+    # List — could be a list of chunks (tensors/ndarrays) or a flat list of floats
+    if isinstance(audio_val, list) and audio_val:
+        first = audio_val[0]
+        if hasattr(first, "numpy") or hasattr(first, "tobytes"):
+            # List of tensors / ndarrays — concatenate
+            parts = [_single_item_to_bytes(item) for item in audio_val]
+            return b"".join(p for p in parts if p)
+        # Flat list of numbers
+        import numpy as np
+
+        try:
+            arr = np.array(audio_val, dtype=np.float32)
+            return arr.tobytes()
+        except ValueError:
+            # Inhomogeneous — try concatenating sub-arrays
+            parts = []
+            for sub in audio_val:
+                if hasattr(sub, "tobytes"):
+                    parts.append(sub.tobytes())
+                elif hasattr(sub, "numpy"):
+                    parts.append(sub.cpu().float().numpy().tobytes())
+                else:
+                    parts.append(np.array(sub, dtype=np.float32).tobytes())
+            return b"".join(parts)
+
+    return None
+
+
 @dataclass
 class EngineInputs:
     """Parsed engine inputs ready for AsyncOmni.generate().
@@ -61,6 +121,7 @@ class EngineInputs:
     request_type: RequestType = RequestType.CHAT_COMPLETION
     fps: int = 0
     response_format: str | None = None
+    audio_response_format: str | None = None
 
 
 class OmniHandler(BaseOmniHandler):
@@ -164,6 +225,10 @@ class OmniHandler(BaseOmniHandler):
 
         previous_text = ""
 
+        # For audio requests, keep the latest PCM output (vLLM returns
+        # cumulative audio — each iteration contains the full waveform so far).
+        audio_pcm: bytes | None = None
+
         async with self._abort_monitor(context, request_id):
             try:
                 async for stage_output in self.engine_client.generate(
@@ -206,17 +271,36 @@ class OmniHandler(BaseOmniHandler):
                         if chunk:
                             yield chunk
 
+                    elif inputs.request_type == RequestType.AUDIO_GENERATION:
+                        pcm = self._extract_audio_bytes(stage_output)
+                        if pcm:
+                            audio_pcm = pcm
+
             except GeneratorExit:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e))
+                return
+
+        # After the generator finishes, emit the complete audio response.
+        if audio_pcm:
+            chunk = self._format_audio_chunk(
+                audio_pcm,
+                request_id,
+                response_format=inputs.audio_response_format,
+            )
+            if chunk:
+                yield chunk
 
     def build_engine_inputs(
         self,
         parsed_request: Union[
-            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+            NvCreateImageRequest,
+            NvCreateVideoRequest,
+            NvCreateAudioSpeechRequest,
+            Dict[str, Any],
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
@@ -241,9 +325,8 @@ class OmniHandler(BaseOmniHandler):
         elif request_type == RequestType.VIDEO_GENERATION:
             assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
-
         elif request_type == RequestType.AUDIO_GENERATION:
-            raise NotImplementedError("Audio generation is not yet supported")
+            return self._engine_inputs_from_audio(parsed_request)
 
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -373,6 +456,125 @@ class OmniHandler(BaseOmniHandler):
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
         )
+
+    def _engine_inputs_from_audio(
+        self, req: NvCreateAudioSpeechRequest
+    ) -> EngineInputs:
+        """Build engine inputs from an NvCreateAudioSpeechRequest.
+
+        Mirrors the logic in vllm-omni's ``serving_speech.py``: the prompt
+        is a dict with **dummy** ``prompt_token_ids`` whose length matches
+        what the model's ``preprocess()`` will produce, plus an
+        ``additional_information`` dict with all TTS parameters wrapped in
+        lists.
+        """
+        nvext = req.nvext
+
+        # --- task type ---
+        task_type = nvext.task_type if nvext and nvext.task_type else None
+        if task_type is None:
+            if nvext and nvext.ref_audio:
+                task_type = "Base"
+            else:
+                task_type = "CustomVoice"
+
+        # --- additional_information (all values must be lists) ---
+        additional_info: Dict[str, Any] = {
+            "task_type": [task_type],
+            "text": [req.input],
+        }
+
+        if req.voice:
+            additional_info["speaker"] = [req.voice]
+
+        language = nvext.language if nvext and nvext.language else "auto"
+        additional_info["language"] = [language]
+
+        instruct = nvext.instructions if nvext and nvext.instructions else ""
+        additional_info["instruct"] = [instruct]
+
+        if nvext:
+            if nvext.ref_audio is not None:
+                additional_info["ref_audio"] = [nvext.ref_audio]
+            if nvext.ref_text is not None:
+                additional_info["ref_text"] = [nvext.ref_text]
+
+        max_new_tokens = (
+            nvext.max_new_tokens if nvext and nvext.max_new_tokens else 2048
+        )
+        additional_info["max_new_tokens"] = [max_new_tokens]
+
+        # --- estimate prompt length ---
+        # The TTS model replaces prompt token IDs with computed embeddings
+        # in preprocess().  The token IDs themselves are unused, but their
+        # *count* must match the embedding length the model will produce,
+        # otherwise the sampler's penalty kernel indexes out of bounds.
+        ph_len = self._estimate_tts_prompt_len(additional_info, task_type)
+
+        # Build prompt dict the same way serving_speech.py does.
+        prompt: Dict[str, Any] = {
+            "prompt_token_ids": [1] * ph_len,
+            "additional_information": additional_info,
+        }
+
+        if req.speed is not None:
+            additional_info["speed"] = [req.speed]
+
+        sp_kwargs: Dict[str, Any] = {}
+        if nvext:
+            if nvext.seed is not None:
+                sp_kwargs["seed"] = nvext.seed
+
+        sampling_params_list = (
+            [OmniDiffusionSamplingParams(**sp_kwargs)] if sp_kwargs else None
+        )
+
+        return EngineInputs(
+            prompt=prompt,
+            sampling_params_list=sampling_params_list,
+            request_type=RequestType.AUDIO_GENERATION,
+            audio_response_format=req.response_format,
+        )
+
+    def _estimate_tts_prompt_len(
+        self, additional_info: Dict[str, Any], task_type: str
+    ) -> int:
+        """Estimate the prompt embedding length for a TTS request.
+
+        Calls the model's ``estimate_prompt_len_from_additional_information``
+        with a tokenizer so that the dummy ``prompt_token_ids`` length
+        matches what ``preprocess()`` will produce.  A mismatch causes the
+        sampler to index out of bounds or generates garbage audio.
+        """
+        try:
+            from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
+                Qwen3TTSTalkerForConditionalGeneration,
+            )
+
+            # Lazy-load the TTS tokenizer (cached on first call).
+            if not hasattr(self, "_tts_tokenizer"):
+                from transformers import AutoTokenizer
+
+                self._tts_tokenizer = AutoTokenizer.from_pretrained(
+                    self.config.model, trust_remote_code=True
+                )
+
+            return Qwen3TTSTalkerForConditionalGeneration.estimate_prompt_len_from_additional_information(
+                additional_information=additional_info,
+                task_type=task_type,
+                tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
+                    "input_ids"
+                ],
+                codec_language_id=None,
+                spk_is_dialect=None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "TTS prompt length estimation failed: %s; using heuristic", exc
+            )
+            # Heuristic: ~4 chars/token + template overhead.
+            text = (additional_info.get("text") or [""])[0]
+            return max(2, len(text) // 4 + 12)
 
     async def _prepare_image_output(
         self, images: list, request_id: str, response_format: str | None = None
@@ -548,6 +750,93 @@ class OmniHandler(BaseOmniHandler):
                 error=str(e),
             )
             return error_response.model_dump()
+
+    @staticmethod
+    def _extract_audio_bytes(stage_output) -> bytes | None:
+        """Extract raw audio bytes from a vllm-omni stage output.
+
+        vllm-omni stores TTS audio in ``multimodal_output["audio"]``,
+        accessible either directly on the stage output or on its nested
+        ``request_output``.
+        """
+        mm = getattr(stage_output, "multimodal_output", None)
+        if not mm:
+            ro = getattr(stage_output, "request_output", None)
+            mm = getattr(ro, "multimodal_output", None) if ro else None
+        if not mm or "audio" not in mm:
+            return None
+
+        audio_val = mm["audio"]
+        return _audio_val_to_bytes(audio_val)
+
+    def _format_audio_chunk(
+        self,
+        pcm_bytes: bytes,
+        request_id: str,
+        response_format: str | None = None,
+        sample_rate: int = 24000,
+    ) -> Dict[str, Any] | None:
+        """Encode accumulated PCM float32 data as an NvAudiosResponse.
+
+        The raw PCM is wrapped in a WAV container (float32, mono) so
+        that clients receive a playable file.
+
+        Args:
+            pcm_bytes: Raw float32 PCM bytes from the engine.
+            request_id: Unique request identifier.
+            response_format: Requested audio format (wav, pcm, etc.).
+            sample_rate: Sample rate of the audio (default 24000 for Qwen3-TTS).
+
+        Returns:
+            ``NvAudiosResponse.model_dump()`` dict, or ``None`` if empty.
+        """
+        if not pcm_bytes:
+            return None
+
+        fmt = response_format or "wav"
+
+        if fmt == "pcm":
+            # Raw PCM: send as-is
+            encoded = pcm_bytes
+            content_type = "audio/pcm"
+        else:
+            # Wrap in WAV container (IEEE float32, mono)
+            encoded = self._pcm_to_wav(pcm_bytes, sample_rate)
+            content_type = "audio/wav"
+
+        audio_b64 = base64.b64encode(encoded).decode("utf-8")
+
+        response = NvAudiosResponse(
+            audio_b64=audio_b64,
+            content_type=content_type,
+            model=self.config.served_model_name or self.config.model,
+            created=int(time.time()),
+        )
+        return response.model_dump()
+
+    @staticmethod
+    def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int) -> bytes:
+        """Wrap raw float32 PCM in a WAV header."""
+        import struct
+
+        n = len(pcm_bytes)
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            36 + n,  # file size - 8
+            b"WAVE",
+            b"fmt ",
+            16,  # fmt chunk size
+            3,  # format tag: IEEE float
+            1,  # channels: mono
+            sample_rate,
+            sample_rate * 4,  # byte rate
+            4,  # block align
+            32,  # bits per sample
+            b"data",
+            n,  # data size
+        )
+        return header + pcm_bytes
 
     def _format_text_chunk(
         self,
