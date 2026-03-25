@@ -235,7 +235,7 @@ def update_engine_config_with_dynamo(
             f"Setting reasonable default of {engine_config.block_size} for block_size"
         )
 
-    if _uses_nixl_connector(engine_config):
+    if _uses_nixl_connector(engine_config) or _uses_pegaflow_connector(engine_config):
         ensure_side_channel_host()
 
     defaults = {
@@ -338,6 +338,28 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+                return True
+    return False
+
+
+def _uses_pegaflow_connector(engine_config: AsyncEngineArgs) -> bool:
+    """Check if the user-provided --kv-transfer-config uses PegaKVConnector or PegaPdConnector.
+
+    Handles both direct usage and nested usage inside PegaPdConnector.
+    """
+    kv_cfg = getattr(engine_config, "kv_transfer_config", None)
+    if kv_cfg is None:
+        return False
+    connector_name = kv_cfg.kv_connector
+    if connector_name in ("PegaKVConnector", "PegaPdConnector"):
+        return True
+    if connector_name in ("PdConnector", "MultiConnector"):
+        extra = kv_cfg.kv_connector_extra_config or {}
+        for entry in extra.get("connectors", []):
+            if isinstance(entry, dict) and entry.get("kv_connector") in (
+                "PegaKVConnector",
+                "PegaPdConnector",
+            ):
                 return True
     return False
 

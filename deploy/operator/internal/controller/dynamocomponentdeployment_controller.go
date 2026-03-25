@@ -333,6 +333,43 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 			anyModified = true
 		}
 		leaderWorkerSets = append(leaderWorkerSets, lwsObj)
+
+		// For multinode deployments with K8s discovery, label the LWS headless
+		// Service with dynamo discovery labels so that follower pods are visible
+		// to the discovery daemon. Without this, only the leader pod (in the
+		// regular Service) is discovered, and follower DP ranks are never routed to.
+		if dynamoComponentDeployment.IsMultinode() &&
+			commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dynamoComponentDeployment.Spec.Annotations) {
+			headlessSvcName := lwsInstanceName(dynamoComponentDeployment, i)
+			headlessSvc := &corev1.Service{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      headlessSvcName,
+				Namespace: dynamoComponentDeployment.Namespace,
+			}, headlessSvc); err == nil {
+				needsUpdate := false
+				if headlessSvc.Labels == nil {
+					headlessSvc.Labels = make(map[string]string)
+				}
+				if headlessSvc.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend] != "kubernetes" {
+					headlessSvc.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+					needsUpdate = true
+				}
+				if headlessSvc.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] != commonconsts.KubeLabelValueTrue {
+					headlessSvc.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+					needsUpdate = true
+				}
+				if needsUpdate {
+					if err := r.Update(ctx, headlessSvc); err != nil {
+						logger.Error(err, "Failed to label LWS headless service for discovery",
+							"service", headlessSvcName)
+					} else {
+						logger.Info("Labeled LWS headless service with dynamo discovery labels",
+							"service", headlessSvcName)
+						anyModified = true
+					}
+				}
+			}
+		}
 	}
 
 	// Clean up any excess LeaderWorkerSets (if replicas were decreased)
