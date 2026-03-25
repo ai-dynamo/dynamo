@@ -23,8 +23,10 @@ from dynamo.frontend.sglang_prepost import (
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
     _build_dynamo_preproc,
+    _init_worker,
     _map_finish_reason,
 )
+import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -588,6 +590,18 @@ class TestPreprocessChatRequest:
         assert len(with_none.prompt_token_ids) == len(
             with_auto.prompt_token_ids
         ), "tool_choice=none with flag off should keep tools in template"
+
+    def test_init_worker_propagates_exclude_flag_true(self):
+        """_init_worker sets the worker-global exclude_tools flag to True."""
+        _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
+        assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is True
+
+    def test_init_worker_propagates_exclude_flag_false(self):
+        """_init_worker sets the worker-global exclude_tools flag to False."""
+        _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=False)
+        assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
+        # Reset to default
+        sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
