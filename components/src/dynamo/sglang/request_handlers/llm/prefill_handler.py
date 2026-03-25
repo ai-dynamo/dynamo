@@ -133,6 +133,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
 
+        if dp_rank is not None and dp_rank == 2**32 - 1:
+            dp_rank = None
+
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
