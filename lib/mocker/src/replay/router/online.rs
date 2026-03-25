@@ -189,7 +189,6 @@ impl KvReplayRouter {
             None,
             BlockHashOptions::default(),
             None,
-            None,
         );
         let response = self
             .scheduler

@@ -349,7 +349,6 @@ impl OfflineReplayRouter {
                         None,
                         BlockHashOptions::default(),
                         None,
-                        None,
                     )
                 };
                 (overlaps, token_seq)
@@ -361,7 +360,6 @@ impl OfflineReplayRouter {
                     self.block_size,
                     None,
                     BlockHashOptions::default(),
-                    None,
                     None,
                 );
                 (overlaps, token_seq)
