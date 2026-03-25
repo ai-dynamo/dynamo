@@ -3,7 +3,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen-agg
+  name: qwen
 spec:
   backendFramework: vllm
   services:

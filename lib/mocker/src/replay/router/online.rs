@@ -11,7 +11,7 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{OverlapScores, RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::{BlockHashOptions, OverlapScores, RouterEvent, WorkerId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -46,11 +46,11 @@ impl ReplayIndexer {
     ) -> Result<OverlapScores> {
         match self {
             Self::Single(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name)
+                .find_matches_for_request(tokens, lora_name, None)
                 .await
                 .map_err(Into::into),
             Self::Concurrent(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name)
+                .find_matches_for_request(tokens, lora_name, None)
                 .await
                 .map_err(Into::into),
         }
@@ -138,6 +138,7 @@ impl KvReplayRouter {
             args.block_size as u32,
             selector,
             policy,
+            config.router_track_prefill_tokens,
             CancellationToken::new(),
             "replay",
             false,
@@ -187,6 +188,7 @@ impl KvReplayRouter {
             &request.tokens,
             self.block_size,
             None,
+            BlockHashOptions::default(),
             None,
         );
         let response = self

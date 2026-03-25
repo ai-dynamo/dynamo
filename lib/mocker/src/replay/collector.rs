@@ -309,6 +309,7 @@ impl TraceCollector {
         }
 
         let duration_s = (duration_ms / 1000.0).max(1e-9);
+        let itl_distribution = build_distribution_stats(&itls);
         TraceSimulationReport {
             request_counts: TraceRequestCounts {
                 num_requests: requests.len(),
@@ -335,8 +336,8 @@ impl TraceCollector {
                 ttst: build_distribution_stats(&ttsts),
                 tpot: build_distribution_stats(&tpots),
                 itl: TraceInterTokenLatencyStats {
-                    distribution: build_distribution_stats(&itls),
-                    max_ms: max_value(&itls),
+                    max_ms: itl_distribution.max_ms,
+                    distribution: itl_distribution,
                 },
                 e2e: build_distribution_stats(&e2e_latencies),
                 output_token_throughput_per_user: build_distribution_stats(
@@ -386,37 +387,39 @@ fn mean(values: &[f64]) -> f64 {
     }
 }
 
-fn max_value(values: &[f64]) -> f64 {
-    values.iter().copied().reduce(f64::max).unwrap_or(0.0)
-}
-
 fn build_distribution_stats(values: &[f64]) -> TraceDistributionStats {
-    TraceDistributionStats {
-        mean_ms: mean(values),
-        min_ms: min_value(values),
-        max_ms: max_value(values),
-        median_ms: percentile(values, 50.0),
-        p75_ms: percentile(values, 75.0),
-        p90_ms: percentile(values, 90.0),
-        p95_ms: percentile(values, 95.0),
-        p99_ms: percentile(values, 99.0),
-        std_ms: std_dev(values),
-    }
-}
-
-fn percentile(values: &[f64], percentile: f64) -> f64 {
     if values.is_empty() {
-        return 0.0;
+        return TraceDistributionStats {
+            mean_ms: 0.0,
+            min_ms: 0.0,
+            max_ms: 0.0,
+            median_ms: 0.0,
+            p75_ms: 0.0,
+            p90_ms: 0.0,
+            p95_ms: 0.0,
+            p99_ms: 0.0,
+            std_ms: 0.0,
+        };
     }
 
     let mut sorted = values.to_vec();
     sorted.sort_by(|left, right| left.total_cmp(right));
-    let rank = ((sorted.len() - 1) as f64 * percentile / 100.0).round() as usize;
-    sorted[rank.min(sorted.len() - 1)]
+    TraceDistributionStats {
+        mean_ms: mean(values),
+        min_ms: sorted[0],
+        max_ms: *sorted.last().expect("sorted values must be non-empty"),
+        median_ms: percentile_sorted(&sorted, 50.0),
+        p75_ms: percentile_sorted(&sorted, 75.0),
+        p90_ms: percentile_sorted(&sorted, 90.0),
+        p95_ms: percentile_sorted(&sorted, 95.0),
+        p99_ms: percentile_sorted(&sorted, 99.0),
+        std_ms: std_dev(values),
+    }
 }
 
-fn min_value(values: &[f64]) -> f64 {
-    values.iter().copied().reduce(f64::min).unwrap_or(0.0)
+fn percentile_sorted(sorted: &[f64], percentile: f64) -> f64 {
+    let rank = ((sorted.len() - 1) as f64 * percentile / 100.0).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
 }
 
 fn std_dev(values: &[f64]) -> f64 {
