@@ -435,9 +435,8 @@ where
             is_eagle: Some(self.is_eagle),
         };
 
-        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes").in_scope(|| {
-            compute_block_hash_for_seq(tokens, self.block_size, hash_options)
-        });
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
