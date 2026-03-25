@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" width="800" height="420" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 250" width="800" height="250" role="img" aria-labelledby="title desc">
   <title id="title">disagg-same-node</title>
   <desc id="desc">Architecture diagram showing disagg-same-node</desc>
 
@@ -171,7 +171,7 @@
     .connector-kv { fill: none; stroke: var(--pill-kv); stroke-width: 2.0; }
     .connector-dashed { fill: none; stroke: var(--connector); stroke-width: 2.0; stroke-dasharray: 6 4; }
   </style>
-  <rect x="20" y="15" width="760" height="390" rx="14" fill="var(--surface-zone)" stroke="var(--border-zone)" stroke-width="1.0" stroke-dasharray="6 3" filter="url(#blue-glow)"/>
+  <rect x="20" y="15" width="760" height="220" rx="14" fill="var(--surface-zone)" stroke="var(--border-zone)" stroke-width="1.0" stroke-dasharray="6 3" filter="url(#blue-glow)"/>
   <text x="400.0" y="35.5" class="zone-label" style="fill:var(--zone-label);text-anchor:middle;">SAME NODE</text>
 
   <rect x="58" y="55" width="260" height="130" rx="10" fill="var(--accent)" opacity="0.7"/>
