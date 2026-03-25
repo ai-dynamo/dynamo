@@ -12,8 +12,9 @@ use dynamo_kv_router::{
     indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, OverlapScores, RouterEvent,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -301,6 +302,7 @@ where
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
+    is_eagle: bool,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -317,6 +319,7 @@ where
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
         model_name: Option<String>,
+        is_eagle: bool,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -370,6 +373,7 @@ where
             kv_router_config,
             cancellation_token,
             client,
+            is_eagle,
         })
     }
 
@@ -384,6 +388,20 @@ where
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    pub fn is_eagle(&self) -> bool {
+        self.is_eagle
+    }
+
+    pub async fn record_routing_decision(
+        &self,
+        mut tokens_with_hashes: TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        self.indexer
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .await
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
@@ -411,16 +429,26 @@ where
         }
 
         let isl_tokens = tokens.len();
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name: lora_name.as_deref(),
+            is_eagle: Some(self.is_eagle),
+        };
 
-        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes").in_scope(|| {
-            compute_block_hash_for_seq(
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        let hash_elapsed = start.elapsed();
+        // Compute seq_hashes only if scheduler needs it for active blocks tracking
+        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+            self.kv_router_config.compute_seq_hashes_for_tracking(
                 tokens,
                 self.block_size,
-                block_mm_infos,
-                lora_name.as_deref(),
+                router_config_override,
+                hash_options,
+                Some(&block_hashes),
             )
         });
-        let hash_elapsed = start.elapsed();
+        let seq_hash_elapsed = start.elapsed();
 
         let overlap_scores = self
             .indexer
@@ -428,17 +456,6 @@ where
             .instrument(tracing::info_span!("kv_router.find_matches"))
             .await?;
         let find_matches_elapsed = start.elapsed();
-
-        // Compute seq_hashes only if scheduler needs it for active blocks tracking
-        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
-            self.kv_router_config.compute_seq_hashes_for_tracking(
-                tokens,
-                self.block_size,
-                router_config_override,
-                lora_name.as_deref(),
-            )
-        });
-        let seq_hash_elapsed = start.elapsed();
 
         let response = self
             .scheduler
@@ -461,8 +478,8 @@ where
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
             m.observe(
                 hash_elapsed,
-                find_matches_elapsed,
                 seq_hash_elapsed,
+                find_matches_elapsed,
                 total_elapsed,
             );
         }
@@ -471,9 +488,9 @@ where
         tracing::info!(
             isl_tokens,
             hash_us = hash_elapsed.as_micros() as u64,
-            find_matches_us = (find_matches_elapsed - hash_elapsed).as_micros() as u64,
-            seq_hash_us = (seq_hash_elapsed - find_matches_elapsed).as_micros() as u64,
-            schedule_us = (total_elapsed - seq_hash_elapsed).as_micros() as u64,
+            seq_hash_us = (seq_hash_elapsed - hash_elapsed).as_micros() as u64,
+            find_matches_us = (find_matches_elapsed - seq_hash_elapsed).as_micros() as u64,
+            schedule_us = (total_elapsed - find_matches_elapsed).as_micros() as u64,
             total_us = total_elapsed.as_micros() as u64,
             "find_best_match completed"
         );
@@ -491,6 +508,7 @@ where
         &self,
         request_id: String,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         overlap_blocks: u32,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
@@ -498,12 +516,18 @@ where
         router_config_override: Option<&RouterConfigOverride>,
     ) {
         let isl_tokens = tokens.len();
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name: lora_name.as_deref(),
+            is_eagle: Some(self.is_eagle),
+        };
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
-            lora_name.as_deref(),
+            hash_options,
+            None,
         );
 
         if let Err(e) = self
@@ -559,10 +583,19 @@ where
     pub async fn get_overlap_blocks(
         &self,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
     ) -> Result<u32, KvRouterError> {
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
+        let block_hashes = compute_block_hash_for_seq(
+            tokens,
+            self.block_size,
+            BlockHashOptions {
+                block_mm_infos,
+                lora_name,
+                is_eagle: Some(self.is_eagle),
+            },
+        );
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }
@@ -572,18 +605,26 @@ where
         &self,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
-        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name,
+            is_eagle: Some(self.is_eagle),
+        };
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
-            lora_name,
+            hash_options,
+            Some(&block_hashes),
         );
+
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         Ok(self
             .scheduler

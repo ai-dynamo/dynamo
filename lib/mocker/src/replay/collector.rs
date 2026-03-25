@@ -360,6 +360,22 @@ impl TraceCollector {
                 reused_input_tokens: stats.reused_input_tokens,
             })
     }
+
+    #[cfg(test)]
+    pub(crate) fn snapshots(&self) -> Vec<TraceRequestStatsSnapshot> {
+        self.requests
+            .values()
+            .map(|stats| TraceRequestStatsSnapshot {
+                arrival_time_ms: stats.arrival_time_ms,
+                first_admit_ms: stats.first_admit_ms,
+                first_token_ms: stats.first_token_ms(),
+                last_token_ms: stats.last_token_ms(),
+                input_length: stats.input_length,
+                output_length: stats.output_length,
+                reused_input_tokens: stats.reused_input_tokens,
+            })
+            .collect()
+    }
 }
 
 fn mean(values: &[f64]) -> f64 {

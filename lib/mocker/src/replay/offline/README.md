@@ -9,7 +9,7 @@ The goal is to simulate trace execution without spinning up async runtimes, netw
 The public replay entrypoints live one level up in `lib/mocker/src/replay/entrypoints.rs`. They:
 
 - normalize `MockEngineArgs`
-- load or accept `DirectRequest`s
+- load or accept `DirectRequest`s or `loadgen::Trace` workloads
 - validate replay arguments
 - dispatch to offline or online replay
 
@@ -42,7 +42,10 @@ The single-worker path is intentionally simple and only used when:
 - `num_workers == 1`
 - engine type is `vllm`
 
-That path avoids the cluster event queue and router machinery entirely.
+That path avoids the cluster event queue and router machinery entirely, but it now supports both:
+
+- flat request replay
+- workload-driven replay through `WorkloadDriver` for multi-turn/session traces
 
 ```mermaid
 flowchart TD
@@ -63,6 +66,8 @@ Important details:
 
 - Trace mode uses `normalize_trace_requests` in `lib/mocker/src/replay/mod.rs` so the first request starts at `0 ms`, then applies `arrival_speedup_ratio`.
 - Concurrency mode ignores original arrival spacing and keeps the worker filled up to `max_in_flight`.
+- Workload trace mode honors first-turn timestamps and inter-turn delays.
+- Workload concurrency mode ignores first-turn timestamps but still enforces inter-turn delays after completion.
 - The worker itself is still the real mocker engine core; only the scheduling loop is simplified.
 
 ## Multi-Worker Harness
@@ -178,13 +183,15 @@ In round-robin mode, this capture is skipped because nothing consumes those even
 Both single and multi harnesses support two admission modes:
 
 - Trace mode
-  - respects input arrival timestamps
-  - timestamps are normalized so the first request starts at `0 ms`
-  - `arrival_speedup_ratio` compresses or stretches inter-arrival gaps
+  - for flat requests, respects input arrival timestamps
+  - for workloads, respects first-turn timestamps and inter-turn delays
+  - timestamps are normalized so the first request or first session starts at `0 ms`
+  - `arrival_speedup_ratio` compresses or stretches inter-arrival gaps and inter-turn delays
 
 - Concurrency mode
-  - ignores original spacing
+  - ignores original first-turn spacing
   - keeps up to `max_in_flight` requests resident in the cluster
+  - for workloads, still unlocks follow-up turns only after completion plus inter-turn delay
   - stamps synthetic arrival times as requests are admitted
 
 This split is why `lib/mocker/src/replay/offline/mod.rs` exposes both:
