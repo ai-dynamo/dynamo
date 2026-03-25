@@ -132,7 +132,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=16384, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=16384, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -147,6 +147,7 @@ impl MockEngineArgs {
         dp_size: u32,
         startup_time: Option<f64>,
         worker_type: &str,
+        planner_profile_data: Option<PathBuf>,
         aic_backend: Option<String>,
         aic_system: Option<String>,
         aic_backend_version: Option<String>,
@@ -174,7 +175,7 @@ impl MockEngineArgs {
             })
             .transpose()?;
 
-        let inner = RsMockEngineArgs::builder()
+        let mut builder = RsMockEngineArgs::builder()
             .engine_type(engine_type)
             .num_gpu_blocks(num_gpu_blocks)
             .block_size(block_size)
@@ -201,7 +202,19 @@ impl MockEngineArgs {
             .zmq_replay_port(zmq_replay_port)
             .preemption_mode(preemption_mode)
             .router_queue_policy(router_queue_policy)
-            .sglang(sglang.map(|config| config.inner()))
+            .sglang(sglang.map(|config| config.inner()));
+
+        if let Some(npz_path) = planner_profile_data {
+            let perf_model = PerfModel::from_npz(&npz_path).map_err(|e| {
+                PyException::new_err(format!(
+                    "Failed to load planner_profile_data from {:?}: {e}",
+                    npz_path
+                ))
+            })?;
+            builder = builder.perf_model(Arc::new(perf_model));
+        }
+
+        let inner = builder
             .build()
             .map_err(|e| PyException::new_err(format!("Failed to build MockEngineArgs: {e}")))?
             .normalized()

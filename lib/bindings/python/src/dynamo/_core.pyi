@@ -1216,6 +1216,7 @@ class MockEngineArgs:
         dp_size: int = 1,
         startup_time: Optional[float] = None,
         worker_type: str = "aggregated",
+        planner_profile_data: Optional[str | os.PathLike[str]] = None,
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
         aic_backend_version: Optional[str] = None,

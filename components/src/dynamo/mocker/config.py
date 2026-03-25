@@ -41,51 +41,52 @@ def _build_sglang_args(args: argparse.Namespace) -> SglangArgs | None:
     return SglangArgs(**sglang_args)
 
 
-def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
-    aic_backend = None
-    aic_system = None
-    aic_backend_version = None
-    aic_tp_size = None
-    aic_model_path = None
-    if getattr(args, "aic_perf_model", False):
-        aic_backend = getattr(args, "engine_type", None) or "vllm"
-        aic_system = getattr(args, "aic_system", None)
-        aic_backend_version = getattr(args, "aic_backend_version", None)
-        aic_tp_size = getattr(args, "aic_tp_size", None)
-        aic_model_path = getattr(args, "model_path", None)
-
-    return MockEngineArgs(
-        engine_type=getattr(args, "engine_type", None) or "vllm",
-        num_gpu_blocks=getattr(args, "num_gpu_blocks", _DEFAULT_NUM_GPU_BLOCKS),
-        block_size=getattr(args, "block_size", 0) or 0,
-        max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
-        max_num_batched_tokens=getattr(
+def _build_mocker_engine_args_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    worker_type = (
+        "prefill"
+        if getattr(args, "is_prefill_worker", False)
+        else "decode"
+        if getattr(args, "is_decode_worker", False)
+        else "aggregated"
+    )
+    kwargs: dict[str, object] = {
+        "engine_type": getattr(args, "engine_type", None) or "vllm",
+        "num_gpu_blocks": getattr(args, "num_gpu_blocks", _DEFAULT_NUM_GPU_BLOCKS),
+        "block_size": getattr(args, "block_size", 0) or 0,
+        "max_num_seqs": getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
+        "max_num_batched_tokens": getattr(
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
         ),
-        enable_prefix_caching=getattr(args, "enable_prefix_caching", True),
-        enable_chunked_prefill=getattr(args, "enable_chunked_prefill", True),
-        preemption_mode=getattr(args, "preemption_mode", "lifo"),
-        speedup_ratio=getattr(args, "speedup_ratio", 1.0),
-        decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
-        dp_size=getattr(args, "dp_size", 1),
-        startup_time=getattr(args, "startup_time", None),
-        worker_type=(
-            "prefill"
-            if getattr(args, "is_prefill_worker", False)
-            else "decode"
-            if getattr(args, "is_decode_worker", False)
-            else "aggregated"
-        ),
-        aic_backend=aic_backend,
-        aic_system=aic_system,
-        aic_backend_version=aic_backend_version,
-        aic_tp_size=aic_tp_size,
-        aic_model_path=aic_model_path,
-        enable_local_indexer=not getattr(args, "durable_kv_events", False),
-        kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
-        reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
-        sglang=_build_sglang_args(args),
-    )
+        "enable_prefix_caching": getattr(args, "enable_prefix_caching", True),
+        "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", True),
+        "speedup_ratio": getattr(args, "speedup_ratio", 1.0),
+        "decode_speedup_ratio": getattr(args, "decode_speedup_ratio", 1.0),
+        "dp_size": getattr(args, "dp_size", 1),
+        "startup_time": getattr(args, "startup_time", None),
+        "worker_type": worker_type,
+        "planner_profile_data": getattr(args, "planner_profile_data", None),
+        "aic_backend": None,
+        "aic_system": None,
+        "aic_backend_version": None,
+        "aic_tp_size": None,
+        "aic_model_path": None,
+        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
+        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
+        "reasoning": _parse_reasoning_config(getattr(args, "reasoning", None)),
+        "sglang": _build_sglang_args(args),
+        "preemption_mode": getattr(args, "preemption_mode", "lifo"),
+    }
+    if getattr(args, "aic_perf_model", False):
+        kwargs["aic_backend"] = getattr(args, "engine_type", None) or "vllm"
+        kwargs["aic_system"] = getattr(args, "aic_system", None)
+        kwargs["aic_backend_version"] = getattr(args, "aic_backend_version", None)
+        kwargs["aic_tp_size"] = getattr(args, "aic_tp_size", None)
+        kwargs["aic_model_path"] = getattr(args, "model_path", None)
+    return kwargs
+
+
+def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
+    return MockEngineArgs(**_build_mocker_engine_args_kwargs(args))
 
 
 def load_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -250,6 +251,13 @@ def _replay_cli_env() -> dict[str, str]:
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = ":".join(pythonpath_entries)
     return env
+
+
+def _planner_profile_data_npz_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[4]
+        / "benchmarks/results/H200_TP1P_TP1D_perf_data.npz"
+    )
 
 
 def _run_replay_cli(tmp_path, *args):
@@ -840,6 +848,76 @@ def test_replay_cli_passes_multiturn_workload_kwargs(monkeypatch):
     assert captured["kwargs"]["shared_prefix_ratio"] == 0.5
     assert captured["kwargs"]["num_prefix_groups"] == 3
     assert captured["kwargs"]["inter_turn_delay_ms"] == 7.0
+
+
+@pytest.mark.parametrize(
+    ("engine_args_flag", "engine_args_kwarg"),
+    [
+        ("--extra-engine-args", "extra_engine_args"),
+        ("--prefill-engine-args", "prefill_engine_args"),
+        ("--decode-engine-args", "decode_engine_args"),
+    ],
+)
+@pytest.mark.parametrize("workload", ["synthetic", "trace"])
+def test_replay_cli_resolves_planner_profile_data_from_benchmarks(
+    tmp_path, monkeypatch, engine_args_flag, engine_args_kwarg, workload
+):
+    planner_profile_data = _planner_profile_data_npz_path()
+    assert planner_profile_data.exists()
+
+    captured = {}
+    resolved_paths = []
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {
+            "completed_requests": 1,
+            "request_throughput_rps": 1.0,
+            "output_throughput_tok_s": 1.0,
+        }
+
+    def fake_resolve_planner_profile_data(path):
+        resolved_paths.append(path)
+        return SimpleNamespace(npz_path=planner_profile_data)
+
+    monkeypatch.setattr("dynamo.replay.main.run_trace_replay", fake_run)
+    monkeypatch.setattr("dynamo.replay.main.run_synthetic_trace_replay", fake_run)
+    monkeypatch.setattr(
+        "dynamo.replay.main.resolve_planner_profile_data",
+        fake_resolve_planner_profile_data,
+    )
+
+    cli_args = [
+        engine_args_flag,
+        json.dumps(
+            {
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+                "planner_profile_data": str(planner_profile_data),
+            }
+        ),
+    ]
+
+    if workload == "trace":
+        trace_path = _write_trace_and_args(tmp_path)
+        cli_args = [str(trace_path), *cli_args]
+    else:
+        cli_args = [
+            "--input-tokens",
+            "16",
+            "--output-tokens",
+            "8",
+            "--request-count",
+            "1",
+            *cli_args,
+        ]
+
+    exit_code = main(cli_args)
+
+    assert exit_code == 0
+    assert resolved_paths == [planner_profile_data]
+    assert captured["kwargs"][engine_args_kwarg] is not None
 
 
 @pytest.mark.timeout(30)
