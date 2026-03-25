@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::events::{SimulationEvent, SimulationEventKind};
+use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::normalize_trace_requests;
+use super::runtime_utils::{
+    WorkerCompletionPayload, next_timestamp as choose_next_timestamp, pop_next_concurrency_ready,
+    pop_next_trace_ready, pop_ready_worker_completion, push_worker_completion,
+};
 #[cfg(test)]
 use super::state::OfflineWorkerSnapshot;
-use super::state::OfflineWorkerState;
+use super::state::{AggRequestState, OfflineWorkerState};
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, Trace, WorkloadDriver};
 use crate::replay::router::OfflineReplayRouter;
@@ -16,7 +20,7 @@ use crate::scheduler::RouterEventVisibility;
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -62,13 +66,13 @@ struct OfflineRuntime {
     next_worker_idx: usize,
     next_event_seq: u64,
     admission: AdmissionSource,
-    router_pending: HashMap<Uuid, DirectRequest>,
+    requests: HashMap<Uuid, AggRequestState>,
+    queued_requests: usize,
     workers: Vec<OfflineWorkerState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
     mode: ReplayMode,
     router: Option<OfflineReplayRouter>,
-    prefill_completed: HashSet<Uuid>,
     stats: OfflineRuntimeStats,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
@@ -135,7 +139,8 @@ impl OfflineRuntime {
             next_worker_idx: 0,
             next_event_seq: 0,
             admission,
-            router_pending: HashMap::new(),
+            requests: HashMap::new(),
+            queued_requests: 0,
             workers: (0..num_workers)
                 .map(|worker_idx| {
                     OfflineWorkerState::new(worker_idx, args.clone(), capture_kv_events)
@@ -145,7 +150,6 @@ impl OfflineRuntime {
             events: BinaryHeap::new(),
             mode,
             router,
-            prefill_completed: HashSet::new(),
             #[cfg(test)]
             stats: OfflineRuntimeStats::default(),
             #[cfg(not(test))]
@@ -162,7 +166,7 @@ impl OfflineRuntime {
             .iter()
             .map(OfflineWorkerState::in_flight)
             .sum::<usize>()
-            + self.router_pending.len()
+            + self.queued_requests
     }
 
     fn record_in_flight_peak(&mut self) {
@@ -220,9 +224,14 @@ impl OfflineRuntime {
 
     fn dispatch_router_admissions(&mut self, admissions: Vec<(Uuid, usize)>) -> anyhow::Result<()> {
         for (uuid, worker_idx) in admissions {
-            let request = self.router_pending.remove(&uuid).ok_or_else(|| {
-                anyhow::anyhow!("offline replay missing queued request state for {uuid}")
-            })?;
+            let request = self
+                .requests
+                .get_mut(&uuid)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("offline replay missing queued request state for {uuid}")
+                })?
+                .take_queued_request(uuid)?;
+            self.queued_requests = self.queued_requests.saturating_sub(1);
             self.dispatch_to_worker(request, uuid, worker_idx)?;
         }
         Ok(())
@@ -248,6 +257,7 @@ impl OfflineRuntime {
         );
 
         let Some(router) = self.router.as_mut() else {
+            self.requests.insert(uuid, AggRequestState::new_running());
             let worker_idx = self.next_worker_idx;
             self.next_worker_idx = (self.next_worker_idx + 1) % self.workers.len();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
@@ -258,11 +268,14 @@ impl OfflineRuntime {
             router.submit_request_with_hashes(&request, replay_hashes, self.now_ms)?;
         self.record_router_pending();
         if let Some(worker_idx) = maybe_worker_idx {
+            self.requests.insert(uuid, AggRequestState::new_running());
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
         }
 
-        self.router_pending.insert(uuid, request);
+        self.requests
+            .insert(uuid, AggRequestState::new_queued(request));
+        self.queued_requests += 1;
         self.record_in_flight_peak();
         Ok(uuid)
     }
@@ -295,21 +308,7 @@ impl OfflineRuntime {
             (ReplayMode::Concurrency { .. }, AdmissionSource::Requests(_)) => None,
         };
 
-        match (next_arrival_ms, next_event_ms) {
-            (Some(arrival_ms), Some(event_ms)) => Some(arrival_ms.min(event_ms)),
-            (Some(arrival_ms), None) => Some(arrival_ms),
-            (None, Some(event_ms)) => Some(event_ms),
-            (None, None) => None,
-        }
-    }
-
-    fn push_event(&mut self, at_ms: f64, kind: SimulationEventKind) {
-        self.events.push(SimulationEvent {
-            at_ms,
-            seq_no: self.next_event_seq,
-            kind,
-        });
-        self.next_event_seq += 1;
+        choose_next_timestamp(next_arrival_ms, next_event_ms)
     }
 
     fn apply_completed_requests(&mut self, worker_idx: usize, completed_requests: usize) {
@@ -339,7 +338,9 @@ impl OfflineRuntime {
                 }
                 self.record_router_pending();
             }
-            self.prefill_completed.remove(&signal.uuid);
+            self.requests.remove(&signal.uuid).ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
+            })?;
             if let AdmissionSource::Workload(driver) = &mut self.admission {
                 driver.on_complete(signal.uuid, self.now_ms)?;
             }
@@ -347,10 +348,23 @@ impl OfflineRuntime {
             return Ok(());
         }
 
-        if !self.prefill_completed.insert(signal.uuid) {
+        let already_marked = self
+            .requests
+            .get(&signal.uuid)
+            .ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
+            })?
+            .prefill_completed();
+        if already_marked {
             return Ok(());
         }
 
+        self.requests
+            .get_mut(&signal.uuid)
+            .ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
+            })?
+            .mark_prefill_completed();
         if let Some(router) = self.router.as_mut() {
             admissions = router.mark_prefill_completed(signal.uuid)?;
             #[cfg(test)]
@@ -395,25 +409,15 @@ impl OfflineRuntime {
 
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
-        loop {
-            let Some(event) = self.events.peek() else {
-                break;
-            };
-            if event.at_ms != self.now_ms {
-                break;
-            }
-            if !matches!(event.kind, SimulationEventKind::WorkerCompletion { .. }) {
-                break;
-            }
-
-            let event = self.events.pop().expect("event must exist after peek");
-            let SimulationEventKind::WorkerCompletion {
-                worker_idx,
-                completed_requests,
-                output_signals,
-                kv_events,
-            } = event.kind;
-
+        while let Some(WorkerCompletionPayload {
+            stage,
+            worker_idx,
+            completed_requests,
+            output_signals,
+            kv_events,
+        }) = pop_ready_worker_completion(&mut self.events, self.now_ms)
+        {
+            debug_assert_eq!(stage, SimulationWorkerStage::Aggregated);
             self.workers[worker_idx].mark_idle();
             self.process_completed_pass(worker_idx, completed_requests, output_signals, kv_events)?;
             changed = true;
@@ -424,39 +428,33 @@ impl OfflineRuntime {
 
     fn release_trace_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
-        let mut ready_requests = Vec::new();
-
-        match &mut self.admission {
-            AdmissionSource::Requests(pending) => {
-                while pending
-                    .front()
-                    .and_then(|request| request.arrival_timestamp_ms)
-                    .is_some_and(|arrival_ms| arrival_ms <= self.now_ms)
-                {
-                    let request = pending
-                        .pop_front()
-                        .expect("front request must exist when arrival is ready");
-                    let arrival_ms = request
-                        .arrival_timestamp_ms
-                        .expect("trace replay requests must have an arrival timestamp");
-                    ready_requests.push((request, arrival_ms, None));
-                }
+        if matches!(self.admission, AdmissionSource::Requests(_)) {
+            loop {
+                let next_ready = match &mut self.admission {
+                    AdmissionSource::Requests(pending) => {
+                        pop_next_trace_ready(pending, self.now_ms)
+                    }
+                    AdmissionSource::Workload(_) => unreachable!(),
+                };
+                let Some((request, arrival_ms)) = next_ready else {
+                    break;
+                };
+                self.assign_request(request, arrival_ms, None)?;
+                released_any = true;
             }
-            AdmissionSource::Workload(driver) => {
-                ready_requests.extend(driver.pop_ready(self.now_ms, usize::MAX).into_iter().map(
-                    |ready| {
-                        (
-                            ready.request,
-                            ready.scheduled_ready_at_ms,
-                            ready.replay_hashes,
-                        )
-                    },
-                ));
-            }
+            return Ok(released_any);
         }
 
-        for (request, arrival_ms, replay_hashes) in ready_requests {
-            self.assign_request(request, arrival_ms, replay_hashes)?;
+        let ready_requests = match &mut self.admission {
+            AdmissionSource::Requests(_) => unreachable!(),
+            AdmissionSource::Workload(driver) => driver.pop_ready(self.now_ms, usize::MAX),
+        };
+        for ready in ready_requests {
+            self.assign_request(
+                ready.request,
+                ready.scheduled_ready_at_ms,
+                ready.replay_hashes,
+            )?;
             released_any = true;
         }
 
@@ -465,33 +463,38 @@ impl OfflineRuntime {
 
     fn top_off_concurrency(&mut self, max_in_flight: usize) -> anyhow::Result<bool> {
         let mut released_any = false;
+        if matches!(self.admission, AdmissionSource::Requests(_)) {
+            loop {
+                let cluster_in_flight = self.cluster_in_flight();
+                let next_ready = match &mut self.admission {
+                    AdmissionSource::Requests(pending) => pop_next_concurrency_ready(
+                        pending,
+                        self.now_ms,
+                        cluster_in_flight,
+                        max_in_flight,
+                    ),
+                    AdmissionSource::Workload(_) => unreachable!(),
+                };
+                let Some((request, arrival_ms)) = next_ready else {
+                    break;
+                };
+                self.assign_request(request, arrival_ms, None)?;
+                released_any = true;
+            }
+            return Ok(released_any);
+        }
+
         let available = max_in_flight.saturating_sub(self.cluster_in_flight());
         if available == 0 {
             return Ok(false);
         }
 
-        let mut ready_requests = Vec::new();
-        match &mut self.admission {
-            AdmissionSource::Requests(pending) => {
-                for _ in 0..available {
-                    let Some(request) = pending.pop_front() else {
-                        break;
-                    };
-                    ready_requests.push((request, None));
-                }
-            }
-            AdmissionSource::Workload(driver) => {
-                ready_requests.extend(
-                    driver
-                        .pop_ready(self.now_ms, available)
-                        .into_iter()
-                        .map(|ready| (ready.request, ready.replay_hashes)),
-                );
-            }
-        }
-
-        for (request, replay_hashes) in ready_requests {
-            self.assign_request(request, self.now_ms, replay_hashes)?;
+        let ready_requests = match &mut self.admission {
+            AdmissionSource::Requests(_) => unreachable!(),
+            AdmissionSource::Workload(driver) => driver.pop_ready(self.now_ms, available),
+        };
+        for ready in ready_requests {
+            self.assign_request(ready.request, self.now_ms, ready.replay_hashes)?;
             released_any = true;
         }
 
@@ -531,9 +534,12 @@ impl OfflineRuntime {
                 }
 
                 self.workers[worker_idx].mark_busy();
-                self.push_event(
+                push_worker_completion(
+                    &mut self.events,
+                    &mut self.next_event_seq,
                     executed.end_ms,
-                    SimulationEventKind::WorkerCompletion {
+                    WorkerCompletionPayload {
+                        stage: SimulationWorkerStage::Aggregated,
                         worker_idx,
                         completed_requests: executed.completed_requests,
                         output_signals: executed.output_signals,
@@ -616,10 +622,19 @@ impl OfflineRuntime {
 
     #[cfg(test)]
     fn debug_snapshot(&self) -> OfflineRuntimeSnapshot {
-        let mut router_pending_request_ids =
-            self.router_pending.keys().copied().collect::<Vec<_>>();
+        let mut router_pending_request_ids = self
+            .requests
+            .iter()
+            .filter(|(_, state)| state.is_queued_at_router())
+            .map(|(uuid, _)| *uuid)
+            .collect::<Vec<_>>();
         router_pending_request_ids.sort_unstable();
-        let mut prefill_completed = self.prefill_completed.iter().copied().collect::<Vec<_>>();
+        let mut prefill_completed = self
+            .requests
+            .iter()
+            .filter(|(_, state)| state.prefill_completed())
+            .map(|(uuid, _)| *uuid)
+            .collect::<Vec<_>>();
         prefill_completed.sort_unstable();
 
         OfflineRuntimeSnapshot {
@@ -1483,16 +1498,16 @@ mod tests {
         let request_1 = collector.snapshot(Uuid::from_u128(1)).unwrap();
         let request_2 = collector.snapshot(Uuid::from_u128(2)).unwrap();
         let request_3 = collector.snapshot(Uuid::from_u128(3)).unwrap();
+        let first_unblock_ms = request_1
+            .first_token_ms
+            .unwrap()
+            .min(request_2.first_token_ms.unwrap());
 
         assert!(stats.max_router_pending > 0);
         assert!(request_3.first_admit_ms.unwrap() > request_3.arrival_time_ms);
-        assert!(
-            request_3.first_admit_ms.unwrap()
-                < request_1
-                    .last_token_ms
-                    .unwrap()
-                    .min(request_2.last_token_ms.unwrap())
-        );
+        assert_eq!(request_3.first_admit_ms.unwrap(), first_unblock_ms);
+        assert!(request_3.first_admit_ms.unwrap() < request_1.last_token_ms.unwrap());
+        assert!(request_3.first_admit_ms.unwrap() < request_2.last_token_ms.unwrap());
     }
 
     #[test]
@@ -1562,6 +1577,72 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_worker_trace_kv_router_fcfs_and_lcfs_admit_queued_requests_in_opposite_timestamp_order()
+     {
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![10; 64],
+                max_output_tokens: 8,
+                uuid: Some(Uuid::from_u128(10)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+            },
+            DirectRequest {
+                tokens: vec![20; 128],
+                max_output_tokens: 8,
+                uuid: Some(Uuid::from_u128(20)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+            },
+            DirectRequest {
+                tokens: vec![30; 64],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(30)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.1),
+            },
+            DirectRequest {
+                tokens: vec![40; 64],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(40)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.2),
+            },
+        ];
+
+        let (fcfs_collector, fcfs_stats) = run_trace_multi_collect_with_stats(
+            &queueing_router_args(RouterQueuePolicy::Fcfs),
+            requests.clone(),
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+        let (lcfs_collector, lcfs_stats) = run_trace_multi_collect_with_stats(
+            &queueing_router_args(RouterQueuePolicy::Lcfs),
+            requests,
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+
+        let fcfs_request_30 = fcfs_collector.snapshot(Uuid::from_u128(30)).unwrap();
+        let fcfs_request_40 = fcfs_collector.snapshot(Uuid::from_u128(40)).unwrap();
+        let lcfs_request_30 = lcfs_collector.snapshot(Uuid::from_u128(30)).unwrap();
+        let lcfs_request_40 = lcfs_collector.snapshot(Uuid::from_u128(40)).unwrap();
+
+        assert!(fcfs_stats.max_router_pending > 0);
+        assert!(lcfs_stats.max_router_pending > 0);
+        assert_eq!(
+            &fcfs_stats.dispatch_order[2..4],
+            &[Uuid::from_u128(30), Uuid::from_u128(40)]
+        );
+        assert_eq!(
+            &lcfs_stats.dispatch_order[2..4],
+            &[Uuid::from_u128(40), Uuid::from_u128(30)]
+        );
+        assert!(fcfs_request_30.first_admit_ms.unwrap() < fcfs_request_40.first_admit_ms.unwrap());
+        assert!(lcfs_request_40.first_admit_ms.unwrap() < lcfs_request_30.first_admit_ms.unwrap());
+    }
+
+    #[test]
     fn test_multi_worker_concurrency_kv_router_respects_max_in_flight() {
         let args = queueing_router_args(RouterQueuePolicy::Fcfs);
         let (_, stats) = run_concurrency_multi_collect_with_stats(
@@ -1603,6 +1684,51 @@ mod tests {
 
         assert_eq!(stats.max_in_flight_seen, 3);
         assert!(stats.max_router_pending > 0);
+    }
+
+    #[test]
+    fn test_multi_worker_concurrency_kv_router_records_backfill_timing() {
+        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
+        let (collector, stats) = run_concurrency_multi_collect_with_stats(
+            &args,
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(11)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                },
+                DirectRequest {
+                    tokens: vec![2; 64],
+                    max_output_tokens: 4,
+                    uuid: Some(Uuid::from_u128(22)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                },
+                DirectRequest {
+                    tokens: vec![3; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(33)),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                },
+            ],
+            2,
+            2,
+            ReplayRouterMode::KvRouter,
+        );
+
+        let request_1 = collector.snapshot(Uuid::from_u128(11)).unwrap();
+        let request_2 = collector.snapshot(Uuid::from_u128(22)).unwrap();
+        let request_3 = collector.snapshot(Uuid::from_u128(33)).unwrap();
+
+        assert_eq!(request_1.arrival_time_ms, 0.0);
+        assert_eq!(request_2.arrival_time_ms, 0.0);
+        assert_eq!(request_3.arrival_time_ms, request_1.last_token_ms.unwrap());
+        assert!(request_3.arrival_time_ms < request_2.last_token_ms.unwrap());
+        assert_eq!(request_3.first_admit_ms.unwrap(), request_3.arrival_time_ms);
+        assert_eq!(stats.max_in_flight_seen, 2);
     }
 
     #[test]

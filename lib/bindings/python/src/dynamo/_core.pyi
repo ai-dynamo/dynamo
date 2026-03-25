@@ -1217,6 +1217,7 @@ class MockEngineArgs:
         dp_size: int = 1,
         startup_time: Optional[float] = None,
         worker_type: str = "aggregated",
+        planner_profile_data: Optional[str | os.PathLike[str]] = None,
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
@@ -1238,6 +1239,8 @@ class MockEngineArgs:
     @staticmethod
     def from_json(config_json: str) -> "MockEngineArgs":
         ...
+
+    def dump_json(self) -> str: ...
 
     @property
     def block_size(self) -> int: ...
@@ -1376,8 +1379,12 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
 def run_mocker_trace_replay(
     trace_file: str | os.PathLike[str],
     extra_engine_args: Optional[MockEngineArgs] = None,
+    prefill_engine_args: Optional[MockEngineArgs] = None,
+    decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
+    num_prefill_workers: int = 1,
+    num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
@@ -1391,8 +1398,12 @@ def run_mocker_synthetic_trace_replay(
     output_tokens: int,
     request_count: int,
     extra_engine_args: Optional[MockEngineArgs] = None,
+    prefill_engine_args: Optional[MockEngineArgs] = None,
+    decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
+    num_prefill_workers: int = 1,
+    num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
