@@ -97,7 +97,6 @@ fn extract_tool_calls(
                 match parse_tool_call_block(block, config, tools) {
                     Ok(parsed_call) => calls.push(parsed_call),
                     Err(e) => {
-                        warn!("Failed to parse GLM-4.7 tool call block: {e}");
                         if let Some((recovered_text, mut recovered_calls)) =
                             recover_nested_tool_calls(block, config, tools)?
                         {
@@ -106,6 +105,7 @@ fn extract_tool_calls(
                             }
                             calls.append(&mut recovered_calls);
                         } else {
+                            warn!("Failed to parse GLM-4.7 tool call block: {e}");
                             normal_parts.push(block.to_string());
                         }
                     }
@@ -134,15 +134,33 @@ fn recover_nested_tool_calls(
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
     let start_token = config.tool_call_start.as_str();
-    let mut nested_starts = Vec::new();
-    let mut search_offset = start_token.len();
-    while let Some(relative_start) = block[search_offset..].find(start_token) {
-        let nested_start = search_offset + relative_start;
-        nested_starts.push(nested_start);
-        search_offset = nested_start + start_token.len();
+    let mut candidate_starts = Vec::new();
+
+    if let Some(tools_list) = tools {
+        for tool in tools_list {
+            let exact_start = format!("{start_token}{}", tool.name);
+            let mut search_offset = start_token.len();
+            while let Some(relative_start) = block[search_offset..].find(&exact_start) {
+                let nested_start = search_offset + relative_start;
+                candidate_starts.push(nested_start);
+                search_offset = nested_start + 1;
+            }
+        }
     }
 
-    for nested_start in nested_starts.into_iter().rev() {
+    if candidate_starts.is_empty() {
+        let mut search_offset = start_token.len();
+        while let Some(relative_start) = block[search_offset..].find(start_token) {
+            let nested_start = search_offset + relative_start;
+            candidate_starts.push(nested_start);
+            search_offset = nested_start + start_token.len();
+        }
+    }
+
+    candidate_starts.sort_unstable();
+    candidate_starts.dedup();
+
+    for nested_start in candidate_starts.into_iter().rev() {
         let nested_block = &block[nested_start..];
         let (normal_text, calls) = extract_tool_calls(nested_block, config, tools)?;
         if !calls.is_empty() {
@@ -231,6 +249,25 @@ fn get_param_schema_type<'a>(
     param.get("type")?.as_str()
 }
 
+fn recover_malformed_function_name_prefix<'a>(
+    raw_function_name: &'a str,
+    tools: Option<&'a [ToolDefinition]>,
+) -> Option<&'a str> {
+    let tools = tools?;
+
+    tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .filter(|tool_name| {
+            raw_function_name.starts_with(tool_name)
+                && raw_function_name[tool_name.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !matches!(ch, 'a'..='z' | '0'..='9' | '_'))
+        })
+        .max_by_key(|tool_name| tool_name.len())
+}
+
 /// Parse a single GLM-4.7 tool call block
 /// Format: <tool_call>function_name<arg_key>key1</arg_key><arg_value>value1</arg_value>...</tool_call>
 fn parse_tool_call_block(
@@ -249,18 +286,22 @@ fn parse_tool_call_block(
 
     // Extract function name (everything before first <arg_key> or end)
     let arg_key_start = &config.arg_key_start;
-    let function_name = if let Some(pos) = content.find(arg_key_start.as_str()) {
+    let raw_function_name = if let Some(pos) = content.find(arg_key_start.as_str()) {
         content[..pos].trim().to_string()
     } else {
         // No arguments, just function name
         content.trim().to_string()
     };
 
-    if function_name.is_empty() {
+    if raw_function_name.is_empty() {
         anyhow::bail!("Empty function name in tool call");
     }
+    let function_name = recover_malformed_function_name_prefix(&raw_function_name, tools)
+        .unwrap_or(raw_function_name.as_str())
+        .to_string();
+
     if function_name.contains('<') || function_name.contains('>') {
-        anyhow::bail!("Malformed function name '{}'", function_name);
+        anyhow::bail!("Malformed function name '{function_name}'");
     }
 
     // Parse key-value pairs
@@ -564,6 +605,102 @@ mod tests {
         let args: HashMap<String, Value> =
             serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["ids"], serde_json::json!(["/root/run_ls_simple"]));
+        assert_eq!(normal_text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_recovers_valid_tool_name_prefix_from_malformed_function_name() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "wait_agent".to_string(),
+            parameters: None,
+        }];
+
+        let message = concat!(
+            "<tool_call>",
+            "wait_agent",
+            "The agent has been spawned successfully with id \"019d26c6-bcc7-7152-be59-dc68332552f7\". ",
+            "Now I should wait for it to complete and then close it.</think>",
+            "Agent spindle started with ID `019d26c6-bcc7-7152-be59-dc68332552f7`. Waiting for completion then closing it.",
+            "<arg_key>ids</arg_key><arg_value>[\"019d26c6-bcc7-7152-be59-dc68332552f7\"]</arg_value>",
+            "</tool_call>"
+        );
+
+        let (calls, normal_text) =
+            try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "wait_agent");
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(
+            args["ids"],
+            serde_json::json!(["019d26c6-bcc7-7152-be59-dc68332552f7"])
+        );
+        assert_eq!(normal_text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_recovers_nested_tool_call_with_malformed_exact_name_start() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "wait_agent".to_string(),
+            parameters: None,
+        }];
+
+        let message = concat!(
+            "<tool_call>",
+            "Great, the agent has been spawned. Now I need to wait for it to complete before closing it.</think>",
+            "<tool_call>wait_agent",
+            "Great, the agent has been spawned. Now I need to wait for it to complete before closing it.",
+            "<arg_key>ids</arg_key><arg_value>[\"019d26cb-3125-7e03-a07c-363ebffae56b\"]</arg_value>",
+            "</tool_call>"
+        );
+
+        let (calls, normal_text) =
+            try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "wait_agent");
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(
+            args["ids"],
+            serde_json::json!(["019d26cb-3125-7e03-a07c-363ebffae56b"])
+        );
+        assert_eq!(normal_text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_recovers_exact_tool_name_start_from_repeated_spawn_agent_prefixes() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "spawn_agent".to_string(),
+            parameters: None,
+        }];
+
+        let message = concat!(
+            "<tool_call>",
+            "I got an error - the agent_name must be lowercase with only letters, digits, and underscores. ",
+            "Let me fix that.</think>",
+            "<tool_call>spawn",
+            "I got an error - the agent_name must be lowercase with only letters, digits, and underscores. ",
+            "Let me fix that.</think>",
+            "<tool_call>spawn_agent",
+            "<arg_key>agent_name</arg_key><arg_value>ls_executor</arg_value>",
+            "<arg_key>message</arg_key><arg_value>Run ls and report output</arg_value>",
+            "</tool_call>"
+        );
+
+        let (calls, normal_text) =
+            try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "spawn_agent");
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["agent_name"], "ls_executor");
+        assert_eq!(args["message"], "Run ls and report output");
         assert_eq!(normal_text, Some("".to_string()));
     }
 
