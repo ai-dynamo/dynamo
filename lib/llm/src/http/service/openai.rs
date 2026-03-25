@@ -1877,6 +1877,7 @@ async fn images(
             dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
             dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
+            _ => format!("{:?}", m).to_lowercase(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
 
