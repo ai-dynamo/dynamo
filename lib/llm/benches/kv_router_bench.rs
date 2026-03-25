@@ -1404,7 +1404,8 @@ async fn main() -> Result<()> {
         if let Some(contents) = contents {
             match serde_json::from_str::<ChatTemplate>(&contents) {
                 Ok(chat_template) => {
-                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[])) {
+                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[]), true)
+                    {
                         Ok(formatter) => {
                             println!(
                                 "  Prompt formatter loaded from tokenizer_config.json (using frontend-compatible renderer)"
