@@ -9,12 +9,14 @@ use bytes::Bytes;
 use rmp_serde as rmps;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use zeromq::{Socket, SocketRecv, SocketSend, SubSocket};
+use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, SubSocket};
 
-use crate::protocols::{RouterEvent, WorkerId};
+use crate::protocols::{WorkerId, WorkerWithDpRank};
+use crate::recovery::{CursorObservation, CursorState};
 use crate::zmq_wire::{KvEventBatch, convert_event};
 
 use super::indexer::Indexer;
+use super::registry::ListenerRecord;
 
 const INITIAL_BACKOFF_MS: u64 = 10;
 const MAX_BACKOFF_MS: u64 = 5000;
@@ -28,205 +30,396 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
     )
 }
 
-/// Sentinel value for `watermark`: indicates no batch has been processed yet.
 const WATERMARK_UNSET: u64 = u64::MAX;
 
-/// Replay missed batches from the engine's ROUTER socket.
-///
-/// Uses a DEALER socket (no send/recv lockstep) to send one request and
-/// receive multiple response frames. Each response is `[empty, seq, payload]`;
-/// an empty payload signals end of replay.
-#[expect(clippy::too_many_arguments)]
-async fn replay_gap(
-    replay_socket: &mut zeromq::DealerSocket,
-    start_seq: u64,
-    end_seq: u64,
+fn cursor_from_watermark(watermark: u64) -> CursorState {
+    if watermark == WATERMARK_UNSET {
+        CursorState::Initial
+    } else {
+        CursorState::Live(watermark)
+    }
+}
+
+struct ListenerLoop {
     worker_id: WorkerId,
     dp_rank: u32,
     block_size: u32,
-    indexer: &Indexer,
-    warning_count: &Arc<AtomicU32>,
-    watermark: &Arc<AtomicU64>,
-) -> u64 {
-    tracing::info!(
-        worker_id,
-        dp_rank,
-        start_seq,
-        end_seq,
-        "Requesting replay from engine"
-    );
+    indexer: Indexer,
+    cancel: CancellationToken,
+    socket: SubSocket,
+    replay_socket: Option<DealerSocket>,
+    watermark: Arc<AtomicU64>,
+    warning_count: Arc<AtomicU32>,
+    consecutive_errors: u32,
+    messages_processed: u64,
+}
 
-    // DEALER must manually prepend the empty delimiter that REQ adds automatically.
-    let req_frames = vec![Bytes::new(), Bytes::from(start_seq.to_be_bytes().to_vec())];
-    let Ok(req_msg) = zeromq::ZmqMessage::try_from(req_frames) else {
-        tracing::error!(worker_id, dp_rank, "Failed to build replay request");
-        return 0;
-    };
-    if let Err(e) = replay_socket.send(req_msg).await {
-        tracing::error!(worker_id, dp_rank, error = %e, "Failed to send replay request");
-        return 0;
+impl ListenerLoop {
+    #[expect(clippy::too_many_arguments)]
+    fn new(
+        worker_id: WorkerId,
+        dp_rank: u32,
+        block_size: u32,
+        indexer: Indexer,
+        cancel: CancellationToken,
+        socket: SubSocket,
+        replay_socket: Option<DealerSocket>,
+        watermark: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            worker_id,
+            dp_rank,
+            block_size,
+            indexer,
+            cancel,
+            socket,
+            replay_socket,
+            watermark,
+            warning_count: Arc::new(AtomicU32::new(0)),
+            consecutive_errors: 0,
+            messages_processed: 0,
+        }
     }
 
-    let mut replayed = 0u64;
-    loop {
-        let Ok(msg) = replay_socket.recv().await else {
-            tracing::error!(worker_id, dp_rank, "Replay recv error");
-            break;
+    fn cursor(&self) -> CursorState {
+        cursor_from_watermark(self.watermark.load(Ordering::Acquire))
+    }
+
+    async fn replay_gap(&mut self, start_seq: u64, end_seq: u64) -> u64 {
+        tracing::info!(
+            self.worker_id,
+            self.dp_rank,
+            start_seq,
+            end_seq,
+            "Requesting replay from engine"
+        );
+
+        let Some(replay_socket) = self.replay_socket.as_mut() else {
+            tracing::warn!(
+                self.worker_id,
+                self.dp_rank,
+                gap_size = end_seq.saturating_sub(start_seq),
+                "No replay endpoint configured; batches lost"
+            );
+            return 0;
         };
-        // ROUTER sends [identity, empty, seq, payload]; DEALER strips identity,
-        // so we receive [empty, seq, payload].
-        if msg.len() < 3 {
-            tracing::warn!(
-                worker_id,
-                dp_rank,
-                "Unexpected replay frame count: {}",
-                msg.len()
-            );
-            break;
+
+        let worker_id = self.worker_id;
+        let dp_rank = self.dp_rank;
+        let block_size = self.block_size;
+        let indexer = &self.indexer;
+        let warning_count = &self.warning_count;
+        let watermark = &self.watermark;
+
+        let req_frames = vec![Bytes::new(), Bytes::from(start_seq.to_be_bytes().to_vec())];
+        let Ok(req_msg) = zeromq::ZmqMessage::try_from(req_frames) else {
+            tracing::error!(worker_id, dp_rank, "Failed to build replay request");
+            return 0;
+        };
+        if let Err(error) = replay_socket.send(req_msg).await {
+            tracing::error!(worker_id, dp_rank, error = %error, "Failed to send replay request");
+            return 0;
         }
 
-        let payload = msg.get(2).unwrap();
-        if payload.is_empty() {
-            break;
+        let mut replayed = 0u64;
+        loop {
+            let Ok(msg) = replay_socket.recv().await else {
+                tracing::error!(worker_id, dp_rank, "Replay recv error");
+                break;
+            };
+            if msg.len() < 3 {
+                tracing::warn!(
+                    worker_id,
+                    dp_rank,
+                    "Unexpected replay frame count: {}",
+                    msg.len()
+                );
+                break;
+            }
+
+            let payload = msg.get(2).expect("frame count checked above");
+            if payload.is_empty() {
+                break;
+            }
+
+            let seq_bytes = msg.get(1).expect("frame count checked above");
+            if seq_bytes.len() != 8 {
+                tracing::warn!(
+                    worker_id,
+                    dp_rank,
+                    "Invalid replay seq length: {}",
+                    seq_bytes.len()
+                );
+                break;
+            }
+            let seq = u64::from_be_bytes(seq_bytes[..8].try_into().expect("length checked above"));
+
+            let Ok(batch) = rmps::from_slice::<KvEventBatch>(payload) else {
+                tracing::warn!(worker_id, dp_rank, seq, "Failed to decode replayed batch");
+                continue;
+            };
+
+            let effective_dp_rank = batch
+                .data_parallel_rank
+                .map_or(dp_rank, |rank| rank.cast_unsigned());
+            for raw_event in batch.events {
+                let placement_event = convert_event(
+                    raw_event,
+                    seq,
+                    block_size,
+                    WorkerWithDpRank::new(worker_id, effective_dp_rank),
+                    warning_count,
+                );
+                if !placement_event.placement.is_local_gpu() {
+                    continue;
+                }
+                let router_event = placement_event
+                    .into_router_event()
+                    .expect("local worker placement must convert to router event");
+                indexer.apply_event(router_event).await;
+            }
+            watermark.store(seq, Ordering::Release);
+            replayed += 1;
         }
 
-        let seq_bytes = msg.get(1).unwrap();
-        if seq_bytes.len() != 8 {
-            tracing::warn!(
-                worker_id,
-                dp_rank,
-                "Invalid replay seq length: {}",
-                seq_bytes.len()
-            );
-            break;
-        }
-        let seq = u64::from_be_bytes(seq_bytes[..8].try_into().unwrap());
+        tracing::info!(worker_id, dp_rank, replayed, "Replay complete");
+        replayed
+    }
 
-        let Ok(batch) = rmps::from_slice::<KvEventBatch>(payload) else {
-            tracing::warn!(worker_id, dp_rank, seq, "Failed to decode replayed batch");
-            continue;
+    async fn handle_gap(&mut self, seq: u64) {
+        match self.cursor().observe(seq) {
+            CursorObservation::Initial { got } if got > 0 => {
+                tracing::warn!(
+                    self.worker_id,
+                    self.dp_rank,
+                    expected = 0,
+                    got,
+                    "Gap detected: expected seq 0, got {got}"
+                );
+                self.replay_gap(0, got).await;
+            }
+            CursorObservation::Gap { expected, got } => {
+                tracing::warn!(
+                    self.worker_id,
+                    self.dp_rank,
+                    expected,
+                    got,
+                    "Gap detected: expected seq {expected}, got {got}"
+                );
+                self.replay_gap(expected, got).await;
+            }
+            CursorObservation::Initial { .. }
+            | CursorObservation::Contiguous { .. }
+            | CursorObservation::Stale { .. }
+            | CursorObservation::FreshAfterBarrier { .. } => {}
+        }
+    }
+
+    async fn apply_live_batch(&mut self, seq: u64, payload: &[u8]) {
+        let batch = match rmps::from_slice::<KvEventBatch>(payload) {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::warn!(
+                    self.worker_id,
+                    self.dp_rank,
+                    "Failed to decode KvEventBatch: {error}"
+                );
+                return;
+            }
         };
 
         let effective_dp_rank = batch
             .data_parallel_rank
-            .map_or(dp_rank, |r| r.cast_unsigned());
+            .map_or(self.dp_rank, |rank| rank.cast_unsigned());
         for raw_event in batch.events {
-            let kv_event =
-                convert_event(raw_event, seq, block_size, effective_dp_rank, warning_count);
-            let router_event = RouterEvent::new(worker_id, kv_event);
-            indexer.apply_event(router_event).await;
+            let placement_event = convert_event(
+                raw_event,
+                seq,
+                self.block_size,
+                WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
+                &self.warning_count,
+            );
+            if !placement_event.placement.is_local_gpu() {
+                continue;
+            }
+            let router_event = placement_event
+                .into_router_event()
+                .expect("local worker placement must convert to router event");
+            self.indexer.apply_event(router_event).await;
+            self.messages_processed += 1;
         }
-        watermark.store(seq, Ordering::Release);
-        replayed += 1;
+        self.watermark.store(seq, Ordering::Release);
     }
 
-    tracing::info!(worker_id, dp_rank, replayed, "Replay complete");
-    replayed
-}
-
-// TODO: assumes one dp_rank per ZMQ socket. Seq counter is per-socket so gap
-// detection works regardless, but replay semantics may differ if a single
-// socket multiplexes dp_ranks.
-
-/// Connect the ZMQ SUB socket, then spawn a background task that waits for
-/// the ready signal before entering the recv loop.
-///
-/// Returns once the SUB socket is connected (subscription handshake begins
-/// immediately in the background). The ready gate and recv loop run in a
-/// spawned task so `register()` is never blocked waiting for `signal_ready()`.
-#[expect(clippy::too_many_arguments)]
-pub async fn run_zmq_listener(
-    worker_id: WorkerId,
-    dp_rank: u32,
-    zmq_address: String,
-    block_size: u32,
-    indexer: Indexer,
-    cancel: CancellationToken,
-    ready: watch::Receiver<bool>,
-    replay_endpoint: Option<String>,
-    watermark: Arc<AtomicU64>,
-) {
-    tracing::info!(worker_id, dp_rank, zmq_address, "ZMQ listener starting");
-
-    let mut socket = SubSocket::new();
-
-    if let Err(e) = socket.subscribe("").await {
-        tracing::error!("Failed to subscribe on ZMQ socket: {e}");
-        return;
-    }
-
-    if let Err(e) = socket.connect(&zmq_address).await {
-        tracing::error!("Failed to connect ZMQ SUB socket to {zmq_address}: {e}");
-        return;
-    }
-
-    // Spawn the ready-wait + recv loop so the caller returns immediately.
-    // The ZMQ subscription handshake proceeds in the background while P2P
-    // recovery runs; once signal_ready() fires the recv loop starts draining
-    // any buffered messages.
-    tokio::spawn(zmq_wait_ready_then_recv(
-        worker_id,
-        dp_rank,
-        block_size,
-        indexer,
-        cancel,
-        ready,
-        socket,
-        replay_endpoint,
-        watermark,
-    ));
-}
-
-#[expect(clippy::too_many_arguments)]
-async fn zmq_wait_ready_then_recv(
-    worker_id: WorkerId,
-    dp_rank: u32,
-    block_size: u32,
-    indexer: Indexer,
-    cancel: CancellationToken,
-    mut ready: watch::Receiver<bool>,
-    socket: SubSocket,
-    replay_endpoint: Option<String>,
-    watermark: Arc<AtomicU64>,
-) {
-    // Wait for the ready signal before entering the recv loop.
-    // During P2P recovery, this delay lets the recovery code fetch the dump
-    // from a peer while ZMQ subscription handshakes complete in the background.
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => {
-            tracing::info!(worker_id, dp_rank, "ZMQ listener cancelled before ready");
+    async fn handle_message(&mut self, msg: zeromq::ZmqMessage) {
+        if msg.len() != 3 {
+            tracing::warn!(
+                self.worker_id,
+                self.dp_rank,
+                "Unexpected ZMQ frame count: {}",
+                msg.len()
+            );
             return;
         }
-        result = ready.wait_for(|&v| v) => {
-            if result.is_err() {
-                tracing::error!(worker_id, dp_rank, "Ready channel closed before signaling");
-                return;
-            }
+
+        let seq_bytes = msg.get(1).expect("frame count checked above");
+        if seq_bytes.len() != 8 {
+            tracing::warn!(
+                self.worker_id,
+                self.dp_rank,
+                "Invalid sequence number length: {}",
+                seq_bytes.len()
+            );
+            return;
         }
+
+        let seq = u64::from_be_bytes(seq_bytes[..8].try_into().expect("length checked above"));
+        self.handle_gap(seq).await;
+
+        if matches!(self.cursor().observe(seq), CursorObservation::Stale { .. }) {
+            return;
+        }
+
+        let payload = msg.get(2).expect("frame count checked above");
+        self.apply_live_batch(seq, payload).await;
+    }
+
+    async fn run(mut self) -> Result<(), String> {
+        loop {
+            let msg = tokio::select! {
+                biased;
+
+                _ = self.cancel.cancelled() => {
+                    tracing::info!(
+                        self.worker_id,
+                        self.dp_rank,
+                        self.messages_processed,
+                        "ZMQ listener exiting after cancellation"
+                    );
+                    return Ok(());
+                }
+
+                msg_result = self.socket.recv() => {
+                    match msg_result {
+                        Ok(msg) => {
+                            self.consecutive_errors = 0;
+                            msg
+                        }
+                        Err(error) => {
+                            self.consecutive_errors += 1;
+
+                            if self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                return Err(format!(
+                                    "too many consecutive ZMQ recv errors for worker {} dp_rank {}: {error}",
+                                    self.worker_id,
+                                    self.dp_rank,
+                                ));
+                            }
+
+                            let backoff_ms = calculate_backoff_ms(self.consecutive_errors);
+                            tracing::warn!(
+                                error = %error,
+                                consecutive_errors = self.consecutive_errors,
+                                backoff_ms,
+                                worker_id = self.worker_id,
+                                dp_rank = self.dp_rank,
+                                "ZMQ recv error, backing off"
+                            );
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            self.handle_message(msg).await;
+        }
+    }
+}
+
+pub fn spawn_zmq_listener(
+    worker_id: WorkerId,
+    dp_rank: u32,
+    record: Arc<ListenerRecord>,
+    ready: watch::Receiver<bool>,
+    generation: u64,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = run_listener(
+            worker_id,
+            dp_rank,
+            record.clone(),
+            ready,
+            generation,
+            cancel,
+        )
+        .await
+        {
+            tracing::error!(worker_id, dp_rank, error = %error, "ZMQ listener failed");
+            record.try_mark_failed(generation, error);
+        }
+    });
+}
+
+async fn run_listener(
+    worker_id: WorkerId,
+    dp_rank: u32,
+    record: Arc<ListenerRecord>,
+    mut ready: watch::Receiver<bool>,
+    generation: u64,
+    cancel: CancellationToken,
+) -> Result<(), String> {
+    let endpoint = record.endpoint().to_string();
+    let replay_endpoint = record.replay_endpoint().map(str::to_string);
+    let block_size = record.block_size();
+    let indexer = record.indexer();
+    let watermark = record.watermark();
+
+    tracing::info!(worker_id, dp_rank, endpoint, "ZMQ listener starting");
+
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+
+    let mut socket = SubSocket::new();
+    socket
+        .subscribe("")
+        .await
+        .map_err(|e| format!("failed to subscribe on ZMQ socket: {e}"))?;
+
+    tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        result = socket.connect(&endpoint) => {
+            result.map_err(|e| format!("failed to connect ZMQ SUB socket to {endpoint}: {e}"))?;
+        }
+    }
+
+    tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        result = ready.wait_for(|&value| value) => {
+            result.map_err(|_| "ready channel closed before signaling".to_string())?;
+        }
+    }
+
+    if !record.try_mark_active(generation) {
+        tracing::debug!(
+            worker_id,
+            dp_rank,
+            "Listener attempt is stale after readiness gate; exiting"
+        );
+        return Ok(());
     }
 
     tracing::info!(worker_id, dp_rank, "ZMQ listener ready, starting recv loop");
 
-    // Connect DEALER socket once if replay_endpoint is configured.
-    // DEALER (not REQ) because we send one request and receive multiple responses.
-    let mut replay_socket = None;
-    if let Some(ref ep) = replay_endpoint {
-        let mut sock = zeromq::DealerSocket::new();
-        if let Err(e) = sock.connect(ep).await {
-            tracing::error!(worker_id, dp_rank, error = %e, "Failed to connect replay socket to {ep}");
-        } else {
-            tracing::info!(
-                worker_id,
-                dp_rank,
-                replay_endpoint = ep,
-                "Replay socket connected"
-            );
-            replay_socket = Some(sock);
-        }
+    let replay_socket =
+        connect_replay_socket(worker_id, dp_rank, replay_endpoint.as_deref(), &cancel).await;
+    if cancel.is_cancelled() || !record.is_current_attempt(generation) {
+        return Ok(());
     }
 
-    zmq_recv_loop(
+    ListenerLoop::new(
         worker_id,
         dp_rank,
         block_size,
@@ -236,144 +429,68 @@ async fn zmq_wait_ready_then_recv(
         replay_socket,
         watermark,
     )
-    .await;
+    .run()
+    .await
 }
 
-#[expect(clippy::too_many_arguments)]
-async fn zmq_recv_loop(
+async fn connect_replay_socket(
     worker_id: WorkerId,
     dp_rank: u32,
-    block_size: u32,
-    indexer: Indexer,
-    cancel: CancellationToken,
-    mut socket: SubSocket,
-    mut replay_socket: Option<zeromq::DealerSocket>,
-    watermark: Arc<AtomicU64>,
-) {
-    let warning_count = Arc::new(AtomicU32::new(0));
-    let mut consecutive_errors = 0u32;
-    #[expect(unused_assignments)]
-    let mut exit_reason = "unknown";
-    let mut messages_processed = 0u64;
+    replay_endpoint: Option<&str>,
+    cancel: &CancellationToken,
+) -> Option<DealerSocket> {
+    let endpoint = replay_endpoint?;
 
-    'main: loop {
-        tokio::select! {
-            biased;
-
-            _ = cancel.cancelled() => {
-                exit_reason = "cancelled";
-                break 'main;
-            }
-
-            msg_result = socket.recv() => {
-                let Ok(msg) = msg_result else {
-                    let e = msg_result.unwrap_err();
-                    consecutive_errors += 1;
-
-                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                        tracing::error!(
-                            error=%e,
-                            consecutive_errors,
-                            worker_id,
-                            "Too many consecutive ZMQ errors, terminating listener"
-                        );
-                        exit_reason = "too many consecutive errors";
-                        break 'main;
-                    }
-
-                    let backoff_ms = calculate_backoff_ms(consecutive_errors);
-                    tracing::warn!(
-                        error=%e,
-                        consecutive_errors,
-                        backoff_ms,
+    let mut socket = DealerSocket::new();
+    tokio::select! {
+        _ = cancel.cancelled() => None,
+        result = socket.connect(endpoint) => {
+            match result {
+                Ok(()) => {
+                    tracing::info!(
                         worker_id,
-                        "ZMQ recv error, backing off"
+                        dp_rank,
+                        replay_endpoint = endpoint,
+                        "Replay socket connected"
                     );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                };
-
-                consecutive_errors = 0;
-
-                if msg.len() != 3 {
-                    tracing::warn!(worker_id, "Unexpected ZMQ frame count: {}", msg.len());
-                    continue;
+                    Some(socket)
                 }
-
-                let seq_bytes = msg.get(1).unwrap();
-                if seq_bytes.len() != 8 {
-                    tracing::warn!(worker_id, "Invalid sequence number length: {}", seq_bytes.len());
-                    continue;
-                }
-
-                let seq = u64::from_be_bytes(seq_bytes[..8].try_into().unwrap());
-
-                // Gap detection
-                let prev = watermark.load(Ordering::Acquire);
-                if prev != WATERMARK_UNSET && seq > prev + 1 {
-                    let gap_start = prev + 1;
-                    tracing::warn!(
-                        worker_id, dp_rank,
-                        expected = gap_start, got = seq,
-                        "Gap detected: expected seq {gap_start}, got {seq}"
+                Err(e) => {
+                    tracing::error!(
+                        worker_id,
+                        dp_rank,
+                        error = %e,
+                        "Failed to connect replay socket to {endpoint}"
                     );
-                    match replay_socket.as_mut() {
-                        Some(sock) => {
-                            replay_gap(
-                                sock, gap_start, seq, worker_id, dp_rank,
-                                block_size, &indexer, &warning_count, &watermark,
-                            ).await;
-                        }
-                        None => tracing::warn!(
-                            worker_id, dp_rank,
-                            gap_size = seq - gap_start,
-                            "No replay endpoint configured, {gap_size} batches lost",
-                            gap_size = seq - gap_start,
-                        ),
-                    }
+                    None
                 }
-
-                // After replay, watermark may have advanced past the current
-                // batch — skip to avoid double-apply. Exclude the sentinel
-                // (WATERMARK_UNSET) so the very first message is not skipped.
-                let current_wm = watermark.load(Ordering::Acquire);
-                if current_wm != WATERMARK_UNSET && current_wm >= seq {
-                    continue;
-                }
-
-                let payload = msg.get(2).unwrap();
-                let batch_result = rmps::from_slice::<KvEventBatch>(payload);
-                let Ok(batch) = batch_result else {
-                    tracing::warn!(worker_id, "Failed to decode KvEventBatch: {}", batch_result.unwrap_err());
-                    continue;
-                };
-
-                let effective_dp_rank = batch.data_parallel_rank.map_or(dp_rank, |r| r.cast_unsigned());
-                // Use the engine's ZMQ sequence number as event_id so downstream
-                // consumers can detect gaps and request replay.
-                for raw_event in batch.events {
-                    let kv_event = convert_event(raw_event, seq, block_size, effective_dp_rank, &warning_count);
-                    let router_event = RouterEvent::new(worker_id, kv_event);
-                    indexer.apply_event(router_event).await;
-                    messages_processed += 1;
-                }
-                watermark.store(seq, Ordering::Release);
             }
         }
     }
-
-    tracing::info!(
-        worker_id,
-        dp_rank,
-        exit_reason,
-        messages_processed,
-        "ZMQ listener exiting"
-    );
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{WATERMARK_UNSET, cursor_from_watermark};
+    use crate::recovery::CursorObservation;
     use zeromq::{PubSocket, Socket, SocketRecv, SocketSend, SubSocket};
+
+    #[test]
+    fn initial_gap_replays_from_zero_and_replayed_seq_becomes_stale() {
+        let replay_start = match cursor_from_watermark(WATERMARK_UNSET).observe(5) {
+            CursorObservation::Initial { got } if got > 0 => Some(0),
+            CursorObservation::Gap { expected, .. } => Some(expected),
+            _ => None,
+        };
+        assert_eq!(replay_start, Some(0));
+        assert!(matches!(
+            cursor_from_watermark(5).observe(5),
+            CursorObservation::Stale {
+                got: 5,
+                last_applied: Some(5),
+            }
+        ));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmq_buffers_messages_during_brief_delay() {

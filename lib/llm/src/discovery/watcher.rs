@@ -462,8 +462,10 @@ impl ModelWatcher {
                         .kv_chooser_for(
                             &endpoint,
                             card.kv_cache_block_size,
-                            Some(self.router_config.kv_router_config),
+                            Some(self.router_config.kv_router_config.clone()),
                             WORKER_TYPE_DECODE, // This is the decode router
+                            Some(card.display_name.clone()),
+                            card.runtime_config.enable_eagle,
                         )
                         .await?,
                 )
@@ -482,7 +484,7 @@ impl ModelWatcher {
                 .register_prefill_router(&model_name, &namespace)
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.router_config.kv_router_config;
+                    let mut prefill_config = self.router_config.kv_router_config.clone();
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
@@ -494,6 +496,7 @@ impl ModelWatcher {
                         self.router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),
+                        card.runtime_config.enable_eagle,
                     )
                 });
 
@@ -501,8 +504,18 @@ impl ModelWatcher {
             // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
             // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
             // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            //
+            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
+            // so that busy-state updates (via update_free_instances) are visible to the
+            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
+            // Using a different Client instance would cause the PushRouter to never see
+            // busy workers, since each Client::new() creates independent ArcSwap state.
+            let monitor_client = kv_chooser
+                .as_ref()
+                .map(|chooser| chooser.client().clone())
+                .unwrap_or_else(|| client.clone());
             let worker_monitor = Some(KvWorkerMonitor::new(
-                client.clone(),
+                monitor_client,
                 self.router_config.load_threshold_config.clone(),
             ));
 

@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import AsyncIterator
 
 from vllm.inputs.data import TokensPrompt
 
 import dynamo.nixl_connect as connect
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime
 
@@ -19,7 +21,7 @@ from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_m
 logger = logging.getLogger(__name__)
 
 
-class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
+class MultimodalDecodeWorkerHandler(BaseWorkerHandler[vLLMMultimodalRequest, str]):
     """Decode worker for disaggregated multimodal serving"""
 
     def __init__(
@@ -38,11 +40,11 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
+            config,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
-            config=config,
             shutdown_event=shutdown_event,
         )
 
@@ -54,17 +56,19 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         self._connector = connect.Connector()
         logger.info("Multimodal Decode Worker async initialization completed.")
 
-    async def generate(self, request: vLLMMultimodalRequest, context):
+    async def generate(
+        self, request: vLLMMultimodalRequest, context
+    ) -> AsyncIterator[str]:
         rng_decode = _nvtx.start_range("mm:decode_worker_generate", color="blue")
         logger.debug(f"Got raw request: {request}")
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
         with time_and_log_code_section(
             f"[DECODE] request: {request.request_id} preprocessing time"
         ):
-            if not isinstance(request, vLLMMultimodalRequest):
-                if isinstance(request, str):
-                    request = vLLMMultimodalRequest.model_validate_json(request)
-                else:
-                    request = vLLMMultimodalRequest.model_validate(request)
             logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
             # For Qwen VL models with mRoPE, we need to pass multi_modal_data containing
@@ -90,6 +94,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                         image_grid_thw, embeddings_shape, request.request_id
                     )
             lora_request = self._resolve_lora_request(request.model)
+            trace_headers = build_trace_headers(context) if context else None
 
         with time_and_log_code_section(
             f"[DECODE] request: {request.request_id} generate time"
@@ -102,6 +107,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=request.sampling_params,
                 request_id=request.request_id,
                 lora_request=lora_request,
+                trace_headers=trace_headers,
             )
 
             rng_first = _nvtx.start_range("mm:decode:first_token", color="darkred")

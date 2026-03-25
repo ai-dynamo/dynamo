@@ -372,6 +372,9 @@ async def init_llm_worker(
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        runtime_config.exclude_tools_when_tool_choice_none = (
+            config.exclude_tools_when_tool_choice_none
+        )
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer

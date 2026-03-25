@@ -10,12 +10,8 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    basePath: {{ .Values.storage.pvc.basePath | quote }}
-
     overlay:
-      systemDirs: {{ toYaml .Values.config.overlay.systemDirs | nindent 8 }}
-      cacheDirs: {{ toYaml .Values.config.overlay.cacheDirs | nindent 8 }}
-      additionalExclusions: {{ toYaml .Values.config.overlay.additionalExclusions | nindent 8 }}
+      exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
     restore:
       nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
@@ -29,6 +25,7 @@ data:
       leaveRunning: {{ .Values.config.criu.leaveRunning }}
       shellJob: {{ .Values.config.criu.shellJob }}
       tcpClose: {{ .Values.config.criu.tcpClose }}
+      tcpEstablished: {{ .Values.config.criu.tcpEstablished }}
       fileLocks: {{ .Values.config.criu.fileLocks }}
       orphanPtsMaster: {{ .Values.config.criu.orphanPtsMaster }}
       extUnixSk: {{ .Values.config.criu.extUnixSk }}

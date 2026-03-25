@@ -36,8 +36,7 @@ SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patt
 
 | Component | Flag | Purpose |
 |-----------|------|---------|
-| Processor | `--multimodal-processor` | HTTP entry, OpenAI→SGLang conversion |
-| Encode Worker | `--multimodal-encode-worker` | Vision encoder, embeddings generation |
+| Encode Worker | `--multimodal-encode-worker` | Frontend-facing, vision encoding, embeddings generation (Rust frontend tokenizes) |
 | PD Worker | `--multimodal-worker` | Prefill + Decode with embeddings |
 | Decode Worker | `--multimodal-worker --serving-mode=decode` | Entry point for disaggregation |
 | Prefill Worker | `--multimodal-worker --serving-mode=prefill` | Called by Decode, bootstrap coordination |
@@ -118,25 +117,20 @@ curl http://localhost:8000/v1/chat/completions \
 ### Components
 
 - workers:
-  - [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding
+  - [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for image encoding and embeddings generation
   - [MultimodalWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling and decoding.
-- processor: [MultimodalProcessorHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py)
-  - tokenizes the prompt using the chat template
-  - passes the text and image url to the MultimodalEncodeWorker.
 
 ### Workflow
 
-The `MultimodalEncodeWorker` downloads and encodes the image and passes the embeddings to the MultimodalWorker. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface. The `MultimodalWorker` then prefills and decodes the prompt in the same engine, as in the [LLM aggregated serving](../../backends/sglang/README.md) example. Only the processor is registered to the Dynamo frontend as an available endpoint. Workers do NOT register - they are internal components and communicate via NATS.
+The Rust frontend tokenizes the request and extracts image URLs into `multi_modal_data`. The `MultimodalEncodeWorker` receives the pre-tokenized request, downloads and encodes the image, and passes the embeddings to the MultimodalWorker. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface. The `MultimodalWorker` then prefills and decodes the prompt in the same engine, as in the [LLM aggregated serving](../../backends/sglang/README.md) example. Only the encode worker is registered to the Dynamo frontend as an available endpoint. The PD worker does NOT register - it is an internal component and communicates via NATS.
 
 ```mermaid
 flowchart LR
-  HTTP --> processor
-  processor --tokenized request + image_url--> encode_worker
+  HTTP --> encode_worker
   encode_worker --request + embeddings--> worker
 
   worker -.-> encode_worker
-  encode_worker -.-> processor
-  processor -.-> HTTP
+  encode_worker -.-> HTTP
 ```
 
 
@@ -181,26 +175,23 @@ curl http://localhost:8000/v1/chat/completions \
 ### Components
 
 - workers:
-  - [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding
+  - [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for image encoding and embeddings generation
   - [MultimodalWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for decoding
   - [MultimodalPrefillWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling
-- processor: [MultimodalProcessorHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py) tokenizes the prompt and passes it to the MultimodalEncodeWorker.
 
 ### Workflow
 
-In models like Qwen2.5-VL, embeddings are only required during the prefill stage. The image embeddings are transferred via NIXL from the Encode Worker to the Decode Worker (the entry point for disaggregation), which then coordinates with the Prefill Worker. The Prefill Worker processes the embeddings and forwards the KV cache back to the Decode Worker for token generation.
+In models like Qwen2.5-VL, embeddings are only required during the prefill stage. The Rust frontend tokenizes and extracts image URLs. The `MultimodalEncodeWorker` receives the pre-tokenized request, encodes images, and transfers embeddings via NIXL to the Decode Worker (the entry point for disaggregation), which then coordinates with the Prefill Worker. The Prefill Worker processes the embeddings and forwards the KV cache back to the Decode Worker for token generation.
 
 ```mermaid
 flowchart LR
-  HTTP --> processor
-  processor --tokenized request + image_url--> encode_worker
+  HTTP --> encode_worker
   encode_worker --request + embeddings--> worker
   worker --request + embeddings--> prefill_worker
 
   prefill_worker --KV Cache--> worker
-  encode_worker -.-> processor
   worker -.-> encode_worker
-  processor -.-> HTTP
+  encode_worker -.-> HTTP
 ```
 
 ### Launch
@@ -403,6 +394,39 @@ export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 
 Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
 
+## Profiling
+
+Dynamo's SGLang multimodal workers include NVTX markers for `nsys` profiling. They are disabled by default (zero overhead) and enabled by setting `DYN_NVTX=1`.
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
+  bash launch/multimodal_epd.sh ...
+```
+
+| ENV Variable | Default | Description |
+|---|---|---|
+| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling |
+
+Key NVTX ranges emitted:
+
+| Range | Worker | Description |
+|-------|--------|-------------|
+| `mm:enc:generate` | Encode | Full encode request lifetime |
+| `mm:enc:vision_encode` | Encode | Vision encode call (`MMEncoder._encode`) |
+| `mm:enc:embedding_transfer` | Encode | Embedding handoff to downstream worker |
+| `mm:nixl:begin_read` | PD (agg) / Prefill | Begin NIXL read operation for embeddings |
+| `mm:nixl:wait_completion` | PD (agg) / Prefill | Wait for NIXL embedding transfer completion |
+| `mm:pd:generate` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Full worker-side request lifetime |
+| `mm:pd:generate_agg` | PD (agg) | Aggregated generation path |
+| `mm:pd:load_multimodal` | PD (agg) | Build multimodal items from transferred embeddings |
+| `mm:pd:generate_disagg` | Decode worker (disagg entrypoint) | Disaggregated generation path |
+| `mm:prefill:bootstrap` | Prefill (disagg) | Bootstrap coordination path before returning `{bootstrap_host, bootstrap_port, bootstrap_room}` |
+| `mm:prefill:load_multimodal` | Prefill (disagg) | Build multimodal items from transferred embeddings in the prefill worker |
+| `mm:prefill:engine_async_generate` | Prefill (disagg) | SGLang prefill engine invocation (`engine.async_generate`) |
+| `mm:pd:ttft` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Worker-entry TTFT: from request arrival at this worker to first output token (excludes client->frontend->worker network transit) |
+| `mm:dec:first_token` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Decode-stage first-token range (starts when decode stream is launched; not worker-entry TTFT) |
+
 ## Known Limitations
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported
@@ -425,10 +449,8 @@ SGLang multimodal **only supports image-based vision-language models**:
 
 | File | Description |
 |------|-------------|
-| `components/src/dynamo/sglang/main.py` | Component initialization, only Processor registers |
-| `components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py` | Processor implementation, OpenAI→SGLang |
-| `components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py` | Vision encoder, embeddings generation |
+| `components/src/dynamo/sglang/main.py` | Component initialization, Encode Worker registers |
+| `components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py` | Frontend-facing: vision encoding, embeddings generation (receives pre-tokenized input) |
 | `components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py` | PD/Prefill/Decode workers, NIXL read |
-| `components/src/dynamo/sglang/multimodal_utils/multimodal_chat_processor.py` | Chat template processing |
 | `components/src/dynamo/sglang/protocol.py` | Request/response data structures |
-| `components/src/dynamo/sglang/register.py` | Registration logic (only called for Processor) |
+| `components/src/dynamo/sglang/register.py` | Registration logic (called for Encode Worker) |
