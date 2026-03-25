@@ -13,10 +13,17 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    Final,
+    Generic,
+    Optional,
+    TypeVar,
+)
 
-import ray
-import ray.util.state as _ray_util_state
 import torch
 from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -58,6 +65,17 @@ from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
+if TYPE_CHECKING:
+    import ray
+    import ray.util.state as _ray_util_state
+
+try:
+    import ray
+    import ray.util.state as _ray_util_state
+except ModuleNotFoundError:
+    ray = None
+    _ray_util_state = None
+
 # TODO(upstream-vllm): remove this patch once vLLM fixes add_dp_placement_groups in
 # vllm/v1/engine/utils.py to use ray.nodes() instead of ray.util.state.list_nodes().
 #
@@ -84,9 +102,10 @@ class _NodeInfo:
         self.node_id: str = d["NodeID"]
 
 
-_ray_util_state.list_nodes = lambda **kw: [
-    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-]
+if ray is not None and _ray_util_state is not None:
+    _ray_util_state.list_nodes = lambda **kw: [
+        _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+    ]
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
