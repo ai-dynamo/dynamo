@@ -4,25 +4,32 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Protocol
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.reporting import format_report_table, write_report_json
 
-try:
-    from dynamo.mocker.args import (
-        resolve_planner_profile_data,  # type: ignore[import-not-found]
-    )
-except ImportError:
 
-    def resolve_planner_profile_data(planner_profile_data: Path | None) -> Any:
+class PlannerProfileDataResult(Protocol):
+    npz_path: Path | None
+
+
+def resolve_planner_profile_data(
+    planner_profile_data: Path | None,
+) -> PlannerProfileDataResult:
+    try:
+        module = importlib.import_module("dynamo.mocker.args")
+    except ImportError:
         if planner_profile_data is None:
             return SimpleNamespace(npz_path=None)
         return SimpleNamespace(
@@ -30,10 +37,7 @@ except ImportError:
             if planner_profile_data.suffix == ".npz"
             else None
         )
-
-
-from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
-from dynamo.replay.reporting import format_report_table, write_report_json
+    return module.resolve_planner_profile_data(planner_profile_data)
 
 
 def _load_engine_args(raw_args: str | None):
