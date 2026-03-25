@@ -215,7 +215,7 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
-// Re-export CacheControl types from dynamo-async-openai where they are canonically defined
+// Re-export CacheControl types from dynamo-protocols where they are canonically defined
 // alongside the Anthropic protocol types they originate from.
 pub use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
 
