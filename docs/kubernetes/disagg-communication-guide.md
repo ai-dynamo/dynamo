@@ -22,43 +22,9 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 
 ### Communication Stack
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Dynamo Disaggregated Serving                     │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌──────────────────┐              ┌──────────────────┐                 │
-│  │  Prefill Worker  │              │  Decode Worker   │                 │
-│  │  (Pod A)         │              │  (Pod B)         │                 │
-│  │                  │              │                  │                 │
-│  │  ┌────────────┐  │              │  ┌────────────┐  │                 │
-│  │  │ KV Cache   │  │   Transfer   │  │ KV Cache   │  │                 │
-│  │  │ (GPU VRAM) │──┼──────────────┼─▶│ (GPU VRAM) │  │                 │
-│  │  └────────────┘  │              │  └────────────┘  │                 │
-│  └────────┬─────────┘              └────────┬─────────┘                 │
-│           │                                  │                          │
-├───────────┼──────────────────────────────────┼──────────────────────────┤
-│           │          NIXL Library            │                          │
-│           │    (KV Cache Transfer API)       │                          │
-├───────────┼──────────────────────────────────┼──────────────────────────┤
-│           │                                  │                          │
-│           │              UCX                 │                          │
-│           │   (Unified Communication X)      │                          │
-│           │                                  │                          │
-│  ┌────────┴──────────────────────────────────┴────────┐                 │
-│  │                  Transport Layer                    │                 │
-│  │                                                     │                 │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │                 │
-│  │  │   rc_x/dc_x │  │  cuda_copy  │  │    tcp      │ │                 │
-│  │  │   (RDMA)    │  │  (staging)  │  │  (fallback) │ │                 │
-│  │  │             │  │             │  │             │ │                 │
-│  │  │  InfiniBand │  │ GPU↔Host    │  │  Network    │ │                 │
-│  │  │  or RoCE    │  │ memory copy │  │  sockets    │ │                 │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘ │                 │
-│  └─────────────────────────────────────────────────────┘                │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+<Frame>
+  <img src="../assets/img/disagg-comm-stack.svg" alt="Disaggregated inference communication stack showing NIXL, UCX, and transport layers" />
+</Frame>
 
 ### Component Responsibilities
 
@@ -82,29 +48,9 @@ NVLink is a **direct GPU-to-GPU interconnect** that operates at the hardware lev
 
 **Kubernetes pods violate all three requirements:**
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        Physical Node (8× H100 GPUs)                      │
-│                                                                          │
-│  ┌─────────────────────────────┐    ┌─────────────────────────────┐    │
-│  │       Pod A (Prefill)       │    │       Pod B (Decode)        │    │
-│  │                             │    │                             │    │
-│  │  Process Namespace: PID 1   │    │  Process Namespace: PID 1   │    │
-│  │  CUDA_VISIBLE_DEVICES: 0,1  │    │  CUDA_VISIBLE_DEVICES: 2-7  │    │
-│  │                             │    │                             │    │
-│  │  ┌─────┐  ┌─────┐          │    │  ┌─────┐  ┌─────┐  ...     │    │
-│  │  │GPU 0│  │GPU 1│          │    │  │GPU 2│  │GPU 3│          │    │
-│  │  └─────┘  └─────┘          │    │  └─────┘  └─────┘          │    │
-│  │       ↑ NVLink ↑            │    │       ↑ NVLink ↑            │    │
-│  │       (works!)              │    │       (works!)              │    │
-│  └─────────────────────────────┘    └─────────────────────────────┘    │
-│                                                                          │
-│            ╳ NO NVLink possible between pods ╳                          │
-│                                                                          │
-│  Reason: Separate process namespaces, separate CUDA contexts,           │
-│          separate GPU device assignments                                 │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+<Frame>
+  <img src="../assets/img/disagg-nvlink-limitation.svg" alt="Why NVLink cannot work between Kubernetes pods due to process isolation" />
+</Frame>
 
 ### Technical Explanation
 
@@ -148,28 +94,15 @@ VLLMDecodeWorker:
 
 When prefill and decode workers are on the **same physical node**:
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                             Same Node                                    │
-│                                                                          │
-│  ┌────────────────────┐                    ┌────────────────────┐       │
-│  │   Prefill Pod      │                    │   Decode Pod       │       │
-│  │                    │                    │                    │       │
-│  │  ┌──────────────┐  │                    │  ┌──────────────┐  │       │
-│  │  │ GPU 0 (VRAM) │  │                    │  │ GPU 2 (VRAM) │  │       │
-│  │  └──────┬───────┘  │                    │  └──────▲───────┘  │       │
-│  └─────────┼──────────┘                    └─────────┼──────────┘       │
-│            │                                         │                   │
-│            │         RDMA (InfiniBand/RoCE)          │                   │
-│            └─────────────────────────────────────────┘                   │
-│                                                                          │
-│  Options (best to worst):                                                │
-│  1. InfiniBand RDMA with GPUDirect    → GPU-to-GPU, bypasses CPU        │
-│  2. RoCE RDMA with GPUDirect          → GPU-to-GPU, bypasses CPU        │
-│  3. Host-staged RDMA                  → GPU→CPU→RDMA→CPU→GPU            │
-│  4. TCP (fallback)                    → GPU→CPU→TCP→CPU→GPU             │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+<Frame>
+  <img src="../assets/img/disagg-same-node.svg" alt="Same-node RDMA communication between prefill and decode pods" />
+</Frame>
+
+**Options (best to worst):**
+1. InfiniBand RDMA with GPUDirect → GPU-to-GPU, bypasses CPU
+2. RoCE RDMA with GPUDirect → GPU-to-GPU, bypasses CPU
+3. Host-staged RDMA → GPU→CPU→RDMA→CPU→GPU
+4. TCP (fallback) → GPU→CPU→TCP→CPU→GPU
 
 **Best Practice**: Use RDMA even for same-node communication. The overhead is minimal and it provides consistent behavior whether pods land on the same or different nodes.
 
@@ -177,24 +110,9 @@ When prefill and decode workers are on the **same physical node**:
 
 When prefill and decode workers are on **different nodes**:
 
-```text
-┌──────────────────────────────┐         ┌──────────────────────────────┐
-│           Node 1             │         │           Node 2             │
-│                              │         │                              │
-│  ┌────────────────────┐      │         │      ┌────────────────────┐  │
-│  │   Prefill Pod      │      │         │      │   Decode Pod       │  │
-│  │  ┌──────────────┐  │      │         │      │  ┌──────────────┐  │  │
-│  │  │ GPU (VRAM)   │  │      │         │      │  │ GPU (VRAM)   │  │  │
-│  │  └──────┬───────┘  │      │         │      │  └──────▲───────┘  │  │
-│  └─────────┼──────────┘      │         │      └─────────┼──────────┘  │
-│            │                 │         │                │             │
-│  ┌─────────▼─────────┐       │         │       ┌────────┴────────┐   │
-│  │    RDMA NIC       │       │         │       │    RDMA NIC     │   │
-│  │  (InfiniBand/     │◄──────┼─────────┼──────▶│  (InfiniBand/   │   │
-│  │   RoCE)           │       │ Network │       │   RoCE)         │   │
-│  └───────────────────┘       │         │       └─────────────────┘   │
-└──────────────────────────────┘         └──────────────────────────────┘
-```
+<Frame>
+  <img src="../assets/img/disagg-cross-node.svg" alt="Cross-node RDMA communication between prefill and decode pods on separate nodes" />
+</Frame>
 
 **Requirements for optimal cross-node performance:**
 - InfiniBand or RoCE network fabric
