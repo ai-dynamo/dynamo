@@ -97,6 +97,7 @@ pub struct SequenceRequest {
     pub token_sequence: Option<Vec<SequenceHash>>,
     pub isl: usize,
     pub overlap: u32,
+    pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
     pub worker: WorkerWithDpRank,
     pub lora_name: Option<String>,
@@ -221,6 +222,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             token_sequence,
                             isl,
                             overlap,
+                            track_prefill_tokens,
                             expected_output_tokens,
                         } => {
                             self.request_to_worker
@@ -233,12 +235,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
                             let table = self.workers.read();
                             if let Some(&idx) = table.index.get(&event.worker) {
-                                table.slots[idx].1.write().add_request(
+                                table.slots[idx].1.write().add_request_with_prefill_tracking(
                                     event.request_id.clone(),
                                     token_sequence.clone(),
                                     *isl,
                                     *overlap,
                                     *expected_output_tokens,
+                                    *track_prefill_tokens,
                                 );
                             } else {
                                 tracing::warn!(
@@ -380,6 +383,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             token_sequence,
             isl,
             overlap,
+            track_prefill_tokens,
             expected_output_tokens,
             worker,
             lora_name,
@@ -409,12 +413,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
             let mut seq = table.slots[idx].1.write();
-            seq.add_request(
+            seq.add_request_with_prefill_tracking(
                 request_id,
                 token_sequence,
                 isl,
                 overlap,
                 expected_output_tokens,
+                track_prefill_tokens,
             )
         };
 
@@ -437,6 +442,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     token_sequence: req.token_sequence.clone(),
                     isl: req.isl,
                     overlap: req.overlap,
+                    track_prefill_tokens: req.track_prefill_tokens,
                     expected_output_tokens: req.expected_output_tokens,
                 },
                 router_id: self.router_id,
@@ -527,6 +533,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// Note: This operation is idempotent. Calling it multiple times for the same request
     /// will log a warning but not return an error (double free is allowed).
+    ///
+    /// This also performs the underlying prefill-complete cleanup via
+    /// [`ActiveSequences::free`], so callers do not need to call
+    /// [`Self::mark_prefill_completed`] before freeing a completed request.
     pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
         if !self.request_to_worker.contains_key(request_id) {
             tracing::debug!("Request {request_id} not found, already freed (idempotent)");
@@ -697,6 +707,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
+        self.potential_blocks_and_tokens_with_prefill_tracking(token_sequence, isl, overlaps, true)
+    }
+
+    pub fn potential_blocks_and_tokens_with_prefill_tracking(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        isl: usize,
+        overlaps: OverlapScores,
+        track_prefill_tokens: bool,
+    ) -> (
+        HashMap<WorkerWithDpRank, usize>,
+        HashMap<WorkerWithDpRank, usize>,
+    ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
@@ -711,9 +734,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for (worker, lock) in &table.slots {
             let overlap = *overlaps.scores.get(worker).unwrap_or(&0);
 
-            let (blocks, tokens) =
-                lock.read()
-                    .potential_blocks_and_tokens(token_sequence, isl, overlap);
+            let (blocks, tokens) = lock
+                .read()
+                .potential_blocks_and_tokens_with_prefill_tracking(
+                    token_sequence,
+                    isl,
+                    overlap,
+                    track_prefill_tokens,
+                );
             potential_blocks.insert(*worker, blocks);
             potential_tokens.insert(*worker, tokens);
         }
@@ -830,5 +858,46 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::test_utils::NoopSequencePublisher;
+
+    fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
+        ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        )
+    }
+
+    #[tokio::test]
+    async fn add_request_can_skip_prefill_token_tracking() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        sequences
+            .add_request(SequenceRequest {
+                request_id: "req-1".to_string(),
+                token_sequence: Some(vec![1, 2, 3]),
+                isl: 12,
+                overlap: 0,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                worker,
+                lora_name: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(sequences.active_tokens().get(&worker).copied(), Some(0));
     }
 }

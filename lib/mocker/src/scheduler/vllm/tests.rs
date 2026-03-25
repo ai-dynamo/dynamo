@@ -176,6 +176,40 @@ mod core_behavior {
     }
 
     #[test]
+    fn test_prefill_completion_emits_handoff_delay() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        core.receive(DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(81)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let signal = pass
+            .output_signals
+            .first()
+            .expect("prefill pass should emit one completed signal");
+
+        assert!(signal.completed);
+        assert_eq!(signal.handoff_delay_ms, Some(8.0));
+    }
+
+    #[test]
     fn test_first_token_can_arrive_on_prompt_completion_pass() {
         let mut core = VllmCore::new(make_args());
         let uuid = Uuid::from_u128(11);
