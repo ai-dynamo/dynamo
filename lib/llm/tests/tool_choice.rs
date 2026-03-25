@@ -469,31 +469,33 @@ fn make_text_chunk(
     };
     #[allow(deprecated)]
     dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
-        id: "test-named-parser".to_string(),
-        choices: vec![ChatChoiceStream {
-            index: 0,
-            delta: ChatCompletionStreamResponseDelta {
-                role: Some(Role::Assistant),
-                content: Some(ChatCompletionMessageContent::Text(text.to_string())),
-                tool_calls: None,
-                function_call: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason: if finish {
-                Some(dynamo_protocols::types::FinishReason::Stop)
-            } else {
-                None
-            },
-            stop_reason: None,
-            logprobs: None,
-        }],
-        created: 1234567890,
-        model: "test-model".to_string(),
-        system_fingerprint: None,
-        object: "chat.completion.chunk".to_string(),
-        usage: None,
-        service_tier: None,
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+            id: "test-named-parser".to_string(),
+            choices: vec![ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    role: Some(Role::Assistant),
+                    content: Some(ChatCompletionMessageContent::Text(text.to_string())),
+                    tool_calls: None,
+                    function_call: None,
+                    refusal: None,
+                    reasoning_content: None,
+                },
+                finish_reason: if finish {
+                    Some(dynamo_protocols::types::FinishReason::Stop)
+                } else {
+                    None
+                },
+                stop_reason: None,
+                logprobs: None,
+            }],
+            created: 1234567890,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
         nvext: None,
     }
 }
@@ -523,9 +525,6 @@ async fn apply_jail_named_with_parser(
         .tool_call_parser(parser)
         .named_tool_filter(named_tool)
         .build();
-    out.filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
     let out = jail.apply_with_finish_reason(input);
     tokio::pin!(out);
     out.filter_map(|ann| async move { ann.data })
@@ -551,14 +550,15 @@ async fn test_named_tool_with_parser_correct_tool_passes() {
     let tool_call_response = responses
         .iter()
         .find(|r| {
-            r.choices
+            r.inner
+                .choices
                 .first()
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .is_some()
         })
         .expect("expected a response with tool calls for the correct named tool");
 
-    let tool_calls = tool_call_response.choices[0]
+    let tool_calls = tool_call_response.inner.choices[0]
         .delta
         .tool_calls
         .as_ref()
@@ -588,19 +588,19 @@ async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
 
     // No response should contain a tool call for the wrong tool
     for r in &responses {
-        if let Some(choice) = r.choices.first() {
-            if let Some(tool_calls) = &choice.delta.tool_calls {
-                for tc in tool_calls {
-                    let name = tc
-                        .function
-                        .as_ref()
-                        .and_then(|f| f.name.as_deref())
-                        .unwrap_or("");
-                    assert_ne!(
-                        name, "search",
-                        "wrong tool 'search' should have been filtered by named_tool_filter"
-                    );
-                }
+        if let Some(choice) = r.inner.choices.first()
+            && let Some(tool_calls) = &choice.delta.tool_calls
+        {
+            for tc in tool_calls {
+                let name = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.name.as_deref())
+                    .unwrap_or("");
+                assert_ne!(
+                    name, "search",
+                    "wrong tool 'search' should have been filtered by named_tool_filter"
+                );
             }
         }
     }

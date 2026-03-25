@@ -3123,9 +3123,12 @@ fahrenheit
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
-                        .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
                         .sum::<usize>()
                 })
             })
@@ -3140,7 +3143,7 @@ fahrenheit
         // Verify the tool call was parsed correctly
         for r in &results {
             if let Some(data) = &r.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(tool_calls) = &choice.delta.tool_calls {
                         for tc in tool_calls {
                             assert_eq!(
