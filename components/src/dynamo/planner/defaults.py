@@ -130,6 +130,8 @@ class TrtllmComponentName(ComponentName):
     decode_worker_k8s_name = "TRTLLMDecodeWorker"
     decode_worker_component_name = "tensorrt_llm"
     decode_worker_endpoint = "generate"
+    # Aggregated deployment uses a single unified worker
+    aggregated_worker_k8s_name = "TRTLLMWorker"
 
 
 class MockerComponentName(ComponentName):
