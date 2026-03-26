@@ -10,6 +10,7 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import get_default_vllm_block_size
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api, completions_response_handler
@@ -37,6 +38,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "--enforce-eager",
             "--max-model-len",
             "8192",
+            "--block-size",
+            str(get_default_vllm_block_size()),
         ]
 
         # Set debug logging environment
@@ -45,6 +48,12 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         # TODO: Replace hardcoded port with allocate_ports() for xdist-safe parallel execution
         env["DYN_SYSTEM_PORT"] = "9345"
+
+        # Set ETCD endpoints for discovery
+        runtime_services = request.getfixturevalue("runtime_services_dynamic_ports")
+        if runtime_services and runtime_services[1] is not None:
+            etcd_process = runtime_services[1]
+            env["ETCD_ENDPOINTS"] = f"http://127.0.0.1:{etcd_process.port}"
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
@@ -130,12 +139,13 @@ def send_completion_request(
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
 @pytest.mark.timeout(160)  # 3x average (~50s)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
-def test_vllm_health_check_active(request, runtime_services):
+def test_vllm_health_check_active(request, runtime_services_dynamic_ports):
     """
     End-to-end test for worker fault tolerance with migration support.
 
@@ -146,7 +156,16 @@ def test_vllm_health_check_active(request, runtime_services):
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
-    with DynamoFrontendProcess(request):
+    # Prepare environment variables for frontend
+    extra_env = {}
+    if runtime_services_dynamic_ports:
+        nats_process, etcd_process = runtime_services_dynamic_ports
+        if nats_process:
+            extra_env["NATS_SERVER"] = f"nats://127.0.0.1:{nats_process.port}"
+        if etcd_process:
+            extra_env["ETCD_ENDPOINTS"] = f"http://127.0.0.1:{etcd_process.port}"
+
+    with DynamoFrontendProcess(request, extra_env=extra_env if extra_env else None):
         logger.info("Frontend started.")
 
         # Step 2: Start a worker
@@ -187,11 +206,14 @@ def test_vllm_health_check_active(request, runtime_services):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
 @pytest.mark.timeout(160)  # 3x average (~50s)
-def test_vllm_health_check_passive(request, runtime_services, predownload_models):
+def test_vllm_health_check_passive(
+    request, runtime_services_dynamic_ports, predownload_models
+):
     """
     End-to-end test for worker fault tolerance with migration support.
 
@@ -202,7 +224,16 @@ def test_vllm_health_check_passive(request, runtime_services, predownload_models
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
-    with DynamoFrontendProcess(request):
+    # Prepare environment variables for frontend
+    extra_env = {}
+    if runtime_services_dynamic_ports:
+        nats_process, etcd_process = runtime_services_dynamic_ports
+        if nats_process:
+            extra_env["NATS_SERVER"] = f"nats://127.0.0.1:{nats_process.port}"
+        if etcd_process:
+            extra_env["ETCD_ENDPOINTS"] = f"http://127.0.0.1:{etcd_process.port}"
+
+    with DynamoFrontendProcess(request, extra_env=extra_env if extra_env else None):
         logger.info("Frontend started.")
 
         # Step 2: Start a worker

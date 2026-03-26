@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.fault_tolerance
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)

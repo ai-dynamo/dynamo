@@ -814,6 +814,7 @@ def test_serve_deployment(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
+@pytest.mark.xpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
@@ -908,6 +909,7 @@ def lora_chat_payload(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
@@ -964,6 +966,7 @@ def test_lora_aggregated(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
+@pytest.mark.xpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge

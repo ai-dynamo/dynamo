@@ -20,6 +20,11 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
+from tests.utils.device import (
+    get_default_vllm_block_size,
+    get_device_visibility_env_var,
+    get_gpu_memory_utilization,
+)
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -34,12 +39,15 @@ pytestmark = [
     pytest.mark.model(MODEL_NAME),
 ]
 SPEEDUP_RATIO = 10.0
-BLOCK_SIZE = 16
+NUM_REQUESTS = 10
+
+BLOCK_SIZE = get_default_vllm_block_size()
+
 
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
 VLLM_ARGS: Dict[str, Any] = {
-    "block_size": BLOCK_SIZE,
+    "block_size": get_default_vllm_block_size(),
     "model": MODEL_NAME,
     "gpu_memory_utilization": 0.4,  # Limit VRAM allocation per worker
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
@@ -110,7 +118,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
         if vllm_args is None:
             vllm_args = {}
 
-        block_size = vllm_args.get("block_size", BLOCK_SIZE)
+        block_size = vllm_args.get("block_size", get_default_vllm_block_size())
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
@@ -123,8 +131,10 @@ class VLLMProcess(ManagedEngineProcessMixin):
         # Matches test.sh behavior:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
-        # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
+        # - Each process runs on its own device via runtime-specific visibility env
         # - --kv-transfer-config enables KV cache transfer between ranks
+
+        device_visibility_env = get_device_visibility_env_var()
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -209,13 +219,19 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
-                "CUDA_VISIBLE_DEVICES": gpu_device,
+                device_visibility_env: gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
+
+            # Avoid carrying an incompatible visibility variable into the child.
+            if device_visibility_env == "ZE_AFFINITY_MASK":
+                env.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                env.pop("ZE_AFFINITY_MASK", None)
 
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
@@ -255,6 +271,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
@@ -279,6 +296,7 @@ def test_vllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
@@ -291,7 +309,12 @@ def test_router_decisions_vllm_multiple_workers(
     run_router_decisions_test(
         engine_process_cls=VLLMProcess,
         engine_args_name="vllm_args",
-        engine_args=VLLM_ARGS,
+        engine_args={
+            **VLLM_ARGS,
+            "gpu_memory_utilization": get_gpu_memory_utilization(
+                num_workers=2, single_gpu=True
+            ),
+        },
         request=request,
         request_plane=request_plane,
         model_name=MODEL_NAME,
@@ -304,6 +327,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.xpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
@@ -339,6 +363,7 @@ def test_router_decisions_vllm_dp(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",

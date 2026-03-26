@@ -1524,6 +1524,14 @@ def _test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+<<<<<<< HEAD
+=======
+        )
+        kv_router = KvRouter(
+            endpoint=endpoint,
+            block_size=block_size,
+            kv_router_config=kv_router_config,
+>>>>>>> b3356d578 (test: enable more XPU fault-tolerance coverage)
         )
         with min_initial_workers_env(expected_num_instances):
             kv_router = KvRouter(

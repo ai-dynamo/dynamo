@@ -17,6 +17,10 @@ from tests.fault_tolerance.etcd_ha.utils import (
     wait_for_processes_to_terminate,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import (
+    build_nixl_kv_transfer_config,
+    get_default_vllm_block_size,
+)
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
@@ -43,6 +47,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
+        nats_server_url: str | None = None,
     ):
         command = [
             "python3",
@@ -55,6 +60,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.45",
             "--max-model-len",
             "8192",
+            "--block-size",
+            str(get_default_vllm_block_size()),
         ]
 
         # Set port based on worker type
@@ -76,7 +83,10 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging and ETCD endpoints
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        env["DYN_REQUEST_PLANE"] = "tcp"
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
+        if nats_server_url:
+            env["NATS_SERVER"] = nats_server_url
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
@@ -85,12 +95,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(
-                        {
-                            "kv_connector": "NixlConnector",
-                            "kv_role": "kv_both",
-                        }
-                    ),
+                    json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
 
@@ -155,6 +160,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
@@ -176,8 +182,9 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
     - Frontend/worker disconnection from their connected ETCD replica
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request) as nats_server:
         logger.info("NATS server started successfully")
+        nats_server_url = f"nats://127.0.0.1:{nats_server.port}"
 
         # Step 2: Start 3-node ETCD cluster
         num_replicas = 3
@@ -189,11 +196,13 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
             logger.info(f"ETCD endpoints: {etcd_endpoints}")
 
             # Step 3: Start the frontend with ETCD endpoints
-            with DynamoFrontendProcess(request, etcd_endpoints):
+            with DynamoFrontendProcess(request, etcd_endpoints, nats_server_url):
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start a vLLM worker
-                with DynamoWorkerProcess(request, etcd_endpoints):
+                with DynamoWorkerProcess(
+                    request, etcd_endpoints, nats_server_url=nats_server_url
+                ):
                     logger.info("Worker started successfully")
 
                     # Step 5: Send initial inference request to verify system is working
@@ -226,6 +235,7 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -249,8 +259,9 @@ def test_etcd_ha_failover_vllm_disaggregated(
     - Frontend/worker disconnection from their connected ETCD replica
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request) as nats_server:
         logger.info("NATS server started successfully")
+        nats_server_url = f"nats://127.0.0.1:{nats_server.port}"
 
         # Step 2: Start 3-node ETCD cluster
         num_replicas = 3
@@ -262,18 +273,24 @@ def test_etcd_ha_failover_vllm_disaggregated(
             logger.info(f"ETCD endpoints: {etcd_endpoints}")
 
             # Step 3: Start the frontend with ETCD endpoints
-            with DynamoFrontendProcess(request, etcd_endpoints):
+            with DynamoFrontendProcess(request, etcd_endpoints, nats_server_url):
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                    request,
+                    etcd_endpoints,
+                    mode=WorkerMode.PREFILL,
+                    nats_server_url=nats_server_url,
                 ):
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                        request,
+                        etcd_endpoints,
+                        mode=WorkerMode.DECODE,
+                        nats_server_url=nats_server_url,
                     ):
                         logger.info("Decode worker started successfully")
 
@@ -307,6 +324,7 @@ def test_etcd_ha_failover_vllm_disaggregated(
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -323,8 +341,9 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
     5. Verifies that frontend and worker shut down gracefully
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request) as nats_server:
         logger.info("NATS server started successfully")
+        nats_server_url = f"nats://127.0.0.1:{nats_server.port}"
 
         # Step 2: Start single ETCD node using EtcdCluster with num_replicas=1
         with EtcdCluster(request, num_replicas=1) as etcd_cluster:
@@ -335,11 +354,15 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
             logger.info(f"ETCD endpoint: {etcd_endpoints}")
 
             # Step 3: Start the frontend with ETCD endpoint
-            with DynamoFrontendProcess(request, etcd_endpoints) as frontend:
+            with DynamoFrontendProcess(
+                request, etcd_endpoints, nats_server_url
+            ) as frontend:
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start a vLLM worker
-                with DynamoWorkerProcess(request, etcd_endpoints) as worker:
+                with DynamoWorkerProcess(
+                    request, etcd_endpoints, nats_server_url=nats_server_url
+                ) as worker:
                     logger.info("Worker started successfully")
 
                     # Step 5: Send inference request to verify system is working
@@ -362,6 +385,7 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -380,8 +404,9 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
     5. Verifies that frontend and both workers shut down gracefully
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request) as nats_server:
         logger.info("NATS server started successfully")
+        nats_server_url = f"nats://127.0.0.1:{nats_server.port}"
 
         # Step 2: Start single ETCD node using EtcdCluster with num_replicas=1
         with EtcdCluster(request, num_replicas=1) as etcd_cluster:
@@ -392,18 +417,26 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
             logger.info(f"ETCD endpoint: {etcd_endpoints}")
 
             # Step 3: Start the frontend with ETCD endpoint
-            with DynamoFrontendProcess(request, etcd_endpoints) as frontend:
+            with DynamoFrontendProcess(
+                request, etcd_endpoints, nats_server_url
+            ) as frontend:
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                    request,
+                    etcd_endpoints,
+                    mode=WorkerMode.PREFILL,
+                    nats_server_url=nats_server_url,
                 ) as prefill_worker:
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                        request,
+                        etcd_endpoints,
+                        mode=WorkerMode.DECODE,
+                        nats_server_url=nats_server_url,
                     ) as decode_worker:
                         logger.info("Decode worker started successfully")
 

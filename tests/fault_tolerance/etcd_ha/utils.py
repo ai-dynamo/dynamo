@@ -19,19 +19,53 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
 
+def _with_local_no_proxy(env: dict[str, str]) -> dict[str, str]:
+    """Force localhost traffic to bypass corporate/system HTTP proxies."""
+    out = env.copy()
+    for k in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        out.pop(k, None)
+
+    no_proxy_entries = ["127.0.0.1", "localhost", "0.0.0.0"]
+    existing_no_proxy = out.get("NO_PROXY", "")
+    existing_no_proxy_lower = out.get("no_proxy", "")
+    for existing in (existing_no_proxy, existing_no_proxy_lower):
+        if existing:
+            no_proxy_entries.append(existing)
+    merged = ",".join(no_proxy_entries)
+    out["NO_PROXY"] = merged
+    out["no_proxy"] = merged
+    return out
+
+
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Process manager for Dynamo frontend with ETCD HA support."""
 
-    def __init__(self, request, etcd_endpoints: list[str]):
+    def __init__(
+        self,
+        request,
+        etcd_endpoints: list[str],
+        nats_server_url: str | None = None,
+    ):
         extra_env = {
             "DYN_LOG": "debug",
+            "DYN_REQUEST_PLANE": "tcp",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
         }
+        if nats_server_url:
+            extra_env["NATS_SERVER"] = nats_server_url
         # WARNING: terminate_all_matching_process_names=True is NOT pytest-xdist safe!
         # DANGER: Kills ALL dynamo-frontend processes system-wide, including other parallel tests.
         # For parallel-safe alternative, use terminate_all_matching_process_names=False.
@@ -65,7 +99,7 @@ class EtcdReplicaServer(ManagedProcess):
         self.peer_port = peer_port
         self.data_dir = data_dir
 
-        etcd_env = os.environ.copy()
+        etcd_env = _with_local_no_proxy(os.environ.copy())
         etcd_env["ETCD_ENDPOINTS"] = ""  # Clear any inherited ETCD endpoints
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
 
@@ -104,11 +138,13 @@ class EtcdReplicaServer(ManagedProcess):
     def get_status(self) -> dict:
         """Get the status of this ETCD node"""
         try:
-            response = requests.post(
-                f"http://127.0.0.1:{self.client_port}/v3/maintenance/status",
-                json={},
-                timeout=2,
-            )
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.post(
+                    f"http://127.0.0.1:{self.client_port}/v3/maintenance/status",
+                    json={},
+                    timeout=2,
+                )
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
@@ -141,7 +177,11 @@ class EtcdCluster:
     ):
         self.request = request
         self.num_replicas = num_replicas
-        self.base_port = base_port
+        # Reserve contiguous ports for the full cluster to avoid collisions with
+        # other tests that may also run local etcd instances.
+        reserved_ports = allocate_contiguous_ports(1, num_replicas * 2, base_port)
+        self._reserved_ports = reserved_ports
+        self.base_port = reserved_ports[0]
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
         self.log_base_dir = resolve_test_output_path(
@@ -249,7 +289,7 @@ class EtcdCluster:
         peer_url = f"http://127.0.0.1:{peer_port}"
 
         # Set ETCDCTL_ENDPOINTS for etcdctl commands
-        etcdctl_env = os.environ.copy()
+        etcdctl_env = _with_local_no_proxy(os.environ.copy())
         etcdctl_env[
             "ETCDCTL_ENDPOINTS"
         ] = f"http://127.0.0.1:{healthy_replica.client_port}"
@@ -399,8 +439,16 @@ class EtcdCluster:
                 logger.warning(f"Error removing data directory {data_dir}: {e}")
         self.data_dirs = []
 
+        if getattr(self, "_reserved_ports", None):
+            deallocate_ports(self._reserved_ports)
+            self._reserved_ports = []
+
     def __enter__(self):
-        self.start()
+        try:
+            self.start()
+        except Exception:
+            self.stop()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
