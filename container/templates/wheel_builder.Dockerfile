@@ -31,7 +31,7 @@ FROM ${WHEEL_BUILDER_IMAGE} AS wheel_builder_base
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS
 ARG DEVICE
-ARG HWLOC_VERSION=2.10.0
+ARG HWLOC_VERSION
 
 WORKDIR /workspace
 {% if device == "xpu" or device == "cpu" %}
