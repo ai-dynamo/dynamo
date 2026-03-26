@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Deploy Test Framework
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework to test (vllm, sglang, trtllm)'
+        type: string
+        required: true
+      profiles:
+        description: 'JSON array of deployment profiles to test'
+        type: string
+        required: true
+      image_suffix:
+        description: 'Image suffix (e.g. vllm-runtime-cuda12-amd64)'
+        type: string
+        required: true
+      namespace:
+        description: 'Host namespace where the vCluster lives'
+        type: string
+        required: true
+      vcluster_name:
+        description: 'Name of the vCluster'
+        type: string
+        required: true
+      operator_tag:
+        description: 'Operator image tag'
+        type: string
+        required: true
+
+jobs:
+  deploy-test:
+    runs-on: prod-default-small-v2
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        profile: ${{ fromJSON(inputs.profiles) }}
+    name: deploy-test-${{ inputs.framework }} (${{ matrix.profile }})
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+      - name: Run Dynamo Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: ${{ inputs.framework }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
+          platform_arch: amd64
+          extra_pytest_args: -m framework_only

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 use super::policy::{FcfsPolicy, SchedulingPolicy};
-use super::selector::WorkerSelector;
+use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{SchedulingRequest, SchedulingResponse};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -53,6 +53,7 @@ pub struct SchedulerQueue<
     P: SequencePublisher,
     C: WorkerConfigLike,
     S: SchedulingPolicy = FcfsPolicy,
+    Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
     /// Number of requests currently parked in the pending queue.
@@ -65,19 +66,23 @@ pub struct SchedulerQueue<
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
-    selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+    selector: Sel,
     policy: S,
 }
 
-impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
-    SchedulerQueue<P, C, S>
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy,
+    Sel: WorkerSelector<C>,
+> SchedulerQueue<P, C, S, Sel>
 {
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
         block_size: u32,
-        selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+        selector: Sel,
         policy: S,
     ) -> Self {
         if let Some(frac) = threshold_frac {
@@ -186,11 +191,14 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
-            request.token_seq.as_deref(),
-            request.isl_tokens,
-            request.overlaps.clone(),
-        );
+        let (decode_blocks, prefill_tokens) = self
+            .slots
+            .potential_blocks_and_tokens_with_prefill_tracking(
+                request.token_seq.as_deref(),
+                request.isl_tokens,
+                request.overlaps.clone(),
+                request.track_prefill_tokens,
+            );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
@@ -230,6 +238,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
+                track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
@@ -341,7 +350,7 @@ mod tests {
         }
         let (cfg_tx, cfg_rx) = watch::channel(configs);
 
-        let selector = Box::new(DefaultWorkerSelector::new(None, "test"));
+        let selector = DefaultWorkerSelector::new(None, "test");
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
@@ -371,6 +380,7 @@ mod tests {
             overlaps: OverlapScores::default(),
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
@@ -690,6 +700,7 @@ mod tests {
             overlaps: OverlapScores::default(),
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
@@ -713,5 +724,32 @@ mod tests {
             .await
             .unwrap();
         slots.free(&"filter-0".to_string()).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_queue_busy_check_ignores_untracked_prefill_tokens() {
+        let (queue, slots) = make_queue(1, 16, 256, Some(0.0));
+
+        let (mut req1, rx1) = make_request("req-1", 256);
+        req1.track_prefill_tokens = false;
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+        assert_eq!(
+            slots
+                .active_tokens()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(0)
+        );
+
+        let (req2, rx2) = make_request("req-2", 256);
+        queue.enqueue(req2).await;
+        let _resp2 = rx2.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        let _ = slots.mark_prefill_completed(&"req-1".to_string()).await;
+        let _ = slots.free(&"req-1".to_string()).await;
+        let _ = slots.mark_prefill_completed(&"req-2".to_string()).await;
+        let _ = slots.free(&"req-2".to_string()).await;
     }
 }

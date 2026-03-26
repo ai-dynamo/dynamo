@@ -1315,10 +1315,23 @@ mod tests {
             "Comment should be preserved when stream ends while jailed"
         );
 
+        // Verify inner response metadata carries forward real stream values (not placeholders)
+        let inner = accumulated_chunk.data.as_ref().unwrap();
+        assert_eq!(
+            inner.id, "test-id",
+            "Inner response id should carry forward from real stream chunks, not be 'stream-end'"
+        );
+        assert_eq!(
+            inner.model, "test-model",
+            "Inner response model should carry forward from real stream chunks, not be 'unknown'"
+        );
+        assert_eq!(
+            inner.created, 1234567890,
+            "Inner response created should carry forward from real stream chunks, not be 0"
+        );
+
         // Verify accumulated content is returned
-        let content = &accumulated_chunk.data.as_ref().unwrap().choices[0]
-            .delta
-            .content;
+        let content = &inner.choices[0].delta.content;
         assert!(content.is_some(), "Should have accumulated content");
         let content = content.as_ref().unwrap();
         assert!(

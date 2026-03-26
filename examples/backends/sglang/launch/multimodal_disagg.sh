@@ -9,7 +9,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -86,6 +87,14 @@ DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
+# Profiler override: scale prefill/decode fractions proportionally.
+# Encode worker has no --mem-fraction-static in single-gpu mode, so it's unaffected.
+if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" && "$SINGLE_GPU" == "true" ]]; then
+    _TOTAL_FRAC=$(awk -v p="$DYN_PREFILL_GPU_MEM" -v d="$DYN_DECODE_GPU_MEM" 'BEGIN { printf "%.4f", p + d }')
+    DYN_PREFILL_GPU_MEM=$(awk -v o="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" -v p="$DYN_PREFILL_GPU_MEM" -v t="$_TOTAL_FRAC" 'BEGIN { printf "%.2f", o * p / t }')
+    DYN_DECODE_GPU_MEM=$(awk -v o="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" -v d="$DYN_DECODE_GPU_MEM" -v t="$_TOTAL_FRAC" 'BEGIN { printf "%.2f", o * d / t }')
+fi
+
 ENCODE_EXTRA_ARGS=""
 PREFILL_EXTRA_ARGS=""
 DECODE_EXTRA_ARGS=""
@@ -110,13 +119,10 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D" "$MO
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# run SGLang multimodal processor
-python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
-
-# run SGLang multimodal encode worker
+# run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" $ENCODE_EXTRA_ARGS &
+CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Wait for encode worker to initialize before starting prefill worker.

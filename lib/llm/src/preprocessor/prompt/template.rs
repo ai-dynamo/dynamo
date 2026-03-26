@@ -79,6 +79,7 @@ impl PromptFormatter {
                     mdc.prompt_context
                         .clone()
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
+                    mdc.runtime_config.exclude_tools_when_tool_choice_none,
                 )
             }
             PromptFormatterArtifact::HfChatTemplate { .. } => Err(anyhow::anyhow!(
@@ -87,8 +88,16 @@ impl PromptFormatter {
         }
     }
 
-    pub fn from_parts(config: ChatTemplate, context: ContextMixins) -> Result<PromptFormatter> {
-        let formatter = HfTokenizerConfigJsonFormatter::new(config, context)?;
+    pub fn from_parts(
+        config: ChatTemplate,
+        context: ContextMixins,
+        exclude_tools_when_tool_choice_none: bool,
+    ) -> Result<PromptFormatter> {
+        let formatter = HfTokenizerConfigJsonFormatter::with_options(
+            config,
+            context,
+            exclude_tools_when_tool_choice_none,
+        )?;
         Ok(Self::OAI(Arc::new(formatter)))
     }
 }
@@ -123,6 +132,9 @@ struct HfTokenizerConfigJsonFormatter {
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
     requires_content_arrays: bool,
+    /// When true, strip tool definitions from the chat template when tool_choice is "none".
+    /// This prevents models from generating raw XML tool calls in the content field.
+    exclude_tools_when_tool_choice_none: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter

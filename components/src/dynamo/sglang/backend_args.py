@@ -4,7 +4,7 @@
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
-from typing import Optional, Union
+from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -41,13 +41,6 @@ class DynamoSGLangArgGroup(ArgGroup):
             "the same SGLang-native pre/post processing with KV router support.",
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_SGL_MULTIMODAL_PROCESSOR",
-            default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
         add_negatable_bool_argument(
             g,
             flag_name="--multimodal-encode-worker",
@@ -114,10 +107,9 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
-    multimodal_processor: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
-    embedding_transfer_mode: Union[str, EmbeddingTransferMode]
+    embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
     image_diffusion_worker: bool
 
@@ -127,10 +119,11 @@ class DynamoSGLangConfig(ConfigBase):
     video_generation_worker: bool
 
     def validate(self) -> None:
-        if isinstance(self.embedding_transfer_mode, str):
+        if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(
-                self.embedding_transfer_mode
+                str(self.embedding_transfer_mode)
             )
+
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):
             raise ValueError(
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
