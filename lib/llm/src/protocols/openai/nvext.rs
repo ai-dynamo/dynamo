@@ -174,16 +174,23 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+
+    /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
 }
 
 /// Hints from the agent/caller about request characteristics.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default, PartialEq)]
 pub struct AgentHints {
-    /// Latency sensitivity in seconds for queue ordering.
-    /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
+    /// Unified request priority.
+    /// Higher values mean "more important" at the Dynamo API level.
+    /// Dynamo uses this for router queue ordering and normalizes it per backend
+    /// before forwarding engine priority values.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latency_sensitivity: Option<f64>,
+    pub priority: Option<i32>,
 
     /// Expected output sequence length (number of output tokens).
     /// Used as a hint for routing decisions to estimate resource requirements
@@ -199,13 +206,12 @@ pub struct AgentHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculative_prefill: Option<bool>,
 
-    /// Backend engine scheduling priority.
-    /// Forwarded to the engine's generate call for queue ordering, KV cache eviction,
-    /// and preemption decisions. Interpretation is backend-specific:
-    /// vLLM uses lower-is-higher, SGLang uses higher-is-higher (configurable).
+    /// Deprecated alias for router-only priority.
+    /// Kept as an undocumented fallback while callers migrate to `priority`.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i32>,
+    #[schema(ignore)]
+    pub latency_sensitivity: Option<f64>,
 }
 
 /// Anthropic-style cache control hint for prefix pinning with TTL.
