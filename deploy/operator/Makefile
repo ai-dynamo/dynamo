@@ -248,6 +248,109 @@ install-gpu-operator: helm ## Install NVIDIA GPU Operator if not already present
 		echo "GPU Operator installed successfully."; \
 	fi
 
+##@ Cleanup
+
+# Namespace and Helm release used by Tilt dev-loop (matches Tiltfile defaults).
+DYNAMO_NAMESPACE ?= dynamo-system
+DYNAMO_HELM_RELEASE ?= dynamo
+# Grace period (seconds) before force-deleting stuck resources.
+TEARDOWN_GRACE_PERIOD ?= 30
+
+.PHONY: tilt-down
+tilt-down: ## Stop Tilt and remove all Tilt-managed resources.
+	@echo "Stopping Tilt..."
+	@tilt down 2>/dev/null || echo "Tilt was not running — skipping."
+
+.PHONY: clean-tilt
+clean-tilt: tilt-down ## Stop Tilt, remove its build artifacts, and delete the dev namespace.
+	@echo "Removing Tilt build artifacts..."
+	@rm -rf tilt_bin
+	@echo "Deleting Tilt dev namespace $(DYNAMO_NAMESPACE)..."
+	@$(KUBECTL) delete namespace $(DYNAMO_NAMESPACE) --ignore-not-found --timeout=$(TEARDOWN_GRACE_PERIOD)s 2>/dev/null || { \
+		echo "WARNING: namespace $(DYNAMO_NAMESPACE) stuck terminating — force-removing finalizers..."; \
+		$(KUBECTL) get namespace $(DYNAMO_NAMESPACE) -o json \
+			| sed 's/"kubernetes"//' \
+			| $(KUBECTL) replace --raw "/api/v1/namespaces/$(DYNAMO_NAMESPACE)/finalize" -f - 2>/dev/null || true; \
+	}
+
+.PHONY: clean-dynamo-crds
+clean-dynamo-crds: kubectl ## Delete all Dynamo CRDs (these survive helm uninstall due to resource-policy: keep).
+	@echo "Deleting Dynamo custom resources..."
+	@for crd in $$($(KUBECTL) get crd -o name 2>/dev/null | grep 'nvidia.com' | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do \
+		echo "  Deleting all $$crd instances..."; \
+		$(KUBECTL) delete "$$crd" --all -A --timeout=$(TEARDOWN_GRACE_PERIOD)s 2>/dev/null || { \
+			echo "  Timed out — stripping finalizers from remaining $$crd instances..."; \
+			$(KUBECTL) get "$$crd" -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null | \
+			while read -r ns name; do \
+				[ -z "$$name" ] && continue; \
+				$(KUBECTL) patch "$$crd" "$$name" -n "$$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true; \
+			done; \
+			$(KUBECTL) delete "$$crd" --all -A --force --grace-period=0 2>/dev/null || true; \
+		}; \
+	done
+	@echo "Deleting Dynamo CRDs..."
+	@$(KUBECTL) get crd -o name 2>/dev/null | grep 'nvidia.com' | xargs -r $(KUBECTL) delete --timeout=$(TEARDOWN_GRACE_PERIOD)s 2>/dev/null || \
+		$(KUBECTL) get crd -o name 2>/dev/null | grep 'nvidia.com' | xargs -r $(KUBECTL) delete --force --grace-period=0 2>/dev/null || \
+		echo "No Dynamo CRDs found or already removed."
+
+.PHONY: clean-dynamo-helm
+clean-dynamo-helm: helm ## Uninstall Dynamo Helm releases and delete their namespaces.
+	@echo "Uninstalling Dynamo Helm releases..."
+	@$(HELM) uninstall $(DYNAMO_HELM_RELEASE) --namespace $(DYNAMO_NAMESPACE) --wait --timeout=120s 2>/dev/null || \
+		$(HELM) uninstall $(DYNAMO_HELM_RELEASE) --namespace $(DYNAMO_NAMESPACE) --no-hooks 2>/dev/null || \
+		echo "No Helm release '$(DYNAMO_HELM_RELEASE)' in namespace '$(DYNAMO_NAMESPACE)' — skipped."
+	@$(HELM) uninstall dynamo-platform --namespace dynamo --wait --timeout=120s 2>/dev/null || \
+		$(HELM) uninstall dynamo-platform --namespace dynamo --no-hooks 2>/dev/null || \
+		echo "No Helm release 'dynamo-platform' in namespace 'dynamo' — skipped."
+	@echo "Deleting Dynamo namespaces..."
+	@for ns in $(DYNAMO_NAMESPACE) dynamo; do \
+		if $(KUBECTL) get namespace "$$ns" >/dev/null 2>&1; then \
+			echo "  Deleting namespace $$ns..."; \
+			$(KUBECTL) delete namespace "$$ns" --timeout=$(TEARDOWN_GRACE_PERIOD)s 2>/dev/null || { \
+				echo "  WARNING: namespace $$ns stuck terminating — force-removing finalizers..."; \
+				$(KUBECTL) get namespace "$$ns" -o json \
+					| sed 's/"kubernetes"//' \
+					| $(KUBECTL) replace --raw "/api/v1/namespaces/$$ns/finalize" -f - 2>/dev/null || true; \
+			}; \
+		fi; \
+	done
+
+.PHONY: clean-gpu-operator
+clean-gpu-operator: helm ## Uninstall the NVIDIA GPU Operator and delete its namespace.
+	@if $(HELM) list -n $(GPU_OPERATOR_NAMESPACE) -q 2>/dev/null | grep -q '^gpu-operator$$'; then \
+		echo "Uninstalling GPU Operator..."; \
+		$(HELM) uninstall gpu-operator --namespace $(GPU_OPERATOR_NAMESPACE) --wait --timeout=120s 2>/dev/null || \
+			$(HELM) uninstall gpu-operator --namespace $(GPU_OPERATOR_NAMESPACE) --no-hooks; \
+		echo "Deleting GPU Operator namespace $(GPU_OPERATOR_NAMESPACE)..."; \
+		$(KUBECTL) delete namespace $(GPU_OPERATOR_NAMESPACE) --ignore-not-found --timeout=$(TEARDOWN_GRACE_PERIOD)s 2>/dev/null || { \
+			echo "WARNING: namespace $(GPU_OPERATOR_NAMESPACE) stuck terminating — force-removing finalizers..."; \
+			$(KUBECTL) get namespace $(GPU_OPERATOR_NAMESPACE) -o json \
+				| sed 's/"kubernetes"//' \
+				| $(KUBECTL) replace --raw "/api/v1/namespaces/$(GPU_OPERATOR_NAMESPACE)/finalize" -f - 2>/dev/null || true; \
+		}; \
+		echo "GPU Operator removed."; \
+	else \
+		echo "GPU Operator is not installed — skipping."; \
+	fi
+
+.PHONY: clean-cluster
+clean-cluster: kubectl helm ## Remove ALL Dynamo resources from the cluster and local build artifacts.
+	@echo ""
+	@echo "================================================================"
+	@echo "  Dynamo Full Cluster Cleanup"
+	@echo "================================================================"
+	@echo ""
+	$(MAKE) clean-dynamo-crds
+	$(MAKE) clean-tilt
+	$(MAKE) clean-dynamo-helm
+	$(MAKE) clean-gpu-operator
+	$(MAKE) clean-bin
+	@echo ""
+	@echo "================================================================"
+	@echo "  Cluster is clean."
+	@echo "================================================================"
+	@echo ""
+
 ##@ Dependencies
 
 ## Location to install dependencies to
