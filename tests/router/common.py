@@ -620,6 +620,7 @@ def _test_router_overload_503(
         namespace=engine_workers.namespace,
         blocks_threshold=blocks_threshold,
     ):
+        frontend_url = f"http://localhost:{frontend_port}"
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         # Custom payload for 503 test with more tokens to consume resources
@@ -628,86 +629,104 @@ def _test_router_overload_503(
             "max_tokens": 50,  # Longer output to consume more blocks
         }
 
-        # First, send one request with retry to ensure system is ready
-        logger.info("Sending initial request to ensure system is ready...")
-        asyncio.run(send_inflight_requests([url], test_payload_503, 1))
+        logger.info("Waiting for frontend readiness before overload test...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=1,
+                timeout=60,
+            )
+        )
 
-        # Now send 50 concurrent requests to exhaust resources, then verify 503
-        logger.info("Sending 50 concurrent requests to exhaust resources...")
+        logger.info("Launching streaming requests until the router returns 503...")
 
         async def exhaust_resources_and_verify_503():
+            stop_event = asyncio.Event()
+            overload_response = {}
+            unexpected_statuses = []
+
             async with aiohttp.ClientSession() as session:
-                # Start 50 long-running requests concurrently
                 tasks = []
-                for i in range(50):
-                    # Create unique shuffled content for each request
-                    content_words = test_payload["messages"][0]["content"].split()
-                    random.shuffle(content_words)
-                    shuffled_content = " ".join(content_words)
 
-                    # Create unique payload for this request
-                    unique_payload = {
-                        **test_payload,
-                        "max_tokens": 50,
-                        "messages": [
-                            {**test_payload["messages"][0], "content": shuffled_content}
-                        ],
-                    }
+                async def send_request(req_id, payload):
+                    try:
+                        async with session.post(url, json=payload) as response:
+                            if response.status == 200:
+                                logger.info(f"Request {req_id} accepted")
+                                await stop_event.wait()
+                                return response.status
 
-                    async def send_long_request(req_id, payload):
-                        try:
-                            async with session.post(url, json=payload) as response:
-                                if response.status == 200:
-                                    # Don't read the response fully, just hold the connection
-                                    await asyncio.sleep(
-                                        10
-                                    )  # Hold connection for 10 seconds
-                                    return True
-                                else:
-                                    logger.info(
-                                        f"Request {req_id} got status {response.status}"
-                                    )
-                                    return False
-                        except Exception as e:
-                            logger.info(f"Request {req_id} failed: {e}")
-                            return False
-
-                    tasks.append(
-                        asyncio.create_task(send_long_request(i, unique_payload))
-                    )
-
-                # Wait briefly to ensure requests are in-flight
-                await asyncio.sleep(0.8)
-
-                # Now send one more request that should get 503
-                logger.info("Sending additional request that should receive 503...")
-                try:
-                    async with session.post(url, json=test_payload_503) as response:
-                        status_code = response.status
-                        if status_code == 503:
-                            body = await response.json()
-                            logger.info(f"Got expected 503 response: {body}")
-                            error_msg = body.get("message", "")
-                            assert (
-                                "Service temporarily unavailable" in error_msg
-                                or "All workers are busy" in error_msg
-                            ), f"Expected service overload error message, got: {body}"
-                            return True
-                        else:
-                            logger.error(f"Expected 503 but got {status_code}")
-                            if status_code == 200:
-                                logger.error(
-                                    "Request unexpectedly succeeded when it should have been rejected"
+                            if response.status == 503:
+                                body = await response.json()
+                                logger.info(
+                                    f"Request {req_id} got expected 503: {body}"
                                 )
-                            return False
-                except Exception as e:
-                    logger.error(f"Failed to send overload test request: {e}")
-                    return False
+                                overload_response["status"] = response.status
+                                overload_response["body"] = body
+                                stop_event.set()
+                                return response.status
+
+                            body = await response.text()
+                            logger.info(
+                                f"Request {req_id} got unexpected status {response.status}: {body}"
+                            )
+                            unexpected_statuses.append((response.status, body))
+                            return response.status
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.info(f"Request {req_id} failed: {e}")
+                        unexpected_statuses.append(("exception", str(e)))
+                        return None
+
+                try:
+                    for i in range(50):
+                        if stop_event.is_set():
+                            break
+
+                        content_words = test_payload["messages"][0]["content"].split()
+                        random.shuffle(content_words)
+                        shuffled_content = " ".join(content_words)
+                        unique_payload = {
+                            **test_payload_503,
+                            "messages": [
+                                {
+                                    **test_payload["messages"][0],
+                                    "content": shuffled_content,
+                                }
+                            ],
+                        }
+                        tasks.append(
+                            asyncio.create_task(send_request(i, unique_payload))
+                        )
+                        await asyncio.sleep(0.1)
+
+                    if not stop_event.is_set():
+                        try:
+                            await asyncio.wait_for(stop_event.wait(), timeout=10)
+                        except asyncio.TimeoutError:
+                            logger.error("Timed out waiting for overload 503")
                 finally:
-                    # Cancel all background tasks
-                    for task in tasks:
+                    stop_event.set()
+                    done, pending = await asyncio.wait(tasks, timeout=3)
+                    for task in pending:
                         task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    for task in done:
+                        task.result()
+
+                if overload_response.get("status") != 503:
+                    logger.error(
+                        f"Observed statuses before timeout: {unexpected_statuses}"
+                    )
+                    return False
+
+                error_msg = overload_response["body"].get("message", "")
+                assert (
+                    "Service temporarily unavailable" in error_msg
+                    or "All workers are busy" in error_msg
+                ), f"Expected service overload error message, got: {overload_response['body']}"
+                return True
 
         # Run the test
         success = asyncio.run(exhaust_resources_and_verify_503())
