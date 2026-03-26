@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+av==15.0.0
+ftfy==6.3.1
+
+# Needed by the documented mounted-repo vLLM dev workflow and imports.
+grpcio-tools<=1.76.0
+# Extra Python dependencies needed by the upstream-base vLLM dev image.
+# Keep this list narrow so the dev image stays aligned with the upstream vLLM solve.
+
+# Match the upstream vLLM image's Hugging Face stack. requirements.test.txt pulls
+# datasets, which upgrades huggingface-hub in the venv unless we pin it back.
+huggingface-hub==0.36.2
+kubernetes==32.0.1
+tensorboard>=2.19.0,<2.21.0
+tensorboardX==2.6.2.2

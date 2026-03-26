@@ -56,6 +56,7 @@ COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 
+{% if target not in ("dev", "local-dev") %}
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
@@ -71,6 +72,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
     fi
+{% endif %}
 
 USER dynamo
 
