@@ -112,7 +112,7 @@ Before using these templates, ensure you have:
 
 1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
-3. **Container registry access** for vLLM runtime images
+3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
@@ -180,13 +180,13 @@ kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
 
 #### Deploy with Intel XPU  (Optional)
-If your cluster uses Intel GPU devices via Kubernetes Dynamic Resource Allocation (DRA), you'll need to have the [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed.
+If your cluster uses Intel GPU devices via Kubernetes Dynamic Resource Allocation (DRA), ensure:
+- Your Kubernetes cluster is **v1.34+** (required for DRA API v1), and
+- The [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) is installed.
 
-Apply the claim template first and then deploy the XPU template:
+Deploy the XPU template (includes the ResourceClaimTemplate):
 ```bash
 cd <dynamo-source-root>/examples/backends/vllm/deploy
-
-kubectl apply -f resourceclaimtemplate_intel_gpu.yaml -n $NAMESPACE
 
 # For aggregated deployment
 kubectl apply -f agg_xpu_dra.yaml -n $NAMESPACE
