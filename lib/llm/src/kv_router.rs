@@ -126,7 +126,7 @@ where
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        mut workers_with_configs: RuntimeConfigWatch,
+        workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
@@ -140,18 +140,6 @@ where
         let cancellation_token = component.drt().primary_token();
 
         let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
-
-        if !kv_router_config.skip_initial_worker_wait {
-            let _ = workers_with_configs
-                .wait_for(|m| m.len() >= kv_router_config.min_initial_workers)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "runtime config watch closed before {} workers appeared",
-                        kv_router_config.min_initial_workers
-                    )
-                })?;
-        }
 
         let scheduler = KvScheduler::start(
             component.clone(),

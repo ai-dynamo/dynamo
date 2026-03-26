@@ -728,6 +728,7 @@ def test_mocker_router(
             num_requests=NUM_REQUESTS,
             request_plane=request_plane,
             router_mode=router_mode,
+            min_initial_workers=mockers.num_workers,
         )
 
 

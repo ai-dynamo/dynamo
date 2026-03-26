@@ -235,6 +235,7 @@ async def async_main():
     router_config = RouterConfig(
         router_mode,
         kv_router_config,
+        min_initial_workers=config.min_initial_workers,
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,

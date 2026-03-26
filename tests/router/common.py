@@ -55,6 +55,7 @@ def _test_router_basic(
     request_plane: str = "nats",
     router_mode: str = "kv",
     enforce_disagg: bool = False,
+    min_initial_workers: int | None = None,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
@@ -78,6 +79,7 @@ def _test_router_basic(
         request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
         enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
+        min_initial_workers: Optional frontend startup worker gate. Defaults to None.
 
     Raises:
         AssertionError: If requests fail or frontend doesn't become ready
@@ -92,6 +94,7 @@ def _test_router_basic(
         enforce_disagg=enforce_disagg,
         request_plane=request_plane,
         router_mode=router_mode,
+        min_initial_workers=min_initial_workers,
     ):
         # Start router frontend
         logger.info(
@@ -327,7 +330,7 @@ def _test_python_router_bindings(
         AssertionError: If requests fail or router doesn't work correctly
     """
     # Create KvRouterConfig with default settings
-    kv_router_config = KvRouterConfig(min_initial_workers=num_workers)
+    kv_router_config = KvRouterConfig()
 
     # Create KvRouter Python object
     kv_router = KvRouter(
@@ -849,7 +852,6 @@ def _test_router_indexers_sync(
             router_snapshot_threshold=20,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
-            min_initial_workers=num_workers,
         )
 
         # If standalone indexer mode, launch mockers one-by-one and register.
@@ -1502,7 +1504,6 @@ def _test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
-            min_initial_workers=expected_num_instances,
         )
         kv_router = KvRouter(
             endpoint=endpoint,

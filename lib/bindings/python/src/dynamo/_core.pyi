@@ -1140,6 +1140,7 @@ class RouterConfig:
         self,
         mode: RouterMode,
         config: Optional[KvRouterConfig] = None,
+        min_initial_workers: int = 0,
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
@@ -1151,6 +1152,8 @@ class RouterConfig:
         Args:
             mode: The router mode (RoundRobin, Random, KV, or Direct)
             config: Optional KV router configuration (used when mode is KV)
+            min_initial_workers: Minimum number of discovered workers required before
+                router startup continues. Set to 0 to disable the startup wait.
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
@@ -1179,7 +1182,6 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_enable_cache_control: bool = False,
-        min_initial_workers: int = 1,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """
@@ -1213,9 +1215,6 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
             router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
                 cache_control service mesh endpoint (default: False).
-            min_initial_workers: Minimum number of discovered workers required before
-                router startup continues (default: 1). Ignored when
-                skip_initial_worker_wait is enabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
