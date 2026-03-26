@@ -631,10 +631,6 @@ impl AggRuntime {
             self.drain_current_timestamp()?;
         }
 
-        if let Some(router) = self.router.as_mut() {
-            router.shutdown();
-        }
-
         Ok((self.collector, self.stats))
     }
 
