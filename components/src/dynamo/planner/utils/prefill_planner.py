@@ -17,7 +17,16 @@ class PrefillPlanner(BasePlanner):
     component_type = SubComponentType.PREFILL
 
     def load_plan_adjustment(self) -> Optional[int]:
-        """Load-based scaling decision for prefill. Returns desired_replicas or None."""
+        """Load-based scaling decision for prefill using FPM data.
+
+        For each engine, simulates prefill scheduling to estimate next TTFT:
+        - Uses queued prefill tokens + avg ISL as total tokens to process
+        - Chunks into max_num_batched_tokens-sized iterations
+        - Sums regression-predicted wall time per chunk
+
+        Scale up if ALL engines' estimated TTFT > SLA.
+        Scale down if ALL engines' estimated TTFT < SLA * sensitivity.
+        """
         if not self.ttft_regression.has_sufficient_data():
             logger.info(
                 f"TTFT regression: insufficient data ({self.ttft_regression.num_observations}"
@@ -25,73 +34,46 @@ class PrefillPlanner(BasePlanner):
             )
             return None
 
-        x_sla = self.ttft_regression.predict_x_from_sla(self.config.ttft)
-        if x_sla is None:
-            return None
-
-        if not self.cached_load_metrics.recent:
-            return None
-
-        recent = self.cached_load_metrics.recent
-        cluster_averaged = self.cached_load_metrics.cluster_averaged
-
-        # Averaged ISL across all workers in the past adjustment interval
-        avg_isl = cluster_averaged.get("last_isl", 0.0)
-        target_active_tokens = x_sla - avg_isl
-
-        if target_active_tokens <= 0:
-            logger.warning(
-                f"TTFT SLA unachievable at current ISL: x_sla={x_sla:.1f}, "
-                f"avg_isl={avg_isl:.1f}, skipping load-based prefill scaling"
-            )
+        fpm_stats = self._get_fpm_stats()
+        if not fpm_stats:
             return None
 
         num_workers = self.shared_state.num_p_workers
         if num_workers == 0:
             return None
 
-        logger.info(
-            f"Load-based prefill: x_sla={x_sla:.1f}, avg_isl={avg_isl:.1f}, "
-            f"target_active_tokens={target_active_tokens:.1f}, workers={num_workers}, "
-            f"slope={self.ttft_regression.slope:.6f}, intercept={self.ttft_regression.intercept:.3f}"
+        max_num_batched_tokens = getattr(
+            self.prefill_worker_info, "max_num_batched_tokens", None
         )
+        if not max_num_batched_tokens or max_num_batched_tokens <= 0:
+            logger.warning(
+                "max_num_batched_tokens not available from WorkerInfo, "
+                "skipping prefill load-based scaling"
+            )
+            return None
 
-        # Scale up: ALL workers above target (use recent metrics)
-        all_above = all(
-            m.get("active_prefill_tokens", 0.0) > target_active_tokens
-            for m in recent.values()
-        )
-        if all_above:
+        estimated_ttfts: list[float] = []
+        for (wid, dp), fpm in fpm_stats.items():
+            queued_prefill = fpm.queued_requests.sum_prefill_tokens
+            est = self.ttft_regression.estimate_next_ttft(
+                queued_prefill_tokens=queued_prefill,
+                max_num_batched_tokens=max_num_batched_tokens,
+            )
+            if est is None:
+                continue
+            est_ms = est * 1000
+            estimated_ttfts.append(est_ms)
             logger.info(
-                f"Load-based prefill: ALL workers above target ({target_active_tokens:.1f}), "
-                f"scaling up to {num_workers + 1}"
+                f"Prefill engine {wid}:dp{dp}: estimated TTFT {est_ms:.2f}ms "
+                f"(queued_prefill={queued_prefill}, avg_isl={self.ttft_regression.avg_isl:.1f})"
             )
-            return num_workers + 1
 
-        # Scale down: ALL workers below boundary (use recent metrics)
-        if num_workers > 1:
-            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
-            boundary = (
-                target_active_tokens * (num_workers - 1) / num_workers * sensitivity
-            )
-            all_below = all(
-                m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
-            )
-            if all_below:
-                if num_workers - 1 < self.config.min_endpoint:
-                    logger.info(
-                        f"Load-based prefill: ALL workers below boundary ({boundary:.1f}), "
-                        f"but cannot scale down below min_endpoint ({self.config.min_endpoint}); "
-                        f"maintaining {num_workers} prefill workers"
-                    )
-                    return num_workers
-                logger.info(
-                    f"Load-based prefill: ALL workers below boundary ({boundary:.1f}), "
-                    f"scaling down to {num_workers - 1}"
-                )
-                return num_workers - 1
-
-        return None
+        return self._load_based_scaling_decision_from_estimates(
+            estimates=estimated_ttfts,
+            sla=self.config.ttft,
+            num_workers=num_workers,
+            label="prefill TTFT",
+        )
 
     def _update_correction_factor(self) -> bool:
         assert self.last_metrics.isl is not None and self.last_metrics.ttft is not None
