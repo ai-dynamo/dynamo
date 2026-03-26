@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:proper-race-fix
+          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -75,7 +75,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:proper-race-fix
+        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -112,7 +112,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:proper-race-fix
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 2
       resources:
@@ -130,7 +130,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:proper-race-fix
+        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -167,7 +167,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:proper-race-fix
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
