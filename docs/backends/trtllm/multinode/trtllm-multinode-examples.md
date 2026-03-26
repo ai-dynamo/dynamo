@@ -23,9 +23,8 @@ on a slurm cluster with `srun`:
    TP16/EP16 prefill worker (4 nodes) and a multi-node TP16/EP16 decode
    worker (4 nodes) across a total of 8 GB200 nodes.
 
-NOTE: Some of the scripts used in this example like `start_frontend_services.sh` and
-`start_trtllm_worker.sh` should be translatable to other environments like Kubernetes, or
-using `mpirun` directly, with relative ease.
+NOTE: The launch steps below use inline `srun ... bash -lc '...'` commands rather than
+checked-in helper scripts so the guide stays self-contained and matches the current repo.
 
 ## Setup
 
@@ -35,8 +34,8 @@ For simplicity of the example, we will make some assumptions about your slurm cl
    testing, you should aim to allocate groups of nodes that are performantly
    inter-connected, such as those in an NVL72 setup.
 2. Second, we assume this slurm cluster has the [Pyxis](https://github.com/NVIDIA/pyxis)
-   SPANK plugin setup. In particular, the `srun_aggregated.sh` script in this
-   example will use `srun` arguments like `--container-image`,
+   SPANK plugin setup. In particular, the example commands below use `srun`
+   arguments like `--container-image`,
    `--container-mounts`, and `--container-env` that are added to `srun` by Pyxis.
    If your cluster supports similar container based plugins, you may be able to
    modify the script to use that instead.
@@ -93,11 +92,8 @@ export IMAGE="<dynamo_trtllm_image>"
 # different location, you can customize MOUNTS or specify additional
 # comma-separated mount pairs here.
 #
-# NOTE: Currently, this example assumes that the local bash scripts and configs
-# referenced are mounted into into /mnt inside the container. If you want to
-# customize the location of the scripts, make sure to modify `srun_aggregated.sh`
-# accordingly for the new locations of `start_frontend_services.sh` and
-# `start_trtllm_worker.sh`.
+# NOTE: Currently, this example assumes the repo checkout is mounted into `/mnt`
+# inside the container so the example engine config paths resolve correctly.
 #
 # For example, assuming your cluster had a `/lustre` directory on the host, you
 # could add that as a mount like so:
@@ -131,7 +127,7 @@ Assuming you have at least 4 nodes allocated following the setup steps above,
 follow these steps below to launch an **aggregated** deployment across 4 nodes:
 
 ```bash
-# Default set in srun_aggregated.sh, but can customize here.
+# Default used below, but can customize here.
 # export ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/agg/wide_ep/wide_ep_agg.yaml"
 
 # Customize NUM_NODES to match the desired parallelism in ENGINE_CONFIG
@@ -143,10 +139,52 @@ follow these steps below to launch an **aggregated** deployment across 4 nodes:
 # GB200 nodes have 4 gpus per node, but for other types of nodes you can configure this.
 # export NUM_GPUS_PER_NODE=4
 
-# Launches:
-# - frontend + etcd/nats on current (head) node
-# - one large aggregated trtllm worker across multiple nodes via MPI tasks
-./srun_aggregated.sh
+# Shared service discovery settings for the commands below.
+ACCOUNT="${ACCOUNT:-$(sacctmgr -nP show assoc where user=$(whoami) format=account)}"
+export HEAD_NODE="${SLURMD_NODENAME}"
+export HEAD_NODE_IP="$(hostname -i)"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ENGINE_CONFIG="${ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/agg/wide_ep/wide_ep_agg.yaml}"
+
+# Launch frontend + etcd + nats on the head node.
+srun \
+  --mpi pmix \
+  --overlap \
+  --container-image "${IMAGE}" \
+  --container-mounts "${MOUNTS}" \
+  --verbose \
+  --label \
+  -A "${ACCOUNT}" \
+  -J "${ACCOUNT}-dynamo.trtllm" \
+  --nodelist "${HEAD_NODE}" \
+  --nodes 1 \
+  --jobid "${SLURM_JOB_ID}" \
+  bash -lc 'nats-server -js & \
+    etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd & \
+    sleep 3 && \
+    python3 -m dynamo.frontend' &
+
+# Launch one large aggregated TRT-LLM worker across multiple nodes via MPI tasks.
+DISAGGREGATION_MODE="prefill_and_decode" \
+srun \
+  --mpi pmix \
+  --oversubscribe \
+  --container-image "${IMAGE}" \
+  --container-mounts "${MOUNTS}" \
+  --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,ENGINE_CONFIG,MODEL_PATH,SERVED_MODEL_NAME \
+  --verbose \
+  --label \
+  -A "${ACCOUNT}" \
+  -J "${ACCOUNT}-dynamo.trtllm" \
+  --nodes "${NUM_NODES}" \
+  --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
+  --jobid "${SLURM_JOB_ID}" \
+  bash -lc 'trtllm-llmapi-launch python3 -m dynamo.trtllm \
+    --model-path "${MODEL_PATH}" \
+    --served-model-name "${SERVED_MODEL_NAME}" \
+    --extra-engine-args "${ENGINE_CONFIG}" \
+    --disaggregation-mode "${DISAGGREGATION_MODE}"' &
 ```
 
 ## Disaggregated WideEP
@@ -160,7 +198,7 @@ deployment across 8 nodes:
 > example above still deployed on the same set of nodes.
 
 ```bash
-# Defaults set in srun_disaggregated.sh, but can customize here.
+# Defaults used below, but can customize here.
 # export PREFILL_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_prefill.yaml"
 # export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_decode.yaml"
 
@@ -175,20 +213,84 @@ deployment across 8 nodes:
 # GB200 nodes have 4 gpus per node, but for other types of nodes you can configure this.
 # export NUM_GPUS_PER_NODE=4
 
-# Launches:
-# - frontend + etcd/nats on current (head) node.
-# - one large prefill trtllm worker across multiple nodes via MPI tasks
-# - one large decode trtllm worker across multiple nodes via MPI tasks
-./srun_disaggregated.sh
+ACCOUNT="${ACCOUNT:-$(sacctmgr -nP show assoc where user=$(whoami) format=account)}"
+export HEAD_NODE="${SLURMD_NODENAME}"
+export HEAD_NODE_IP="$(hostname -i)"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_prefill.yaml}"
+export DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_decode.yaml}"
+
+# Launch frontend + etcd + nats on the head node.
+srun \
+  --mpi pmix \
+  --overlap \
+  --container-image "${IMAGE}" \
+  --container-mounts "${MOUNTS}" \
+  --verbose \
+  --label \
+  -A "${ACCOUNT}" \
+  -J "${ACCOUNT}-dynamo.trtllm" \
+  --nodelist "${HEAD_NODE}" \
+  --nodes 1 \
+  --jobid "${SLURM_JOB_ID}" \
+  bash -lc 'nats-server -js & \
+    etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd & \
+    sleep 3 && \
+    python3 -m dynamo.frontend' &
+
+# Launch one large prefill worker across multiple nodes via MPI tasks.
+DISAGGREGATION_MODE="prefill" \
+ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG}" \
+srun \
+  --mpi pmix \
+  --oversubscribe \
+  --container-image "${IMAGE}" \
+  --container-mounts "${MOUNTS}" \
+  --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,ENGINE_CONFIG,MODEL_PATH,SERVED_MODEL_NAME \
+  --verbose \
+  --label \
+  -A "${ACCOUNT}" \
+  -J "${ACCOUNT}-dynamo.trtllm" \
+  --nodes "${NUM_PREFILL_NODES}" \
+  --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
+  --jobid "${SLURM_JOB_ID}" \
+  bash -lc 'trtllm-llmapi-launch python3 -m dynamo.trtllm \
+    --model-path "${MODEL_PATH}" \
+    --served-model-name "${SERVED_MODEL_NAME}" \
+    --extra-engine-args "${ENGINE_CONFIG}" \
+    --disaggregation-mode "${DISAGGREGATION_MODE}"' &
+
+# Launch one large decode worker across multiple nodes via MPI tasks.
+DISAGGREGATION_MODE="decode" \
+ENGINE_CONFIG="${DECODE_ENGINE_CONFIG}" \
+srun \
+  --mpi pmix \
+  --oversubscribe \
+  --container-image "${IMAGE}" \
+  --container-mounts "${MOUNTS}" \
+  --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,ENGINE_CONFIG,MODEL_PATH,SERVED_MODEL_NAME \
+  --verbose \
+  --label \
+  -A "${ACCOUNT}" \
+  -J "${ACCOUNT}-dynamo.trtllm" \
+  --nodes "${NUM_DECODE_NODES}" \
+  --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
+  --jobid "${SLURM_JOB_ID}" \
+  bash -lc 'trtllm-llmapi-launch python3 -m dynamo.trtllm \
+    --model-path "${MODEL_PATH}" \
+    --served-model-name "${SERVED_MODEL_NAME}" \
+    --extra-engine-args "${ENGINE_CONFIG}" \
+    --disaggregation-mode "${DISAGGREGATION_MODE}"' &
 ```
 
 > [!Tip]
-> To launch multiple replicas of the configured prefill/decode workers, you can set
-> NUM_PREFILL_WORKERS and NUM_DECODE_WORKERS respectively (default: 1).
+> To launch multiple replicas of the configured prefill/decode workers, repeat the
+> respective `srun` command with the same `PREFILL_ENGINE_CONFIG` or `DECODE_ENGINE_CONFIG`.
 
 ## Understanding the Output
 
-1. The `srun_aggregated.sh` launches two `srun` jobs. The first launches
+1. The aggregated example launches two `srun` jobs. The first launches
    etcd, NATS, and the OpenAI frontend on the head node only
    called "node1" in the example output below. The second launches
    a single TP16 Dynamo+TRTLLM worker spread across 4 nodes, each node
@@ -229,7 +331,7 @@ deployment across 8 nodes:
     ```
 5. At this point, with the worker fully initialized and detected by the frontend,
    it is now ready for inference.
-6. For `srun_disaggregated.sh`, it follows a very similar flow, but instead launches
+6. The disaggregated example follows a very similar flow, but instead launches
    three srun jobs instead of two. One for frontend, one for prefill worker,
    and one for decode worker.
 
@@ -258,8 +360,7 @@ curl -w "%{http_code}" ${HOST}:${PORT}/v1/chat/completions \
 
 ## Cleanup
 
-To cleanup background `srun` processes launched by `srun_aggregated.sh` or
-`srun_disaggregated.sh`, you can run:
+To cleanup the background `srun` processes launched above, you can run:
 ```bash
 pkill srun
 ```
