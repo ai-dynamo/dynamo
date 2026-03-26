@@ -199,6 +199,24 @@ async def init_llm_worker(
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
+        
+        # Propagate any overridden values back to config for MDC registration
+        # This ensures context_length, max_batch_size, etc. reflect the actual engine limits
+        if "max_seq_len" in arg_map:
+            config.max_seq_len = arg_map["max_seq_len"]
+            logging.info(
+                f"Updated config.max_seq_len from extra-engine-args: {config.max_seq_len}"
+            )
+        if "max_batch_size" in arg_map:
+            config.max_batch_size = arg_map["max_batch_size"]
+            logging.info(
+                f"Updated config.max_batch_size from extra-engine-args: {config.max_batch_size}"
+            )
+        if "max_num_tokens" in arg_map:
+            config.max_num_tokens = arg_map["max_num_tokens"]
+            logging.info(
+                f"Updated config.max_num_tokens from extra-engine-args: {config.max_num_tokens}"
+            )
 
     # Apply override_engine_args if provided
     if config.override_engine_args != "":
