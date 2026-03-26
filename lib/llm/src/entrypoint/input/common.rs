@@ -29,6 +29,7 @@ use crate::{
 };
 
 use anyhow::Context as _;
+use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -225,7 +226,6 @@ pub async fn build_routed_pipeline<Req, Resp>(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    min_initial_workers: usize,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     tokenizer: crate::tokenizers::Tokenizer,
@@ -254,7 +254,6 @@ where
         client,
         model_manager,
         router_mode,
-        min_initial_workers,
         worker_monitor,
         chooser,
         preprocessor,
@@ -273,7 +272,6 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    min_initial_workers: usize,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
@@ -297,6 +295,7 @@ where
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {

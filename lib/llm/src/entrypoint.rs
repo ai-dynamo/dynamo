@@ -36,7 +36,6 @@ pub type ChatEngineFactoryCallback = Arc<
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    pub min_initial_workers: usize,
     /// Load threshold configuration for busy detection
     pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
@@ -47,15 +46,9 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
-            min_initial_workers: 0,
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
         }
-    }
-
-    pub fn with_min_initial_workers(mut self, min_initial_workers: usize) -> Self {
-        self.min_initial_workers = min_initial_workers;
-        self
     }
 
     pub fn with_load_threshold_config(mut self, config: LoadThresholdConfig) -> Self {

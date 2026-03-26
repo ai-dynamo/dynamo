@@ -555,6 +555,7 @@ impl ModelManager {
 
     // -- KV Router creation --
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
         endpoint: &Endpoint,

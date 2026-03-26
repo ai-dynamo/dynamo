@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    config::{KvRouterConfig, RouterConfigOverride},
+    config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
@@ -138,8 +138,22 @@ where
         kv_router_config.validate()?;
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
+        let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
+
+        if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
+            let mut startup_watch = workers_with_configs.clone();
+            let _ = startup_watch
+                .wait_for(|m| m.len() >= min_initial_workers)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "runtime config watch closed before {} workers appeared",
+                        min_initial_workers
+                    )
+                })?;
+        }
 
         let scheduler = KvScheduler::start(
             component.clone(),

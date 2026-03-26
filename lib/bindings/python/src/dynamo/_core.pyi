@@ -1140,7 +1140,6 @@ class RouterConfig:
         self,
         mode: RouterMode,
         config: Optional[KvRouterConfig] = None,
-        min_initial_workers: int = 0,
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
@@ -1152,8 +1151,6 @@ class RouterConfig:
         Args:
             mode: The router mode (RoundRobin, Random, KV, or Direct)
             config: Optional KV router configuration (used when mode is KV)
-            min_initial_workers: Minimum number of discovered workers required before
-                router startup continues. Set to 0 to disable the startup wait.
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection

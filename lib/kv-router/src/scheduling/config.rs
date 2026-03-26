@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env::{self, VarError};
 use std::fmt;
 use std::str::FromStr;
 
@@ -15,6 +16,22 @@ use crate::protocols::{
 
 const fn default_track_prefill_tokens() -> bool {
     true
+}
+
+pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+
+pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
+    match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
+        Ok(value) => value.parse::<usize>().map_err(|error| {
+            anyhow::anyhow!(
+                "{DYN_ROUTER_MIN_INITIAL_WORKERS} must be a non-negative integer, got {value:?}: {error}"
+            )
+        }),
+        Err(VarError::NotPresent) => Ok(0),
+        Err(VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_ROUTER_MIN_INITIAL_WORKERS} must be valid unicode")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

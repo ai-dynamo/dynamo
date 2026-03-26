@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import random
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -36,6 +38,20 @@ logger = logging.getLogger(__name__)
 
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+
+
+@contextlib.contextmanager
+def min_initial_workers_env(min_initial_workers: int):
+    previous = os.environ.get(MIN_INITIAL_WORKERS_ENV)
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(min_initial_workers)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
+        else:
+            os.environ[MIN_INITIAL_WORKERS_ENV] = previous
 
 
 ########################################################
@@ -333,11 +349,12 @@ def _test_python_router_bindings(
     kv_router_config = KvRouterConfig()
 
     # Create KvRouter Python object
-    kv_router = KvRouter(
-        endpoint=endpoint,
-        block_size=block_size,
-        kv_router_config=kv_router_config,
-    )
+    with min_initial_workers_env(num_workers):
+        kv_router = KvRouter(
+            endpoint=endpoint,
+            block_size=block_size,
+            kv_router_config=kv_router_config,
+        )
 
     logger.info("Created KvRouter Python object")
 
@@ -905,11 +922,12 @@ def _test_router_indexers_sync(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        kv_router1 = KvRouter(
-            endpoint=endpoint1,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
-        )
+        with min_initial_workers_env(num_workers):
+            kv_router1 = KvRouter(
+                endpoint=endpoint1,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+            )
 
         # Wait for workers to be ready
         await wait_for_workers_ready(endpoint1, kv_router1, num_workers, model_name)
@@ -996,11 +1014,12 @@ def _test_router_indexers_sync(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        kv_router2 = KvRouter(
-            endpoint=endpoint2,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
-        )
+        with min_initial_workers_env(num_workers):
+            kv_router2 = KvRouter(
+                endpoint=endpoint2,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+            )
 
         # Launch Indexer B alongside Router 2. Workers are passed via --workers
         # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
@@ -1505,11 +1524,12 @@ def _test_router_decisions(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
-        kv_router = KvRouter(
-            endpoint=endpoint,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
-        )
+        with min_initial_workers_env(expected_num_instances):
+            kv_router = KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+            )
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(

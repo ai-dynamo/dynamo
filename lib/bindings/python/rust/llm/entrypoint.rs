@@ -132,18 +132,16 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    min_initial_workers: usize,
     enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, min_initial_workers=0, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
-        min_initial_workers: usize,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
@@ -155,7 +153,6 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            min_initial_workers,
             enforce_disagg,
         }
     }
@@ -166,7 +163,6 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
-            min_initial_workers: rc.min_initial_workers,
             load_threshold_config: RsLoadThresholdConfig {
                 active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,

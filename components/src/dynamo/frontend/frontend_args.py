@@ -197,8 +197,10 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
             default=0,
             help=(
-                "Frontend: Minimum number of discovered workers that must be available "
-                "before router startup continues. Set to 0 to disable the startup wait."
+                "Minimum number of workers required before router startup continues. "
+                "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
+                "push-router path and the KV router's config-ready worker gate share "
+                "the same startup threshold. Set to 0 to disable the startup wait."
             ),
             arg_type=int,
             dest="min_initial_workers",

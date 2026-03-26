@@ -60,6 +60,9 @@ async def main():
         kv_router_config=kv_router_config
     )
 
+    # Optional startup gate shared with the frontend and standalone indexer:
+    # os.environ["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "2"
+
     # Your input tokens
     token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
