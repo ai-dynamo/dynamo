@@ -49,13 +49,17 @@ async fn reset_prefix_cache_handler(
     let mut cleared_workers = Vec::new();
     let mut failed_workers = Vec::new();
 
-    // update cleared and failed workers
-    let mut add_worker_result = |success: bool,
-                                 name: String,
-                                 status: &str,
-                                 ns: &str,
-                                 comp: &str,
-                                 message: Option<String>| {
+    // Helper function to add worker result
+    fn add_worker_result(
+        success: bool,
+        name: String,
+        status: &str,
+        ns: &str,
+        comp: &str,
+        message: Option<String>,
+        cleared: &mut Vec<serde_json::Value>,
+        failed: &mut Vec<serde_json::Value>,
+    ) {
         let mut result = json!({
             "name": name,
             "endpoint": format!("{}/{}/{}", ns, comp, RESET_PREFIX_CACHE_ENDPOINT),
@@ -65,14 +69,14 @@ async fn reset_prefix_cache_handler(
             if let Some(m) = message {
                 result["response"] = json!(m);
             }
-            cleared_workers.push(result);
+            cleared.push(result);
         } else {
             if let Some(m) = message {
                 result["error"] = json!(m);
             }
-            failed_workers.push(result);
+            failed.push(result);
         }
-    };
+    }
 
     // create client for each model entry
     for entry in &model_entries {
@@ -92,6 +96,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -107,6 +113,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -125,6 +133,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -145,6 +155,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -167,6 +179,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -180,6 +194,8 @@ async fn reset_prefix_cache_handler(
                 namespace,
                 component,
                 None,
+                &mut cleared_workers,
+                &mut failed_workers,
             );
             continue;
         }
@@ -204,6 +220,8 @@ async fn reset_prefix_cache_handler(
                             namespace,
                             component,
                             Some(response.to_string()),
+                            &mut cleared_workers,
+                            &mut failed_workers,
                         );
                     }
                     None => {
@@ -214,6 +232,8 @@ async fn reset_prefix_cache_handler(
                             namespace,
                             component,
                             None,
+                            &mut cleared_workers,
+                            &mut failed_workers,
                         );
                     }
                 },
@@ -225,6 +245,8 @@ async fn reset_prefix_cache_handler(
                         namespace,
                         component,
                         Some(e.to_string()),
+                        &mut cleared_workers,
+                        &mut failed_workers,
                     );
                 }
             }
