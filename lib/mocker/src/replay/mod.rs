@@ -10,7 +10,7 @@ mod validate;
 
 use std::collections::VecDeque;
 
-use crate::common::protocols::DirectRequest;
+use crate::common::protocols::{DirectRequest, MockEngineArgs};
 
 pub(crate) use collector::TraceCollector;
 #[cfg(test)]
@@ -25,20 +25,50 @@ pub enum ReplayRouterMode {
     KvRouter,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayArgsMode {
+    Aggregated,
+    Disagg,
+}
+
+#[derive(Clone, Debug)]
+pub struct OfflineDisaggReplayConfig {
+    pub prefill_args: MockEngineArgs,
+    pub decode_args: MockEngineArgs,
+    pub num_prefill_workers: usize,
+    pub num_decode_workers: usize,
+}
+
+impl OfflineDisaggReplayConfig {
+    pub fn normalized(self) -> anyhow::Result<Self> {
+        Ok(Self {
+            prefill_args: self.prefill_args.normalized()?,
+            decode_args: self.decode_args.normalized()?,
+            num_prefill_workers: self.num_prefill_workers,
+            num_decode_workers: self.num_decode_workers,
+        })
+    }
+}
+
 pub use entrypoints::{
-    simulate_concurrency_file, simulate_concurrency_file_with_router_mode,
-    simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
-    simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
-    simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
-    simulate_concurrency_requests, simulate_concurrency_requests_with_router_mode,
-    simulate_concurrency_workload, simulate_concurrency_workload_with_router_mode,
-    simulate_trace_file, simulate_trace_file_with_router_mode, simulate_trace_live_file,
-    simulate_trace_live_file_with_router_mode, simulate_trace_live_requests,
-    simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
-    simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
+    simulate_concurrency_file, simulate_concurrency_file_disagg_with_router_mode,
+    simulate_concurrency_file_with_router_mode, simulate_concurrency_live_file,
+    simulate_concurrency_live_file_with_router_mode, simulate_concurrency_live_requests,
+    simulate_concurrency_live_requests_with_router_mode, simulate_concurrency_live_workload,
+    simulate_concurrency_live_workload_with_router_mode, simulate_concurrency_requests,
+    simulate_concurrency_requests_disagg_with_router_mode,
+    simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
+    simulate_concurrency_workload_disagg_with_router_mode,
+    simulate_concurrency_workload_with_router_mode, simulate_trace_file,
+    simulate_trace_file_disagg_with_router_mode, simulate_trace_file_with_router_mode,
+    simulate_trace_live_file, simulate_trace_live_file_with_router_mode,
+    simulate_trace_live_requests, simulate_trace_live_requests_with_router_mode,
+    simulate_trace_live_workload, simulate_trace_live_workload_with_router_mode,
+    simulate_trace_requests, simulate_trace_requests_disagg_with_router_mode,
     simulate_trace_requests_with_router_mode, simulate_trace_workload,
-    simulate_trace_workload_with_router_mode,
+    simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
 };
+pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
     mut requests: Vec<DirectRequest>,

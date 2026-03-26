@@ -117,6 +117,8 @@ The dedicated replay CLI exposes:
 - `--replay-mode offline|online`
 - `--router-mode round_robin|kv_router`
 - `--num-workers`
+- `--num-prefill-workers`
+- `--num-decode-workers`
 - `--replay-concurrency`
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
@@ -125,6 +127,8 @@ The dedicated replay CLI exposes:
 - `--num-prefix-groups`
 - `--inter-turn-delay-ms`
 - `--extra-engine-args` (JSON string)
+- `--prefill-engine-args` (JSON string)
+- `--decode-engine-args` (JSON string)
 - `--router-config` (JSON string)
 - `--report-json`
 
@@ -163,6 +167,19 @@ Both `--extra-engine-args` and `--router-config` accept partial JSON objects. En
 as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_ratio` belong in
 `--extra-engine-args`, not as top-level replay CLI flags. Unspecified fields fall back to the same
 defaults used by `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
+
+- `--prefill-engine-args` for the prefill worker config
+- `--decode-engine-args` for the decode worker config
+- `--num-prefill-workers` and `--num-decode-workers` for pool sizes
+
+For offline disagg replay, the staged JSON must set `worker_type` explicitly:
+
+- `--prefill-engine-args` must use `worker_type: "prefill"`
+- `--decode-engine-args` must use `worker_type: "decode"`
+
+The staged configs must also use the same `block_size`.
 
 ### Synthetic Replay
 
@@ -320,9 +337,12 @@ If `--report-json` is not provided, `python -m dynamo.replay` writes a timestamp
 
 Shared replay constraints:
 
-- aggregated mode
 - `extra_engine_args.engine_type` must be `vllm` or `sglang`
-- `extra_engine_args.dp_size` must be `1`
+- aggregated replay requires the existing aggregated args path
+- disagg replay requires both `prefill_engine_args` and `decode_engine_args`
+- disagg replay requires `router_mode=kv_router`
+- replay `dp_size` must be `1`
+- disagg replay requires matching `block_size` in `prefill_engine_args` and `decode_engine_args`
 
 Additional offline constraints:
 
@@ -330,6 +350,7 @@ Additional offline constraints:
 - single-worker offline replay is still a dedicated fast path for `vllm`, but it now supports both
   flat request replay and workload-driven multi-turn replay
 - `sglang` still goes through the shared multi-worker replay runtime even when `num_workers=1`
+- offline disagg replay is a separate two-stage runtime with prefill and decode worker pools
 
 Additional online constraints:
 
@@ -343,12 +364,13 @@ If you violate those constraints, replay fails immediately with a validation err
   either a trace file, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
 - `--replay-concurrency` works with both trace replay and synthetic replay
 - mocker compute-speed knobs such as `speedup_ratio` still affect simulated timing when passed via
-  `--extra-engine-args`
+  the engine-args JSON for the chosen replay mode
 - `--arrival-speedup-ratio` affects trace timestamps, not worker compute speed
 - `--arrival-interval-ms` only applies to synthetic replay
 - `--turns-per-session`, `--shared-prefix-ratio`, `--num-prefix-groups`, and
   `--inter-turn-delay-ms` only apply to synthetic replay
-- `--extra-engine-args` and `--router-config` are JSON strings on the standalone replay CLI
+- `--extra-engine-args`, `--prefill-engine-args`, `--decode-engine-args`, and `--router-config`
+  are JSON strings on the standalone replay CLI
 - offline replay does not need planner runtime setup, router registration, or external event transport
 - the replay block size should match the trace block size, because token synthesis expands `hash_ids`
   using the configured block size

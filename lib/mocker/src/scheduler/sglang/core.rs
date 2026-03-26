@@ -101,6 +101,10 @@ impl SglangCore {
         self.execute_pass_internal(Some(collector), now_ms)
     }
 
+    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        self.execute_pass_internal(None, now_ms)
+    }
+
     pub(super) fn execute_pass_internal(
         &mut self,
         mut collector: Option<&mut TraceCollector>,

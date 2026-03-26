@@ -59,12 +59,7 @@ impl TurnTrace {
         Ok(())
     }
 
-    pub fn to_direct_request(
-        &self,
-        block_size: usize,
-        request_uuid: Uuid,
-        arrival_timestamp_ms: Option<f64>,
-    ) -> Result<DirectRequest> {
+    pub(crate) fn synthesize_tokens(&self, block_size: usize) -> Result<Vec<u32>> {
         self.validate_block_size_and_capacity(block_size)?;
 
         let mut tokens = Vec::with_capacity(self.input_length);
@@ -85,6 +80,16 @@ impl TurnTrace {
             );
         }
 
+        Ok(tokens)
+    }
+
+    pub fn to_direct_request(
+        &self,
+        block_size: usize,
+        request_uuid: Uuid,
+        arrival_timestamp_ms: Option<f64>,
+    ) -> Result<DirectRequest> {
+        let tokens = self.synthesize_tokens(block_size)?;
         Ok(DirectRequest {
             tokens,
             max_output_tokens: self.max_output_tokens,

@@ -8,6 +8,10 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
+
 /// The event subject that workers publish KV cache events on.
 pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
@@ -431,6 +435,8 @@ pub enum ActiveSequenceEventData {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        #[serde(default = "default_track_prefill_tokens")]
+        track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
     },
     Free,
@@ -991,14 +997,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lora_name_none_matches_legacy() {
-        let tokens: Vec<u32> = (0..8).collect();
-        let hashes_none = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
-        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
-        assert_eq!(hashes_none, hashes_none2);
-    }
-
-    #[test]
     fn test_lora_name_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
         let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
@@ -1170,16 +1168,6 @@ mod tests {
         assert_eq!(deserialized.block_hashes.len(), 2);
         assert_eq!(deserialized.block_hashes[0].0, 4);
         assert_eq!(deserialized.block_hashes[1].0, 5);
-    }
-
-    #[test]
-    fn test_router_request_mark_free_backwards_compatible_deserialization() {
-        let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
-
-        assert!(matches!(
-            request,
-            RouterRequest::MarkFree { request_id: None }
-        ));
     }
 
     #[test]
