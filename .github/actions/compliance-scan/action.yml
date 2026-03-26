@@ -62,6 +62,7 @@ runs:
           if [ -n "${{ inputs.cuda_version }}" ]; then
             RESOLVE_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
           fi
+          RESOLVE_ARGS+=" --arch ${{ inputs.arch }}"
           BASE_IMAGE=$(python3 container/compliance/resolve_base_image.py ${RESOLVE_ARGS})
         fi
         echo "base_image=${BASE_IMAGE}" >> $GITHUB_OUTPUT

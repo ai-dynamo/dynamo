@@ -40,19 +40,12 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /opt/dynamo/target/ | Cargo build output (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
-| **STAGE: framework** | **FROM ${BASE_IMAGE}** |
-|  /opt/dynamo/venv/ | Created with uv venv (→ runtime)
-|  /${FRAMEWORK_INSTALL} | Built framework (→ runtime)
-| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE}** |
-|  /usr/local/cuda/{bin,include,nvvm}/ | COPY from dynamo_base |
+| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (arch-specific tag for vLLM)** |
 |  /usr/bin/nats-server | COPY from dynamo_base |
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
-|  /usr/local/ucx/ | COPY from wheel_builder |
-|  /opt/nvidia/nvda_nixl/ | COPY from wheel_builder |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
-|  /opt/dynamo/venv/ | COPY from framework |
-|  /opt/vllm/ | COPY from framework |
-|  /workspace/{tests,examples,deploy}/ |COPY from build context |
+|  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (`x86_64` or `aarch64` tag selected by CUDA + platform) |
+|  /workspace/{tests,examples/common,examples/backends/vllm,deploy/sanity_check.py} | COPY from build context |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
 |  /usr/local/rustup/ | COPY from dynamo_tools |
@@ -99,7 +92,7 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 | **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) |
 | **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
 | **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
-| **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
+| **Python Env** | system site-packages for vllm/sglang, venv (`/opt/dynamo/venv`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
 
 **Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` and `local-dev` images create `/opt/dynamo/venv` with `--system-site-packages` for build tooling like `maturin` and `uv`.
 

@@ -7,7 +7,7 @@
 Prints the resolved image URI to stdout so it can be captured in shell scripts.
 
 Usage:
-    python resolve_base_image.py --framework vllm --cuda-version 12.9
+    python resolve_base_image.py --framework vllm --cuda-version 12.9 --arch amd64
     python resolve_base_image.py --framework dynamo --target frontend
     python resolve_base_image.py --framework sglang --cuda-version 13.0
 """
@@ -38,6 +38,11 @@ def main() -> None:
     parser.add_argument(
         "--cuda-version",
         help="CUDA version (e.g. 12.9, 13.0, 13.1) — required for runtime targets",
+    )
+    parser.add_argument(
+        "--arch",
+        default="amd64",
+        help="Target architecture (amd64, arm64, linux/amd64, linux/arm64)",
     )
     parser.add_argument(
         "--context-yaml",
@@ -98,17 +103,29 @@ def main() -> None:
         print("ERROR: --cuda-version is required for runtime targets", file=sys.stderr)
         sys.exit(1)
 
+    arch = args.arch.split("/")[-1]
+    if arch not in {"amd64", "arm64"}:
+        print(
+            f"ERROR: Unsupported arch '{args.arch}'. Use amd64, arm64, linux/amd64, or linux/arm64",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     fw_config = ctx.get(args.framework, {})
     cuda_key = f"cuda{args.cuda_version}"
     cuda_config = fw_config.get(cuda_key, {})
 
     runtime_image = cuda_config.get("runtime_image")
     runtime_image_tag = cuda_config.get("runtime_image_tag")
+    runtime_image_tags = cuda_config.get("runtime_image_tags")
+
+    if runtime_image_tags:
+        runtime_image_tag = runtime_image_tags.get(arch)
 
     if not runtime_image or not runtime_image_tag:
         print(
             f"ERROR: Could not resolve base image for framework={args.framework} "
-            f"cuda={args.cuda_version}. Keys runtime_image/runtime_image_tag not found "
+            f"cuda={args.cuda_version} arch={arch}. Keys runtime_image/runtime_image_tag(s) not found "
             f"under {args.framework}.{cuda_key} in context.yaml",
             file=sys.stderr,
         )

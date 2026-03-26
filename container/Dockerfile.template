@@ -39,10 +39,7 @@
 
 # --- VLLM Stages
 {% if framework == "vllm" %}
-    {% include "templates/vllm_framework.Dockerfile" %}
-    {% if target != "framework" %}
-        {% include "templates/vllm_runtime.Dockerfile" %}
-    {% endif %}
+    {% include "templates/vllm_runtime.Dockerfile" %}
 {% else %}
 # --- No VLLM stages included
 {% endif %}

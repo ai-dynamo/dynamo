@@ -41,16 +41,18 @@ dynamo:
 vllm:
   cuda12.9:
     base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: nvcr.io/nvidia/cuda
+    runtime_image: vllm/vllm-openai
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: 12.9.1-runtime-ubuntu24.04
-    vllm_ref: v0.18.0
+    runtime_image_tags:
+      amd64: v0.18.0-x86_64
+      arm64: v0.18.0-aarch64
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: nvcr.io/nvidia/cuda
+    runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: 13.0.2-runtime-ubuntu24.04
-    vllm_ref: v0.18.0
+    runtime_image_tags:
+      amd64: v0.18.0-x86_64-cu130
+      arm64: v0.18.0-aarch64-cu130
   xpu:
     base_image: intel/deep-learning-essentials
     runtime_image: intel/deep-learning-essentials
@@ -68,11 +70,11 @@ vllm:
   vllm_omni_ref: "v0.18.0"
   nixl_ref: 0.10.1
   max_jobs: "10"
+  nixl_ref: v1.0.0
+  nixl_disable_plugins: LIBFABRIC
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  enable_modelexpress_p2p: "false"
-  modelexpress_ref: "3d73992ce6c10e52ddc54f7f12af35d27e173f15"
 
 sglang:
   cuda12.9:

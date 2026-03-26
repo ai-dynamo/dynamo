@@ -31,6 +31,7 @@ FROM ${WHEEL_BUILDER_IMAGE} AS wheel_builder_base
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS
 ARG DEVICE
+ARG HWLOC_VERSION=2.10.0
 
 WORKDIR /workspace
 {% if device == "xpu" or device == "cpu" %}
@@ -159,9 +160,23 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         libuuid-devel \
         zlib-devel
 
+# Build a newer hwloc than the manylinux/RHEL8 package set provides. NIXL 1.0.0
+# uses libfabric topology APIs that require hwloc 2.10+.
+RUN cd /tmp && \
+    HWLOC_SERIES="$(echo ${HWLOC_VERSION} | cut -d. -f1,2)" && \
+    wget -q "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
+    tar -xzf "hwloc-${HWLOC_VERSION}.tar.gz" && \
+    cd "hwloc-${HWLOC_VERSION}" && \
+    ./configure --prefix=/usr/local --disable-nvml && \
+    make -j"$(nproc)" && \
+    make install && \
+    ldconfig && \
+    rm -rf "/tmp/hwloc-${HWLOC_VERSION}" "/tmp/hwloc-${HWLOC_VERSION}.tar.gz"
+
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
-    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH}" \
     CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
     CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
 {% endif %}
@@ -486,6 +501,7 @@ FROM wheel_builder_base AS wheel_builder
 ARG TARGETARCH
 ARG DEVICE
 ARG NIXL_REF
+ARG NIXL_DISABLE_PLUGINS
 ARG USE_SCCACHE
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -513,13 +529,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             -Dcudapath_lib="/usr/local/cuda/lib64" \
             -Dcudapath_inc="/usr/local/cuda/include" \
             -Ducx_path="/usr/local/ucx" \
-            -Dlibfabric_path="/usr/local/libfabric"; \
+            -Dlibfabric_path="/usr/local/libfabric" \
+            $([ -n "$NIXL_DISABLE_PLUGINS" ] && printf '%s' "-Ddisable_plugins=${NIXL_DISABLE_PLUGINS}"); \
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
-            -Ducx_path="/usr/local/ucx"; \
+            -Ducx_path="/usr/local/ucx" \
+            $([ -n "$NIXL_DISABLE_PLUGINS" ] && printf '%s' "-Ddisable_plugins=${NIXL_DISABLE_PLUGINS}"); \
     elif [ "$DEVICE" = "cpu" ]; then \
         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
-            -Ducx_path="/usr/local/ucx"; \
+            -Ducx_path="/usr/local/ucx" \
+            $([ -n "$NIXL_DISABLE_PLUGINS" ] && printf '%s' "-Ddisable_plugins=${NIXL_DISABLE_PLUGINS}"); \
     fi && \
     cd build && \
     ninja && \
