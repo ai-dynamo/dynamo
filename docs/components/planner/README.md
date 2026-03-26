@@ -26,13 +26,13 @@ The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It 
 The Planner supports two scaling modes that can run independently or together:
 
 - **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
-- **Load-based scaling (Experimental)**: Uses real-time per-worker load metrics (active prefill tokens, active KV blocks) from the router and fits an online linear regression to make scaling decisions. No profiling data required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No profiling data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
 
 When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
 ## Feature Matrix
 
-| Feature | Throughput-Based | Load-Based (Experimental) |
+| Feature | Throughput-Based | Load-Based |
 |---------|:----------------:|:-------------------------:|
 | **Deployment** | | |
 | Disaggregated | Supported | Supported |
@@ -99,13 +99,11 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 
 ## Current Limitations
 
-### Load-based scaling (Experimental)
+### Load-based scaling
 
-Load-based scaling is experimental and has the following known limitations. These are actively being addressed as part of the metrics refactor work. Throughput-based scaling is not affected by any of these.
+Load-based scaling has the following known limitations. Throughput-based scaling is not affected by any of these.
 
-**Requires the KV Router.** Load-based scaling relies on per-worker engine metrics (active prefill tokens, active KV blocks) published by the [KV Router](../router/README.md). Other routing strategies (round-robin, random) do not emit these metrics, so load-based scaling cannot operate without the KV Router.
-
-**Scale-down with idle workers.** If a worker receives no requests (for example, because the router is not distributing traffic evenly), the router does not publish metrics for that worker. Without metrics, the Planner cannot evaluate whether the worker is underutilized, which can prevent scale-down decisions. **Workaround:** Ensure traffic distribution reaches all workers. If you observe workers stuck at zero load, check your router configuration.
+**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). FPM is currently only available for vllm and is automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set. The KV Router is **not** required for load-based scaling.
 
 ### General
 
@@ -144,7 +142,7 @@ Load-based scaling is experimental and has the following known limitations. Thes
 | `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
 | `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
 | `--no-correction` | `true` | Disable correction factors (auto-disabled when load-based scaling is on) |
-| **Load-based scaling (Experimental)** | | |
+| **Load-based scaling** | | |
 | `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
 | `--disable-throughput-scaling` | `false` | Disable throughput-based scaling (required for `agg` mode) |
 | `--loadbased-router-metrics-url` | auto-discovered | URL to router's `/metrics` endpoint |
@@ -186,7 +184,7 @@ The dashboard shows:
 - TTFT and ITL distributions
 - Input/output sequence lengths
 
-**Load-based scaling** pulls per-engine status directly from the frontend's `/metrics` endpoint:
-- Active prefill tokens per worker
-- Active decode blocks per worker
-- Last observed TTFT, ITL, and ISL per worker
+**Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
+- Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
+- Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
+- No router `/metrics` scraping required

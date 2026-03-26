@@ -204,31 +204,60 @@ class KubernetesAPI:
     async def wait_for_graph_deployment_ready(
         self,
         graph_deployment_name: str,
+        include_planner: bool = True,
         max_attempts: int = 180,  # default: 30 minutes total
         delay_seconds: int = 10,  # default: check every 10 seconds
     ) -> None:
-        """Wait for a graph deployment to be ready"""
+        """Wait for a graph deployment to be ready.
 
+        Args:
+            graph_deployment_name: Name of the DGD to wait for.
+            include_planner: If False, skip services with componentType "planner"
+                and check per-service readiness instead of the global DGD Ready
+                condition. This avoids a circular wait when the planner itself
+                is one of the services in the DGD.
+            max_attempts: Maximum polling iterations.
+            delay_seconds: Seconds between polls.
+        """
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
             graph_deployment = self.get_graph_deployment(graph_deployment_name)
 
-            conditions = graph_deployment.get("status", {}).get("conditions", [])
-            ready_condition = next(
-                (c for c in conditions if c.get("type") == "Ready"), None
-            )
+            if include_planner:
+                conditions = graph_deployment.get("status", {}).get("conditions", [])
+                ready_condition = next(
+                    (c for c in conditions if c.get("type") == "Ready"), None
+                )
+                if ready_condition and ready_condition.get("status") == "True":
+                    return
 
-            if ready_condition and ready_condition.get("status") == "True":
-                return  # Deployment is ready
+                logger.info(
+                    f"[Attempt {attempt + 1}/{max_attempts}] "
+                    f"(status: {ready_condition.get('status') if ready_condition else 'N/A'}, "
+                    f"message: {ready_condition.get('message') if ready_condition else 'no condition found'})"
+                )
+            else:
+                services = graph_deployment.get("spec", {}).get("services", {})
+                not_ready: list[str] = []
+                for svc_name, svc_spec in services.items():
+                    if svc_spec.get("componentType", "") == "planner":
+                        continue
+                    _, is_stable = self.get_service_replica_status(
+                        graph_deployment, svc_name
+                    )
+                    if not is_stable:
+                        not_ready.append(svc_name)
 
-            logger.info(
-                f"[Attempt {attempt + 1}/{max_attempts}] "
-                f"(status: {ready_condition.get('status') if ready_condition else 'N/A'}, "
-                f"message: {ready_condition.get('message') if ready_condition else 'no condition found'})"
-            )
+                if not not_ready:
+                    return
 
-        # Raise after all attempts exhausted (without additional delay)
+                logger.info(
+                    f"[Attempt {attempt + 1}/{max_attempts}] "
+                    f"Waiting for services (excluding planner): "
+                    f"not ready: {not_ready}"
+                )
+
         raise TimeoutError(
             f"Graph deployment '{graph_deployment_name}' "
             f"is not ready after {max_attempts * delay_seconds} seconds"

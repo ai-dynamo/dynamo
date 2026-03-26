@@ -76,7 +76,7 @@ def _test_router_basic(
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
-        router_mode: Router mode ("kv", "round-robin", "random", "direct"). Defaults to "kv".
+        router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
         enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
 
     Raises:
