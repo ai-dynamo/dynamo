@@ -13,6 +13,48 @@ use crate::scheduler::AdmissionEvent;
 
 use super::state::{ArrivalEvent, RequestRegistry, SharedLiveRuntimeStats, now_ms};
 
+async fn process_output_signal(
+    output: OutputSignal,
+    batch_time_ms: f64,
+    collector: &mut TraceCollector,
+    requests: &RequestRegistry,
+    router: &ReplayRouter,
+    stats: &SharedLiveRuntimeStats,
+) {
+    collector.on_token(output.uuid, batch_time_ms);
+
+    let Some(state) = requests.get(&output.uuid) else {
+        return;
+    };
+
+    if state.mark_first_token_once() {
+        match router.on_first_token(output.uuid).await {
+            Ok(true) => stats.record_prefill_marked(),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                uuid = %output.uuid,
+                error = %error,
+                "online replay failed to mark prefill completed"
+            ),
+        }
+    }
+
+    if !output.completed || !state.mark_completed_once() {
+        return;
+    }
+
+    match router.on_complete(output.uuid).await {
+        Ok(true) => stats.record_freed(),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            uuid = %output.uuid,
+            error = %error,
+            "online replay failed to free completed request"
+        ),
+    }
+    state.notify_completion();
+}
+
 pub(super) async fn run_demux(
     start: Instant,
     mut arrival_rx: mpsc::UnboundedReceiver<ArrivalEvent>,
@@ -58,33 +100,15 @@ pub(super) async fn run_demux(
                     Some(output_batch) => {
                         let batch_time_ms = now_ms(start);
                         for output in output_batch {
-                            collector.on_token(output.uuid, batch_time_ms);
-                            if let Some(state) = requests.get(&output.uuid) {
-                                if state.mark_first_token_once() {
-                                    match router.on_first_token(output.uuid).await {
-                                        Ok(true) => stats.record_prefill_marked(),
-                                        Ok(false) => {}
-                                        Err(error) => tracing::warn!(
-                                            uuid = %output.uuid,
-                                            error = %error,
-                                            "online replay failed to mark prefill completed"
-                                        ),
-                                    }
-                                }
-
-                                if output.completed && state.mark_completed_once() {
-                                    match router.on_complete(output.uuid).await {
-                                        Ok(true) => stats.record_freed(),
-                                        Ok(false) => {}
-                                        Err(error) => tracing::warn!(
-                                            uuid = %output.uuid,
-                                            error = %error,
-                                            "online replay failed to free completed request"
-                                        ),
-                                    }
-                                    state.notify_completion();
-                                }
-                            }
+                            process_output_signal(
+                                output,
+                                batch_time_ms,
+                                &mut collector,
+                                &requests,
+                                &router,
+                                &stats,
+                            )
+                            .await;
                         }
                     }
                     None => outputs_open = false,
