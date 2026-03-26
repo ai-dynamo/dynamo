@@ -239,7 +239,13 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        // Format address properly for both IPv4 and IPv6
+        // IPv6 addresses must be wrapped in brackets when used with a port
+        let address = if self.local_ip.contains(':') {
+            format!("[{}]:{}", self.local_ip, self.local_port)
+        } else {
+            format!("{}:{}", self.local_ip, self.local_port)
+        };
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
