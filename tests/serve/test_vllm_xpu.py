@@ -79,10 +79,7 @@ vllm_configs = {
         name="aggregated_logprobs_xpu",
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
-        marks=[
-            pytest.mark.xpu_1, 
-            pytest.mark.post_merge
-        ],
+        marks=[pytest.mark.xpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_with_logprobs(
@@ -232,9 +229,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
-            pytest.mark.xpu_1, 
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.skip("skip for XPU")
+            pytest.mark.skip("skip for XPU"),
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
@@ -267,9 +264,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
-            pytest.mark.xpu_1, 
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="skip for XPU")
+            pytest.mark.skip(reason="skip for XPU"),
         ],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
@@ -336,9 +333,9 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
-            pytest.mark.multimodal, 
+            pytest.mark.multimodal,
             pytest.mark.nightly,
-            pytest.mark.skip(reason="skip for XPU")
+            pytest.mark.skip(reason="skip for XPU"),
         ],
         model="Qwen/Qwen3-VL-8B-Instruct",
         script_args=[
@@ -430,10 +427,7 @@ vllm_configs = {
         name="guided_decoding_xpu",
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
-        marks=[
-            pytest.mark.xpu_1, 
-            pytest.mark.pre_merge
-        ],
+        marks=[pytest.mark.xpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload(
