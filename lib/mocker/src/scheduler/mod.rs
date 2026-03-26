@@ -89,6 +89,13 @@ impl EngineCore {
             Self::Sglang(core) => core.execute_pass(collector, now_ms),
         }
     }
+
+    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        match self {
+            Self::Vllm(core) => core.execute_hidden_pass(now_ms),
+            Self::Sglang(core) => core.execute_hidden_pass(now_ms),
+        }
+    }
 }
 
 #[derive(Clone)]

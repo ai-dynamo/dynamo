@@ -171,6 +171,7 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_active_blocks={config.router_track_active_blocks}, "
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
+        f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
         f"router_ttl_secs={config.router_ttl_secs}, "
         f"router_max_tree_size={config.router_max_tree_size}, "
         f"router_prune_target_ratio={config.router_prune_target_ratio}"

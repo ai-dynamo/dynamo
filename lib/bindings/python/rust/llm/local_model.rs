@@ -61,6 +61,14 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_exclude_tools_when_tool_choice_none(
+        &mut self,
+        exclude_tools_when_tool_choice_none: bool,
+    ) {
+        self.inner.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none;
+    }
+
+    #[setter]
     fn set_enable_eagle(&mut self, enable_eagle: bool) {
         self.inner.enable_eagle = enable_eagle;
     }
@@ -122,6 +130,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn exclude_tools_when_tool_choice_none(&self) -> bool {
+        self.inner.exclude_tools_when_tool_choice_none
     }
 
     #[getter]

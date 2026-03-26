@@ -14,6 +14,7 @@ use crate::common::protocols::{
     WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
+use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
@@ -276,6 +277,10 @@ impl VllmCore {
         now_ms: f64,
     ) -> EnginePassResult {
         self.execute_pass_internal(Some(collector), now_ms, None)
+    }
+
+    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        self.execute_pass_internal(None, now_ms, None)
     }
 
     pub(super) fn execute_pass_internal(
@@ -641,8 +646,25 @@ impl VllmCore {
             }
             if let Some(request) = self.state.requests.get(&uuid) {
                 debug_assert_vllm_request_progress(uuid, request);
+                let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                    self.args.worker_type,
+                    completed,
+                    request.sequence.num_input_tokens(),
+                    self.args.kv_transfer_bandwidth,
+                    self.args.kv_bytes_per_token,
+                );
+                output_signals.push(OutputSignal {
+                    uuid,
+                    completed,
+                    handoff_delay_ms,
+                });
+            } else {
+                output_signals.push(OutputSignal {
+                    uuid,
+                    completed,
+                    handoff_delay_ms: None,
+                });
             }
-            output_signals.push(OutputSignal { uuid, completed });
             if completed {
                 self.state.complete(&uuid);
             }

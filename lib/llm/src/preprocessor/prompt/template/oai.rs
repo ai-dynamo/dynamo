@@ -346,6 +346,16 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let mixins = Value::from_dyn_object(self.mixins.clone());
 
         let tools = req.tools();
+        // Strip tools when tool_choice is "none" and the flag is enabled, so the model
+        // doesn't see tool definitions and generate raw XML tool calls in its response.
+        let tools = if self.exclude_tools_when_tool_choice_none {
+            match req.tool_choice() {
+                Some(ref tc) if tc.as_str() == Some("none") => None,
+                _ => tools,
+            }
+        } else {
+            tools
+        };
         // has_tools should be true if tools is a non-empty array
         let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
@@ -1224,5 +1234,82 @@ NORMAL MODE
     fn add_when_empty() {
         let s = dummy_state(vec![]);
         assert!(s.should_add_generation_prompt());
+    }
+
+    /// Helper to build a formatter with a simple tool-aware template.
+    fn tool_aware_formatter(
+        exclude_tools_when_tool_choice_none: bool,
+    ) -> HfTokenizerConfigJsonFormatter {
+        let template = r#"
+{%- if tools is iterable and tools | length > 0 %}
+TOOL_MODE tools={{ tools | length }}
+{%- else %}
+NORMAL_MODE
+{%- endif %}
+{{ messages[0].content }}"#;
+
+        let chat_template: super::tokcfg::ChatTemplate =
+            serde_json::from_value(serde_json::json!({ "chat_template": template })).unwrap();
+
+        HfTokenizerConfigJsonFormatter::with_options(
+            chat_template,
+            ContextMixins::new(&[]),
+            exclude_tools_when_tool_choice_none,
+        )
+        .unwrap()
+    }
+
+    /// Helper to build a request with tools and optional tool_choice.
+    fn request_with_tool_choice(tool_choice: &str) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+                }
+            }],
+            "tool_choice": tool_choice
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_exclude_tools_strips_when_tool_choice_none() {
+        let formatter = tool_aware_formatter(true);
+        let request = request_with_tool_choice("none");
+        let result = formatter.render(&request).unwrap();
+        assert!(
+            result.contains("NORMAL_MODE"),
+            "With exclude_tools=true and tool_choice=none, tools should be stripped. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_exclude_tools_keeps_when_tool_choice_auto() {
+        let formatter = tool_aware_formatter(true);
+        let request = request_with_tool_choice("auto");
+        let result = formatter.render(&request).unwrap();
+        assert!(
+            result.contains("TOOL_MODE"),
+            "With tool_choice=auto, tools should be included. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_no_exclude_tools_keeps_when_tool_choice_none() {
+        let formatter = tool_aware_formatter(false);
+        let request = request_with_tool_choice("none");
+        let result = formatter.render(&request).unwrap();
+        assert!(
+            result.contains("TOOL_MODE"),
+            "With exclude_tools=false and tool_choice=none, tools should NOT be stripped. Got: {}",
+            result
+        );
     }
 }

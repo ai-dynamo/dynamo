@@ -108,7 +108,6 @@ class PlannerConfig(BaseModel):
     enable_load_scaling: bool = SLAPlannerDefaults.enable_load_scaling
 
     # Load-based scaling settings
-    load_router_metrics_url: Optional[str] = SLAPlannerDefaults.load_router_metrics_url
     load_adjustment_interval: int = SLAPlannerDefaults.load_adjustment_interval
     load_learning_window: int = SLAPlannerDefaults.load_learning_window
     load_scaling_down_sensitivity: int = (
@@ -146,13 +145,6 @@ class PlannerConfig(BaseModel):
                 )
 
         if self.enable_load_scaling:
-            # Router metrics URL is required outside kubernetes mode
-            if not self.load_router_metrics_url and self.environment != "kubernetes":
-                raise ValueError(
-                    "load_router_metrics_url is required when "
-                    "load-based scaling is enabled outside kubernetes mode"
-                )
-
             # Load-based interval must be shorter than throughput interval
             if self.enable_throughput_scaling:
                 if self.load_adjustment_interval >= self.throughput_adjustment_interval:
