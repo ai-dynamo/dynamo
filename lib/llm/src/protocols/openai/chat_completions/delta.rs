@@ -271,6 +271,9 @@ impl DeltaGenerator {
             finish_reason,
             stop_reason,
             logprobs,
+            // Note: reasoning_content is not available in the streaming delta path.
+            // has_reasoning is only set in the aggregated response path (aggregator.rs).
+            has_reasoning: None,
         };
 
         let choices = vec![choice];

@@ -311,6 +311,11 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             None
         };
 
+        let has_reasoning = delta
+            .reasoning_content
+            .as_ref()
+            .is_some_and(|r| !r.is_empty());
+
         dynamo_async_openai::types::ChatChoice {
             message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
@@ -325,6 +330,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             finish_reason,
             stop_reason: delta.stop_reason,
             logprobs: delta.logprobs,
+            has_reasoning: if has_reasoning { Some(true) } else { None },
         }
     }
 }

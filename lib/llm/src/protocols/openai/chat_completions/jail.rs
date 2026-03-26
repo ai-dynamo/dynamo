@@ -135,6 +135,7 @@ fn create_choice_stream(
         finish_reason,
         stop_reason,
         logprobs,
+        has_reasoning: None,
     }
 }
 
@@ -598,6 +599,7 @@ impl JailedStream {
                                     finish_reason: choice.finish_reason,
                                     stop_reason: choice.stop_reason.clone(),
                                     logprobs: choice.logprobs.clone(),
+                                    has_reasoning: choice.has_reasoning,
                                 };
                                 all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
                             }
