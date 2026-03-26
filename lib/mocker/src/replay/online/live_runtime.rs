@@ -29,7 +29,7 @@ struct LiveRuntime {
     pending: VecDeque<DirectRequest>,
     senders: Arc<[mpsc::UnboundedSender<DirectRequest>]>,
     schedulers: Vec<EngineScheduler>,
-    output_rx: mpsc::UnboundedReceiver<OutputSignal>,
+    output_rx: mpsc::UnboundedReceiver<Vec<OutputSignal>>,
     admission_rx: mpsc::UnboundedReceiver<AdmissionEvent>,
     cancel_token: CancellationToken,
     start: Instant,
@@ -47,7 +47,7 @@ impl LiveRuntime {
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         let cancel_token = CancellationToken::new();
-        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
         let router = Arc::new(ReplayRouter::new(
             router_mode,
