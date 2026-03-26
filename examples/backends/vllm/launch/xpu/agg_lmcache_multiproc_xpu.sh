@@ -18,8 +18,10 @@ cleanup() {
 trap cleanup EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+
+export VLLM_TARGET_DEVICE=xpu
 
 MODEL="Qwen/Qwen3-0.6B"
 
@@ -39,7 +41,9 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   python -m dynamo.vllm --model "$MODEL" --enforce-eager \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-  ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' &
+  --block-size "${BLOCK_SIZE:-64}" \
+  ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
+  --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_device":"xpu"}' &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

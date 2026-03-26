@@ -40,17 +40,18 @@ Each launch script runs the frontend and worker(s) in a single terminal. You can
 
 The simplest deployment pattern: a single worker handles both prefill and decode. Requires 1 GPU.
 
+Run on CUDA devices:
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
 ```
 
-For XPU deployments, use a larger block size and set it to at least `64` (`>= 64`):
+Run on XPUs:
 
 ```bash
-# XeTLA ChunkPrefill FP8KV: only support block_size >= 64
 cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg.sh --block-size 64
+bash launch/xpu/agg_xpu.sh
 ```
 
 ### Aggregated Serving with KV Routing
@@ -66,7 +67,7 @@ bash launch/agg_router.sh
 Run on XPUs:
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-DYN_DEVICE=xpu bash launch/agg_router.sh
+bash launch/xpu/agg_router_xpu.sh
 ```
 
 

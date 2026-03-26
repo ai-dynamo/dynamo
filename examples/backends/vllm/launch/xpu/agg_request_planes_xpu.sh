@@ -5,8 +5,10 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+
+export VLLM_TARGET_DEVICE=xpu
 
 # Parse command-line arguments for request plane mode
 REQUEST_PLANE="tcp"  # Default to TCP
@@ -62,6 +64,7 @@ DYN_HEALTH_CHECK_ENABLED=true \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    --block-size "${BLOCK_SIZE:-64}" \
     ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

@@ -15,11 +15,13 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+
+export VLLM_TARGET_DEVICE=xpu
 
 # Default values
-MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+MODEL_NAME="Qwen/Qwen3-VL-8B-Instruct"
 
 # Parse command line arguments
 # Extra arguments are passed through to the vLLM worker
@@ -37,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help             Show this help message"
             echo ""
             echo "Any additional arguments are passed through to the vLLM worker."
-            echo "Example: $0 --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 --dyn-tool-call-parser hermes"
+            echo "Example: $0 --model Qwen/Qwen3-VL-8B-Instruct --dyn-tool-call-parser hermes"
             exit 0
             ;;
         *)
@@ -74,11 +76,11 @@ GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)
 # Extra args from command line come last to allow overrides
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    --block-size "${BLOCK_SIZE:-64}" \
     ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}"
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

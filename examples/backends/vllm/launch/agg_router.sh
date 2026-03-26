@@ -15,17 +15,6 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
-# Device selection: supports CUDA (CUDA_VISIBLE_DEVICES) and XPU (ZE_AFFINITY_MASK)
-# Set DYN_DEVICE=xpu to use Intel XPU device selection
-if [[ "${DYN_DEVICE:-cuda}" == "xpu" ]]; then
-    DYN_VISIBLE_DEVICES_W0="ZE_AFFINITY_MASK=0"
-    DYN_VISIBLE_DEVICES_W1="ZE_AFFINITY_MASK=1"
-    export VLLM_TARGET_DEVICE=xpu
-else
-    DYN_VISIBLE_DEVICES_W0="CUDA_VISIBLE_DEVICES=0"
-    DYN_VISIBLE_DEVICES_W1="CUDA_VISIBLE_DEVICES=1"
-fi
-
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
@@ -43,7 +32,7 @@ python -m dynamo.frontend \
 # TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 #
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-env "$DYN_VISIBLE_DEVICES_W0" python3 -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
@@ -51,7 +40,7 @@ env "$DYN_VISIBLE_DEVICES_W0" python3 -m dynamo.vllm \
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-env "$DYN_VISIBLE_DEVICES_W1" python3 -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \

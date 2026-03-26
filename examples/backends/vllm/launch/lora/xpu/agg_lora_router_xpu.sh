@@ -5,7 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
 
 export AWS_ENDPOINT=http://localhost:9000
 export AWS_ACCESS_KEY_ID=minioadmin
@@ -21,6 +21,8 @@ mkdir -p $DYN_LORA_PATH
 
 # Set deterministic hash for KV event IDs
 export PYTHONHASHSEED=0
+
+export VLLM_TARGET_DEVICE=xpu
 
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
@@ -66,7 +68,7 @@ python -m dynamo.frontend \
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 # TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+ZE_AFFINITY_MASK=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
@@ -76,7 +78,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+ZE_AFFINITY_MASK=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \

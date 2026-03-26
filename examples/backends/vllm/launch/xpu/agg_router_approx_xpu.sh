@@ -5,11 +5,14 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+
+export VLLM_TARGET_DEVICE=xpu
 
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + Approximate KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
@@ -26,14 +29,14 @@ python -m dynamo.frontend \
 # TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+ZE_AFFINITY_MASK=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+ZE_AFFINITY_MASK=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}' &

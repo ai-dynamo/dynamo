@@ -5,8 +5,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
-source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
 
 export AWS_ENDPOINT=http://localhost:9000
 export AWS_ACCESS_KEY_ID=minioadmin
@@ -18,9 +18,12 @@ export AWS_ALLOW_HTTP=true
 export DYN_LORA_ENABLED=true
 export DYN_LORA_PATH=/tmp/dynamo_loras_minio
 
+export VLLM_TARGET_DEVICE=xpu
+
 mkdir -p $DYN_LORA_PATH
 
 MODEL="Qwen/Qwen3-0.6B"
+
 SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Aggregated Serving + LoRA (1 GPU)" "$MODEL" "$HTTP_PORT"
@@ -69,6 +72,7 @@ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    --block-size "${BLOCK_SIZE:-64}" \
     ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
     --enable-lora \
     --max-lora-rank 64 &
