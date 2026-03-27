@@ -4,27 +4,28 @@
 use std::collections::HashMap;
 use std::env::var;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
 
-use super::metrics;
-use super::metrics::register_worker_timing_metrics;
 use super::Metrics;
 use super::RouteDoc;
+use super::metrics;
+use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
-    register_router_queue_metrics, register_worker_load_metrics, RoutingOverheadMetrics,
+    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
@@ -35,7 +36,6 @@ use dynamo_runtime::metrics::{
     tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
-use dynamo_runtime::DistributedRuntime;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

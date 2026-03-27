@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{service_v2, RouteDoc};
-use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
+use super::{RouteDoc, service_v2};
+use axum::{Json, Router, http::Method, response::IntoResponse, routing::post};
 use serde_json::json;
 use std::sync::Arc;
 
