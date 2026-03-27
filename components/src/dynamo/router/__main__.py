@@ -19,12 +19,14 @@ from typing import Optional
 import uvloop
 
 from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.llm.semantic_kv import SemanticKvCacheProvider
 from dynamo.router.args import (
     DynamoRouterConfig,
     build_aic_perf_config,
     build_kv_router_config,
 )
 from dynamo.router.args import parse_args as parse_router_args
+from dynamo.router.semantic import create_semantic_provider
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -42,12 +44,14 @@ class StandaloneRouterHandler:
         block_size: int,
         kv_router_config: KvRouterConfig,
         aic_perf_config: Optional[AicPerfConfig],
+        semantic_provider: Optional[SemanticKvCacheProvider] = None,
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
         self.aic_perf_config = aic_perf_config
+        self.semantic_provider = semantic_provider
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -115,6 +119,34 @@ class StandaloneRouterHandler:
             "extra_args": request.get("extra_args"),
         }
 
+        # Semantic pre-routing: if a semantic provider is configured and
+        # prompt_text is available, try to find a donor before routing.
+        token_ids = request["token_ids"]
+        prompt_text = request.get("prompt_text")
+
+        if self.semantic_provider is not None and prompt_text is not None:
+            try:
+                match = await self.semantic_provider.find_semantic_match(
+                    token_ids, prompt_text
+                )
+                if match is not None:
+                    # Pass donor hint to the router via extra_args so the
+                    # backend can use the donor's KV blocks.
+                    extra = dict(request.get("extra_args") or {})
+                    extra["semantic_donor"] = {
+                        "donor_id": match.donor_id,
+                        "donor_token_ids": list(match.donor_token_ids),
+                        "similarity": match.similarity,
+                    }
+                    preprocessed_request["extra_args"] = extra
+                    logger.debug(
+                        "Semantic match: donor=%s sim=%.3f",
+                        match.donor_id,
+                        match.similarity,
+                    )
+            except Exception:
+                logger.warning("Semantic pre-routing failed", exc_info=True)
+
         async for worker_output in await self.kv_router.generate_from_request(
             preprocessed_request  # type: ignore[arg-type]
         ):
@@ -136,6 +168,17 @@ class StandaloneRouterHandler:
             }
             yield llm_engine_output
 
+        # Post-routing: register this request as a donor for future lookups
+        if self.semantic_provider is not None and prompt_text is not None:
+            request_id = request.get("request_id", "")
+            if request_id:
+                try:
+                    await self.semantic_provider.register_donor(
+                        request_id, token_ids, prompt_text
+                    )
+                except Exception:
+                    logger.warning("Semantic donor registration failed", exc_info=True)
+
     async def best_worker_id(self, token_ids, router_config_override=None):
         """
         Get the best worker ID for a given set of tokens without actually routing.
@@ -148,7 +191,7 @@ class StandaloneRouterHandler:
             logger.error("KvRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
+        worker_id, _dp_rank, _overlap_blocks = await self.kv_router.best_worker(
             token_ids, router_config_override
         )
 
@@ -187,6 +230,11 @@ async def worker(runtime: DistributedRuntime):
     kv_router_config = build_kv_router_config(config)
     aic_perf_config = build_aic_perf_config(config)
 
+    # Load optional semantic KV cache provider
+    semantic_provider = create_semantic_provider(
+        getattr(config, "semantic_kv_provider", None)
+    )
+
     # Create handler
     handler = StandaloneRouterHandler(
         runtime,
@@ -194,6 +242,7 @@ async def worker(runtime: DistributedRuntime):
         config.router_block_size,
         kv_router_config,
         aic_perf_config,
+        semantic_provider=semantic_provider,
     )
     await handler.initialize()
 

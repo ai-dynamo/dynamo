@@ -43,6 +43,8 @@ from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
+from .semantic_kv import SemanticKvCacheProvider as SemanticKvCacheProvider
+from .semantic_kv import SemanticMatch as SemanticMatch
 
 # Backward-compatible aliases
 fetch_llm = fetch_model
