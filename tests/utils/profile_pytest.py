@@ -14,17 +14,18 @@ in-process instrumentation.  Using NVML directly (the same C library that
 ``nvidia-smi`` wraps) avoids the overhead of forking a subprocess each sample
 and allows high-frequency sampling.
 
-In **binary-search mode** (the default), the profiler sets the env var
-``_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE`` to a value between 0.05 and 0.95 and
-re-runs the test at each midpoint.  If the test passes, the fraction is lowered;
-if it OOMs, the fraction is raised — standard bisection to find the minimum
-VRAM the test needs.  The peak ``memory.used`` from the last passing run
-(plus a 10 % safety margin) becomes the ``@pytest.mark.max_vram_gib`` recommendation.
+In **binary-search mode** (the default), the profiler bisects the KV cache
+allocation — ``_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`` for vLLM (bytes) or
+``_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`` for SGLang (tokens).
+If the test passes, the allocation is lowered; if it OOMs, it is raised —
+standard bisection to find the minimum the test needs.  A safety factor
+is applied and the peak ``memory.used`` from the last passing run becomes
+the ``@pytest.mark.profiled_vram_gib`` recommendation.
 
-**IMPORTANT**: The test under profile **MUST** honor ``_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE``
-— either directly (see ``test_mock_gpu_alloc.py``) or via launch scripts that
-pass it as ``--gpu-memory-utilization`` to vLLM (e.g. ``agg.sh``).  If the test
-ignores this variable, every probe will pass at the same peak and the profiler
+**IMPORTANT**: The test under profile **MUST** read the appropriate KV cache
+override — either directly (see ``test_mock_gpu_alloc.py``) or via launch
+scripts that call ``build_gpu_mem_args`` (e.g. ``agg.sh``).  If the test
+ignores the override, every probe will pass at the same peak and the profiler
 will warn that the binary search is unreliable.
 
 Usage::
@@ -51,6 +52,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -68,6 +70,11 @@ logger = logging.getLogger(__name__)
 # tier has headroom for variance across runs.
 _VRAM_SAFETY_FACTOR = 1.1
 
+# Safety margin for KV cache recommendations (both SGLang tokens and vLLM bytes).
+# The minimum passing value is multiplied by this factor to provide headroom for
+# prompt length variation, scheduling jitter, and multi-turn conversations.
+_KV_SAFETY_FACTOR = 2.0
+
 # Phase detection: a memory jump exceeding this threshold (MiB) between
 # consecutive samples marks a phase boundary.
 _PHASE_JUMP_MIB = 200
@@ -76,6 +83,11 @@ _PHASE_JUMP_MIB = 200
 # a plateau, in consecutive samples.
 _PLATEAU_TOLERANCE_MIB = 50
 _PLATEAU_MIN_SAMPLES = 3
+
+# Early-stop threshold for binary search: if the last 3 probes have peak
+# VRAM within this range, the bisection is in the noise floor (model weights
+# dominate) and further probes won't yield meaningful data.
+_EARLY_STOP_RANGE_MIB = 768  # 0.75 GiB
 
 
 def _extract_model_from_markers(pytest_args: list[str]) -> str | None:
@@ -446,6 +458,9 @@ def _recommend_markers(
     wall_secs: float,
     model_name: str | None = None,
     num_runs: int = 1,
+    requested_sglang_kv_tokens: int | None = None,
+    requested_vllm_kv_cache_bytes: int | None = None,
+    min_kv_value: int | None = None,
 ) -> tuple[list[MarkerRecommendation], list[str]]:
     """Generate marker recommendations from profiling data.
 
@@ -523,17 +538,37 @@ def _recommend_markers(
             )
         )
 
-    # -- Hardware: VRAM requirement --
+    # -- Hardware: VRAM requirements (two markers) --
     if used_vram > _PLATEAU_TOLERANCE_MIB:
+        max_peak_gib = round(max_peak_mib / 1024, 1)
         padded_peak_mib = int(max_peak_mib * _VRAM_SAFETY_FACTOR)
         padded_peak_gib = round(padded_peak_mib / 1024, 1)
+
+        # profiled_vram_gib: actual nvidia-smi peak (for scheduling/filtering)
         recs.append(
             MarkerRecommendation(
-                f"max_vram_gib({padded_peak_gib})",
-                f"peak {_format_mib(max_peak_mib)} GPU RAM used "
-                f"(+10% safety: {_format_mib(padded_peak_mib)})",
+                f"profiled_vram_gib({max_peak_gib})",
+                f"actual nvidia-smi peak {_format_mib(max_peak_mib)}",
             )
         )
+        if requested_sglang_kv_tokens is not None:
+            min_label = f" over min={min_kv_value}" if min_kv_value is not None else ""
+            recs.append(
+                MarkerRecommendation(
+                    f"requested_sglang_kv_tokens({requested_sglang_kv_tokens})",
+                    f"KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety{min_label})",
+                )
+            )
+        if requested_vllm_kv_cache_bytes is not None:
+            min_label = (
+                f" over min={min_kv_value:_}" if min_kv_value is not None else ""
+            )
+            recs.append(
+                MarkerRecommendation(
+                    f"requested_vllm_kv_cache_bytes({requested_vllm_kv_cache_bytes:_})",
+                    f"KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety{min_label})",
+                )
+            )
 
         # Warn about GPU cards that would OOM
         for card_gib, card_name in _GPU_REFERENCE_CARDS:
@@ -541,7 +576,7 @@ def _recommend_markers(
                 warnings.append(f"Will OOM on {card_name} ({card_gib} GiB).")
 
     # -- Timeout --
-    timeout_val = int(math.ceil(wall_secs * 3.0))
+    timeout_val = int(math.ceil(wall_secs * 6.0))
     timeout_val = max(timeout_val, 10)
     recs.append(
         MarkerRecommendation(
@@ -598,6 +633,46 @@ def _print_recommendations(
     print()
 
 
+_SGLANG_NODEID_MARKERS = ["test_sglang", "sglang"]
+
+
+def _is_sglang_test(pytest_args: list[str]) -> bool:
+    """Check if any pytest arg looks like a SGLang test node ID."""
+    return any(
+        marker in arg for arg in pytest_args for marker in _SGLANG_NODEID_MARKERS
+    )
+
+
+_OOM_PATTERNS = [
+    "OutOfMemoryError",
+    "CUDA out of memory",
+    "CUDA error: out of memory",
+    "not enough memory",
+    "Cannot allocate",
+    "oom-kill",
+]
+
+
+def _looks_like_oom(stdout: str) -> bool:
+    """Check if captured output contains OOM-like errors."""
+    stdout_lower = stdout.lower()
+    return any(pat.lower() in stdout_lower for pat in _OOM_PATTERNS)
+
+
+_SGLANG_MAX_TOKENS_RE = re.compile(r"max_total_tokens=(\d+)")
+
+
+def _extract_requested_sglang_kv_tokens(stdout: str) -> int | None:
+    """Extract max_total_tokens from SGLang engine output.
+
+    SGLang logs: "Got total KV blocks from scheduler: N (max_total_tokens=M, page_size=P)"
+    """
+    match = _SGLANG_MAX_TOKENS_RE.search(stdout)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 _DEFAULT_PROBE_TIMEOUT = 300  # 5 minutes max per profile run
 
 
@@ -610,13 +685,13 @@ def _run_once(
     quiet: bool = False,
     run_label: str | None = None,
     timeout: float = _DEFAULT_PROBE_TIMEOUT,
-) -> tuple[int, float, list[GpuReport], list[GpuSample]]:
+) -> tuple[int, float, list[GpuReport], list[GpuSample], str]:
     """Run pytest once with GPU sampling.
 
     When *run_label* is set, each line of pytest stdout/stderr is prefixed
     with ``[run_label]`` so multi-run output is easy to follow.
 
-    Returns (exit_code, wall_secs, reports, raw_samples).
+    Returns (exit_code, wall_secs, reports, raw_samples, captured_stdout).
     """
     sampler = _Sampler(interval=interval)
     sampler.start()
@@ -639,6 +714,7 @@ def _run_once(
     capture = run_label is not None
     t_start = time.monotonic()
     timed_out = False
+    captured_stdout = ""
     try:
         result = subprocess.run(
             pytest_cmd,
@@ -648,6 +724,8 @@ def _run_once(
             timeout=timeout,
         )
         rc = result.returncode
+        if capture:
+            captured_stdout = result.stdout or ""
     except subprocess.TimeoutExpired:
         timed_out = True
         rc = 1
@@ -658,9 +736,9 @@ def _run_once(
             )
     if not timed_out and capture:
         prefix = f"[{run_label}] "
-        for line in result.stdout.splitlines():
+        for line in captured_stdout.splitlines():
             print(f"{prefix}{line}")
-        for line in result.stderr.splitlines():
+        for line in (result.stderr or "").splitlines():
             print(f"{prefix}{line}", file=sys.stderr)
     sys.stdout.flush()
     wall_secs = time.monotonic() - t_start
@@ -672,7 +750,7 @@ def _run_once(
 
     sampler.stop()
     reports = _build_reports(sampler.samples, baseline_end, test_end)
-    return rc, wall_secs, reports, sampler.samples
+    return rc, wall_secs, reports, sampler.samples, captured_stdout
 
 
 def _find_min_vram(
@@ -682,23 +760,46 @@ def _find_min_vram(
     teardown_seconds: float = 2.0,
     recommend: bool = True,
     csv_path: str | None = None,
+    kv_bytes_mode: bool = False,
+    gpu_index: int = 0,
 ) -> int:
-    """Binary search _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to find the minimum VRAM a test needs.
+    """Binary search to find the minimum VRAM a test needs.
 
-    Sets _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE env var (honored by agg.sh and similar scripts),
-    runs the test at each profile point, and bisects until the boundary is found.
+    Three modes, two patterns:
+
+    KV bisection (deterministic, no profiling race):
+      vLLM:   bisects _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES (bytes)
+      SGLang: bisects _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS (tokens)
+      Both use the same _KV_SAFETY_FACTOR (2x) and the same bisect loop.
+      The only differences are env var name, units, display, and bounds.
     """
+    is_sglang = _is_sglang_test(pytest_args)
+
     gpu_info = _query_gpu_stats()
     if not gpu_info:
         raise RuntimeError("NVML returned no GPU data")
-    used_mib = gpu_info[0][1]
-    total_mib = gpu_info[0][2]
+    if gpu_index >= len(gpu_info):
+        raise RuntimeError(
+            f"GPU {gpu_index} not found (available: 0..{len(gpu_info) - 1})"
+        )
+    used_mib = gpu_info[gpu_index][1]
+    total_mib = gpu_info[gpu_index][2]
     free_mib = total_mib - used_mib
     total_gib = total_mib / 1024
 
+    # Base env: pin subprocess to the selected GPU
+    _gpu_env = {"CUDA_VISIBLE_DEVICES": str(gpu_index)}
+
     model_name = _extract_model_from_markers(pytest_args)
 
-    print("\n--- FIND MINIMUM VRAM (binary search) ---")
+    if not is_sglang:
+        kv_bytes_mode = True
+
+    if kv_bytes_mode:
+        mode_label = "KV CACHE BYTES (vLLM, deterministic)"
+    else:
+        mode_label = "KV TOKENS (SGLang)"
+    print(f"\n--- FIND MINIMUM {mode_label} (binary search) ---")
     print(f"  GPU total : {total_gib:.1f} GiB")
     print(
         f"  GPU free  : {free_mib / 1024:.1f} GiB  "
@@ -708,7 +809,6 @@ def _find_min_vram(
     if model_name:
         print(f"  Model     : {model_name}")
 
-    # Warn if something is already consuming significant GPU memory
     hogged_pct = used_mib / total_mib * 100
     if hogged_pct > 10:
         print(f"\n  {'!' * 72}")
@@ -716,91 +816,169 @@ def _find_min_vram(
             f"  WARNING: {used_mib / 1024:.1f} GiB ({hogged_pct:.0f}%) of GPU memory "
             f"is already in use!"
         )
-        print("  Another process is hogging the GPU. Results will be inaccurate")
-        print(
-            "  because _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE is a fraction of TOTAL memory,"
-        )
-        print("  not FREE memory. Kill other GPU processes first.")
+        print("  Another process is hogging the GPU. Free memory is reduced,")
+        print("  which limits KV cache headroom. Kill other GPU processes first.")
         print(f"  {'!' * 72}")
     print()
 
-    lo = 0.05
-    hi = 0.95
-    tolerance = 0.05
-    max_iterations = math.ceil(math.log2((hi - lo) / tolerance))
-    last_pass_util: float | None = None
-    last_pass_peak_mib: int = 0
-    elapsed_times: list[float] = []
-    all_peak_mibs: list[int] = []
-    pass_wall_times: list[float] = []
+    # -- Validation run --
+    validation_env: dict[str, str] = dict(_gpu_env)
+    if kv_bytes_mode:
+        # Start at 50% of free GPU. If it passes, that's the upper bound and we
+        # search downward. If it fails (model weights too large), halve again
+        # until we find a passing point, then search downward from there.
+        max_kv_bytes = int(max(free_mib // 2, 1024) * 1024 * 1024)
+        validation_env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(max_kv_bytes)
+        validation_desc = f"kv_cache={max_kv_bytes // (1024**2)} MiB (50% of free)"
+    else:
+        validation_desc = "no token cap, default fraction"
 
-    print(f"  Range   : {lo:.0%} - {hi:.0%}  (tolerance {tolerance:.0%})")
+    print(f"  [probe 1] Validation run ({validation_desc})")
+    sys.stdout.flush()
+    t_iter_start = time.monotonic()
+    rc, wall, reports, raw_samples, stdout = _run_once(
+        pytest_args,
+        interval=interval,
+        baseline_seconds=baseline_seconds,
+        teardown_seconds=teardown_seconds,
+        extra_env=validation_env or None,
+        quiet=True,
+        run_label="probe 1",
+    )
+    iter_elapsed = time.monotonic() - t_iter_start
+
+    # kv-bytes mode: if validation fails, check whether it's OOM (over-allocated)
+    # or a genuine test failure (unrelated to KV cache). Only retry with less KV
+    # if the output looks like OOM; otherwise the test is broken and retrying won't help.
+    if rc != 0 and kv_bytes_mode:
+        if _looks_like_oom(stdout):
+            for attempt in range(4):
+                max_kv_bytes //= 2
+                if max_kv_bytes < 64 * 1024 * 1024:
+                    break
+                validation_env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(
+                    max_kv_bytes
+                )
+                print(
+                    f"  [OOM] Reducing KV cache to {max_kv_bytes // (1024**2)} MiB "
+                    f"(retry {attempt + 1}/4)"
+                )
+                sys.stdout.flush()
+                t_iter_start = time.monotonic()
+                rc, wall, reports, raw_samples, stdout = _run_once(
+                    pytest_args,
+                    interval=interval,
+                    baseline_seconds=baseline_seconds,
+                    teardown_seconds=teardown_seconds,
+                    extra_env=validation_env,
+                    quiet=True,
+                    run_label=f"probe 1 (retry {attempt + 1})",
+                )
+                iter_elapsed = time.monotonic() - t_iter_start
+                if rc == 0:
+                    break
+        else:
+            print(
+                "  [FAIL] Test failed but NOT from OOM — the test appears genuinely broken."
+            )
+            print(
+                "  Hint: check the test output above for the root cause "
+                "(EngineDeadError, timeout, assertion, etc.)."
+            )
+
+    if rc != 0:
+        reason = (
+            "OOM at all KV sizes"
+            if _looks_like_oom(stdout)
+            else "test broken (not OOM)"
+        )
+        print(f"  [FAIL] Cannot determine minimum KV cache: {reason}.")
+        return rc
+
+    peak_mib = max((r.peak_mib for r in reports), default=0)
+
+    if kv_bytes_mode:
+        # Search range: 64 MiB to 40 GiB in bytes.
+        # Lower bound at 64 MiB to skip probes that always fail (no model
+        # can serve even 1 request with < 64 MiB KV cache).
+        lo: float | int = 64 * 1024 * 1024  # 64 MiB minimum
+        hi: float | int = max_kv_bytes
+        tolerance: float | int = 16 * 1024 * 1024  # 16 MiB tolerance
+        print(
+            f"  [PASS] peak {_format_mib(peak_mib)}, wall {wall:.0f}s, "
+            f"iter took {iter_elapsed:.0f}s"
+        )
+    else:
+        max_tokens = _extract_requested_sglang_kv_tokens(stdout)
+        if max_tokens is None:
+            print(
+                "  [ERROR] Could not extract max_total_tokens from SGLang output.\n"
+                "  The launch script must log 'max_total_tokens=N' (SGLang does this by default)."
+            )
+            return 4
+        page_size = 16
+        lo = page_size
+        hi = max_tokens
+        tolerance = page_size * 2
+        print(
+            f"  [PASS] peak {_format_mib(peak_mib)}, wall {wall:.0f}s, "
+            f"max_total_tokens={max_tokens}, iter took {iter_elapsed:.0f}s"
+        )
+
+    baseline_time = iter_elapsed
+    probe_timeout = max(baseline_time * 2, 60)
+    print(f"  Profile timeout: {probe_timeout:.0f}s (2x first probe)")
+
+    max_iterations = (
+        max(1, math.ceil(math.log2((hi - lo) / tolerance))) if hi > lo else 0
+    )
+    last_pass_value: float | int = hi
+    last_pass_peak_mib: int = peak_mib
+    last_pass_reports = reports
+    last_pass_samples = raw_samples
+    elapsed_times: list[float] = [iter_elapsed]
+    pass_wall_times: list[float] = [wall]
+    all_peak_mibs: list[int] = [peak_mib]
+
+    if kv_bytes_mode:
+        print(
+            f"\n  Range   : {int(lo) // (1024**2)} - {int(hi) // (1024**2)} MiB  (tolerance {int(tolerance) // (1024**2)} MiB)"
+        )
+    else:
+        print(f"\n  Range   : {lo} - {hi} tokens  (tolerance {tolerance} tokens)")
     print(
         f"  Max iter: {max_iterations + 1} (1 validation + {max_iterations} bisections)"
     )
     print()
 
-    # First, verify the test passes at hi (0.95)
-    print(
-        f"  [profile 1/{max_iterations + 1}] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE={hi:.2f} "
-        f"(allowed max GPU {hi * total_gib:.1f} GiB)  [validation run]"
-    )
-    sys.stdout.flush()
-    t_iter_start = time.monotonic()
-    label = f"profile 1/{max_iterations + 1}"
-    rc, wall, reports, raw_samples = _run_once(
-        pytest_args,
-        interval=interval,
-        baseline_seconds=baseline_seconds,
-        teardown_seconds=teardown_seconds,
-        extra_env={"_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE": f"{hi:.2f}"},
-        quiet=True,
-        run_label=label,
-    )
-    iter_elapsed = time.monotonic() - t_iter_start
-    elapsed_times.append(iter_elapsed)
-    if rc != 0:
-        print(
-            f"  [FAIL] allowed GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
-            f"test fails even at max utilization. Cannot determine minimum."
-        )
-        return rc
-
-    peak_mib = max((r.peak_mib for r in reports), default=0)
-    all_peak_mibs.append(peak_mib)
-    last_pass_util = hi
-    last_pass_peak_mib = peak_mib
-    last_pass_reports = reports
-    last_pass_samples = raw_samples
-    pass_wall_times.append(wall)
-    print(
-        f"  [PASS] allowed GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
-        f"peak GPU used = {_format_mib(peak_mib)}, wall {wall:.0f}s, "
-        f"iter took {iter_elapsed:.0f}s"
-    )
-
-    # Use 2x the first profile's time as the timeout for subsequent profiles.
-    # If a profile takes longer than this, it's likely stuck in teardown.
-    baseline_time = iter_elapsed
-    probe_timeout = max(baseline_time * 2, 60)
-    print(f"  Profile timeout: {probe_timeout:.0f}s (2x first profile)")
-
+    # -- Binary search loop --
     iteration = 0
     while (hi - lo) > tolerance:
         iteration += 1
         probe_num = iteration + 1
-        mid = (lo + hi) / 2
         remaining = max_iterations + 1 - probe_num
         avg_iter = sum(elapsed_times) / len(elapsed_times)
         eta_s = remaining * avg_iter
 
-        label = f"profile {probe_num}/{max_iterations + 1}"
-        print(
-            f"\n  [{label}] "
-            f"_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE={mid:.2f} "
-            f"(allowed max GPU {mid * total_gib:.1f} GiB)  "
-            f"[~{remaining} iters left, profiling ETA ~{eta_s:.0f}s]"
-        )
+        if kv_bytes_mode:
+            mid_int = (int(lo) + int(hi)) // 2
+            mid_int = max(mid_int, 1024 * 1024)  # minimum 1 MiB
+            probe_env = {
+                **_gpu_env,
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES": str(mid_int),
+            }
+            probe_desc = f"kv_cache={mid_int // (1024**2)} MiB ({mid_int:,} bytes)"
+        else:
+            mid_int = ((int(lo) + int(hi)) // 2 // page_size) * page_size
+            mid_int = max(mid_int, page_size)
+            probe_env = {
+                **_gpu_env,
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS": str(mid_int),
+            }
+            probe_desc = f"tokens={mid_int}"
+
+        label = f"probe {probe_num}/{max_iterations + 1}"
+        print(f"  [{label}] {probe_desc}  [~{remaining} left, ETA ~{eta_s:.0f}s]")
         sys.stdout.flush()
 
         stop_progress = threading.Event()
@@ -829,12 +1007,12 @@ def _find_min_vram(
         )
         progress_thread.start()
 
-        rc, wall, reports, raw_samples = _run_once(
+        rc, wall, reports, raw_samples, stdout = _run_once(
             pytest_args,
             interval=interval,
             baseline_seconds=baseline_seconds,
             teardown_seconds=teardown_seconds,
-            extra_env={"_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE": f"{mid:.2f}"},
+            extra_env=probe_env,
             quiet=True,
             run_label=label,
             timeout=probe_timeout,
@@ -853,77 +1031,134 @@ def _find_min_vram(
         peak_mib = max((r.peak_mib for r in reports), default=0)
         all_peak_mibs.append(peak_mib)
 
+        mid_value = mid_int
         if rc == 0:
-            last_pass_util = mid
+            last_pass_value = mid_value
             last_pass_peak_mib = peak_mib
             last_pass_reports = reports
             last_pass_samples = raw_samples
             pass_wall_times.append(wall)
-            hi = mid
+            hi = mid_value
             print(
-                f"  [PASS] allowed GPU = {mid * total_gib:.1f} GiB ({mid:.0%}), "
-                f"peak GPU used = {_format_mib(peak_mib)}, wall {wall:.0f}s, "
-                f"iter took {iter_elapsed:.0f}s"
+                f"  [PASS] {probe_desc}, peak {_format_mib(peak_mib)}, "
+                f"wall {wall:.0f}s, iter took {iter_elapsed:.0f}s"
             )
         else:
-            lo = mid
-            print(
-                f"  [FAIL] allowed GPU = {mid * total_gib:.1f} GiB ({mid:.0%}), "
-                f"OOM or error, iter took {iter_elapsed:.0f}s"
-            )
+            lo = mid_value
+            print(f"  [FAIL] {probe_desc}, iter took {iter_elapsed:.0f}s")
 
-    # Detect if _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE is being ignored: all peaks are nearly
-    # identical despite wildly different utilization caps.
-    if len(all_peak_mibs) >= 3:
-        peak_range = max(all_peak_mibs) - min(all_peak_mibs)
-        if peak_range < _PLATEAU_TOLERANCE_MIB:
-            print(f"\n  {'!' * 72}")
-            print(
-                f"  WARNING: Peak VRAM was ~{_format_mib(all_peak_mibs[0])} across ALL "
-                f"{len(all_peak_mibs)} probes (range: {peak_range} MiB)."
-            )
-            print(
-                "  This strongly suggests the test IGNORES the _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE"
-            )
-            print("  env var.  Binary search results are UNRELIABLE — no marker")
-            print("  recommendation will be provided.")
-            print("  ")
-            print(
-                "  FIX: The test (or its launch script) must read _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE"
-            )
-            print("  and pass --gpu-memory-utilization to vLLM / the engine.")
-            print("  See tests/README.md 'GPU VRAM Profiler' for details.")
-            print(f"  {'!' * 72}")
-            return 4
+        # Early termination: if last 3 probes have peak VRAM within
+        # _EARLY_STOP_RANGE_MIB, further bisection is in the noise floor.
+        if len(all_peak_mibs) >= 4:
+            recent = all_peak_mibs[-3:]
+            peak_range = max(recent) - min(recent)
+            if peak_range < _EARLY_STOP_RANGE_MIB:
+                print(
+                    f"  [EARLY STOP] Peak VRAM stable at ~{_format_mib(recent[-1])} "
+                    f"for last 3 probes (range {peak_range} MiB < "
+                    f"{_EARLY_STOP_RANGE_MIB} MiB threshold) "
+                    f"-- stopping bisection early"
+                )
+                break
 
-    # Results
-    assert last_pass_util is not None
-    min_vram_gib = last_pass_util * total_gib
-
-    padded_peak_mib = int(last_pass_peak_mib * _VRAM_SAFETY_FACTOR)
-    padded_peak_gib = round(padded_peak_mib / 1024, 1)
-
-    # Extract a short test name from pytest args for the summary
+    # -- Results --
     test_name = next(
         (a for a in pytest_args if "::" in a or a.endswith(".py")),
         " ".join(pytest_args),
     )
     test_short = test_name.rsplit("::", 1)[-1] if "::" in test_name else test_name
+    peak_gib = round(last_pass_peak_mib / 1024, 1)
 
-    print("\n--- RESULT ---")
-    print(f"  Lowest passing utilization : {last_pass_util:.0%}")
-    print(
-        f"  Minimum VRAM needed        : ~{min_vram_gib:.1f} GiB "
-        f"(peak observed: {_format_mib(last_pass_peak_mib)}, "
-        f"+10% safety: {_format_mib(padded_peak_mib)})"
-    )
-    print(f"  {test_short}: @pytest.mark.max_vram_gib({padded_peak_gib})")
+    print(f"\n{'=' * 72}")
+    if kv_bytes_mode:
+        min_kv_bytes = int(last_pass_value)
+        safe_kv_bytes = int(min_kv_bytes * _KV_SAFETY_FACTOR)
+        # Round up to nearest 1000 for clean marker values
+        safe_kv_bytes = ((safe_kv_bytes + 999) // 1000) * 1000
+        safe_kv_mib = safe_kv_bytes // (1024 * 1024)
+        min_kv_mib = min_kv_bytes // (1024 * 1024)
 
-    # Full marker recommendations using average wall time across all passing runs
+        print(f"  Minimum KV cache : {min_kv_mib} MiB ({min_kv_bytes:,} bytes)")
+        print(
+            f"  Safe KV cache    : {safe_kv_mib} MiB ({safe_kv_bytes:,} bytes) ({_KV_SAFETY_FACTOR:.0f}x safety)"
+        )
+        print(f"  Peak VRAM        : {_format_mib(last_pass_peak_mib)}")
+        print()
+        print("  Recommended markers:")
+        print(f"    @pytest.mark.profiled_vram_gib({peak_gib})")
+        print(
+            f"    @pytest.mark.requested_vllm_kv_cache_bytes({safe_kv_bytes:_}),  # KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety over min={min_kv_bytes:_})"
+        )
+        print(f"{'=' * 72}")
+
+    else:
+        min_tokens = int(last_pass_value)
+        safe_tokens = int(min_tokens * _KV_SAFETY_FACTOR)
+        page_size = 16
+        safe_tokens = ((safe_tokens + page_size - 1) // page_size) * page_size
+
+        # Final validation probe at safe_tokens to get accurate profiled_vram_gib.
+        # The bisection's last pass was at min_tokens; the recommended marker uses
+        # safe_tokens which allocates more KV cache and thus more VRAM.
+        print(f"  [final probe] Measuring VRAM at safe_tokens={safe_tokens}")
+        sys.stdout.flush()
+        rc_final, wall_final, reports_final, samples_final, stdout_final = _run_once(
+            pytest_args,
+            interval=interval,
+            baseline_seconds=baseline_seconds,
+            teardown_seconds=teardown_seconds,
+            extra_env={
+                **_gpu_env,
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS": str(safe_tokens),
+            },
+            quiet=True,
+            run_label="final",
+            timeout=probe_timeout,
+        )
+        if rc_final == 0:
+            last_pass_peak_mib = max((r.peak_mib for r in reports_final), default=0)
+            last_pass_reports = reports_final
+            last_pass_samples = samples_final
+            pass_wall_times.append(wall_final)
+            peak_gib = round(last_pass_peak_mib / 1024, 1)
+            print(
+                f"  [PASS] tokens={safe_tokens}, peak {_format_mib(last_pass_peak_mib)}, "
+                f"wall {wall_final:.0f}s"
+            )
+        else:
+            print(
+                f"  [FAIL] tokens={safe_tokens} failed unexpectedly, "
+                f"using VRAM from min_tokens={min_tokens} instead"
+            )
+
+        print(f"\n{'=' * 72}")
+        print("MINIMUM KV TOKENS RESULT")
+        print(f"{'=' * 72}")
+        print(f"  Minimum tokens  : {min_tokens} (raw bisection result)")
+        print(f"  Recommended     : {safe_tokens} ({_KV_SAFETY_FACTOR:.0f}x safety)")
+        print(
+            f"  Peak VRAM       : {_format_mib(last_pass_peak_mib)} (at {safe_tokens} tokens)"
+        )
+        print(f"  {test_short}: @pytest.mark.profiled_vram_gib({peak_gib})")
+        print(
+            f"  {test_short}: @pytest.mark.requested_sglang_kv_tokens({safe_tokens}),  # KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety over min={min_tokens})"
+        )
+    print(f"{'=' * 72}")
+
+    # Marker recommendations
+    requested_sglang_kv_tokens = safe_tokens if is_sglang else None
+    requested_vllm_kv_cache_bytes = safe_kv_bytes if kv_bytes_mode else None
+    min_kv_value = int(last_pass_value)
     if recommend:
         avg_pass_wall = sum(pass_wall_times) / len(pass_wall_times)
         recs, warnings = _recommend_markers(
-            last_pass_reports, avg_pass_wall, model_name, num_runs=len(pass_wall_times)
+            last_pass_reports,
+            avg_pass_wall,
+            model_name,
+            num_runs=len(pass_wall_times),
+            requested_sglang_kv_tokens=requested_sglang_kv_tokens,
+            requested_vllm_kv_cache_bytes=requested_vllm_kv_cache_bytes,
+            min_kv_value=min_kv_value,
         )
         _print_recommendations(recs, warnings, pytest_args=pytest_args)
 
@@ -980,6 +1215,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable the default binary-search mode that finds minimum VRAM. "
         "When set, runs a single profiling pass instead.",
     )
+    parser.add_argument(
+        "--kv-bytes",
+        action="store_true",
+        default=False,
+        help="(No-op, kept for backward compat.) vLLM always uses KV byte "
+        "bisection via _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES. "
+        "Outputs @pytest.mark.requested_vllm_kv_cache_bytes(N).",
+    )
+    parser.add_argument(
+        "--gpu",
+        "--gpus",
+        type=int,
+        default=0,
+        help="GPU index to profile on (default: 0). "
+        "Sets CUDA_VISIBLE_DEVICES for the subprocess.",
+    )
 
     raw = argv if argv is not None else sys.argv[1:]
 
@@ -1002,18 +1253,25 @@ def main(argv: list[str] | None = None) -> int:
         if looks_like_test_path and not os.path.exists(test_path):
             parser.error(f"Test path does not exist: {test_path}")
 
+    gpu_idx = args.gpu
     gpu_info = _query_gpu_stats()
     if not gpu_info:
         raise RuntimeError("NVML returned no GPU data")
+    if gpu_idx >= len(gpu_info):
+        raise RuntimeError(
+            f"GPU {gpu_idx} not found (available: 0..{len(gpu_info) - 1})"
+        )
 
-    used_mib = gpu_info[0][1]
-    total_mib = gpu_info[0][2]
+    used_mib = gpu_info[gpu_idx][1]
+    total_mib = gpu_info[gpu_idx][2]
     hogged_pct = used_mib / total_mib * 100
     if hogged_pct > 10:
         print(
-            f"\nWARNING: {used_mib / 1024:.1f} GiB ({hogged_pct:.0f}%) of GPU memory "
-            f"is already in use! Results may be inaccurate.\n"
+            f"\nWARNING: GPU {gpu_idx}: {used_mib / 1024:.1f} GiB ({hogged_pct:.0f}%) "
+            f"of GPU memory is already in use! Results may be inaccurate.\n"
         )
+
+    gpu_env = {"CUDA_VISIBLE_DEVICES": str(gpu_idx)}
 
     if not args.no_find_min_vram:
         return _find_min_vram(
@@ -1023,21 +1281,34 @@ def main(argv: list[str] | None = None) -> int:
             teardown_seconds=args.teardown_seconds,
             recommend=not args.no_recommend,
             csv_path=args.csv,
+            kv_bytes_mode=args.kv_bytes,
+            gpu_index=gpu_idx,
         )
 
     model_name = _extract_model_from_markers(pytest_args)
+    is_sglang = _is_sglang_test(pytest_args)
 
-    rc, wall_secs, reports, samples = _run_once(
+    rc, wall_secs, reports, samples, stdout = _run_once(
         pytest_args,
         interval=args.interval,
         baseline_seconds=args.baseline_seconds,
         teardown_seconds=args.teardown_seconds,
+        extra_env=gpu_env,
+        run_label="profile" if is_sglang else None,
     )
 
     _print_report(reports, rc, wall_secs, model_name=model_name)
 
     if not args.no_recommend and reports:
-        recs, warnings = _recommend_markers(reports, wall_secs, model_name=model_name)
+        requested_sglang_kv_tokens = None
+        if is_sglang:
+            requested_sglang_kv_tokens = _extract_requested_sglang_kv_tokens(stdout)
+        recs, warnings = _recommend_markers(
+            reports,
+            wall_secs,
+            model_name=model_name,
+            requested_sglang_kv_tokens=requested_sglang_kv_tokens,
+        )
         _print_recommendations(recs, warnings, pytest_args=pytest_args)
 
     if args.csv:

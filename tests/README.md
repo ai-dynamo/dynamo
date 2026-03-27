@@ -116,43 +116,96 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
-| VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). The pytest invocation can use `--max-vram-gib=N` to select only tests that fit on the available GPU. Does not prevent running on smaller GPUs (that will OOM). Use `profile_pytest.py` to measure. |
+| VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
+| vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
+| SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
 
-### Example
+### Example (vLLM)
 ```python
 @pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.gpu_1
-@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
 def test_kv_cache_behavior():
     ...
 ```
 
-### Filtering by VRAM
+### Example (SGLang with token cap)
+```python
+@pytest.mark.pre_merge
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(3.7)   # actual nvidia-smi peak at recommended token count
+@pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
+@pytest.mark.timeout(265)
+@pytest.mark.sglang
+def test_sglang_aggregated():
+    ...
+```
 
-The `max_vram_gib(N)` marker records how much GPU memory a test needs. The pytest invocation can use `--max-vram-gib=N` as a **selector** to run only tests that fit on the available GPU. Tests that exceed the budget are skipped at collection time (before any test starts). Tests without a `max_vram_gib` marker always run (no constraint assumed).
+### VRAM Markers and Filtering
 
-This is for the following use cases:
-- **MIG partitioned GPUs:** when running tests in parallel on MIG slices (e.g., 2x 40 GiB partitions on an 80 GiB GPU), each slice has limited VRAM.
-- **Smaller CI GPUs:** some CI jobs use L4 GPUs with only 24 GiB of VRAM.
+Markers differ by engine:
 
-Nothing prevents you from running without this flag — but if a test needs more VRAM than is physically available, it will OOM at runtime (e.g., vLLM raises `ValueError: No available memory for the cache blocks`).
+**vLLM** uses byte-based KV cache control:
+- **`profiled_vram_gib(N)`** — actual peak from nvidia-smi. Used for `--max-vram-gib` filtering and scheduler budget.
+- **`requested_vllm_kv_cache_bytes(N)`** — exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic and parallel-safe.
+
+**SGLang** uses token-based control:
+- **`profiled_vram_gib(N)`** — actual peak from nvidia-smi at the recommended token count. Used for `--max-vram-gib` filtering and scheduler budget.
+- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. SGLang's default `--mem-fraction-static` is never overridden; the token cap is the sole allocation control. Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+
+`--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N. Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
+
+### GPU-Parallel Execution
+
+GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytest_parallel_gpu.py`). This is separate from `pytest-xdist` because:
+
+1. **VRAM budget**: xdist has no GPU memory awareness — two 20 GiB tests on a 48 GiB GPU will OOM.
+2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
+3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
+   - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe.
 
 ```bash
-# Preview which gpu_1 vllm tests fit on a 16 GiB MIG partition (no tests are executed)
-python3 -m pytest --max-vram-gib=16 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
-
-# Same, but for 24 GiB L4 CI GPUs
+# Dry-run: preview which tests fit and the GPU plan
 python3 -m pytest --max-vram-gib=24 --dry-run -m "gpu_1 and vllm" tests/serve/test_vllm.py
 
-# GPU tests that have no max_vram_gib marker yet — need profiling
-# TODO: profile these tests and add max_vram_gib markers
-python3 -m pytest --dry-run -m "(gpu_1 or gpu_2 or gpu_4 or gpu_8) and not max_vram_gib" tests/serve/test_vllm.py
+# Run pre-merge vllm tests in parallel
+python3 -m pytest --max-vram-gib=6 -n auto -m "gpu_1 and vllm and not nightly and not post_merge" tests/serve/test_vllm.py
+
+# Run all (pre+post merge) with live output
+python3 -m pytest --max-vram-gib=48 -n auto -sv -m "gpu_1 and vllm and not nightly" tests/serve/test_vllm.py tests/frontend/test_vllm.py
+
+# SGLang tests
+python3 -m pytest --max-vram-gib=48 -n auto -m "gpu_1 and sglang" tests/serve/test_sglang.py
+
+# Tests that still need profiling
+python3 -m pytest --dry-run -m "(gpu_1 or gpu_2) and not profiled_vram_gib" tests/serve/
+```
+
+Example output (6 SGLang tests, RTX 6000 Ada 48 GiB):
+```
+GPU parallel: 6 tests, 7 concurrent slots, GPU0 (48 GiB, 43 GiB multi-proc budget)
+
+[w0] tests/serve/test_sglang.py::...completions_only-2]     profiled= 14.9 GiB  req_kv_tokens=  1024  timeout=420s
+[w1] tests/serve/test_sglang.py::...multimodal_agg_qwen-2]  profiled= 20.2 GiB  req_kv_tokens=   512  timeout=280s
+[w2] tests/serve/test_sglang.py::...aggregated-2]            profiled=  6.0 GiB  req_kv_tokens=  1024  timeout=240s
+...
+
+[w0] tests/serve/...completions_only-2] (GPU0, profiled 14.9 GiB, req_kv_tokens=  1024) RUNNING
+[w1] tests/serve/...multimodal_agg_qwen-2] (GPU0, profiled 20.2 GiB, req_kv_tokens=   512) RUNNING
+[elapsed 10s] GPU0: 0.6/48 GiB [w0(10s), w1(5s)] [queued: w2, w3, w4, w5]
+[w1] tests/serve/...multimodal_agg_qwen-2] PASSED [31s]
+[w0] tests/serve/...completions_only-2] PASSED [76s]
+...
+=============== 6 passed in 111.00s (1:51) (vs 228s seq, 2.1x) ===============
 ```
 
 ### Lifecycle Marker Note
@@ -296,13 +349,20 @@ pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" 
 pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short
 ```
 
-> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). Tests not marked `parallel`, and all GPU tests (`gpu_1`, `gpu_2`, etc.), run sequentially (no `-n` flag). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
+> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
 
 **Full E2E suite** -- launches engines for every test configuration; slowest, requires GPU and a framework container (typically <30min depending on framework and model):
 ```bash
+# Sequential (default)
 pytest -m "vllm and e2e and gpu_1" -v --tb=short
 pytest -m "sglang and e2e and gpu_1" -v --tb=short
 pytest -m "trtllm and e2e and gpu_1" -v --tb=short
+
+# GPU-parallel (VRAM-aware scheduling, ~2x faster on 48 GiB GPU)
+# Only tests with profiled_vram_gib markers are selected; -n auto calculates
+# concurrent slots from GPU VRAM / smallest test. See "GPU-Parallel Execution" below.
+python3 -m pytest --max-vram-gib=48 -n auto -m "gpu_1 and sglang" tests/serve/test_sglang.py -v
+python3 -m pytest --max-vram-gib=48 -n auto -m "gpu_1 and vllm" tests/serve/test_vllm.py -v
 ```
 
 **Post-merge equivalent** -- CI runs `(pre_merge or post_merge)` after merge, which adds slower tests on top of the pre_merge set. **Running the full post-merge suite locally can take several hours per framework** (model downloads, GPU inference, multi-GPU coordination). For day-to-day development, before you submit to CI, use the `pre_merge` commands above for quicker feedback. See [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml) for exact markers:
@@ -446,66 +506,83 @@ When writing or reviewing GPU tests, use `tests/utils/profile_pytest.py` to meas
 
 ### How it works
 
-The profiler sets the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` environment variable (a fraction from 0.0 to 1.0 of total GPU RAM) and runs the test at each probe point. It bisects between "passes" and "OOM/fails" to find the boundary. After the search, it samples `nvidia-smi` to report peak VRAM, phase analysis, and marker recommendations.
+The profiler automatically detects the engine type and uses the appropriate binary search:
 
-**Requirement:** The test under profile **must** honor the `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` env var. For standalone tests that allocate CUDA memory directly, check `os.environ.get("_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")` and cap your allocation accordingly — see `tests/utils/test_mock_gpu_alloc.py` for an example.
+- **vLLM**: bisects `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` (bytes) → `--kv-cache-memory-bytes`. Finds the minimum KV cache bytes where the test passes, applies a 2x safety factor. Outputs `profiled_vram_gib` and `requested_vllm_kv_cache_bytes` markers.
+- **SGLang**: bisects `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` (token count) → `--max-total-tokens`. Finds the minimum KV cache tokens where the test passes, applies a 2x safety factor, then runs a final probe at the safe token count to measure the actual VRAM. Outputs `profiled_vram_gib` and `requested_sglang_kv_tokens` markers.
+
+**Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
+
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
 
 ### Engine-specific mapping
 
-`_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is a generic env var (float 0.0-1.0) that launch scripts translate to the engine-specific CLI flag:
+Launch scripts call `build_gpu_mem_args` (from `examples/common/gpu_utils.sh`) which checks env var overrides and returns the appropriate CLI flags:
 
-| Engine  | CLI flag                         | Launch script support |
-|---------|----------------------------------|-----------------------|
-| vLLM    | `--gpu-memory-utilization`       | Implemented in `agg.sh`, `disagg.sh`, etc. via `build_gpu_mem_args` |
-| SGLang  | `--mem-fraction-static`          | Implemented in `agg.sh`, `agg_embed.sh`, `disagg.sh`, `agg_router.sh`, `disagg_same_gpu.sh` via `build_gpu_mem_args`. Multimodal scripts (`multimodal_epd.sh`, `multimodal_disagg.sh`) split the override proportionally between workers. |
-| TRT-LLM | `--free-gpu-memory-fraction`    | Not yet implemented (has its own `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`, TODO: unify) |
+```bash
+GPU_MEM_ARGS=$(build_gpu_mem_args sglang)
+python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
+```
 
-**Note on sglang:** Unlike vLLM (where `--max-model-len` affects KV cache sizing), sglang's `--mem-fraction-static` is the sole knob for KV cache allocation. `--context-length` and `--max-running-requests` only affect request scheduling, not memory allocation. See `examples/common/gpu_utils.md` for details.
+Env vars control engine allocation during profiling and parallel test execution:
 
-If the profiler detects constant VRAM across all probes (meaning the env var is ignored), it prints a warning and skips marker recommendations.
+**`_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`** (integer) — vLLM only:
+
+| Engine  | Returned CLI flag                | Notes |
+|---------|----------------------------------|-------|
+| vLLM    | `--kv-cache-memory-bytes N`      | Exact byte cap on KV cache; deterministic and parallel-safe |
+
+**`_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`** (integer) — SGLang only:
+
+| Engine  | Returned CLI flag                | Notes |
+|---------|----------------------------------|-------|
+| SGLang  | `--max-total-tokens N`           | Token-based KV cache cap |
+
+Both use absolute caps (bytes and tokens) — deterministic and independent of current free memory, which is critical for parallel test execution. See `examples/common/gpu_utils.md`.
 
 ### Usage
 
 ```bash
-# Default mode: binary search for minimum VRAM (recommended)
-# -xvs is optional: stop on first failure, verbose, show output
+# vLLM: binary search for minimum KV cache bytes
 python tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated] -xvs
+
+# Profile on a specific GPU (default: 0)
+python tests/utils/profile_pytest.py --gpu 1 tests/serve/test_vllm.py::test_serve_deployment[aggregated] -xvs
+
+# SGLang: binary search for minimum KV cache tokens (automatic)
+python tests/utils/profile_pytest.py tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -xvs
 
 # Single-pass profiling (no binary search, just measure one run using default RAM)
 python tests/utils/profile_pytest.py --no-find-min-vram tests/serve/test_vllm.py::test_serve_deployment[aggregated]
 ```
 
-### Example output
+### Example output (vLLM)
 
 ```bash
 ========================================================================
-FIND MINIMUM VRAM (binary search)
+FIND MINIMUM KV CACHE BYTES (vLLM, deterministic) (binary search)
 ========================================================================
   GPU total : 48.0 GiB
-  GPU free  : 48.0 GiB  (in use: 0.0 GiB)
+  GPU free  : 47.4 GiB  (in use: 0.6 GiB)
   Test      : tests/serve/test_vllm.py::test_serve_deployment[aggregated] -x
 
-  Range   : 5% - 95%  (tolerance 5%)
-  Max iter: 6 (1 validation + 5 bisections)
-
-  [probe 1/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.95 (45.6 GiB)  [validation run]
-  [PASS] peak 18.5 GiB, wall 41s, iter took 49s
+  [probe 1] Validation run: kv_cache=23296 MiB (50% of free)
+  [PASS] peak 2.9 GiB, wall 42s, iter took 49s
   ...
-  [probe 5/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.33 (15.9 GiB)
-  [FAIL] OOM or error at 33% (15.9 GiB), iter took 30s
+  [probe 6/15] kv_cache=449 MiB (471,027,000 bytes)
+  [PASS] peak 2.9 GiB, wall 41s, iter took 49s
 
-  [probe 6/6] _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE=0.36 (17.2 GiB)  [~0 left, ETA ~0s]
-  [PASS] peak 18.5 GiB, wall 41s, iter took 49s
+  [probe 7/15] kv_cache=224 MiB (235,513,856 bytes)
+  [FAIL] OOM, iter took 30s
 
 ========================================================================
-MINIMUM VRAM RESULT
-========================================================================
-  Lowest passing utilization : 36%
-  Minimum VRAM needed        : ~17.2 GiB (peak observed: 18.5 GiB, +10% safety: 20.4 GiB)
+  Minimum KV cache : 449 MiB (471,027,000 bytes)
+  Safe KV cache    : 898 MiB (942,054,000 bytes) (2x safety)
+  Peak VRAM        : 2.9 GiB
 
-  # test_serve_deployment[aggregated]: @pytest.mark.max_vram_gib(21)
-  # Fits on: L4 (24 GiB), V100-32GB (32 GiB), A6000/A40 (48 GiB), A100/H100 (80 GiB)
-  # Will OOM on: edge/embedded (4 GiB), RTX 3060/4060 (8 GiB), T4 (16 GiB)
+  Recommended markers:
+    @pytest.mark.profiled_vram_gib(2.9)
+    @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000),  # KV cache cap (2x safety over min=471_027_000)
 ========================================================================
 
 ========================================================================
@@ -513,14 +590,41 @@ Recommended markers to add to your pytest. You can copy-paste this:
 ========================================================================
 # Measured using: tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated]
 @pytest.mark.e2e  # wall time 41.2s, loads a real model
-@pytest.mark.gpu_1  # 1 GPU(s) used, peak 18.5 GiB
-@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.gpu_1  # 1 GPU(s) used, peak 2.9 GiB
+@pytest.mark.profiled_vram_gib(2.9)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.timeout(124)  # 3x observed 41.2s
 
   WARNING: Wall time 41.2s is too slow for pre_merge (> 20s). Consider post_merge or nightly instead.
-  WARNING: Will OOM on edge/embedded (4 GiB).
-  WARNING: Will OOM on RTX 3060/4060 (8 GiB).
-  WARNING: Will OOM on T4 (16 GiB).
+========================================================================
+```
+
+### Example output (SGLang — token-based bisection)
+
+```bash
+========================================================================
+FIND MINIMUM KV TOKENS (SGLang) (binary search)
+========================================================================
+  GPU total : 48.0 GiB
+  GPU free  : 47.4 GiB  (in use: 0.6 GiB)
+  Test      : tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -xvs
+
+  [probe 1] Validation run (no token cap)
+  [PASS] peak 43.0 GiB, wall 36s, max_total_tokens=366688, iter took 44s
+  ...
+  [probe 14/15] tokens=48  [~1 left, ETA ~45s]
+  [PASS] tokens=48, peak 3.7 GiB, wall 26s, iter took 34s
+  [final probe] Measuring VRAM at safe_tokens=96
+  [PASS] tokens=96, peak 3.7 GiB, wall 27s
+
+========================================================================
+MINIMUM KV TOKENS RESULT
+========================================================================
+  Minimum tokens  : 16 (raw bisection result)
+  Recommended     : 96 (2x safety)
+  Peak VRAM       : 3.7 GiB (at 96 tokens)
+  @pytest.mark.profiled_vram_gib(3.7)
+  @pytest.mark.requested_sglang_kv_tokens(96),  # KV cache cap (2x safety over min=48)
 ========================================================================
 ```
 
@@ -528,7 +632,7 @@ Recommended markers to add to your pytest. You can copy-paste this:
 
 1. **Copy the `@pytest.mark.*` lines** into your test function or `pytestmark` list.
 
-2. **VRAM marker** — `max_vram_gib(N)` records the peak GPU memory the test needs (with 10% safety margin). This marker does **not** skip tests on its own — if a test runs on a GPU that is too small, it will OOM and fail hard. Use `--max-vram-gib=N` to select only tests that fit on the available GPU (see [Filtering by VRAM](#filtering-by-vram) for examples). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
+2. **VRAM markers** — `profiled_vram_gib(N)` records the actual nvidia-smi peak (for filtering/scheduling), `requested_vllm_kv_cache_bytes(N)` or `requested_sglang_kv_tokens(N)` controls the engine's KV cache allocation for deterministic parallel execution. Use `--max-vram-gib=N` to deselect tests whose profiled VRAM exceeds N (see [Filtering by VRAM](#filtering-by-vram)). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
 
 3. **Lifecycle markers** — the profiler recommends `pre_merge` only for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
 
@@ -540,6 +644,7 @@ Recommended markers to add to your pytest. You can copy-paste this:
 
 | Flag | Description |
 |------|-------------|
+| `--kv-bytes` | No-op (kept for backward compat). vLLM always bisects on `--kv-cache-memory-bytes` |
 | `--no-find-min-vram` | Skip binary search; run a single profiling pass instead |
 | `--interval N` | GPU sampling interval in seconds (default: 1.0) |
 | `--baseline-seconds N` | Seconds to sample before launching pytest (default: 3.0) |
