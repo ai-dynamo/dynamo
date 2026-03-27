@@ -225,6 +225,23 @@ async def init_llm_worker(
             logging.info(f"Applying engine arg overrides: {overrides}")
 
             deep_update(arg_map, overrides)
+
+            # Propagate any overridden values back to config for MDC registration
+            if "max_seq_len" in overrides:
+                config.max_seq_len = arg_map["max_seq_len"]
+                logging.info(
+                    f"Updated config.max_seq_len from override-engine-args: {config.max_seq_len}"
+                )
+            if "max_batch_size" in overrides:
+                config.max_batch_size = arg_map["max_batch_size"]
+                logging.info(
+                    f"Updated config.max_batch_size from override-engine-args: {config.max_batch_size}"
+                )
+            if "max_num_tokens" in overrides:
+                config.max_num_tokens = arg_map["max_num_tokens"]
+                logging.info(
+                    f"Updated config.max_num_tokens from override-engine-args: {config.max_num_tokens}"
+                )
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
