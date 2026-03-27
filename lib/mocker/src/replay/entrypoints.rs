@@ -9,10 +9,11 @@ use dynamo_kv_router::config::KvRouterConfig;
 
 use super::online;
 use super::validate::{
-    validate_offline_concurrency_args, validate_offline_replay_args,
+    validate_offline_concurrency_args, validate_offline_disagg_concurrency_args,
+    validate_offline_disagg_replay_args, validate_offline_replay_args,
     validate_online_concurrency_args, validate_online_replay_args,
 };
-use super::{ReplayRouterMode, TraceSimulationReport};
+use super::{OfflineDisaggReplayConfig, ReplayRouterMode, TraceSimulationReport};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::Trace;
 
@@ -51,6 +52,28 @@ pub fn simulate_trace_file_with_router_mode(
         router_config,
         trace,
         num_workers,
+        router_mode,
+    )?;
+    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_trace_file_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    trace_path: &Path,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    let trace = Trace::from_mooncake(trace_path, config.prefill_args.block_size)?
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    let started_at = Instant::now();
+    let report = crate::replay::offline::simulate_trace_workload_disagg(
+        config,
+        router_config,
+        trace,
         router_mode,
     )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
@@ -124,6 +147,30 @@ pub fn simulate_trace_requests_with_router_mode(
         router_config,
         requests,
         num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+    )?;
+    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_trace_requests_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    if requests.is_empty() {
+        bail!("trace replay requires at least one request");
+    }
+
+    let started_at = Instant::now();
+    let report = crate::replay::offline::simulate_trace_disagg(
+        config,
+        router_config,
+        requests,
         arrival_speedup_ratio,
         router_mode,
     )?;
@@ -204,6 +251,27 @@ pub fn simulate_concurrency_file_with_router_mode(
         trace,
         max_in_flight,
         num_workers,
+        router_mode,
+    )?;
+    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_concurrency_file_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    trace_path: &Path,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    let trace = Trace::from_mooncake(trace_path, config.prefill_args.block_size)?;
+    let started_at = Instant::now();
+    let report = simulate_concurrency_workload_disagg_with_router_mode(
+        config,
+        router_config,
+        trace,
+        max_in_flight,
         router_mode,
     )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
@@ -326,6 +394,28 @@ pub fn simulate_concurrency_requests_with_router_mode(
     )
 }
 
+pub fn simulate_concurrency_requests_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    if requests.is_empty() {
+        bail!("concurrency replay requires at least one request");
+    }
+
+    crate::replay::offline::simulate_concurrency_disagg(
+        config,
+        router_config,
+        requests,
+        max_in_flight,
+        router_mode,
+    )
+}
+
 pub fn simulate_trace_workload(
     args: MockEngineArgs,
     trace: Trace,
@@ -355,6 +445,24 @@ pub fn simulate_trace_workload_with_router_mode(
         router_config,
         trace,
         num_workers,
+        router_mode,
+    )?;
+    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+pub fn simulate_trace_workload_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    let started_at = Instant::now();
+    let report = crate::replay::offline::simulate_trace_workload_disagg(
+        config,
+        router_config,
+        trace,
         router_mode,
     )?;
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
@@ -418,6 +526,24 @@ pub fn simulate_concurrency_workload_with_router_mode(
         trace,
         max_in_flight,
         num_workers,
+        router_mode,
+    )
+}
+
+pub fn simulate_concurrency_workload_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    crate::replay::offline::simulate_concurrency_workload_disagg(
+        config,
+        router_config,
+        trace,
+        max_in_flight,
         router_mode,
     )
 }
