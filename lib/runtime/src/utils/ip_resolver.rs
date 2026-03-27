@@ -8,10 +8,9 @@ use local_ip_address::Error;
 use std::net::IpAddr;
 
 fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
-    let resolved_ip = resolver.local_ip().or_else(|err| match err {
-        Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-        _ => Err(err),
-    });
+    let resolved_ip = resolver
+        .local_ip()
+        .or_else(|_| resolver.local_ipv6());
 
     match resolved_ip {
         Ok(addr) => addr,
