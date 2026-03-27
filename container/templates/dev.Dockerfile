@@ -213,10 +213,11 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PREFIX=/opt/intel/intel_nixl
 {% else %}
 {% if framework == "vllm" %}
-# Upstream vLLM packages NIXL under dist-packages rather than /opt/nvidia/nvda_nixl.
-ENV NIXL_PREFIX=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/.nixl_cu12.mesonpy.libs \
-    NIXL_LIB_DIR=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/.nixl_cu12.mesonpy.libs \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/.nixl_cu12.mesonpy.libs/plugins
+# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
+# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 {% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
