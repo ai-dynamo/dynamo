@@ -72,7 +72,7 @@ def _accumulate_embeddings(
     accumulated ``multi_modal_data`` dict (mutated in-place).
 
     Handles both video (numpy conversion) and image modalities, including
-    the Qwen-VL dict-style embeddings with ``image_embeds`` + ``image_grid_thw``.
+    grid-aware dict-style embeddings with ``image_embeds`` + ``image_grid_thw``.
     """
     if "video" in model.lower():
         video_numpy = embeddings.numpy()
@@ -96,7 +96,7 @@ def _accumulate_embeddings(
         return
 
     if isinstance(mm_data["image"], dict):
-        # Qwen-VL style: dict with image_embeds + image_grid_thw tensors
+        # Grid-aware style: dict with image_embeds + image_grid_thw tensors
         multi_modal_data["image"]["image_embeds"] = torch.cat(
             (
                 multi_modal_data["image"]["image_embeds"],

@@ -29,10 +29,10 @@ from ..multimodal_utils import (
     encode_image_embeddings,
     get_encoder_components,
     load_vision_model,
+    split_image_embeddings,
     vLLMMultimodalRequest,
 )
 from ..multimodal_utils.embedding_cache import EmbeddingCache
-from ..multimodal_utils.model import is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -245,30 +245,10 @@ class EncodeWorkerHandler:
                     )
 
                 with _nvtx.annotate("mm:enc:split_embeddings", color="orange"):
-                    # [gluo FIXME] This is specific to qwen vision processing..
-                    # Split concatenated embeddings for each image item.
-                    if is_qwen_vl_model(self.model):
-                        merge_size = self.vision_encoder.spatial_merge_size
-                        sizes = (
-                            image_embeds["image_grid_thw"].prod(-1)
-                            // merge_size
-                            // merge_size
-                        ).tolist()
-                        splitted_embeddings = embeddings.squeeze(0).split(sizes)
-                        logger.debug(
-                            f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
-                        )
-                    else:
-                        # Validated on llava (NOTE need to double check on other models) that the
-                        # embeddings already has batch dimension for images, so we can directly
-                        # split by batch dimension
-                        logger.debug(f"image embedding shape: {embeddings.shape}")
-                        splitted_embeddings = embeddings
-
-                    image_grid_thw = (
-                        image_embeds["image_grid_thw"].tolist()
-                        if "image_grid_thw" in image_embeds
-                        else None
+                    splitted_embeddings, image_grid_thw = split_image_embeddings(
+                        embeddings=embeddings,
+                        image_embeds=image_embeds,
+                        vision_encoder=self.vision_encoder,
                     )
 
             # fill in the embedding_lists with new computed embeddings and cache them

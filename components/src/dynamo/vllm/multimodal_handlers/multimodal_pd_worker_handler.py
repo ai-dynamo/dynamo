@@ -31,7 +31,7 @@ from ..multimodal_utils import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
 )
-from ..multimodal_utils.model import is_qwen_vl_model
+from ..multimodal_utils.model import is_grid_thw_image_data
 from ..multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 logger = logging.getLogger(__name__)
@@ -177,13 +177,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
     ) -> None:
         """Attach model-specific metadata to the request for the decode worker.
 
-        For Qwen VL (mRoPE) models, captures image grid dimensions and
+        For grid-aware multimodal models, captures image grid dimensions and
         embedding shapes so the decode worker can reconstruct
         ``multi_modal_data`` consistently for multiple images.
         """
-        if is_qwen_vl_model(self.config.model) and isinstance(
-            multi_modal_data.get("image"), dict
-        ):
+        if is_grid_thw_image_data(multi_modal_data.get("image")):
             image_data = multi_modal_data["image"]
             image_grid_thw = image_data.get("image_grid_thw")
             image_embeds = image_data.get("image_embeds")
@@ -333,14 +331,15 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
         if rng_ttft is not None:
             _nvtx.end_range(rng_ttft)
 
-        # Qwen VL (mRoPE): keep the ORIGINAL unexpanded prompt.
-        # The decode worker passes multi_modal_data which causes vLLM to
-        # expand the prompt identically to prefill, ensuring block counts match.
+        # Grid-aware multimodal models: keep the ORIGINAL unexpanded prompt.
+        # The decode worker passes placeholder multi_modal_data which causes
+        # vLLM to expand the prompt identically to prefill, ensuring block
+        # counts match.
         #
         # Other models: use the expanded prompt from prefill response.
         # They don't pass multi_modal_data in decode, so they need the
         # already-expanded prompt to match the KV cache layout.
-        if not is_qwen_vl_model(self.config.model):
+        if request.image_grid_thw is None or request.embeddings_shape is None:
             request.engine_prompt[
                 "prompt_token_ids"
             ] = prefill_response.prompt_token_ids
@@ -355,7 +354,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
         logger.debug("Decode request: %s", request)
 
         # Serialized request is lightweight: token IDs, sampling params with
-        # kv_transfer_params, and small Qwen metadata (image_grid_thw,
+        # kv_transfer_params, and small grid-aware metadata (image_grid_thw,
         # embeddings_shape).  Heavy multimodal data was consumed locally by
         # engine_client.generate() and multimodal_inputs was cleared by
         # `_finalize_request_metadata`.

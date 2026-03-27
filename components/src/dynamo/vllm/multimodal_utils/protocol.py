@@ -182,7 +182,7 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     model: Optional[str] = None
     # Decode-only worker can have None for multimodal_inputs
     multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
-    # Add these fields for Qwen VL (mRoPE) decode-only worker
+    # Add these fields for grid-aware multimodal decode-only workers
     image_grid_thw: Optional[List[List[int]]] = None
     embeddings_shape: Optional[List[int]] = None
 

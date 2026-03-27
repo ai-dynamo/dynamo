@@ -14,179 +14,67 @@
 # limitations under the License.
 
 import logging
-import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
-from transformers import AutoModel
-from vllm import LLM
-from vllm.utils.system_utils import update_environment_variables
 
 logger = logging.getLogger(__name__)
 
-# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
-# should be removed once there is proper way to extract vLLM encoder.
-VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
+IMAGE_EMBEDS_KEY = "image_embeds"
+IMAGE_GRID_THW_KEY = "image_grid_thw"
 
 
-class SupportedModels:
-    """Supported multimodal model identifiers"""
-
-    # TODO: Replace this explicit model list with dynamic detection using
-    # HF config `architectures` field or vLLM's model registry, so any
-    # vLLM-supported VLM works without maintaining entries here.
-
-    LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
-    QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
-    QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
-    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
-    QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
-    QWEN_3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
-    QWEN_3_VL_30B_A3B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-    QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
-    QWEN_3_VL_8B = "Qwen/Qwen3-VL-8B-Instruct"
-    QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
-    QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
-    QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
-    QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
-    QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
-    LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
+def is_grid_thw_image_data(image_data: Any) -> bool:
+    """Return True when the image payload carries explicit embed + grid metadata."""
+    return (
+        isinstance(image_data, dict)
+        and IMAGE_EMBEDS_KEY in image_data
+        and IMAGE_GRID_THW_KEY in image_data
+    )
 
 
-def normalize_model_name(model_name: str) -> str:
-    """
-    Extract and normalize model name from various formats including HuggingFace cache paths.
+def _load_vllm_encoder_only_model(model_id: str, enforce_eager: bool) -> Any:
+    from vllm import LLM
+    from vllm.utils.system_utils import update_environment_variables
 
-    Args:
-        model_name: Model identifier which can be:
-            - A simple model name: "Qwen/Qwen2.5-VL-7B-Instruct"
-            - A HuggingFace cache path: "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/..."
-            - A local path to a model directory
+    update_environment_variables(
+        {
+            "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        }
+    )
 
-    Returns:
-        Normalized model name in the format "organization/model-name"
-
-    Examples:
-        >>> normalize_model_name("Qwen/Qwen2.5-VL-7B-Instruct")
-        "Qwen/Qwen2.5-VL-7B-Instruct"
-        >>> normalize_model_name("/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/...")
-        "Qwen/Qwen2.5-VL-7B-Instruct"
-    """
-    # If it's already a simple model name (org/model format), return as-is
-    if "/" in model_name and not model_name.startswith("/"):
-        return model_name
-
-    # Handle HuggingFace cache paths
-    if "models--" in model_name:
-        # Extract from cache path format: models--ORG--MODEL-NAME
-        # Split on "models--" then on "--" to handle dashes in org/model names
-        parts_after_models = model_name.split("models--", 1)
-        if len(parts_after_models) > 1:
-            # Split the remaining part on "--" and take the last two segments
-            segments = parts_after_models[1].split("--")
-            if len(segments) >= 2:
-                # Take all segments except the last as org (rejoined with dashes)
-                # and the last segment (before any slash) as model name
-                org_segments = segments[:-1]
-                model_segment = segments[-1].split("/")[
-                    0
-                ]  # Remove any path after model name
-
-                org = "--".join(org_segments)  # Rejoin org parts with dashes
-                model = model_segment
-                return f"{org}/{model}"
-
-    # Handle local directory paths - extract the last directory name
-    path = Path(model_name)
-    if path.exists() and path.is_dir():
-        return path.name
-
-    # If no pattern matches, return the original name
-    return model_name
-
-
-def is_model_supported(model_name: str, supported_model: str) -> bool:
-    """
-    Check if a model name matches a supported model, handling various naming formats.
-
-    Args:
-        model_name: The model name to check (may be path, cache name, etc.)
-        supported_model: The supported model identifier
-
-    Returns:
-        True if the model is supported, False otherwise
-    """
-    normalized_name = normalize_model_name(model_name).lower()
-    normalized_supported = normalize_model_name(supported_model).lower()
-
-    return normalized_name == normalized_supported
-
-
-# List of all Qwen VL model variants for easy extension
-QWEN_VL_MODELS = [
-    SupportedModels.QWEN_2_VL_2B,
-    SupportedModels.QWEN_2_5_VL_3B,
-    SupportedModels.QWEN_2_5_VL_7B,
-    SupportedModels.QWEN_2_5_VL_32B,
-    SupportedModels.QWEN_3_VL_2B,
-    SupportedModels.QWEN_3_VL_30B_A3B,
-    SupportedModels.QWEN_3_VL_30B_A3B_FP8,
-    SupportedModels.QWEN_3_VL_8B,
-    SupportedModels.QWEN_3_VL_8B_FP8,
-    SupportedModels.QWEN_3_VL_4B,
-    SupportedModels.QWEN_3_VL_4B_FP8,
-    SupportedModels.QWEN_3_VL_32B,
-    SupportedModels.QWEN_3_VL_32B_FP8,
-]
-
-
-def is_qwen_vl_model(model_name: str) -> bool:
-    """
-    Check if a model is any Qwen VL variant.
-
-    Args:
-        model_name: The model name to check
-
-    Returns:
-        True if the model is a Qwen VL variant, False otherwise
-    """
-    return any(
-        is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS
+    vllm_model = LLM(
+        model=model_id,
+        enforce_eager=enforce_eager,
+        kv_cache_memory_bytes=1024
+        * 1024
+        * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
+        max_model_len=1,
+        mm_encoder_only=True,
+        enable_prefix_caching=False,
+    )
+    return (
+        vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model
     )
 
 
 def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Module:
     """
-    Load a vision model from a HuggingFace model ID.
+    Load a vision-capable model and return the encoder-only object used by the
+    encode worker.
     """
-    if VLLM_ENCODER and is_qwen_vl_model(model_id):
-        # Disable to get ViT from the same process
-        update_environment_variables(
-            {
-                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
-            }
-        )
-
-        # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
-        # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/32605.
-        # Load only the vision model via vLLM
-        vllm_model = LLM(
-            model=model_id,
-            enforce_eager=enforce_eager,
-            kv_cache_memory_bytes=1024
-            * 1024
-            * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
-            max_model_len=1,
-            mm_encoder_only=True,
-            enable_prefix_caching=False,
-        )
-        return (
-            vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
-        )
-    return AutoModel.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
-    )
+    try:
+        return _load_vllm_encoder_only_model(model_id, enforce_eager)
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load a dedicated vision encoder via "
+            f"vLLM `mm_encoder_only` for model '{model_id}'. "
+            "This backend requires the vLLM encoder-only path and no longer "
+            "falls back to transformers.AutoModel because that path is "
+            "materially slower. Use a model that supports vLLM "
+            "`mm_encoder_only` loading. "
+            f"Original error: {exc}"
+        ) from exc
 
 
 def construct_mm_data(
@@ -196,12 +84,10 @@ def construct_mm_data(
     video_numpy: Optional[Any] = None,
     image_grid_thw: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
-    """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
+    """Construct multimodal data for a vLLM request."""
+    del model
 
-    # Handle video models
-    if is_model_supported(model, SupportedModels.LLAVA_NEXT_VIDEO_7B):
-        if video_numpy is None:
-            raise ValueError("No video frames provided.")
+    if video_numpy is not None:
         return {"video": video_numpy}
 
     # Handle image models - validate image embeddings first
@@ -210,45 +96,43 @@ def construct_mm_data(
 
     image_embeds = image_embeds.to(embeddings_dtype)
 
-    # Model-specific image handling
-    if is_qwen_vl_model(model):
-        return _construct_qwen_image_data(image_embeds, image_grid_thw)
-    else:
-        # Default image handling for other models (e.g., LLAVA_1_5_7B)
-        return {"image": image_embeds}
+    if image_grid_thw is not None and len(image_grid_thw) > 0:
+        return _construct_grid_thw_image_data(image_embeds, image_grid_thw)
+
+    return {"image": image_embeds}
 
 
-def _construct_qwen_image_data(
+def _construct_grid_thw_image_data(
     image_embeds: torch.Tensor, image_grid_thw: Optional[List[Any]]
 ) -> Dict[str, Dict[str, torch.Tensor]]:
-    """Construct image data specifically for Qwen models."""
+    """Construct image data for models that require `image_grid_thw`."""
     if image_grid_thw is None or len(image_grid_thw) == 0:
-        raise ValueError("No image grid provided for Qwen model.")
+        raise ValueError("No image grid provided for grid-aware multimodal payload.")
 
     grid_thw_tensor = torch.tensor(image_grid_thw)
 
     return {
         "image": {
-            "image_embeds": image_embeds.squeeze(0),
-            "image_grid_thw": grid_thw_tensor,
+            IMAGE_EMBEDS_KEY: image_embeds.squeeze(0),
+            IMAGE_GRID_THW_KEY: grid_thw_tensor,
         }
     }
 
 
-def construct_qwen_decode_mm_data(
+def construct_grid_thw_decode_mm_data(
     image_grid_thw: Optional[List[Any]],
     embeddings_shape: Optional[Any],
     request_id: str,
     *,
     dtype: torch.dtype = torch.float16,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
-    """Construct schema-valid Qwen multimodal data for vLLM v1 disagg decode.
+    """Construct schema-valid multimodal data for grid-aware vLLM v1 decode.
 
     This is a WORKAROUND (WAR) for vLLM's disaggregated multimodal decode limitations.
 
     Notes:
     - vLLM parses multimodal inputs and builds `mm_features` from `multi_modal_data`.
-    - For Qwen VL models, the parser enforces that image data contains BOTH
+    - For grid-aware models, the parser enforces that image data contains BOTH
       `image_embeds` and `image_grid_thw` keys.
     - In disaggregated decode, the KV cache already includes the vision context
       from prefill; decode still needs `mm_features` for mRoPE initialization.
@@ -270,23 +154,27 @@ def construct_qwen_decode_mm_data(
       decode-side prefix caching provides minimal benefit in disaggregated setup.
     """
     if image_grid_thw is None or len(image_grid_thw) == 0:
-        raise ValueError("No image grid provided for Qwen model.")
+        raise ValueError(
+            "No image grid provided for grid-aware decode multimodal payload."
+        )
     if embeddings_shape is None:
-        raise ValueError("embeddings_shape is required for Qwen decode mm data.")
+        raise ValueError(
+            "embeddings_shape is required for grid-aware decode multimodal payload."
+        )
 
     # WAR: Use request_id hash as seed for unique placeholder values.
     # This prevents prefix cache from incorrectly matching different images
     # that happen to have the same dimensions (same image_grid_thw).
     # bit ops to convert request ID to somewhat unique value that fits in the dtype range
-    if not hasattr(construct_qwen_decode_mm_data, "_counter"):
-        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
-    fill_value = construct_qwen_decode_mm_data._counter  # type: ignore[attr-defined]
-    construct_qwen_decode_mm_data._counter += 1  # type: ignore[attr-defined]
+    if not hasattr(construct_grid_thw_decode_mm_data, "_counter"):
+        construct_grid_thw_decode_mm_data._counter = 0  # type: ignore[attr-defined]
+    fill_value = construct_grid_thw_decode_mm_data._counter  # type: ignore[attr-defined]
+    construct_grid_thw_decode_mm_data._counter += 1  # type: ignore[attr-defined]
     max_val = (
         torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
     )
-    if construct_qwen_decode_mm_data._counter > max_val:  # type: ignore[attr-defined]
-        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
+    if construct_grid_thw_decode_mm_data._counter > max_val:  # type: ignore[attr-defined]
+        construct_grid_thw_decode_mm_data._counter = 0  # type: ignore[attr-defined]
     image_embeds = torch.full(
         embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
     )
@@ -295,7 +183,7 @@ def construct_qwen_decode_mm_data(
 
     return {
         "image": {
-            "image_embeds": image_embeds,
-            "image_grid_thw": torch.tensor(image_grid_thw),
+            IMAGE_EMBEDS_KEY: image_embeds,
+            IMAGE_GRID_THW_KEY: torch.tensor(image_grid_thw),
         }
     }
