@@ -1546,6 +1546,7 @@ visible
 
     #[test]
     fn test_response_salvages_raw_think_blocks_and_hides_them_from_visible_text() {
+        #[allow(deprecated)]
         let chat_resp = NvCreateChatCompletionResponse {
             id: "chatcmpl-think".into(),
             choices: vec![dynamo_async_openai::types::ChatChoice {
@@ -1582,12 +1583,8 @@ visible
         match &wrapped.inner.output[0] {
             OutputItem::Reasoning(reasoning) => {
                 assert_eq!(reasoning.summary.len(), 1);
-                match &reasoning.summary[0] {
-                    SummaryPart::SummaryText(summary) => {
-                        assert_eq!(summary.text, "private chain of thought");
-                    }
-                    _ => panic!("expected reasoning summary text"),
-                }
+                let SummaryPart::SummaryText(summary) = &reasoning.summary[0];
+                assert_eq!(summary.text, "private chain of thought");
             }
             other => panic!("expected reasoning item, got {other:?}"),
         }
