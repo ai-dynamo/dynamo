@@ -17,6 +17,10 @@ const fn default_min_initial_workers() -> usize {
     1
 }
 
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -63,6 +67,9 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub assume_kv_reuse: Option<bool>,
+
+    #[builder(default)]
+    pub track_prefill_tokens: Option<bool>,
 }
 
 /// KV Router configuration parameters
@@ -97,6 +104,12 @@ pub struct KvRouterConfig {
     /// When true, computes actual block hashes for sequence tracking.
     /// When false, generates random hashes (assuming no KV cache reuse).
     pub router_assume_kv_reuse: bool,
+
+    /// Whether to include prompt-side prefill tokens in active load accounting (default: true).
+    /// When false, prompt tokens are excluded from active prefill token tracking, queue pressure,
+    /// and potential prefill-token load calculations.
+    #[serde(default = "default_track_prefill_tokens")]
+    pub router_track_prefill_tokens: bool,
 
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     #[validate(range(min = 1))]
@@ -171,6 +184,7 @@ impl Default for KvRouterConfig {
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
+            router_track_prefill_tokens: default_track_prefill_tokens(),
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
@@ -208,6 +222,18 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
 }
 
 impl KvRouterConfig {
+    pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
+        config_override
+            .and_then(|cfg| cfg.assume_kv_reuse)
+            .unwrap_or(self.router_assume_kv_reuse)
+    }
+
+    pub fn track_prefill_tokens(&self, config_override: Option<&RouterConfigOverride>) -> bool {
+        config_override
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.router_track_prefill_tokens)
+    }
+
     /// Compute sequence hashes for active block tracking based on configuration.
     ///
     /// Returns:
@@ -231,9 +257,7 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        let assume_kv_reuse = config_override
-            .and_then(|cfg| cfg.assume_kv_reuse)
-            .unwrap_or(self.router_assume_kv_reuse);
+        let assume_kv_reuse = self.assume_kv_reuse(config_override);
 
         if assume_kv_reuse {
             let block_hashes = match precomputed_block_hashes {
@@ -291,6 +315,11 @@ mod tests {
     }
 
     #[test]
+    fn kv_router_config_defaults_to_tracking_prefill_tokens() {
+        assert!(KvRouterConfig::default().router_track_prefill_tokens);
+    }
+
+    #[test]
     fn kv_router_config_rejects_zero_initial_workers() {
         let cfg = KvRouterConfig {
             min_initial_workers: 0,
@@ -330,6 +359,17 @@ mod tests {
             .unwrap();
 
         assert_ne!(without_mm, with_mm);
+    }
+
+    #[test]
+    fn router_config_override_serde_round_trip_preserves_track_prefill_tokens() {
+        let serialized = serde_json::to_string(&RouterConfigOverride {
+            track_prefill_tokens: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+        let deserialized: RouterConfigOverride = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.track_prefill_tokens, Some(false));
     }
 
     #[test]

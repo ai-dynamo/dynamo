@@ -135,6 +135,7 @@ mod tests {
             overlaps,
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
             router_config_override: None,
             update_states: false,
             lora_name: None,

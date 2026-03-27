@@ -384,6 +384,7 @@ async fn apply_entry(
                     token_sequence: Some(block_hashes),
                     isl,
                     overlap: 0,
+                    track_prefill_tokens: true,
                     expected_output_tokens: Some(output_length as u32),
                     worker,
                     lora_name: None,

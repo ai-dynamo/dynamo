@@ -230,6 +230,8 @@ markers = [
     "gpu_2: marks tests to run on 2GPUs",
     "gpu_4: marks tests to run on 4GPUs",
     "gpu_8: marks tests to run on 8GPUs",
+    "xpu_1: marks tests to run on XPU",
+    "xpu_2: marks tests to run on 2XPUs",
     "max_vram_gib(N): peak VRAM in GiB (with 10% safety). Filter with --max-vram-gib=N",
     "e2e: marks tests as end-to-end tests",
     "integration: marks tests as integration tests",

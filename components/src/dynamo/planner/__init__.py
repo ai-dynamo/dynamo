@@ -9,6 +9,7 @@ __all__ = [
     "SLAPlannerDefaults",
     "TargetReplica",
     "SubComponentType",
+    "WorkerInfo",
 ]
 # Import the classes
 from dynamo.planner.defaults import SLAPlannerDefaults, SubComponentType
@@ -16,6 +17,7 @@ from dynamo.planner.global_planner_connector import GlobalPlannerConnector
 from dynamo.planner.kubernetes_connector import KubernetesConnector, TargetReplica
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.virtual_connector import VirtualConnector
+from dynamo.planner.worker_info import WorkerInfo
 
 try:
     from ._version import __version__
