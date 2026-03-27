@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+from collections import defaultdict
 from typing import Any, Dict, List
 
 import torch
@@ -32,6 +33,12 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
+# Scheduler mode: "per_request" keeps all images from one request on same encoder,
+# "per_image" (default/legacy) distributes images within a request across encoders
+ENCODER_SCHEDULER_MODE = os.getenv("DYN_ENCODER_SCHEDULER", "per_request")
+
+# Round-robin counter for per-request scheduling (thread-safe via GIL for single event loop)
+_encoder_round_robin_index = 0
 
 
 # ── Internal helpers (all underscore-prefixed) ───────────────────────
@@ -91,32 +98,32 @@ def _accumulate_embeddings(
         image_grid_thw=image_grid_thw,
     )
 
-    if "image" not in multi_modal_data:
-        multi_modal_data["image"] = mm_data["image"]
-        return
-
     if isinstance(mm_data["image"], dict):
         # Qwen-VL style: dict with image_embeds + image_grid_thw tensors
-        multi_modal_data["image"]["image_embeds"] = torch.cat(
-            (
-                multi_modal_data["image"]["image_embeds"],
-                mm_data["image"]["image_embeds"],
+        if multi_modal_data["image"] == []:
+            multi_modal_data["image"] = mm_data["image"]
+        else:
+            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
+            multi_modal_data["image"]["image_embeds"] = torch.cat(
+                (
+                    multi_modal_data["image"]["image_embeds"],
+                    mm_data["image"]["image_embeds"],
+                )
             )
-        )
-        multi_modal_data["image"]["image_grid_thw"] = torch.cat(
-            (
-                multi_modal_data["image"]["image_grid_thw"],
-                mm_data["image"]["image_grid_thw"],
+            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+                (
+                    multi_modal_data["image"]["image_grid_thw"],
+                    mm_data["image"]["image_grid_thw"],
+                )
             )
-        )
-    elif isinstance(mm_data["image"], torch.Tensor):
-        multi_modal_data["image"] = torch.cat(
-            (multi_modal_data["image"], mm_data["image"])
-        )
     else:
-        raise ValueError(
-            f"Unexpected image data format from construct_mm_data: {type(mm_data['image'])}"
-        )
+        # [gluo FIXME] embedding with multiple images?
+        if multi_modal_data["image"] == []:
+            multi_modal_data["image"] = mm_data["image"]
+        else:
+            multi_modal_data["image"] = torch.cat(
+                (multi_modal_data["image"], mm_data["image"])
+            )
 
 
 def _ensure_owned_tensors(multi_modal_data: Dict[str, Any]) -> None:
@@ -167,25 +174,73 @@ async def _fetch_from_encode_workers(
     with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
         batch: List[MultiModalGroup] = []
         encode_response_streams = []
-        for url in image_urls:
-            multimodal_input = MultiModalInput()
-            multimodal_input.image_url = url
-            batch.append(MultiModalGroup(multimodal_input=multimodal_input))
 
-            if len(batch) >= encode_batch_size:
+        # Select encoder based on scheduling mode
+        if ENCODER_SCHEDULER_MODE == "per_request":
+            # Per-request mode: pick one encoder for entire request, rotate across requests
+            global _encoder_round_robin_index
+            instance_ids = encode_worker_client.instance_ids()
+            if not instance_ids:
+                raise RuntimeError("No encoder instances available")
+
+            selected_instance_id = instance_ids[
+                _encoder_round_robin_index % len(instance_ids)
+            ]
+            _encoder_round_robin_index += 1
+            logger.info(
+                f"[PREFILL] request: {request_id} assigned to encoder instance {selected_instance_id} "
+                f"(mode=per_request, {len(image_urls)} images)"
+            )
+
+            # Send all batches to the same encoder using direct()
+            for url in image_urls:
+                multimodal_input = MultiModalInput()
+                multimodal_input.image_url = url
+                batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+
+                if len(batch) >= encode_batch_size:
+                    encode_request.multimodal_inputs = batch
+                    payload = encode_request.model_dump_json()
+                    encode_response_streams.append(
+                        await encode_worker_client.direct(
+                            payload, selected_instance_id, context=context  # type: ignore[arg-type]
+                        )
+                    )
+                    batch = []
+
+            if batch:
+                encode_request.multimodal_inputs = batch
+                payload = encode_request.model_dump_json()
+                encode_response_streams.append(
+                    await encode_worker_client.direct(
+                        payload, selected_instance_id, context=context  # type: ignore[arg-type]
+                    )
+                )
+        else:
+            # Per-image mode (legacy): round-robin per batch, images distributed across encoders
+            logger.debug(
+                f"[PREFILL] request: {request_id} using per_image scheduler "
+                f"(mode=per_image, {len(image_urls)} images)"
+            )
+            for url in image_urls:
+                multimodal_input = MultiModalInput()
+                multimodal_input.image_url = url
+                batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+
+                if len(batch) >= encode_batch_size:
+                    encode_request.multimodal_inputs = batch
+                    payload = encode_request.model_dump_json()
+                    encode_response_streams.append(
+                        await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
+                    )
+                    batch = []
+
+            if batch:
                 encode_request.multimodal_inputs = batch
                 payload = encode_request.model_dump_json()
                 encode_response_streams.append(
                     await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
                 )
-                batch = []
-
-        if batch:
-            encode_request.multimodal_inputs = batch
-            payload = encode_request.model_dump_json()
-            encode_response_streams.append(
-                await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
-            )
 
     with time_and_log_code_section(
         f"[PREFILL] request: {request_id} receive encode responses"
@@ -327,7 +382,7 @@ class MultiModalEmbeddingLoader:
             context=context,
         )
 
-        multi_modal_data: Dict[str, Any] = {}
+        multi_modal_data: Dict[str, Any] = defaultdict(list)
         with time_and_log_code_section(
             f"[PREFILL] request: {request_id} accumulate embeddings"
         ):
