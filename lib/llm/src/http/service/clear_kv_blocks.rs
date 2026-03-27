@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{service_v2, RouteDoc};
-use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
+use super::{RouteDoc, service_v2};
+use axum::{Json, Router, http::Method, response::IntoResponse, routing::post};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -54,12 +54,12 @@ async fn clear_kv_blocks_handler(
     let mut worker_groups: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for instance in &all_instances {
-        if let DiscoveryInstance::Endpoint(inst) = instance {
-            if inst.endpoint == CLEAR_KV_ENDPOINT {
-                let key = (inst.namespace.clone(), inst.component.clone());
-                if seen.insert(key.clone()) {
-                    worker_groups.push(key);
-                }
+        if let DiscoveryInstance::Endpoint(inst) = instance
+            && inst.endpoint == CLEAR_KV_ENDPOINT
+        {
+            let key = (inst.namespace.clone(), inst.component.clone());
+            if seen.insert(key.clone()) {
+                worker_groups.push(key);
             }
         }
     }
