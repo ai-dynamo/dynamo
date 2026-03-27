@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dynamo_runtime::{
     discovery::DiscoveryInstance, discovery::DiscoveryQuery, pipeline::PushRouter,
-    stream::StreamExt,
+    protocols::annotated::Annotated, stream::StreamExt,
 };
 
 pub const RESET_PREFIX_CACHE_ENDPOINT: &str = "reset_prefix_cache";
@@ -117,7 +117,7 @@ async fn reset_prefix_cache_handler(
             }
         };
 
-        let router = match PushRouter::<(), serde_json::Value>::from_client(
+        let router = match PushRouter::<(), Annotated<serde_json::Value>>::from_client(
             client,
             Default::default(),
         )
@@ -180,11 +180,16 @@ async fn reset_prefix_cache_handler(
             match router.direct(().into(), instance.id()).await {
                 Ok(mut stream) => match stream.next().await {
                     Some(response) => {
+                        let response_str = response
+                            .data
+                            .as_ref()
+                            .map(|d| d.to_string())
+                            .unwrap_or_default();
                         cleared_workers.push(json!({
                             "name": instance_name,
                             "endpoint": endpoint_path,
                             "status": "Successfully reset prefix cache for instance",
-                            "response": response.to_string(),
+                            "response": response_str,
                         }));
                     }
                     None => {
