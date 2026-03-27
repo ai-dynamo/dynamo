@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# This is the image that will be used for the Dynamo Frontend, Prefill, and Decode services
+x-dynamo-image: &DYNAMO_IMAGE nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+
+# The environment variables lifted to this top section are either ones that you may want to change or shared between multiple services
+#   Service-specific environment variables are included under their specific "environment:" sections
+x-shared-environ: &shared-environ
+  # (May want to change) Specify the model and inference server settings
+  MODEL_NAME: "Qwen/Qwen3-0.6B"
+  MAX_MODEL_LEN: 16384
+  MAX_NUM_SEQS: 16
+  TENSOR_PARALLEL_SIZE: 1
+  # (Shared between services) The ETCD/NATS variables below are set so that the other containers on the shared network can find them
+  ETCD_ENDPOINTS: "etcd-server:2379"
+  NATS_SERVER: "nats://nats-server:4222"
+
+  # (Shared between services) You can modify the prefill and decode worker log output verbosity below
+  DYN_LOG: debug
+
+services:
+  dynamo-frontend:
+    image: *DYNAMO_IMAGE
+    command: python -m dynamo.frontend --http-port 8000
+    ports:
+      - 8000:8000
+    environment:
+      <<: *shared-environ
+    volumes:
+      - frontend-cache:/home/dynamo/.cache/
+    restart: always
+    depends_on:
+      - nats-server
+      - etcd-server
+
+  dynamo-prefill:
+    image: *DYNAMO_IMAGE
+    command: >
+      /bin/bash -c "python -m dynamo.vllm
+      --model $$MODEL_NAME
+      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'
+      --kv-events-config '{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20081\",\"enable_kv_cache_events\":true}'
+      --max-model-len $$MAX_MODEL_LEN
+      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE
+      --max-num-seqs $$MAX_NUM_SEQS
+      --enable-prefix-caching
+      --prefix-caching-hash-algo sha256
+      --disaggregation-mode prefill"
+    environment:
+      <<: *shared-environ
+      DYN_VLLM_KV_EVENT_PORT: 20081
+      DYN_SYSTEM_PORT: 8081
+      VLLM_NIXL_SIDE_CHANNEL_PORT: 20097
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: ['0']
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    volumes:
+      - prefill-cache:/home/dynamo/.cache/
+    restart: always
+    depends_on:
+      - nats-server
+      - etcd-server
+
+  dynamo-decode:
+    image: *DYNAMO_IMAGE
+    command: >
+      /bin/bash -c "python -m dynamo.vllm
+      --model $$MODEL_NAME
+      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'
+      --max-model-len $$MAX_MODEL_LEN
+      --tensor-parallel-size $$TENSOR_PARALLEL_SIZE
+      --max-num-seqs $$MAX_NUM_SEQS
+      --enable-prefix-caching
+      --prefix-caching-hash-algo sha256
+      --disaggregation-mode decode"
+    environment:
+      <<: *shared-environ
+      DYN_SYSTEM_PORT: 8082
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: ['1']
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    volumes:
+      - decode-cache:/home/dynamo/.cache/
+    restart: always
+    depends_on:
+      - nats-server
+      - etcd-server
+
+  nats-server:
+    image: nats:2.11.4
+    command: [ "-js", "--trace", "-m", "8222" ]
+    ports:
+      - 4222:4222
+      - 6222:6222
+      - 8222:8222  # the endpoints include /varz, /healthz, ...
+
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_NAME: "etcd-server"
+      ETCD_INITIAL_CLUSTER: "etcd-server=http://etcd-server:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://etcd-server:2380"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd-server:2379"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+      ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
+    ports:
+      - 2379:2379  # this port exposes the http /metrics endpoint
+      - 2380:2380
+
+volumes:
+  frontend-cache:
+  prefill-cache:
+  decode-cache:
