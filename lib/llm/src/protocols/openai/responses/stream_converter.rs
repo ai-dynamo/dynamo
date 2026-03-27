@@ -421,9 +421,9 @@ impl ResponseStreamConverter {
                 // structured delta.tool_calls chunks.
                 if !self.structured_tool_calls_seen
                     && delta
-                    .tool_calls
-                    .as_ref()
-                    .is_none_or(|tool_calls| tool_calls.is_empty())
+                        .tool_calls
+                        .as_ref()
+                        .is_none_or(|tool_calls| tool_calls.is_empty())
                 {
                     let parsed_calls = parse_tool_call_text(&self.raw_text);
                     for (name, arguments) in parsed_calls
