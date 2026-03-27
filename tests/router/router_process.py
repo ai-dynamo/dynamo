@@ -28,6 +28,7 @@ class FrontendRouterProcess(ManagedProcess):
         request_plane: str = "nats",
         durable_kv_events: bool = False,
         router_mode: str = "kv",
+        min_initial_workers: int | None = None,
     ):
         command = [
             "python3",
@@ -65,6 +66,8 @@ class FrontendRouterProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if min_initial_workers is not None:
+            env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
 
         super().__init__(
             command=command,

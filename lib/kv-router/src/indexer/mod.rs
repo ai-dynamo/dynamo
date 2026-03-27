@@ -40,6 +40,7 @@ mod traits;
 mod types;
 
 pub mod concurrent_radix_tree;
+pub mod concurrent_radix_tree_compressed;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;

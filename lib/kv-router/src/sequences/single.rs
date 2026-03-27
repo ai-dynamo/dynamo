@@ -144,6 +144,27 @@ impl ActiveSequences {
         overlap: u32,
         expected_output_tokens: Option<u32>,
     ) -> HashSet<RequestId> {
+        self.add_request_with_prefill_tracking(
+            request_id,
+            token_sequence,
+            isl,
+            overlap,
+            expected_output_tokens,
+            true,
+        )
+    }
+
+    /// Add a new request with optional prompt-token load accounting.
+    /// Returns the set of expired request IDs that were removed during cleanup.
+    pub fn add_request_with_prefill_tracking(
+        &mut self,
+        request_id: RequestId,
+        token_sequence: Option<Vec<SequenceHash>>,
+        isl: usize,
+        overlap: u32,
+        expected_output_tokens: Option<u32>,
+        track_prefill_tokens: bool,
+    ) -> HashSet<RequestId> {
         // Check for double-add and log error, returning early
         if self.active_seqs.contains_key(&request_id) {
             tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
@@ -153,7 +174,11 @@ impl ActiveSequences {
         // Lazily check and clean up expired requests, capturing removed IDs
         let removed_requests = self.force_expiry();
 
-        let prefill_tokens = self.new_tokens(isl, overlap);
+        let prefill_tokens = if track_prefill_tokens {
+            self.new_tokens(isl, overlap)
+        } else {
+            0
+        };
         self.prefill_tokens
             .insert(request_id.clone(), prefill_tokens);
         self.active_tokens += prefill_tokens;
@@ -209,12 +234,26 @@ impl ActiveSequences {
         isl: usize,
         overlap: u32,
     ) -> (usize, usize) {
+        self.potential_blocks_and_tokens_with_prefill_tracking(token_sequence, isl, overlap, true)
+    }
+
+    pub fn potential_blocks_and_tokens_with_prefill_tracking(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        isl: usize,
+        overlap: u32,
+        track_prefill_tokens: bool,
+    ) -> (usize, usize) {
         let potential_blocks = if let Some(token_seq) = token_sequence {
             self.new_blocks(token_seq) + self.active_blocks()
         } else {
             self.active_blocks()
         };
-        let potential_tokens = self.new_tokens(isl, overlap) + self.active_tokens;
+        let potential_tokens = if track_prefill_tokens {
+            self.new_tokens(isl, overlap) + self.active_tokens
+        } else {
+            self.active_tokens
+        };
         (potential_blocks, potential_tokens)
     }
 
@@ -232,7 +271,10 @@ impl ActiveSequences {
         self.new_blocks(token_sequence) + self.active_blocks()
     }
 
-    /// Free all blocks associated with a request
+    /// Free all blocks associated with a request.
+    ///
+    /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need
+    /// to invoke both when the request is finishing.
     pub fn free(&mut self, request_id: &RequestId) -> usize {
         self.mark_prefill_completed(request_id);
 
@@ -422,6 +464,48 @@ mod tests {
         // Free it (internally calls mark_prefill_completed) → active_tokens=0
         seq_manager.free(&"r2".to_string());
         assert_eq!(seq_manager.active_tokens(), 0);
+    }
+
+    #[test]
+    fn test_add_request_without_prefill_tracking_keeps_active_tokens_zero() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1, 2, 3]),
+            12,
+            0,
+            None,
+            false,
+        );
+
+        assert_eq!(seq_manager.active_tokens(), 0);
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        assert_eq!(seq_manager.active_tokens(), 0);
+        seq_manager.free(&"r1".to_string());
+        assert_eq!(seq_manager.active_blocks(), 0);
+    }
+
+    #[test]
+    fn test_potential_blocks_and_tokens_without_prefill_tracking_ignores_prompt_load() {
+        let mut seq_manager = ActiveSequences::new(4);
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1, 2, 3]),
+            12,
+            0,
+            None,
+            false,
+        );
+
+        let (blocks, tokens) = seq_manager.potential_blocks_and_tokens_with_prefill_tracking(
+            Some(&[1, 2, 3, 4]),
+            16,
+            0,
+            false,
+        );
+        assert_eq!(blocks, 4);
+        assert_eq!(tokens, 0);
     }
 
     #[tokio::test(start_paused = true)]
