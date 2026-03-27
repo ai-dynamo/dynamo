@@ -54,10 +54,7 @@ from .args import Config
 from .constants import EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import (
-    construct_grid_thw_decode_mm_data,
-    is_grid_thw_image_data,
-)
+from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
@@ -1173,45 +1170,50 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         mm_map = request["multi_modal_data"]
 
         vllm_mm_data = {}
-        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        if image_mm_items:
-            image_urls = []
-            uses_url_only_images = True
-            for item in image_mm_items:
-                if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                    image_urls.append(item[URL_VARIANT_KEY])
-                else:
-                    uses_url_only_images = False
-                    break
 
-            if self.embedding_loader is not None and uses_url_only_images and image_urls:
-                image_mm_data = await self.embedding_loader.load_multimodal_embeddings(
+        # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
+        # Still continue below so mixed image+video requests can attach `video`.
+        if self.embedding_loader is not None:
+            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
+            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
+            # support 'Decoded' variant. Need to update the encode worker to unify handling
+            image_urls = []
+            supported = True
+            for item in mm_map.get(IMAGE_URL_KEY, []):
+                if isinstance(item, dict) and "Url" in item:
+                    image_urls.append(item["Url"])
+                elif isinstance(item, dict) and "Decoded" in item:
+                    supported = False
+            if supported:
+                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
                     image_urls, request_id, model=self.config.model, context=context
                 )
-                if image_mm_data:
-                    logger.debug(
-                        "Fetched multimodal embeddings for %d item(s)",
-                        len(image_urls),
-                    )
-                    vllm_mm_data.update(image_mm_data)
+                logger.debug(
+                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                )
 
-            if "image" not in vllm_mm_data:
-                images = await self.image_loader.load_image_batch(image_mm_items)
-                if images:
-                    # vLLM expects single image or list
-                    vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-                    logger.debug(
-                        "Extracted %d image(s) for multimodal processing", len(images)
-                    )
+        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
+        if "image" not in vllm_mm_data and image_mm_items:
+            images = await self.image_loader.load_image_batch(
+                image_mm_items,
+            )
+
+            if images:
+                # vLLM expects single image or list
+                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                logger.debug(
+                    f"Extracted {len(images)} image(s) for multimodal processing"
+                )
 
         video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
         if video_mm_items:
             videos = await self.video_loader.load_video_batch(video_mm_items)
+
             if videos:
+                # vLLM expects single video or list
                 vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
                 logger.debug(
-                    "Extracted %d video item(s) for multimodal processing",
-                    len(videos),
+                    f"Extracted {len(videos)} video(s) for multimodal processing"
                 )
 
         return vllm_mm_data if vllm_mm_data else None
@@ -1574,25 +1576,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         multi_modal_data = None
         # The decode worker is handling disaggregated requests, the mm embedding will be synthetic
         if prefill_result is not None and embedding_params is not None:
-            if (
-                embedding_params.get("image_grid_thw") is not None
-                or embedding_params.get("embeddings_shape") is not None
-            ):
-                if (
-                    embedding_params.get("image_grid_thw") is None
-                    or embedding_params.get("embeddings_shape") is None
-                ):
-                    logger.warning(
-                        "Incomplete grid-aware embedding metadata for request %s; "
-                        "skipping decode multi_modal_data construction.",
-                        request_id,
-                    )
-                else:
-                    multi_modal_data = construct_grid_thw_decode_mm_data(
-                        embedding_params["image_grid_thw"],
-                        embedding_params["embeddings_shape"],
-                        request_id,
-                    )
+            if is_qwen_vl_model(self.config.model):
+                multi_modal_data = construct_qwen_decode_mm_data(
+                    embedding_params["image_grid_thw"],
+                    embedding_params["embeddings_shape"],
+                    request_id,
+                )
         else:
             # Extract and decode multimodal data if present
             multi_modal_data = await self._extract_multimodal_data(
@@ -1915,11 +1904,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """
         Helper function to build mm embedding parameters to be consumed by the decode worker, typically
         decode worker doesn't require any metadata for mm embedding as the content has been consumed by
-        prefill. However, some grid-aware multimodal models require image metadata during
-        decode so vLLM can reconstruct the prompt expansion consistently.
+        prefill. However, especially found for Qwen models, vLLM's processor will try to expand image
+        tokens in the prompt which requires such a metadata to pass through the processor.
         """
         embedding_params = {}
-        if is_grid_thw_image_data(multi_modal_data.get("image")):
+        if is_qwen_vl_model(self.config.model) and isinstance(
+            multi_modal_data.get("image"), dict
+        ):
             image_data = multi_modal_data["image"]
             image_grid_thw = image_data.get("image_grid_thw")
             image_embeds = image_data.get("image_embeds")

@@ -16,7 +16,7 @@ from ..args import Config
 from ..constants import DisaggregationMode
 from ..handlers import BaseWorkerHandler
 from ..multimodal_utils import MyRequestOutput, vLLMMultimodalRequest
-from ..multimodal_utils.model import construct_grid_thw_decode_mm_data
+from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -71,27 +71,26 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler[vLLMMultimodalRequest, str
         ):
             logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
-            # Some grid-aware multimodal models need placeholder multimodal data on
-            # decode so vLLM can rebuild position metadata from `image_grid_thw`.
-            # The decode worker receives the ORIGINAL unexpanded prompt (with
-            # placeholders), and vLLM expands it using this metadata so block
-            # counts match prefill.
+            # For Qwen VL models with mRoPE, we need to pass multi_modal_data containing
+            # image_grid_thw for position embeddings calculation. The decode worker
+            # receives the ORIGINAL unexpanded prompt (with placeholders), and vLLM
+            # will expand it using the multi_modal_data, ensuring the block count
+            # matches what prefill computed.
             #
             # We pass unique placeholder embeddings (seeded by request_id) since the
             # actual embeddings are already in the KV cache from prefill. The unique
             # values prevent incorrect prefix cache matches between different images.
             multi_modal_data = None
-            image_grid_thw = getattr(request, "image_grid_thw", None)
-            embeddings_shape = getattr(request, "embeddings_shape", None)
-            if image_grid_thw is not None or embeddings_shape is not None:
+            if is_qwen_vl_model(self.config.model):
+                image_grid_thw = getattr(request, "image_grid_thw", None)
+                embeddings_shape = getattr(request, "embeddings_shape", None)
                 if image_grid_thw is None or embeddings_shape is None:
                     logger.warning(
-                        "Incomplete grid-aware decode fields "
-                        "(image_grid_thw/embeddings_shape); skipping "
-                        "multi_modal_data construction."
+                        "Missing Qwen VL decode fields (image_grid_thw/embeddings_shape); "
+                        "skipping multi_modal_data construction."
                     )
                 else:
-                    multi_modal_data = construct_grid_thw_decode_mm_data(
+                    multi_modal_data = construct_qwen_decode_mm_data(
                         image_grid_thw, embeddings_shape, request.request_id
                     )
             lora_request = self._resolve_lora_request(request.model)

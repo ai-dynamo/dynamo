@@ -14,14 +14,19 @@
 # limitations under the License.
 
 import hashlib
-import inspect
 import logging
-from collections import deque
+import os
 from typing import Any, Dict, Optional
 
 import torch
 
+from .model import SupportedModels, is_model_supported, is_qwen_vl_model
+
 logger = logging.getLogger(__name__)
+
+# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
+# should be removed once there is proper way to extract vLLM encoder.
+VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
 def get_embedding_hash(key: str) -> str:
@@ -36,141 +41,46 @@ def get_embedding_hash(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def _normalize_device(device: Any) -> torch.device:
-    if isinstance(device, torch.device):
-        return device
-    if isinstance(device, str):
-        return torch.device(device)
-    if isinstance(device, int):
-        return torch.device("cpu" if device < 0 else f"cuda:{device}")
-    return torch.device("cpu")
+def get_qwen_image_features(
+    vision_encoder: torch.nn.Module, image_embeds: Dict[str, Any]
+) -> torch.Tensor:
+    """
+    Extract image features using Qwen-style vision encoder.
 
+    Args:
+        vision_encoder: The vision encoder model
+        image_embeds: Dictionary containing pixel values and grid information
 
-def _get_module_device(module: torch.nn.Module) -> torch.device:
-    device = getattr(module, "device", None)
-    if device is not None:
-        return _normalize_device(device)
+    Returns:
+        Processed image features tensor
 
-    get_device = getattr(module, "get_device", None)
-    if callable(get_device):
-        try:
-            return _normalize_device(get_device())
-        except TypeError:
-            pass
+    Raises:
+        ValueError: If grid_thw is not provided for Qwen model
+    """
+    logger.debug(f"Encoding image of shape: {image_embeds['pixel_values'].shape}")
+    if VLLM_ENCODER:
+        pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
+        grid_thw = image_embeds.get("image_grid_thw")
+        if grid_thw is None:
+            raise ValueError("grid_thw is not provided")
+        grid_thw = grid_thw.tolist()
+        image_features = vision_encoder(pixel_values, grid_thw=grid_thw)
+        return image_features
 
-    try:
-        return next(module.parameters()).device
-    except (AttributeError, StopIteration):
-        return torch.device("cpu")
+    pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
 
-
-def _get_callable_parameter_names(callable_obj: Any) -> set[str]:
-    try:
-        return set(inspect.signature(callable_obj).parameters)
-    except (TypeError, ValueError):
-        return set()
-
-
-def _looks_like_direct_vision_encoder(candidate: Any) -> bool:
-    if getattr(candidate, "spatial_merge_size", None) is not None:
-        return True
-
-    param_names = _get_callable_parameter_names(getattr(candidate, "forward", candidate))
-    return "grid_thw" in param_names or "image_grid_thw" in param_names
-
-
-def _iter_model_candidates(root: Any):
-    queue = deque([root])
-    seen: set[int] = set()
-
-    while queue:
-        candidate = queue.popleft()
-        if candidate is None or id(candidate) in seen:
-            continue
-        seen.add(id(candidate))
-        yield candidate
-
-        nested_model = getattr(candidate, "model", None)
-        if nested_model is not None:
-            queue.append(nested_model)
-
-
-def _summarize_attrs(candidate: Any) -> str:
-    public_attrs = sorted(attr for attr in dir(candidate) if not attr.startswith("_"))
-    return ", ".join(public_attrs[:25])
-
-
-def _prepare_grid_thw(image_embeds: Dict[str, Any], device: torch.device) -> Any:
-    grid_thw = image_embeds.get("image_grid_thw")
-    if grid_thw is None:
-        return None
-
-    if isinstance(grid_thw, torch.Tensor):
-        grid_thw = grid_thw.to(device)
-    else:
-        grid_thw = torch.tensor(grid_thw, device=device)
-
-    return grid_thw
-
-
-def _invoke_image_extractor(
-    extractor: Any,
-    image_embeds: Dict[str, Any],
-    device: torch.device,
-) -> Any:
-    pixel_values = image_embeds["pixel_values"].to(device)
-    grid_thw = _prepare_grid_thw(image_embeds, device)
-    param_names = _get_callable_parameter_names(extractor)
-
-    args = [] if "pixel_values" in param_names else [pixel_values]
-    kwargs = {"pixel_values": pixel_values} if "pixel_values" in param_names else {}
-
+    grid_thw = image_embeds.get("image_grid_thw", None)
     if grid_thw is not None:
-        if "image_grid_thw" in param_names:
-            kwargs["image_grid_thw"] = grid_thw
-        elif "grid_thw" in param_names:
-            # Direct `grid_thw` encoders are loaded from vLLM's encoder-only path.
-            kwargs["grid_thw"] = grid_thw.tolist()
-        elif param_names:
-            raise ValueError(
-                "Processed image inputs include `image_grid_thw`, but the selected "
-                f"encoder path {extractor} does not accept `image_grid_thw` or "
-                "`grid_thw`."
-            )
+        grid_thw = grid_thw.to(vision_encoder.device)
+        logger.debug(f"Qwen grid_thw shape: {grid_thw.shape}")
+    else:
+        raise ValueError("grid_thw is not provided")
 
-    return extractor(*args, **kwargs)
-
-
-def _merge_tensor_chunks(chunks: Any) -> torch.Tensor:
-    if isinstance(chunks, torch.Tensor):
-        return chunks
-
-    if isinstance(chunks, (tuple, list)) and chunks and all(
-        isinstance(item, torch.Tensor) for item in chunks
-    ):
-        return torch.cat(tuple(chunks), dim=0)
-
-    raise TypeError(f"Unsupported embedding chunks type: {type(chunks)}")
-
-
-def _extract_tensor_output(outputs: Any) -> torch.Tensor:
-    if isinstance(outputs, torch.Tensor):
-        return outputs
-
-    if isinstance(outputs, dict):
-        for key in ("pooler_output", "last_hidden_state"):
-            if key in outputs and outputs[key] is not None:
-                return _merge_tensor_chunks(outputs[key])
-
-    for attr in ("pooler_output", "last_hidden_state"):
-        value = getattr(outputs, attr, None)
-        if value is not None:
-            return _merge_tensor_chunks(value)
-
-    if isinstance(outputs, (tuple, list)):
-        return _merge_tensor_chunks(outputs)
-
-    raise TypeError(f"Unsupported embedding output type: {type(outputs)}")
+    return (
+        vision_encoder.get_image_features(pixel_values, grid_thw)  # type: ignore
+        if grid_thw is not None
+        else vision_encoder.get_image_features(pixel_values)  # type: ignore
+    )
 
 
 def encode_image_embeddings(
@@ -180,30 +90,41 @@ def encode_image_embeddings(
     projector: Optional[torch.nn.Module] = None,
 ) -> torch.Tensor:
     """
-    Encode image embeddings using the appropriate encoder path discovered from
-    the loaded model structure.
+    Encode image embeddings using the appropriate model-specific encoder.
+
+    Args:
+        model_name: The model identifier
+        image_embeds: Dictionary containing processed image data
+        vision_encoder: The vision encoder module
+        projector: The multimodal projector (required for LLaVA-style models)
+
+    Returns:
+        Encoded embeddings tensor with normalized shape
+
+    Raises:
+        ValueError: If projector is missing for LLaVA models
+        NotImplementedError: If model is not supported
     """
-    del model_name
-
-    device = _get_module_device(vision_encoder)
     with torch.no_grad():
-        if projector is not None:
-            pixel_values = image_embeds["pixel_values"].to(device)
+        # Route through the correct encoder based on model
+        if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+            pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
             vision_outputs = vision_encoder(pixel_values)
-            hidden_states = getattr(vision_outputs, "last_hidden_state", None)
-            if hidden_states is None:
-                hidden_states = _extract_tensor_output(vision_outputs)
-            embeddings = projector(hidden_states)
-        else:
-            feature_extractor = getattr(vision_encoder, "get_image_features", None)
-            if callable(feature_extractor):
-                raw_outputs = _invoke_image_extractor(
-                    feature_extractor, image_embeds, device
-                )
-            else:
-                raw_outputs = _invoke_image_extractor(vision_encoder, image_embeds, device)
-            embeddings = _extract_tensor_output(raw_outputs)
 
+            if projector is None:
+                raise ValueError(f"Projector not found for LLaVA model: {model_name}")
+
+            embeddings = projector(vision_outputs.last_hidden_state)
+
+        elif is_qwen_vl_model(model_name):
+            embeddings = get_qwen_image_features(vision_encoder, image_embeds)
+
+        else:
+            raise NotImplementedError(f"Model not supported: {model_name}")
+
+        # Normalize output shape
+        if isinstance(embeddings, (tuple, list)):
+            embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
     return embeddings
@@ -213,61 +134,27 @@ def get_encoder_components(
     model_name: str, vision_model: torch.nn.Module
 ) -> tuple[Any, Optional[Any]]:
     """
-    Resolve the encoder and optional projector from the loaded model object.
+    Get the appropriate vision encoder and projector components for a given model.
 
-    The resolution is based on the structure of the loaded module rather than
-    the model name so newly supported VLMs can work without list maintenance.
+    Args:
+        model_name: The model identifier
+        vision_model: The loaded vision model
+
+    Returns:
+        Tuple of (vision_encoder, projector) where types depend on the model
+
+    Raises:
+        NotImplementedError: If model is not supported
     """
-    for candidate in _iter_model_candidates(vision_model):
-        vision_tower = getattr(candidate, "vision_tower", None)
-        if vision_tower is not None:
-            return vision_tower, getattr(candidate, "multi_modal_projector", None)
+    if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+        vision_encoder = vision_model.vision_tower
+        projector = getattr(vision_model, "multi_modal_projector", None)
+        return vision_encoder, projector
 
-        if callable(getattr(candidate, "get_image_features", None)):
-            return candidate, None
+    elif is_qwen_vl_model(model_name):
+        vision_encoder = vision_model
+        projector = None
+        return vision_encoder, projector
 
-        visual = getattr(candidate, "visual", None)
-        if visual is not None:
-            return visual, None
-
-        if _looks_like_direct_vision_encoder(candidate):
-            return candidate, None
-
-    raise NotImplementedError(
-        "Unable to locate vision encoder components for "
-        f"'{model_name}'. Root model attributes: {_summarize_attrs(vision_model)}"
-    )
-
-
-def split_image_embeddings(
-    embeddings: torch.Tensor,
-    image_embeds: Dict[str, Any],
-    vision_encoder: torch.nn.Module,
-) -> tuple[Any, Optional[list[Any]]]:
-    """
-    Split encoded embeddings back into per-image chunks.
-
-    Models that expose `image_grid_thw` plus `spatial_merge_size` produce a
-    concatenated sequence and must be split with the merge metadata. Other
-    models already retain the batch dimension.
-    """
-    image_grid_thw = (
-        image_embeds["image_grid_thw"].tolist()
-        if "image_grid_thw" in image_embeds
-        else None
-    )
-    spatial_merge_size = getattr(vision_encoder, "spatial_merge_size", None)
-
-    if image_grid_thw is not None and spatial_merge_size is not None:
-        sizes = (
-            image_embeds["image_grid_thw"].prod(-1) // spatial_merge_size**2
-        ).tolist()
-        split_embeddings = embeddings.squeeze(0).split(sizes)
-        logger.debug(
-            "Split grid-aware embeddings into shapes: %s",
-            [tensor.shape for tensor in split_embeddings],
-        )
-        return split_embeddings, image_grid_thw
-
-    logger.debug("Image embedding shape: %s", embeddings.shape)
-    return embeddings, image_grid_thw
+    else:
+        raise NotImplementedError(f"Model not supported: {model_name}")

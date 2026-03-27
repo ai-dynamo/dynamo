@@ -13,9 +13,9 @@ from dynamo.vllm.multimodal_utils.encode_utils import (
     encode_image_embeddings,
     get_embedding_hash,
     get_encoder_components,
-    split_image_embeddings,
 )
 from dynamo.vllm.multimodal_utils.model import (
+    SupportedModels,
     construct_mm_data,
     load_vision_model,
 )
@@ -38,6 +38,7 @@ __all__ = [
     "get_encoder_components",
     "get_http_client",
     "ImageLoader",
+    "SupportedModels",
     "construct_mm_data",
     "load_vision_model",
     "MultiModalInput",
@@ -48,5 +49,4 @@ __all__ = [
     "MyRequestOutput",
     "vLLMMultimodalRequest",
     "MultiModalEmbeddingLoader",
-    "split_image_embeddings",
 ]
