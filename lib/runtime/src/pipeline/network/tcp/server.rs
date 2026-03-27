@@ -198,7 +198,13 @@ impl TcpStreamServer {
 
     #[allow(clippy::await_holding_lock)]
     async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+        // Format address properly for both IPv4 and IPv6
+        // IPv6 addresses must be wrapped in brackets when used with a port
+        let addr = if local_ip.contains(':') {
+            format!("[{}]:{}", local_ip, local_port)
+        } else {
+            format!("{}:{}", local_ip, local_port)
+        };
         let state_clone = state.clone();
         let mut guard = state.lock().await;
         if guard.handle.is_some() {
