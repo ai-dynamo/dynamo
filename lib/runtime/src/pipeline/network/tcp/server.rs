@@ -695,7 +695,9 @@ mod tests {
         }
 
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-            Ok(IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]))
+            // Use IPv6 loopback (::1) for deterministic binding in tests.
+            // This is guaranteed to exist on all CI hosts unlike fd00::/8 ULA addresses.
+            Ok(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]))
         }
     }
 
@@ -845,14 +847,15 @@ mod tests {
         let ip = socket_addr.ip();
         assert!(
             ip.is_ipv6(),
-            "Should use IPv6 address when IPv4 is unavailable"
+            "Should use IPv6 loopback address when IPv4 is unavailable"
         );
 
         // Verify it matches our test IPv6 address
-        let expected_ipv6 = IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]);
+        // Use IPv6 loopback (::1) which is guaranteed to be available on all hosts
+        let expected_ipv6 = IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]);
         assert_eq!(
             ip, expected_ipv6,
-            "Should use the IPv6 address from resolver, got: {}",
+            "Should use the IPv6 loopback address from resolver, got: {}",
             ip
         );
 
