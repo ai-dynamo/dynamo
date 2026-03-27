@@ -1,15 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{RouteDoc, service_v2};
-use axum::{Json, Router, http::Method, response::IntoResponse, routing::post};
+use super::{service_v2, RouteDoc};
+use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
 use serde_json::json;
 use std::sync::Arc;
 
 use dynamo_runtime::{
-    discovery::DiscoveryInstance,
-    discovery::DiscoveryQuery,
-    pipeline::PushRouter,
+    discovery::DiscoveryInstance, discovery::DiscoveryQuery, pipeline::PushRouter,
     stream::StreamExt,
 };
 
@@ -119,21 +117,23 @@ async fn clear_kv_blocks_handler(
             }
         };
 
-        let router =
-            match PushRouter::<(), serde_json::Value>::from_client(client, Default::default())
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    failed_workers.push(json!({
-                        "name": format!("{}/{}", namespace, component),
-                        "endpoint": format!("{}/{}/{}", namespace, component, CLEAR_KV_ENDPOINT),
-                        "status": "Failed to create router",
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
+        let router = match PushRouter::<(), serde_json::Value>::from_client(
+            client,
+            Default::default(),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                failed_workers.push(json!({
+                    "name": format!("{}/{}", namespace, component),
+                    "endpoint": format!("{}/{}/{}", namespace, component, CLEAR_KV_ENDPOINT),
+                    "status": "Failed to create router",
+                    "error": e.to_string(),
+                }));
+                continue;
+            }
+        };
 
         let discovery_key = DiscoveryQuery::Endpoint {
             namespace: namespace.clone(),
@@ -172,8 +172,7 @@ async fn clear_kv_blocks_handler(
             .collect();
 
         for instance in &instances_filtered {
-            let instance_name =
-                format!("{}/{}-instance-{}", namespace, component, instance.id());
+            let instance_name = format!("{}/{}-instance-{}", namespace, component, instance.id());
             let endpoint_path = format!("{}/{}/{}", namespace, component, CLEAR_KV_ENDPOINT);
             match router.direct(().into(), instance.id()).await {
                 Ok(mut stream) => match stream.next().await {
