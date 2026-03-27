@@ -47,6 +47,7 @@ pub struct ResponseStreamConverter {
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
     fallback_tool_calls_emitted: usize,
+    structured_tool_calls_seen: bool,
     // Output index counter
     next_output_index: u32,
     // Usage stats from the backend's final chunk
@@ -85,6 +86,7 @@ impl ResponseStreamConverter {
             accumulated_text: String::new(),
             function_call_items: Vec::new(),
             fallback_tool_calls_emitted: 0,
+            structured_tool_calls_seen: false,
             next_output_index: 0,
             usage: None,
         }
@@ -417,7 +419,8 @@ impl ResponseStreamConverter {
 
                 // Fallback for models that emit tool calls as raw <tool_call> text instead of
                 // structured delta.tool_calls chunks.
-                if delta
+                if !self.structured_tool_calls_seen
+                    && delta
                     .tool_calls
                     .as_ref()
                     .is_none_or(|tool_calls| tool_calls.is_empty())
@@ -440,10 +443,23 @@ impl ResponseStreamConverter {
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
                 if !tool_calls.is_empty() {
+                    self.structured_tool_calls_seen = true;
+                    self.fallback_tool_calls_emitted = self
+                        .fallback_tool_calls_emitted
+                        .max(parse_tool_call_text(&self.raw_text).len());
                     self.finish_message_if_started(&mut events);
                 }
                 for tc in tool_calls {
                     let tc_index = tc.index as usize;
+
+                    if tc_index < self.fallback_tool_calls_emitted
+                        && self
+                            .function_call_items
+                            .get(tc_index)
+                            .is_some_and(|fc| fc.started && fc.done)
+                    {
+                        continue;
+                    }
 
                     // Start a new function call if we haven't seen this index
                     while self.function_call_items.len() <= tc_index {
@@ -784,10 +800,7 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
-        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
-    };
+    use serde_json::json;
 
     fn default_params() -> ResponseParams {
         ResponseParams {
@@ -813,67 +826,65 @@ mod tests {
         name: Option<&str>,
         args: Option<&str>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[allow(deprecated)]
-        NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: None,
-                    function_call: None,
-                    tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
-                        index: tc_index,
-                        id: id.map(String::from),
-                        r#type: Some(ChatCompletionToolType::Function),
-                        function: Some(FunctionCallStream {
-                            name: name.map(String::from),
-                            arguments: args.map(String::from),
-                        }),
-                    }]),
-                    role: None,
-                    refusal: None,
-                    reasoning_content: None,
+        serde_json::from_value(json!({
+            "id": "chat-1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": null,
+                    "tool_calls": [{
+                        "index": tc_index,
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": args,
+                        }
+                    }],
+                    "role": null,
+                    "refusal": null,
+                    "reasoning_content": null
                 },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
+                "finish_reason": null,
+                "stop_reason": null,
+                "logprobs": null
             }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
-            nvext: None,
-        }
+            "created": 0,
+            "model": "test",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "object": "chat.completion.chunk",
+            "usage": null,
+            "nvext": null
+        }))
+        .expect("tool call test fixture should deserialize")
     }
 
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
-        #[allow(deprecated)]
-        NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: Some(ChatCompletionMessageContent::Text(text.into())),
-                    function_call: None,
-                    tool_calls: None,
-                    role: None,
-                    refusal: None,
-                    reasoning_content: None,
+        serde_json::from_value(json!({
+            "id": "chat-1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": text,
+                    "tool_calls": null,
+                    "role": null,
+                    "refusal": null,
+                    "reasoning_content": null
                 },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
+                "finish_reason": null,
+                "stop_reason": null,
+                "logprobs": null
             }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
-            nvext: None,
-        }
+            "created": 0,
+            "model": "test",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "object": "chat.completion.chunk",
+            "usage": null,
+            "nvext": null
+        }))
+        .expect("text test fixture should deserialize")
     }
 
     /// Extract the SSE event type from a Result<Event, _>.
@@ -1051,5 +1062,111 @@ mod tests {
             "visible text delta should still be emitted: {types:?}"
         );
         assert_eq!(conv.accumulated_text, "Visible answer.");
+    }
+
+    #[test]
+    fn test_structured_tool_call_does_not_duplicate_raw_tool_call_text_same_chunk() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        let events = conv.process_chunk(
+            &serde_json::from_value(json!({
+                "id": "test",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "content": "<tool_call>{\"name\":\"spawn_agent\",\"arguments\":{\"task\":\"ls\"}}</tool_call>",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "spawn_agent",
+                                "arguments": "{\"task\":\"ls\"}"
+                            }
+                        }],
+                        "role": null,
+                        "refusal": null,
+                        "reasoning_content": null
+                    },
+                    "finish_reason": null,
+                    "stop_reason": null,
+                    "logprobs": null
+                }],
+                "created": 0,
+                "model": "test",
+                "service_tier": null,
+                "system_fingerprint": null,
+                "object": "chat.completion.chunk",
+                "usage": null,
+                "nvext": null
+            }))
+            .expect("combined content/tool-calls fixture should deserialize"),
+        );
+
+        let types = event_types(&events);
+        assert_eq!(
+            types
+                .iter()
+                .filter(|t| *t == "response.output_item.added")
+                .count(),
+            1,
+            "should emit exactly one function-call item: {types:?}"
+        );
+        assert_eq!(
+            types
+                .iter()
+                .filter(|t| *t == "response.function_call_arguments.done")
+                .count(),
+            1,
+            "should emit exactly one function-call args done: {types:?}"
+        );
+        assert_eq!(
+            types
+                .iter()
+                .filter(|t| *t == "response.output_item.done")
+                .count(),
+            1,
+            "should emit exactly one function-call item done: {types:?}"
+        );
+    }
+
+    #[test]
+    fn test_structured_tool_call_does_not_duplicate_prior_fallback_tool_call() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        let fallback_events = conv.process_chunk(&text_chunk(
+            "<tool_call>{\"name\":\"spawn_agent\",\"arguments\":{\"task\":\"ls\"}}</tool_call>",
+        ));
+        let fallback_types = event_types(&fallback_events);
+        assert_eq!(
+            fallback_types
+                .iter()
+                .filter(|t| *t == "response.output_item.done")
+                .count(),
+            1,
+            "fallback path should emit one completed function call: {fallback_types:?}"
+        );
+
+        let structured_events = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("spawn_agent"),
+            Some("{\"task\":\"ls\"}"),
+        ));
+        let structured_types = event_types(&structured_events);
+        assert!(
+            !structured_types.contains(&"response.output_item.added".to_string()),
+            "structured duplicate should be ignored after fallback: {structured_types:?}"
+        );
+        assert!(
+            !structured_types.contains(&"response.function_call_arguments.done".to_string()),
+            "structured duplicate args should be ignored after fallback: {structured_types:?}"
+        );
+        assert!(
+            !structured_types.contains(&"response.output_item.done".to_string()),
+            "structured duplicate completion should be ignored after fallback: {structured_types:?}"
+        );
     }
 }
