@@ -7,9 +7,6 @@ title: Multinode Examples
 For general TensorRT-LLM features and engine configuration, see the
 [Reference Guide](../trtllm-reference-guide.md).
 
-This page intentionally focuses on Kubernetes-based deployments and the
-checked-in TRT-LLM recipes.
-
 ## Recommended Path
 
 For multinode TensorRT-LLM deployments, start from the checked-in Kubernetes
@@ -75,25 +72,6 @@ kubectl port-forward svc/<frontend-service> 8000:8000 -n ${NAMESPACE}
 
 curl http://localhost:8000/v1/models
 ```
-
-## Which Recipe To Use
-
-Choose the recipe that matches your model, hardware, and deployment mode:
-
-- Use [DeepSeek-R1 TRT-LLM WideEP](../../../../recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml)
-  for the current checked-in multi-node GB200 WideEP configuration.
-- Use [Qwen3-235B-A22B-FP8](../../../../recipes/qwen3-235b-a22b-fp8/README.md)
-  when you need a large MoE TensorRT-LLM deployment on H100 or H200.
-- Use [Qwen3-32B-FP8](../../../../recipes/qwen3-32b-fp8/README.md)
-  for a smaller TensorRT-LLM deployment with both aggregated and disaggregated options.
-- Use [GPT-OSS-120B](../../../../recipes/gpt-oss-120b/README.md)
-  for Blackwell-focused TensorRT-LLM deployments.
-- Use [Kimi-K2.5](../../../../recipes/kimi-k2.5/README.md)
-  for the current Kimi TensorRT-LLM aggregated Kubernetes deployments.
-
-Many recipe directories also include `perf.yaml` alongside `deploy.yaml` for
-load or benchmarking flows. If present, use the recipe-local manifest rather
-than inventing a separate multinode launch procedure.
 
 ## Notes
 
