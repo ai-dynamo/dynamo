@@ -25,31 +25,6 @@ from tests.utils.test_output import resolve_test_output_path
 logger = logging.getLogger(__name__)
 
 
-def _with_local_no_proxy(env: dict[str, str]) -> dict[str, str]:
-    """Force localhost traffic to bypass corporate/system HTTP proxies."""
-    out = env.copy()
-    for k in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        out.pop(k, None)
-
-    no_proxy_entries = ["127.0.0.1", "localhost", "0.0.0.0"]
-    existing_no_proxy = out.get("NO_PROXY", "")
-    existing_no_proxy_lower = out.get("no_proxy", "")
-    for existing in (existing_no_proxy, existing_no_proxy_lower):
-        if existing:
-            no_proxy_entries.append(existing)
-    merged = ",".join(no_proxy_entries)
-    out["NO_PROXY"] = merged
-    out["no_proxy"] = merged
-    return out
-
-
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Process manager for Dynamo frontend with ETCD HA support."""
 
@@ -99,7 +74,7 @@ class EtcdReplicaServer(ManagedProcess):
         self.peer_port = peer_port
         self.data_dir = data_dir
 
-        etcd_env = _with_local_no_proxy(os.environ.copy())
+        etcd_env = os.environ.copy()
         etcd_env["ETCD_ENDPOINTS"] = ""  # Clear any inherited ETCD endpoints
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
 
@@ -139,7 +114,6 @@ class EtcdReplicaServer(ManagedProcess):
         """Get the status of this ETCD node"""
         try:
             with requests.Session() as session:
-                session.trust_env = False
                 response = session.post(
                     f"http://127.0.0.1:{self.client_port}/v3/maintenance/status",
                     json={},
@@ -289,7 +263,7 @@ class EtcdCluster:
         peer_url = f"http://127.0.0.1:{peer_port}"
 
         # Set ETCDCTL_ENDPOINTS for etcdctl commands
-        etcdctl_env = _with_local_no_proxy(os.environ.copy())
+        etcdctl_env = os.environ.copy()
         etcdctl_env[
             "ETCDCTL_ENDPOINTS"
         ] = f"http://127.0.0.1:{healthy_replica.client_port}"

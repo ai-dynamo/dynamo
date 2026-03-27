@@ -507,19 +507,17 @@ def verify_runtime_cancellation_metrics(
 
     logger.info(f"Runtime cancellation metrics (component={component}): {count}")
 
-    if count != expected_count:
-        if not runtime_lines:
-            logger.warning(
-                "Runtime cancellation metric series is not exposed; skipping strict runtime cancellation assertion"
-            )
-            return
+    assert runtime_lines, (
+        "Runtime cancellation metric series is not exposed. "
+        "Expected at least one runtime cancellation metric line in worker /metrics."
+    )
 
-        preview = "\n".join(runtime_lines[:20])
-        assert count == expected_count, (
-            f"Runtime (component={component}): expected {expected_count} cancellations, "
-            f"but got {count}. "
-            f"Observed runtime cancellation metrics lines:\n{preview}"
-        )
+    preview = "\n".join(runtime_lines[:20])
+    assert count == expected_count, (
+        f"Runtime (component={component}): expected {expected_count} cancellations, "
+        f"but got {count}. "
+        f"Observed runtime cancellation metrics lines:\n{preview}"
+    )
 
 
 def read_log_content(log_path: str | None) -> str:
