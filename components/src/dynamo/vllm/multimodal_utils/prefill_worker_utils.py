@@ -37,6 +37,31 @@ SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 # "per_image" (default/legacy) distributes images within a request across encoders
 ENCODER_SCHEDULER_MODE = os.getenv("DYN_ENCODER_SCHEDULER", "per_request")
 
+# Encoder split ratio: controls request distribution between encoders
+# Format: "N:M" where N requests go to first encoder, M to second encoder
+# Examples: "1:1" (equal split, default), "7:3" (70% to first, 30% to second)
+ENCODER_SPLIT_RATIO_STR = os.getenv("DYN_ENCODER_SPLIT_RATIO", "1:1")
+
+
+def _parse_split_ratio(ratio_str: str) -> tuple[int, int]:
+    """Parse split ratio string like '7:3' into tuple (7, 3)."""
+    try:
+        parts = ratio_str.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid format: {ratio_str}")
+        ratio1, ratio2 = int(parts[0]), int(parts[1])
+        if ratio1 <= 0 or ratio2 <= 0:
+            raise ValueError(f"Ratios must be positive: {ratio_str}")
+        return (ratio1, ratio2)
+    except Exception as e:
+        logger.warning(
+            f"Failed to parse DYN_ENCODER_SPLIT_RATIO='{ratio_str}': {e}. Using default 1:1"
+        )
+        return (1, 1)
+
+
+ENCODER_SPLIT_RATIO = _parse_split_ratio(ENCODER_SPLIT_RATIO_STR)
+
 # Round-robin counter for per-request scheduling (thread-safe via GIL for single event loop)
 _encoder_round_robin_index = 0
 
@@ -183,14 +208,32 @@ async def _fetch_from_encode_workers(
             if not instance_ids:
                 raise RuntimeError("No encoder instances available")
 
-            selected_instance_id = instance_ids[
-                _encoder_round_robin_index % len(instance_ids)
-            ]
+            # Apply weighted round-robin based on split ratio
+            if len(instance_ids) == 2:
+                # Weighted selection for dual encoder setup
+                ratio1, ratio2 = ENCODER_SPLIT_RATIO
+                total_ratio = ratio1 + ratio2
+                position = _encoder_round_robin_index % total_ratio
+
+                # Select first encoder if position < ratio1, else second encoder
+                encoder_index = 0 if position < ratio1 else 1
+                selected_instance_id = instance_ids[encoder_index]
+
+                logger.info(
+                    f"[PREFILL] request: {request_id} assigned to encoder instance {selected_instance_id} "
+                    f"(mode=per_request, split_ratio={ratio1}:{ratio2}, position={position}/{total_ratio}, {len(image_urls)} images)"
+                )
+            else:
+                # Simple round-robin for single or 3+ encoders
+                selected_instance_id = instance_ids[
+                    _encoder_round_robin_index % len(instance_ids)
+                ]
+                logger.info(
+                    f"[PREFILL] request: {request_id} assigned to encoder instance {selected_instance_id} "
+                    f"(mode=per_request, {len(image_urls)} images)"
+                )
+
             _encoder_round_robin_index += 1
-            logger.info(
-                f"[PREFILL] request: {request_id} assigned to encoder instance {selected_instance_id} "
-                f"(mode=per_request, {len(image_urls)} images)"
-            )
 
             # Send all batches to the same encoder using direct()
             for url in image_urls:

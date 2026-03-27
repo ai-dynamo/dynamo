@@ -89,7 +89,8 @@ echo "  - Encoder 1: CPU (vision model on CPU)"
 echo "  - Encoder 2: XPU $DYN_ENCODE_WORKER_1_GPU (vision model on GPU)"
 echo "  - Prefill: XPU $DYN_PREFILL_WORKER_GPU"
 echo "  - Decode: XPU $DYN_DECODE_WORKER_GPU"
-echo "  - Load balancing: Round-robin across encoders"
+echo "  - Scheduler Mode: ${DYN_ENCODER_SCHEDULER:-per_request}"
+echo "  - Split Ratio: ${DYN_ENCODER_SPLIT_RATIO:-1:1}"
 echo "=========================================="
 echo ""
 
@@ -125,9 +126,11 @@ python -m dynamo.vllm \
 
 sleep 5  # Give encoders time to register
 
-# Start prefill worker (routes to both encoders via round-robin)
+# Start prefill worker (routes to both encoders via scheduler)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+DYN_ENCODER_SCHEDULER="${DYN_ENCODER_SCHEDULER:-per_request}" \
+DYN_ENCODER_SPLIT_RATIO="${DYN_ENCODER_SPLIT_RATIO:-1:1}" \
 env $DEVICE_AFFINITY_ENV=$DYN_PREFILL_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-worker \
@@ -162,7 +165,7 @@ echo "=================================================="
 echo "All components started. Waiting for initialization..."
 echo "=================================================="
 echo ""
-echo "Encoders will load balance requests via round-robin"
+echo "Scheduler: ${DYN_ENCODER_SCHEDULER:-per_request} mode (split: ${DYN_ENCODER_SPLIT_RATIO:-1:1})"
 echo ""
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
