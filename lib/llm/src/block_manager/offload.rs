@@ -796,6 +796,12 @@ mod tests {
     type DevicePool = Option<Arc<dyn BlockPool<DeviceStorage, Local, BasicMetadata>>>;
     type HostPool = Option<Arc<dyn BlockPool<PinnedStorage, Local, BasicMetadata>>>;
     type DiskPool = Option<Arc<dyn BlockPool<DiskStorage, Local, BasicMetadata>>>;
+    type TestPools = (
+        Arc<OffloadManager<Local, BasicMetadata>>,
+        DevicePool,
+        HostPool,
+        DiskPool,
+    );
 
     lazy_static::lazy_static! {
         static ref NIXL_AGENT: Arc<Option<NixlAgent>> = {
@@ -2013,12 +2019,7 @@ mod tests {
             host_config: Option<(usize, LayoutType)>,
             device_config: Option<(usize, LayoutType)>,
             disk_config: Option<(usize, LayoutType)>,
-        ) -> Result<(
-            Arc<OffloadManager<Local, BasicMetadata>>,
-            DevicePool,
-            HostPool,
-            DiskPool,
-        )> {
+        ) -> Result<TestPools> {
             // This would need to be implemented to support different layout types per pool
             // For now, fall back to standard build with the most complex layout
             build_pools_with_layout(
