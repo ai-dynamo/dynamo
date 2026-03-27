@@ -156,6 +156,12 @@ pub struct KvRouterConfig {
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
+    /// Enable agent-aware cache control features.
+    /// When true, the router creates a session_control client for session lifecycle RPCs,
+    /// manages sticky session affinity, and injects retention_seconds for priority-based
+    /// KV eviction with time decay. When false (default), these features are disabled.
+    pub router_enable_cache_control: bool,
+
     pub skip_initial_worker_wait: bool,
 
     /// Scheduling policy for the router queue.
@@ -190,6 +196,7 @@ impl Default for KvRouterConfig {
             router_prune_target_ratio: 0.8,
             router_queue_threshold: Some(4.0),
             router_event_threads: 4,
+            router_enable_cache_control: false,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,

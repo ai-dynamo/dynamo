@@ -28,6 +28,13 @@ use futures::stream;
 use tracing::Instrument;
 use validator::Validate;
 
+// Re-export from dynamo-kv-router crate
+pub use dynamo_kv_router::approx;
+pub use dynamo_kv_router::protocols;
+pub use dynamo_kv_router::scheduling;
+pub use dynamo_kv_router::selector;
+
+pub mod agent_controller;
 pub mod indexer;
 mod jetstream;
 pub mod metrics;
@@ -36,12 +43,15 @@ pub mod publisher;
 pub mod push_router;
 pub mod scheduler;
 pub mod sequence;
+pub mod sticky_sessions;
 pub mod subscriber;
 pub mod worker_query;
 
+pub use agent_controller::AgentController;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub use sticky_sessions::StickySessionRouter;
 
 use crate::{
     discovery::RuntimeConfigWatch,

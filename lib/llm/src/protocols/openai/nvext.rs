@@ -166,6 +166,14 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
+
+    /// Session control for subagent KV isolation and sticky routing.
+    /// When present, the router uses `session_id` for worker affinity.
+    /// When `action` is set to `open` or `close`, the router also fires
+    /// session lifecycle RPCs to the worker.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<SessionControl>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -199,6 +207,81 @@ pub struct AgentHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(ignore)]
     pub latency_sensitivity: Option<f64>,
+}
+
+/// Anthropic-style cache control hint for prefix pinning with TTL.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: CacheControlType,
+    /// TTL as seconds (integer) or shorthand ("5m" = 300s, "1h" = 3600s). Clamped to [300, 3600].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheControlType {
+    #[default]
+    Ephemeral,
+    #[serde(other)]
+    Unknown,
+}
+
+const MIN_TTL_SECONDS: u64 = 300;
+const MAX_TTL_SECONDS: u64 = 3600;
+
+impl CacheControl {
+    /// Parse TTL string to seconds, clamped to [300, 3600].
+    ///
+    /// Accepts integer seconds ("120", "600") or shorthand ("5m", "1h").
+    /// Values below 300 are clamped to 300; values above 3600 are clamped to 3600.
+    /// Unrecognized strings default to 300s.
+    pub fn ttl_seconds(&self) -> u64 {
+        let raw = match self.ttl.as_deref() {
+            None => return MIN_TTL_SECONDS,
+            Some("5m") => 300,
+            Some("1h") => 3600,
+            Some(other) => match other.parse::<u64>() {
+                Ok(secs) => secs,
+                Err(_) => {
+                    tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
+                    return MIN_TTL_SECONDS;
+                }
+            },
+        };
+        raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
+    }
+}
+
+fn default_session_timeout() -> u64 {
+    30
+}
+
+/// Session control for subagent KV isolation and sticky routing.
+///
+/// Always requires `session_id`. The `action` field is optional:
+/// - `action: "open"` on the first turn creates a streaming session on the worker
+/// - `action: "close"` on the last turn frees session KV after generation
+/// - No `action` on intermediate turns -- just provides `session_id` for sticky routing
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SessionControl {
+    /// Unique session identifier. Present on every turn for sticky routing.
+    pub session_id: String,
+    /// Lifecycle action: `"open"` or `"close"`. Omit on intermediate turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<SessionAction>,
+    /// Inactivity timeout in seconds (default 30, only used with `action: "open"`).
+    #[serde(default = "default_session_timeout")]
+    pub timeout: u64,
+}
+
+/// Session lifecycle actions.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    Open,
+    Close,
 }
 
 impl Default for NvExt {
@@ -249,6 +332,68 @@ mod tests {
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
+        assert_eq!(nv_ext.session_control, None);
+    }
+
+    // Test CacheControl serde roundtrip and TTL parsing
+    #[test]
+    fn test_cache_control_serde_and_ttl() {
+        // Default (ephemeral, no TTL)
+        let cc = CacheControl::default();
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert_eq!(cc.ttl, None);
+        assert_eq!(cc.ttl_seconds(), 300);
+
+        // Shorthand values
+        let cc_5m = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("5m".to_string()),
+        };
+        assert_eq!(cc_5m.ttl_seconds(), 300);
+
+        let cc_1h = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("1h".to_string()),
+        };
+        assert_eq!(cc_1h.ttl_seconds(), 3600);
+
+        // Integer seconds -- within range
+        let cc_600 = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("600".to_string()),
+        };
+        assert_eq!(cc_600.ttl_seconds(), 600);
+
+        // Integer seconds -- clamped to min (300)
+        let cc_low = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("10".to_string()),
+        };
+        assert_eq!(cc_low.ttl_seconds(), 300);
+
+        // Integer seconds -- clamped to max (3600)
+        let cc_high = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("7200".to_string()),
+        };
+        assert_eq!(cc_high.ttl_seconds(), 3600);
+
+        // Unrecognized string defaults to 300
+        let cc_bad = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("forever".to_string()),
+        };
+        assert_eq!(cc_bad.ttl_seconds(), 300);
+
+        // Serde roundtrip
+        let json = serde_json::to_string(&cc_5m).unwrap();
+        let deser: CacheControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, cc_5m);
+
+        // Deserialize from API-style JSON
+        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
+        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
+        assert_eq!(from_api.ttl_seconds(), 3600);
     }
 
     // Test valid builder configurations
@@ -286,6 +431,47 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, Some(100));
         assert_eq!(nv_ext.decode_worker_id, Some(200));
         assert!(nv_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_session_control_serde() {
+        // Open action with timeout
+        let sc_json = r#"{"session_id": "sub-1", "action": "open", "timeout": 60}"#;
+        let sc: SessionControl = serde_json::from_str(sc_json).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.session_id, "sub-1");
+        assert_eq!(sc.timeout, 60);
+
+        // Close action (timeout defaults to 30)
+        let sc_close = r#"{"session_id": "sub-1", "action": "close"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_close).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Close));
+        assert_eq!(sc.timeout, 30);
+
+        // Continue (no action, just session_id for sticky routing)
+        let sc_continue = r#"{"session_id": "sub-1"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_continue).unwrap();
+        assert_eq!(sc.action, None);
+        assert_eq!(sc.session_id, "sub-1");
+
+        // NvExt with session_control
+        let nvext_json =
+            r#"{"session_control": {"session_id": "sub-2", "action": "open", "timeout": 30}}"#;
+        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
+        assert!(nvext.session_control.is_some());
+        let sc = nvext.session_control.unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.session_id, "sub-2");
+
+        // Roundtrip
+        let original = SessionControl {
+            session_id: "test-session".to_string(),
+            action: Some(SessionAction::Close),
+            timeout: 90,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deser: SessionControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, original);
     }
 
     // Test apply_header_routing_overrides - worker header present, prefill header absent

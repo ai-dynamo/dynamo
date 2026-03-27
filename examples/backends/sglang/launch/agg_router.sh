@@ -52,16 +52,21 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="Qwen/Qwen3-14B-FP8"
+CONTEXT_LENGTH="${CONTEXT_LENGTH:-131072}"
+MODEL_OVERRIDE_ARGS=$(cat <<EOF
+{"rope_theta":1000000,"max_position_embeddings":${CONTEXT_LENGTH},"rope_scaling":{"rope_type":"yarn","rope_theta":1000000,"factor":4.0,"original_max_position_embeddings":32768}}
+EOF
+)
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL")
+GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --max-model-len "$CONTEXT_LENGTH")
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-FRONTEND_ARGS=(--router-mode kv)
+FRONTEND_ARGS=(--router-mode kv --enable-cache-control --router-reset-states)
 if [ "$APPROX_MODE" = true ]; then
     FRONTEND_ARGS+=(--no-kv-events)
 fi
@@ -81,10 +86,17 @@ OTEL_SERVICE_NAME=dynamo-worker-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER1:-808
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
+  --context-length "$CONTEXT_LENGTH" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
   ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
+  --skip-tokenizer-init \
+  --radix-eviction-policy priority \
+  --enable-streaming-session \
+  --json-model-override-args "$MODEL_OVERRIDE_ARGS" \
+  --dyn-tool-call-parser hermes \
+  --dyn-reasoning-parser qwen3 \
   "${KV_EVENTS_ARGS_1[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
@@ -93,10 +105,17 @@ OTEL_SERVICE_NAME=dynamo-worker-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER2:-808
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
+  --context-length "$CONTEXT_LENGTH" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
   ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
+  --skip-tokenizer-init \
+  --radix-eviction-policy priority \
+  --json-model-override-args "$MODEL_OVERRIDE_ARGS" \
+  --enable-streaming-session \
+  --dyn-tool-call-parser hermes \
+  --dyn-reasoning-parser qwen3 \
   "${KV_EVENTS_ARGS_2[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &

@@ -18,7 +18,12 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter,
+        agent_controller::{AgentController, SessionCloseAction},
+        metrics::RouterRequestMetrics,
+        sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -29,6 +34,10 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// Sticky session routing (always available when session_id is set).
+    sticky_sessions: Option<Arc<StickySessionRouter>>,
+    /// Session lifecycle RPCs (open/close). Requires --enable-event-plane.
+    agent_controller: Option<Arc<AgentController>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -59,6 +68,8 @@ struct RequestGuard {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    /// Deferred session close action (fires after generation completes)
+    deferred_close: Option<SessionCloseAction>,
 }
 
 impl RequestGuard {
@@ -134,6 +145,11 @@ impl RequestGuard {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
+
+        // Take to prevent double-fire from Drop
+        if let Some(close) = self.deferred_close.take() {
+            close.execute(&self.context_id);
+        }
     }
 
     fn record_metrics(&mut self) {
@@ -155,6 +171,12 @@ impl RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
+
+        // Fire deferred close if finish() didn't run (e.g., stream dropped early).
+        if let Some(close) = self.deferred_close.take() {
+            close.execute(&self.context_id);
+        }
+
         if !self.freed {
             let chooser = self.chooser.clone();
             let context_id = self.context_id.clone();
@@ -181,7 +203,40 @@ impl KvPushRouter {
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        KvPushRouter { inner, chooser }
+        let enable_event_plane = chooser.kv_router_config().router_enable_cache_control;
+
+        // Agent controller manages session lifecycle RPCs (open/close).
+        let agent_controller = if enable_event_plane {
+            let component = chooser.client().endpoint.component().clone();
+            Some(Arc::new(AgentController::new(component)))
+        } else {
+            None
+        };
+
+        // Sticky sessions share expiry handling with the agent controller so
+        // router-side reap also closes the worker session.
+        let sticky_sessions = if enable_event_plane {
+            let on_expire = agent_controller.as_ref().map(|controller| {
+                let controller = controller.clone();
+                Arc::new(move |session_id: String, worker_id: u64| {
+                    controller
+                        .clone()
+                        .close_expired_session(session_id, worker_id);
+                }) as Arc<dyn Fn(String, u64) + Send + Sync>
+            });
+            Some(Arc::new(StickySessionRouter::new(
+                InMemoryAffinityStore::new_with_on_expire(on_expire),
+            )))
+        } else {
+            None
+        };
+
+        KvPushRouter {
+            inner,
+            chooser,
+            sticky_sessions,
+            agent_controller,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -332,13 +387,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+
+        // Resolve session affinity: if the request has a session_id, inject the
+        // pinned worker_id into backend_instance_id before worker selection.
+        if let Some(ref sticky) = self.sticky_sessions
+            && request
+                .routing
+                .as_ref()
+                .and_then(|r| r.backend_instance_id)
+                .is_none()
+            && let Some(worker_id) = sticky.resolve(&request)
+        {
+            request.routing_mut().backend_instance_id = Some(worker_id);
+        }
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
@@ -443,6 +511,31 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
+        // Session lifecycle RPCs via agent controller.
+        // Fails fast if session_control.open is requested but the client can't be created.
+        let deferred_close = match self.agent_controller.as_ref() {
+            Some(ctrl) => {
+                ctrl.on_routed(
+                    &request,
+                    instance_id,
+                    &context_id,
+                    self.sticky_sessions.as_deref(),
+                )
+                .await?
+            }
+            None => None,
+        };
+
+        // Inject retention_seconds from cache_control TTL into extra_args.
+        // This replaces the old pin_prefix RPC -- the backend uses retention_seconds
+        // for priority-based KV cache eviction with time decay.
+        if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
+            let extra = request.extra_args.get_or_insert_with(|| json!({}));
+            if let serde_json::Value::Object(map) = extra {
+                map.insert("retention_seconds".to_string(), json!(ttl));
+            }
+        }
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -484,6 +577,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
+                deferred_close,
             };
 
             loop {

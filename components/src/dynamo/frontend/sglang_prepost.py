@@ -94,6 +94,22 @@ def create_parsers(
     return tool_call_parser, reasoning_parser
 
 
+def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
+    if isinstance(prompt_token_ids, list):
+        return prompt_token_ids
+
+    input_ids = getattr(prompt_token_ids, "input_ids", None)
+    if isinstance(input_ids, list):
+        return input_ids
+
+    if isinstance(prompt_token_ids, dict):
+        dict_input_ids = prompt_token_ids.get("input_ids")
+        if isinstance(dict_input_ids, list):
+            return dict_input_ids
+
+    return list(prompt_token_ids)
+
+
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
@@ -124,9 +140,9 @@ def preprocess_chat_request(
     ):
         template_kwargs["tools"] = [t.model_dump() for t in sglang_tools]
 
-    prompt_token_ids = tokenizer.apply_chat_template(messages, **template_kwargs)
-    if not isinstance(prompt_token_ids, list):
-        prompt_token_ids = list(prompt_token_ids)
+    prompt_token_ids = _normalize_prompt_token_ids(
+        tokenizer.apply_chat_template(messages, **template_kwargs)
+    )
 
     tool_call_parser, reasoning_parser = create_parsers(
         request,

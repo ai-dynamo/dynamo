@@ -114,6 +114,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         priority = (request.get("routing") or {}).get("priority")
 
+        # Extract retention_seconds from extra_args if present
+        extra_args = request.get("extra_args") or {}
+        retention_seconds = extra_args.get("retention_seconds")
+
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
@@ -147,7 +151,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
                 **self._priority_kwargs(priority),
+                **self._retention_kwargs(retention_seconds),
             )
 
             if self.skip_tokenizer_init:
@@ -185,7 +191,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
                 **self._priority_kwargs(priority),
+                **self._retention_kwargs(retention_seconds),
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):

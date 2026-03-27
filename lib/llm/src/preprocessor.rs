@@ -331,6 +331,7 @@ impl OpenAIPreprocessor {
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
                 allowed_worker_ids: None,
+                session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
