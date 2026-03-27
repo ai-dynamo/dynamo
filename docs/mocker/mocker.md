@@ -96,7 +96,7 @@ python -m dynamo.mocker \
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
-| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Requires `aiconfigurator` SDK installed (install with `pip install ai-dynamo[mocker]`) |
+| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and replay paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
@@ -126,10 +126,12 @@ python -m dynamo.mocker \
 
 The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
 `offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
-admission, and synthetic workload generation directly:
+admission, synthetic workload generation, and offline disaggregated prefill/decode replay directly:
 
-The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Engine settings
-such as `block_size`, `engine_type`, and compute speedups still belong in `--extra-engine-args`.
+The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Aggregated
+replay uses `--extra-engine-args`. Offline disagg replay instead uses
+`--prefill-engine-args` plus `--decode-engine-args`, together with
+`--num-prefill-workers` and `--num-decode-workers`.
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
@@ -197,6 +199,31 @@ Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay
 `block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
 as it matches `block_size` when both are provided.
 
+Offline replay also supports disaggregated `kv_router` mode. In that mode:
+
+- `--prefill-engine-args` must describe a prefill worker
+- `--decode-engine-args` must describe a decode worker
+- `--router-mode` must be `kv_router`
+- only offline replay is supported
+
+Example:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 4096 \
+    --output-tokens 256 \
+    --request-count 100 \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --replay-concurrency 32 \
+    --num-prefill-workers 2 \
+    --num-decode-workers 6 \
+    --prefill-engine-args '{"worker_type":"prefill","block_size":512}' \
+    --decode-engine-args '{"worker_type":"decode","block_size":512}' \
+    --router-config '{"router_queue_policy":"wspt"}' \
+    --report-json /tmp/replay-report.json
+```
+
 ## Performance Modeling Setup
 
 By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, pass `--planner-profile-data` with either:
@@ -223,7 +250,7 @@ python -m dynamo.mocker \
 To use the AIC SDK for latency prediction:
 
 ```bash
-pip install ai-dynamo[mocker]
+uv pip install '.[mocker]'
 
 python -m dynamo.mocker \
     --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
@@ -234,11 +261,31 @@ python -m dynamo.mocker \
 
 The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
 
-When using `python -m dynamo.replay`, there are no dedicated AIC flags. Pass the equivalent fields directly via `--extra-engine-args`:
+Important notes:
+
+- AIC is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC.
+- `python -m dynamo.replay` also does not use AIC unless you explicitly put AIC fields in the engine-args JSON.
+- `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
+- In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
+
+When using `python -m dynamo.replay`, there are no dedicated AIC flags. For aggregated replay,
+pass the equivalent fields via `--extra-engine-args`:
 
 ```bash
 python -m dynamo.replay /path/to/trace.jsonl \
     --extra-engine-args '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
+```
+
+For offline disagg replay, pass the staged engine configs instead:
+
+```bash
+python -m dynamo.replay /path/to/trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --prefill-engine-args '{"worker_type":"prefill","aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"block_size":512}' \
+    --decode-engine-args '{"worker_type":"decode","aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"block_size":512}' \
+    --num-prefill-workers 2 \
+    --num-decode-workers 6
 ```
 
 The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
@@ -355,7 +402,7 @@ The mocker supports three timing prediction modes:
 
 **Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
 
-**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode requires the `aiconfigurator` SDK, installable via `pip install ai-dynamo[mocker]`.
+**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode is opt-in and requires both the `aiconfigurator` SDK and loadable systems/perf data for the requested tuple.
 
 ### Bootstrap Rendezvous (Disaggregated Serving)
 

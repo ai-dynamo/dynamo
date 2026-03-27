@@ -26,6 +26,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
+    "router_track_prefill_tokens",
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
@@ -51,6 +52,7 @@ class KvRouterConfigBase(ConfigBase):
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
+    router_track_prefill_tokens: bool
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
@@ -172,6 +174,18 @@ class KvRouterArgGroup(ArgGroup):
                 "(when KV cache reuse is not expected)."
             ),
             obsolete_flag="--assume-kv-reuse",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-track-prefill-tokens",
+            env_var="DYN_ROUTER_TRACK_PREFILL_TOKENS",
+            default=True,
+            dest="router_track_prefill_tokens",
+            help=(
+                "KV Router: Include prompt-side prefill tokens in active load accounting. "
+                "Use --no-router-track-prefill-tokens to ignore prompt tokens in router "
+                "prefill-token load, queue pressure, and active_prefill_tokens metrics."
+            ),
         )
         add_argument(
             g,

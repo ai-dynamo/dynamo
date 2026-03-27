@@ -23,6 +23,7 @@ from dynamo.planner.utils.planner_core import (
 )
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.prometheus import Metrics
+from dynamo.planner.worker_info import WorkerInfo
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -56,12 +57,12 @@ class PlannerHarness:
         target_replicas = [
             {
                 "sub_component_type": "prefill",
-                "component_name": self.prefill_planner.prefill_component_name,
+                "component_name": self.prefill_planner.prefill_worker_info.k8s_name,
                 "desired_replicas": next_num_p,
             },
             {
                 "sub_component_type": "decode",
-                "component_name": self.prefill_planner.decode_component_name,
+                "component_name": self.prefill_planner.decode_worker_info.k8s_name,
                 "desired_replicas": next_num_d,
             },
         ]
@@ -83,12 +84,12 @@ class PlannerHarness:
         }
         prefill_attrs = {
             "prefill_interpolator",
-            "prefill_component_name",
+            "prefill_worker_info",
             "p_correction_factor",
         }
         decode_attrs = {
             "decode_interpolator",
-            "decode_component_name",
+            "decode_worker_info",
             "d_correction_factor",
         }
         if name == "last_metrics":
@@ -184,6 +185,20 @@ def planner():
         )
         decode_planner = DecodePlanner(mock_runtime, config, shared_state=shared_state)
         planner = PlannerHarness(prefill_planner, decode_planner, shared_state)
+
+        # Set up WorkerInfo for both planners
+        prefill_planner.prefill_worker_info = WorkerInfo(
+            k8s_name="VllmPrefillWorker",
+            component_name="prefill",
+            endpoint="generate",
+        )
+        prefill_planner.decode_worker_info = WorkerInfo(
+            k8s_name="VllmDecodeWorker",
+            component_name="backend",
+            endpoint="generate",
+        )
+        decode_planner.prefill_worker_info = prefill_planner.prefill_worker_info
+        decode_planner.decode_worker_info = prefill_planner.decode_worker_info
 
         # Mock the interpolators to return fixed values for testing
         planner.prefill_interpolator = Mock()
