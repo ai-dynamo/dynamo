@@ -65,27 +65,6 @@ export DYN_REQUEST_PLANE=tcp
 
 GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS")
 
-prefetch_model_if_needed() {
-    local model_name="$1"
-
-    if [[ -e "$model_name" ]]; then
-        return
-    fi
-
-    python - "$model_name" <<'PY'
-from pathlib import Path
-import sys
-
-from huggingface_hub import snapshot_download
-
-model_name = sys.argv[1]
-if Path(model_name).exists():
-    raise SystemExit(0)
-
-snapshot_download(repo_id=model_name)
-PY
-}
-
 print_launch_banner --no-curl "Launching Aggregated Video Serving" "$MODEL_NAME" "$HTTP_PORT" \
     "Backend:     dynamo.vllm --enable-multimodal" \
     "Video path:  Standard TokensPrompt multi_modal_data flow"
@@ -102,8 +81,6 @@ print_curl_footer <<CURL
       "max_tokens": 128
     }'
 CURL
-
-prefetch_model_if_needed "$MODEL_NAME"
 
 python -m dynamo.frontend &
 

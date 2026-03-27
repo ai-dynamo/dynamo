@@ -232,7 +232,11 @@ class Processor(ProcessMixIn):
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    multimodal_input.image_url = item.image_url.url
+                    raise ValueError(
+                        "Image requests should use the standard `python -m dynamo.frontend` "
+                        "+ `python -m dynamo.vllm --enable-multimodal` flow instead of the "
+                        "legacy multimodal example processor."
+                    )
                 elif item.type == "video_url":
                     raise ValueError(
                         "Video requests should use the standard `python -m dynamo.frontend` "
@@ -252,7 +256,10 @@ class Processor(ProcessMixIn):
             and multimodal_input.video_url is None
             and multimodal_input.audio_url is None
         ):
-            raise ValueError("Either image URL or audio URL is required")
+            raise ValueError(
+                "Audio requests are the only multimodal mode supported by the "
+                "legacy example processor."
+            )
 
         async for response in self._generate(
             chat_request, multimodal_input, RequestType.CHAT

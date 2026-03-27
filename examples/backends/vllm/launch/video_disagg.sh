@@ -66,27 +66,6 @@ done
 
 export DYN_REQUEST_PLANE=tcp
 
-prefetch_model_if_needed() {
-    local model_name="$1"
-
-    if [[ -e "$model_name" ]]; then
-        return
-    fi
-
-    python - "$model_name" <<'PY'
-from pathlib import Path
-import sys
-
-from huggingface_hub import snapshot_download
-
-model_name = sys.argv[1]
-if Path(model_name).exists():
-    raise SystemExit(0)
-
-snapshot_download(repo_id=model_name)
-PY
-}
-
 if [[ "$SINGLE_GPU" == "true" ]]; then
     GPU_LABEL="1 GPU"
     PREFILL_GPU="${DYN_PREFILL_WORKER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
@@ -129,8 +108,6 @@ print_curl_footer <<CURL
       "max_tokens": 128
     }'
 CURL
-
-prefetch_model_if_needed "$MODEL_NAME"
 
 python -m dynamo.frontend &
 
