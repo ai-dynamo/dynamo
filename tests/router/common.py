@@ -1296,6 +1296,7 @@ def _test_router_decisions_disagg(
         enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
+        min_initial_workers=decode_workers.num_workers + prefill_workers.num_workers,
     ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
