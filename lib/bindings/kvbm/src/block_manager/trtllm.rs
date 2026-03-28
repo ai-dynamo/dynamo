@@ -314,6 +314,16 @@ impl TrtllmStateManager {
         self.num_blocks
     }
 
+    fn add_dummy_request(&mut self, request_id: u64, target_capacity: usize) -> PyResult<bool> {
+        self.request_state.entry(request_id).or_insert(RequestState {
+            active: true,
+            ..Default::default()
+        });
+        self.slot_for(request_id)?;
+        self.request_state_for_mut(request_id)?.active = true;
+        self.resize_state(request_id, target_capacity)
+    }
+
     fn shutdown(&mut self) {
         self.request_state.clear();
         self.free_block_ids = (0..self.num_blocks).collect();

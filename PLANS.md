@@ -195,13 +195,18 @@ Implemented so far:
   fallback for stub-only tests and environments without the extension
 - added stdlib-only tests that verify the Python manager can delegate request
   lifecycle state to the native helper surface
+- moved supported-path dummy request allocation onto the native helper too,
+  instead of seeding dummy state through Python `prepare_context()` plus
+  direct resize calls
+- fixed `get_kv_cache_stats()` to report native-backed allocations instead of
+  incorrectly reading only the dormant Python fallback free-list
 
 Still pending in this phase:
 
-- replace the remaining Python fallback bookkeeping entirely once the Rust path
-  covers dummy requests, iteration events, and any remaining edge semantics
 - decide whether host block-offset materialization should also move into Rust or
   remain a thin Python-side formatting step
+- add repeated allocate/free and teardown coverage around the now-native dummy
+  and lifecycle path
 
 ### Phase 5: `impl` compatibility surface
 
@@ -264,6 +269,10 @@ Goal:
 - Added a native Rust `TrtllmStateManager` and started delegating request
   lifecycle bookkeeping from the Python manager into that object for the
   supported path.
+- Added native helper support for dummy request allocation so the supported
+  path no longer needs Python-side dummy request seeding before allocation.
+- Fixed native-backed KV cache stats reporting so allocated bytes now reflect
+  native free-block state plus full TRTLLM block geometry.
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -300,6 +309,12 @@ Goal:
   can delegate request accounting to Rust without reusing the logical
   distributed `BlockManager`, because the supported path only needs local
   request/block bookkeeping plus exported tensor views today.
+- `get_kv_cache_stats()` was still a real correctness gap after the native
+  lifecycle work: it read only the Python fallback free-list, so native-backed
+  allocations always reported zero bytes until fixed.
+- After re-reading the current native lifecycle boundary, the only remaining
+  supported-path Python-owned state that materially affects correctness is host
+  block-offset row formatting; request/block ownership can stay native.
 
 ## Testing Log
 
@@ -326,6 +341,11 @@ Goal:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after moving dummy request allocation to the native helper and fixing
+  native-backed stats:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
@@ -343,15 +363,14 @@ Goal:
 
 ## Remaining Work
 
-- Phase 4: finish moving the remaining Python fallback lifecycle logic into the
-  Rust `TrtllmStateManager`, especially dummy-request helpers and any other
-  paths that still touch Python-owned request/block state directly.
 - Phase 4: decide whether host block-offset row materialization should move into
   Rust now that slot assignment and padded block rows are already available
   there.
-- Phase 5: decide whether the current tiny aggregated-path `impl` shim is
-  sufficient for the pinned supported path once the Rust lifecycle object lands,
-  or whether additional `impl` methods need to move into Rust too.
+- Phase 4: add repeated allocate/free and teardown coverage for both fallback
+  and native-backed lifecycle paths.
+- Phase 5: add the public manager shutdown/teardown behavior still required by
+  the pinned executor path, then re-check whether the current tiny aggregated
+  `impl` shim is sufficient.
 - Add a runtime-capable validation path for the Rust test binary once the local
   PyO3/Python link environment is fixed; until then rely on `cargo check` plus
   Python contract tests for this machine.
@@ -359,9 +378,10 @@ Goal:
 
 ## Exact Next Step
 
-1. Finish delegating `add_dummy_requests()` and any remaining direct Python
-   block-state mutations to `TrtllmStateManager`.
-2. Decide whether to move host block-offset formatting into Rust or keep it in
-   Python, then update the tests around repeated allocate/free and teardown.
-3. Re-read the pinned TRTLLM `impl` consumers and either keep the current shim
-   or move any still-required methods into the native helper layer.
+1. Add a public `KvbmKVCacheManager.shutdown()` that clears native/fallback
+   state, host block-offset rows, and owned export references in the way the
+   pinned executor expects.
+2. Keep host block-offset formatting in Python unless shutdown/teardown testing
+   exposes a real native-only correctness need; padded rows are already native.
+3. Extend tests around repeated allocate/free, slot reuse, dummy requests, and
+   teardown, then re-check the pinned aggregated-path `impl` consumers.

@@ -171,6 +171,16 @@ class KvbmKVCacheManager:
             return "float32"
         return None
 
+    def _dtype_size_bytes(self) -> int:
+        dtype_name = self._normalize_dtype_name()
+        if dtype_name == "float16":
+            return 2
+        if dtype_name == "bfloat16":
+            return 2
+        if dtype_name == "float32":
+            return 4
+        return 0
+
     def _maybe_create_native_primary_pool(self) -> Any:
         create_primary_pool = getattr(rust_bindings, "create_primary_pool", None)
         if create_primary_pool is None or self.num_blocks == 0:
@@ -665,27 +675,24 @@ class KvbmKVCacheManager:
             if not prepare_resource:
                 continue
 
-            self.prepare_context(request)
             target = token_num + self.num_extra_kv_tokens + num_extra_decoding_steps
             if is_gen:
                 target += max_num_draft_tokens + 1
             if self._native_state is not None:
-                if not self._native_state.resize_context(
-                    request_id, 0, target, 0, True
-                ):
+                if not self._native_state.add_dummy_request(request_id, target):
                     raise RuntimeError(f"failed to allocate dummy request {request_id}")
                 self._write_host_block_offsets_row(
                     request_id,
                     self._native_state.get_padded_block_row(request_id, BAD_PAGE_INDEX),
                 )
             else:
+                self.prepare_context(request)
                 if not self._resize_state(self._request_state_for(request_id), target):
                     raise RuntimeError(f"failed to allocate dummy request {request_id}")
             if draft_kv_cache_manager is not None:
-                draft_kv_cache_manager.prepare_context(request)
                 if draft_kv_cache_manager._native_state is not None:
-                    if not draft_kv_cache_manager._native_state.resize_context(
-                        request_id, 0, target, 0, True
+                    if not draft_kv_cache_manager._native_state.add_dummy_request(
+                        request_id, target
                     ):
                         raise RuntimeError(
                             f"failed to allocate draft dummy request {request_id}"
@@ -696,18 +703,30 @@ class KvbmKVCacheManager:
                             request_id, BAD_PAGE_INDEX
                         ),
                     )
-                elif not draft_kv_cache_manager._resize_state(
-                    draft_kv_cache_manager._request_state_for(request_id), target
-                ):
-                    raise RuntimeError(
-                        f"failed to allocate draft dummy request {request_id}"
-                    )
+                else:
+                    draft_kv_cache_manager.prepare_context(request)
+                    if not draft_kv_cache_manager._resize_state(
+                        draft_kv_cache_manager._request_state_for(request_id), target
+                    ):
+                        raise RuntimeError(
+                            f"failed to allocate draft dummy request {request_id}"
+                        )
 
         return requests
 
     def get_kv_cache_stats(self) -> KvCacheStats:
-        allocated_blocks = self.num_blocks - len(self._free_block_ids)
-        allocated_bytes = allocated_blocks * self.tokens_per_block * self.head_dim
+        if self._native_state is not None:
+            allocated_blocks = self.num_blocks - int(self._native_state.get_num_free_blocks())
+        else:
+            allocated_blocks = self.num_blocks - len(self._free_block_ids)
+        block_bytes = (
+            self.tokens_per_block
+            * self.kv_factor
+            * self.head_dim
+            * sum(self.num_kv_heads_per_layer)
+            * self._dtype_size_bytes()
+        )
+        allocated_bytes = allocated_blocks * block_bytes
         return KvCacheStats(allocated_bytes=allocated_bytes)
 
     def copy_batch_block_offsets(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from pathlib import Path
 import sys
 import types
@@ -403,6 +404,77 @@ class TrtllmIntegrationTest(unittest.TestCase):
             manager.host_kv_cache_block_offsets[0][0][0][:4],
             [0, 1, -1, -1],
         )
+
+    def test_manager_can_delegate_dummy_requests_and_stats_to_native_helper(self) -> None:
+        class _NativeState:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.block_ids = {}
+                self.slots = {}
+                self.calls = []
+
+            def is_request_active(self, request_id: int) -> bool:
+                return request_id in self.block_ids
+
+            def add_dummy_request(self, request_id: int, target_capacity: int) -> bool:
+                self.calls.append((request_id, target_capacity))
+                num_blocks = math.ceil(target_capacity / self.kwargs["tokens_per_block"])
+                self.block_ids[request_id] = list(range(num_blocks))
+                self.slots.setdefault(request_id, 0)
+                return True
+
+            def get_padded_block_row(self, request_id: int, bad_page_index: int):
+                row = list(self.block_ids[request_id])
+                row.extend([bad_page_index] * 8)
+                return row
+
+            def get_slot(self, request_id: int) -> int:
+                return self.slots.setdefault(request_id, 0)
+
+            def get_cache_indices(self, request_id: int):
+                return self.block_ids[request_id]
+
+            def get_num_free_blocks(self) -> int:
+                return 6
+
+            def shutdown(self) -> None:
+                self.block_ids.clear()
+                self.slots.clear()
+
+        sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager = _NativeState
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[0],
+            total_num_kv_heads_per_layer=[8],
+            max_seq_len=32,
+            num_blocks=8,
+        )
+
+        requests = manager.add_dummy_requests(
+            [501],
+            token_nums=[3],
+            is_gen=True,
+            max_num_draft_tokens=2,
+        )
+
+        self.assertEqual([request.py_request_id for request in requests], [501])
+        self.assertEqual(manager._native_state.calls, [(501, 6)])
+        self.assertEqual(manager.get_cache_indices(501), [0, 1])
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [0, 1, -1, -1],
+        )
+        self.assertEqual(manager.get_kv_cache_stats().allocated_bytes, 4096)
 
 
 if __name__ == "__main__":
