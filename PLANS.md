@@ -646,6 +646,9 @@ Implemented so far:
     Python package is not installed as a full built wheel in `.venv`
   - after stubbing those, TRT-LLM still aborted during Open MPI / PMIx init
     (`MPI_Init_thread`, `Unable to start a daemon on the local node`)
+  - a later note claimed MPI setup had been fixed manually, but this exact smoke
+    check still failed in the current shell on 2026-03-28 UTC, so the blocker
+    remains unresolved for this run
   - this remains an external runtime-environment blocker on this machine
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
