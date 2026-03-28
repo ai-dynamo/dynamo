@@ -26,6 +26,71 @@ class KvCacheStats:
     allocated_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class _MappingShim:
+    world_size: int
+    tp_size: int
+    tp_rank: int
+    pp_size: int
+    pp_rank: int
+    rank: int
+    device_id: int
+    dp_size: int = 1
+    dp_rank: int = 0
+    cp_size: int = 1
+    cp_rank: int = 0
+    gpus_per_node: int = 1
+    enable_attention_dp: bool = False
+
+
+@dataclass(frozen=True)
+class _FakeBufferAttr:
+    life_cycle_id: int
+    pool_index: int
+    offset: int
+    size: int
+
+
+@dataclass(frozen=True)
+class _FakeStoragePool:
+    base_address: int
+    slot_size: int
+    num_slots: int
+
+    def slot_address(self, slot_id: int) -> int:
+        return self.base_address + slot_id * self.slot_size
+
+
+@dataclass(frozen=True)
+class _FakeStoragePoolGroup:
+    _pools: list[_FakeStoragePool]
+
+    @property
+    def num_pools(self) -> int:
+        return len(self._pools)
+
+
+@dataclass(frozen=True)
+class _FakeStorageLevel:
+    storage: Any
+
+
+@dataclass(frozen=True)
+class _FakeLifeCycle:
+    window_size: Optional[int]
+
+
+class _FakeStorage:
+    def __init__(self, pool_group: _FakeStoragePoolGroup, buffer_attr: dict[Any, Any]) -> None:
+        self._buffer_attr = buffer_attr
+        self._levels = [_FakeStorageLevel(storage=type("PoolGroups", (), {"_pool_groups": [pool_group]})())]
+        self.num_life_cycles = 1
+
+    def get_pool_group_index(self, life_cycle_id: int) -> int:
+        del life_cycle_id
+        return 0
+
+
 @dataclass
 class _RequestState:
     block_ids: list[int] = field(default_factory=list)
@@ -56,6 +121,23 @@ class _ImplCompat:
     @property
     def layer_grouping(self) -> list[list[int]]:
         return [list(range(self._manager.num_local_layers))]
+
+    @property
+    def _storage(self) -> Any:
+        return self._manager.get_disagg_storage_metadata()
+
+    @property
+    def _init_config(self) -> Any:
+        return self._manager.get_disagg_init_config()
+
+    @property
+    def _life_cycles(self) -> list[Any]:
+        return self._manager.get_disagg_life_cycles()
+
+    def get_indexer_k_cache_pool(self) -> Any:
+        raise NotImplementedError(
+            "Indexer K-cache export is not implemented for the current KVBM TRTLLM path"
+        )
 
 
 class KvbmKVCacheManager:
@@ -146,6 +228,19 @@ class KvbmKVCacheManager:
         self.cache_mode = cache_mode
         self.is_mla = cache_mode == "mla"
         self.is_mla_enable = self.is_mla
+        self.max_batch_size = max(1, math.ceil(self.max_num_sequences / self.pp_size))
+        self.is_vswa = False
+        self.max_draft_len = 0
+        self.mapping = _MappingShim(
+            world_size=self.world_size,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            pp_size=self.pp_size,
+            pp_rank=self.pp_rank,
+            rank=self.pp_rank * self.tp_size + self.tp_rank,
+            device_id=self.device_id,
+            gpus_per_node=max(self.world_size, 1),
+        )
 
         if self.num_local_layers == 0:
             raise ValueError("pp_layers must contain at least one layer")
@@ -189,6 +284,7 @@ class KvbmKVCacheManager:
         self._iteration_events: list[Any] = []
         self._request_slots: dict[int, int] = {}
         self._free_slots = list(range(self.max_num_sequences + 1))
+        self._disagg_metadata: Optional[dict[str, Any]] = None
 
     def _local_num_kv_heads(self, total_num_kv_heads: int) -> int:
         if total_num_kv_heads < 0:
@@ -208,6 +304,105 @@ class KvbmKVCacheManager:
             "cache_mode": self.cache_mode,
             "kv_factor": self.kv_factor,
         }
+
+    def _build_disagg_metadata(self) -> dict[str, Any]:
+        pool = self.get_unique_primary_pool()
+        required_attrs = ("shape", "data_ptr", "element_size")
+        if any(not hasattr(pool, attr) for attr in required_attrs):
+            raise NotImplementedError(
+                "Primary-pool export does not expose tensor metadata needed for TRTLLM "
+                "disaggregation page-table construction"
+            )
+        if not hasattr(pool, "stride"):
+            raise NotImplementedError(
+                "Primary-pool export is missing stride metadata needed for TRTLLM "
+                "disaggregation page-table construction"
+            )
+        shape = tuple(int(dim) for dim in pool.shape)
+        if len(shape) != 6:
+            raise NotImplementedError(
+                "Disaggregation metadata expects primary pool layout "
+                "[blocks, layers, kv_factor, page_size, num_heads, head_dim]"
+            )
+
+        element_size = int(pool.element_size())
+        slot_bytes = int(pool.stride(0)) * element_size
+        layer_stride = int(pool.stride(1)) * element_size
+        role_stride = int(pool.stride(2)) * element_size
+        buffer_size = role_stride
+        base_address = int(pool.data_ptr())
+
+        role_key = "key"
+        role_value = "value"
+        try:
+            from tensorrt_llm._torch.pyexecutor.resource_manager import Role
+        except ImportError:
+            pass
+        else:
+            role_key = Role.KEY
+            role_value = Role.VALUE
+
+        buffer_attr = {}
+        for local_layer_id in range(self.num_local_layers):
+            layer_offset = local_layer_id * layer_stride
+            buffer_attr[(local_layer_id, role_key)] = _FakeBufferAttr(
+                life_cycle_id=0,
+                pool_index=0,
+                offset=layer_offset,
+                size=buffer_size,
+            )
+            if self.kv_factor > 1:
+                buffer_attr[(local_layer_id, role_value)] = _FakeBufferAttr(
+                    life_cycle_id=0,
+                    pool_index=0,
+                    offset=layer_offset + role_stride,
+                    size=buffer_size,
+                )
+
+        pool_group = _FakeStoragePoolGroup(
+            _pools=[
+                _FakeStoragePool(
+                    base_address=base_address,
+                    slot_size=slot_bytes,
+                    num_slots=shape[0],
+                )
+            ]
+        )
+
+        cache_tier = "gpu_mem"
+        try:
+            from tensorrt_llm.runtime.kv_cache_manager_v2 import CacheTier
+        except ImportError:
+            pass
+        else:
+            cache_tier = CacheTier.GPU_MEM
+
+        return {
+            "storage": _FakeStorage(pool_group=pool_group, buffer_attr=buffer_attr),
+            "init_config": type(
+                "FakeInitConfig",
+                (),
+                {
+                    "tokens_per_block": self.tokens_per_block,
+                    "cache_tiers": [type("FakeCacheTierConfig", (), {"tier": cache_tier})()],
+                },
+            )(),
+            "life_cycles": [_FakeLifeCycle(window_size=None)],
+        }
+
+    def _get_disagg_metadata(self) -> dict[str, Any]:
+        if self._disagg_metadata is None:
+            self._disagg_metadata = self._build_disagg_metadata()
+        return self._disagg_metadata
+
+    def get_disagg_storage_metadata(self) -> Any:
+        return self._get_disagg_metadata()["storage"]
+
+    def get_disagg_init_config(self) -> Any:
+        return self._get_disagg_metadata()["init_config"]
+
+    def get_disagg_life_cycles(self) -> list[Any]:
+        return list(self._get_disagg_metadata()["life_cycles"])
 
     def _uniform_num_kv_heads(self) -> Optional[int]:
         if not self.num_kv_heads_per_layer:
@@ -873,3 +1068,4 @@ class KvbmKVCacheManager:
         self._reset_host_block_offsets()
         self.layer_buffers.clear()
         self.primary_pool = None
+        self._disagg_metadata = None

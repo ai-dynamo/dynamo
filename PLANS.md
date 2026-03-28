@@ -338,7 +338,7 @@ Implemented so far:
 
 ### Phase 7: Disaggregated serving convergence
 
-Status: pending
+Status: in progress
 
 Goal:
 
@@ -398,6 +398,28 @@ Exit criteria:
   manager
 - KVBM-backed TRT-LLM workers can participate in disaggregated transfer without
   abandoning Rust-owned lifecycle/storage invariants
+
+Implemented so far:
+
+- extended the local TRTLLM `impl` compatibility surface with a narrow fake-V2
+  metadata adapter:
+  - `impl.layer_grouping`
+  - `impl._storage`
+  - `impl._init_config`
+  - `impl._life_cycles`
+- added manager-owned disaggregation metadata synthesis from the exported
+  primary-pool tensor layout instead of trying to emulate TRT-LLM ownership:
+  - computes slot bytes and per-layer role offsets from the
+    `[blocks, layers, kv_factor, page_size, num_heads, head_dim]` export
+  - exposes one life cycle / one pool group for the currently supported
+    non-sliding-window path
+  - emits key-only metadata automatically for baseline MLA (`kv_factor=1`)
+- added a lightweight `mapping` shim plus derived `max_batch_size`,
+  `is_vswa=False`, and `max_draft_len=0` so TRT-LLM's Python
+  disaggregation/rank-info helpers have the manager fields they read first
+- added stdlib-only tests that validate the fake-V2 metadata contract for:
+  - standard K/V layout
+  - baseline MLA key-only layout
 
 ## Progress Log
 
@@ -464,6 +486,12 @@ Exit criteria:
   - standard attention derives local KV head geometry from TP size
   - baseline MLA keeps a single latent-cache pool with `kv_factor=1`
   - native pool/state helpers now carry device/rank/stage identity
+- Landed the first disaggregation-facing adapter step:
+  - the manager now synthesizes a fake-V2 storage/page-table metadata surface
+    directly from the KVBM-owned primary pool
+  - the manager now exposes the lightweight `mapping` and batch-size fields
+    that TRT-LLM's Python transfer/rank-info helpers read before transfer
+    starts
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -554,6 +582,18 @@ Exit criteria:
   which is enough for local worker validation and future disaggregation
   adapters. The remaining phase-7 blocker is not identity; it is missing
   storage/page-table metadata.
+- After adding the fake-V2 metadata surface, the next real runtime blocker
+  moved outside this repo:
+  - importing the installed TRT-LLM disaggregation builder in
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv`
+    still aborts inside Open MPI / PMIx initialization on this machine
+  - this happens even with `TLLM_DISABLE_MPI=1`, so the current runtime issue is
+    not the KVBM manager API anymore; it is the local TRT-LLM / MPI import
+    environment
+- TRT-LLM's Python disaggregation helpers also read more than page-table data:
+  `RankInfo.from_kv_cache_manager()` and `KvCacheTransceiverV2` expect
+  `mapping` and `max_batch_size`, so the phase-7 minimum viable adapter had to
+  include those fields as well.
 
 ## Testing Log
 
@@ -594,6 +634,19 @@ Exit criteria:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after the fake-V2 disaggregation metadata milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Failed in the repo `.venv` direct TRT-LLM smoke path before page-table
+  validation completed:
+  `TLLM_DISABLE_MPI=1 .venv/bin/python ... build_page_table_from_manager(manager)`
+  Reason:
+  - local import first needed stubbed `nixl` / `kvbm._core` because the repo
+    Python package is not installed as a full built wheel in `.venv`
+  - after stubbing those, TRT-LLM still aborted during Open MPI / PMIx init
+    (`MPI_Init_thread`, `Unable to start a daemon on the local node`)
+  - this remains an external runtime-environment blocker on this machine
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
@@ -622,31 +675,34 @@ Exit criteria:
   - explicit device placement in Rust pool creation
   - rank/stage-aware validation for `tp>1` and `pp>1`
 - Disaggregated-serving convergence is still pending:
-  - a V2-style storage/page-table surface for TRT-LLM
+  - validate the new V2-style storage/page-table surface against a TRT-LLM
+    runtime environment that can import disaggregation modules without MPI/PMIx
+    aborting
   - mapping KVBM storage tiers onto TRT-LLM life cycles / pool groups
   - preserving Rust-owned lifecycle and residency guarantees through transfer
     flows
 - External blocker remains: add a runtime-capable validation path for the Rust
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
+- Additional external blocker now identified for phase 7 runtime validation:
+  the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
+  direct disaggregation page-table smoke check can run.
 
 ## Exact Next Step
 
-1. Inspect the pinned TRT-LLM disaggregation entry points again, then extend
-   the local `impl` compatibility surface beyond aggregated mode starting with
-   metadata that page-table builders consume first:
-   - `impl.layer_grouping`
-   - `impl._storage`
-   - `impl._init_config`
-   - `impl._life_cycles`
-2. Decide whether the least-risk next increment is:
-   - a KVBM-specific page-table builder/adapter for the pinned extractor path,
-     or
-   - a narrower fake-V2 storage surface on `impl` that can satisfy
-     `KVRegionExtractorV1` / `KvCacheTransceiverV2` without copying ownership
-     back into Python.
-3. Whichever seam is smaller, land it with stdlib tests first, then use the
-   repo `.venv` runtime (`/workspace/model-performance/michaelfeil1209/mfdynamo/.venv`)
-   for a direct import/smoke check against installed `torch` and
-   `tensorrt_llm` before attempting broader runtime validation.
+1. Re-run the direct TRT-LLM smoke check on a host or container where importing
+   `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
+   PMIx. Use the same manager construction added in this repo and validate that
+   `build_page_table_from_manager(manager)` succeeds end-to-end.
+2. Once that runtime import blocker is gone, continue phase 7 by checking
+   whether `KvCacheTransceiverV2` can progress past `RankInfo` and transfer
+   worker setup using the current fake-V2 metadata, or whether it still needs
+   additional `impl` storage-tier/life-cycle detail.
+3. If more detail is required, the next file to extend is:
+   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+   specifically the fake-V2 metadata builders:
+   - `_build_disagg_metadata()`
+   - `get_disagg_storage_metadata()`
+   - `get_disagg_init_config()`
+   - `get_disagg_life_cycles()`
 - /workspace/model-performance/michaelfeil1209/mfdynamo/.venv has a installation of torch and tensorrt_llm active, can be patched.

@@ -805,6 +805,114 @@ class TrtllmIntegrationTest(unittest.TestCase):
                 pp_size=2,
             )
 
+    def test_manager_exposes_fake_v2_disagg_metadata(self) -> None:
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        class _FakeTensor:
+            def __init__(self, shape: tuple[int, ...], strides: tuple[int, ...], ptr: int) -> None:
+                self.shape = shape
+                self._strides = strides
+                self._ptr = ptr
+
+            def stride(self, dim: int) -> int:
+                return self._strides[dim]
+
+            def element_size(self) -> int:
+                return 2
+
+            def data_ptr(self) -> int:
+                return self._ptr
+
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[2, 3],
+            total_num_kv_heads_per_layer=[6, 6, 6, 6],
+            max_seq_len=64,
+            num_blocks=8,
+            primary_pool=_FakeTensor(
+                shape=(8, 2, 2, 4, 6, 16),
+                strides=(1536, 768, 384, 96, 16, 1),
+                ptr=4096,
+            ),
+            device_id=2,
+            world_size=4,
+            tp_size=2,
+            tp_rank=1,
+            pp_size=2,
+            pp_rank=1,
+        )
+
+        self.assertEqual(manager.max_batch_size, 16)
+        self.assertEqual(manager.mapping.rank, 3)
+        self.assertEqual(manager.impl.layer_grouping, [[0, 1]])
+
+        storage = manager.impl._storage
+        init_config = manager.impl._init_config
+        life_cycles = manager.impl._life_cycles
+        pool = storage._levels[0].storage._pool_groups[0]._pools[0]
+
+        self.assertEqual(init_config.tokens_per_block, 4)
+        self.assertEqual(storage.num_life_cycles, 1)
+        self.assertEqual(storage.get_pool_group_index(0), 0)
+        self.assertEqual(pool.base_address, 4096)
+        self.assertEqual(pool.slot_size, 3072)
+        self.assertEqual(pool.num_slots, 8)
+        self.assertEqual(pool.slot_address(3), 4096 + 3 * 3072)
+        self.assertIsNone(life_cycles[0].window_size)
+        self.assertEqual(
+            storage._buffer_attr[(0, "key")],
+            manager.get_disagg_storage_metadata()._buffer_attr[(0, "key")],
+        )
+        self.assertEqual(storage._buffer_attr[(0, "key")].offset, 0)
+        self.assertEqual(storage._buffer_attr[(0, "key")].size, 768)
+        self.assertEqual(storage._buffer_attr[(0, "value")].offset, 768)
+        self.assertEqual(storage._buffer_attr[(1, "key")].offset, 1536)
+        self.assertEqual(storage._buffer_attr[(1, "value")].offset, 2304)
+
+    def test_manager_exposes_key_only_disagg_metadata_for_mla(self) -> None:
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        class _FakeTensor:
+            def __init__(self, shape: tuple[int, ...], strides: tuple[int, ...], ptr: int) -> None:
+                self.shape = shape
+                self._strides = strides
+                self._ptr = ptr
+
+            def stride(self, dim: int) -> int:
+                return self._strides[dim]
+
+            def element_size(self) -> int:
+                return 2
+
+            def data_ptr(self) -> int:
+                return self._ptr
+
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=576,
+            pp_layers=[0, 1],
+            total_num_kv_heads_per_layer=[1, 1],
+            max_seq_len=64,
+            num_blocks=8,
+            cache_mode="mla",
+            primary_pool=_FakeTensor(
+                shape=(8, 2, 1, 4, 1, 576),
+                strides=(4608, 2304, 2304, 576, 576, 1),
+                ptr=8192,
+            ),
+        )
+
+        storage = manager.impl._storage
+
+        self.assertEqual(sorted(storage._buffer_attr), [(0, "key"), (1, "key")])
+        self.assertEqual(storage._buffer_attr[(0, "key")].size, 4608)
+        self.assertEqual(storage._buffer_attr[(1, "key")].offset, 4608)
+        with self.assertRaises(NotImplementedError):
+            manager.impl.get_indexer_k_cache_pool()
+
 
 if __name__ == "__main__":
     unittest.main()
