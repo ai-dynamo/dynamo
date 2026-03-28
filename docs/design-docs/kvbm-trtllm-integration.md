@@ -892,3 +892,5 @@ The first milestone is successful when:
 - TensorRT-LLM no longer depends on its native KV allocator in the supported path
 
 After that, CPU and disk tiering can be added on top of the same ownership model.
+
+FYI .venv has torch installed and is ready at your command.
