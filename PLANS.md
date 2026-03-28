@@ -235,6 +235,139 @@ Implemented so far:
 - re-checked the pinned upstream consumers and found no additional aggregated
   supported-path `impl` methods that need to move into Rust today
 
+### Phase 6: Rank-local multi-GPU expansion
+
+Status: pending
+
+Goal:
+
+- Support non-disaggregated TensorRT-LLM bring-up for:
+  - `tp=4, pp=1`
+  - `tp=2, pp=2`
+- Keep TensorRT-LLM responsible for TP/PP scheduling and collectives.
+- Make KVBM own rank-local KV memory and rank-local request/block state on each
+  TRT-LLM worker process.
+- Include baseline TRT-LLM MLA support in this worker model:
+  - single latent-cache pool
+  - `kv_factor=1`
+  - compatible with `load_paged_kv_cache_for_mla`,
+    `load_chunked_kv_cache_for_mla`, and
+    `mla_rope_append_paged_kv_assign_q`
+
+Required API and implementation changes:
+
+- Extend `KvbmKVCacheManager` construction with explicit topology/device
+  metadata:
+  - `device_id`
+  - `world_size`
+  - `tp_size`
+  - `tp_rank`
+  - `pp_size`
+  - `pp_rank`
+- Make local KV geometry rank-aware:
+  - local exported heads must use the TP shard, not global head count
+  - local exported layers must respect the PP stage's `pp_layers`
+- Split MHA/MQA assumptions from MLA assumptions:
+  - standard attention uses head-sharded K/V exports
+  - MLA uses SELFKONLY-style latent cache with `kv_factor=1`
+  - MLA cache sizing under TP is not the same as `num_heads / tp_size`
+- Pass `device_id` through to the Rust primary-pool constructor so each rank
+  allocates on its own GPU instead of implicitly assuming device 0/default
+- Extend the native lifecycle helper so its state is explicitly scoped to one
+  TRT-LLM rank/stage and can expose that identity for debugging and validation
+- Re-check host block-offset and cache-index helpers against rank-local block
+  numbering; baseline TP/PP should keep physical block IDs local to a rank
+  unless the TRT-LLM call site proves a wider namespace is required
+
+Design decision for this phase:
+
+- The baseline supported architecture is one KVBM-backed TRT-LLM KV manager per
+  process/rank, not a shared distributed allocator
+- The first MLA target is baseline TRT-LLM MLA only:
+  - support the single-pool latent-cache contract used by the TRT-LLM backend
+  - do not require DSA sparse MLA in the first milestone
+  - do not require FlashInfer MLA dual-cache layout in the first milestone
+- TensorRT-LLM continues to own:
+  - request scheduling
+  - TP collectives
+  - PP send/recv and stage coordination
+- KVBM owns:
+  - rank-local KV tensors
+  - rank-local block allocation
+  - rank-local request/block lifecycle invariants
+
+Exit criteria:
+
+- Constructor/API can represent `tp>1` and `pp>1`
+- Exported pool/layer views are correct for:
+  - standard local heads / local layers
+  - baseline MLA latent-cache layout
+- The manager can be instantiated independently on each TRT-LLM rank for
+  `tp=4,pp=1` and `tp=2,pp=2` shapes without pretending KV is globally shared
+
+### Phase 7: Disaggregated serving convergence
+
+Status: pending
+
+Goal:
+
+- Extend the TRT-LLM manager path so a TRT-LLM worker can still own its local
+  KV memory via KVBM while also exposing KVBM storage tiers and transfer hooks
+  to TRT-LLM's disaggregation runtime.
+
+Current blockers identified from the pinned TRT-LLM disaggregation surface:
+
+- The current aggregated-path `_ImplCompat` shim is too small for
+  `KVRegionExtractorV1` / `KvCacheTransceiverV2`
+- The TRT-LLM disaggregation path expects manager/impl storage metadata that
+  the current manager does not expose, including:
+  - `impl.layer_grouping`
+  - `impl._storage`
+  - `impl._init_config`
+  - `impl._life_cycles`
+  - `impl.get_indexer_k_cache_pool()`
+- The current manager does not model multi-life-cycle/layer-group storage
+  ownership, so TRT-LLM cannot build a V2 page table from it
+- The current TRT-LLM manager path has no local representation of KVBM storage
+  tiers (GPU/host/disk) even though the older connector path and KVBM storage
+  layer do
+- Rank exchange for disaggregation currently exists in TRT-LLM and in the older
+  KVBM connector path, but not in the new TRT-LLM KV manager path
+- MLA-specific transfer/storage shapes are not modeled yet:
+  - standard TRT-LLM MLA uses a single latent-cache pool (`kv_factor=1`)
+  - FlashInfer MLA uses two separate caches (`ckv_cache`, `kpe_cache`)
+  - DSA sparse MLA adds an indexer K-cache side pool and extra block-offset
+    metadata
+
+Required design work:
+
+- Decide whether the TRT-LLM manager should:
+  - grow into a V2-style storage-backed manager surface directly, or
+  - expose a narrower adapter that wraps KVBM storage/lifecycle primitives in
+    the exact TRT-LLM V2 contracts
+- Define how KVBM storage tiers map onto TRT-LLM life cycles, pool groups, and
+  layer groups for:
+  - single-stage TP
+  - multi-stage PP
+  - disaggregated load/store transfer
+- Keep Rust as the source of truth for ownership/state transitions:
+  - request lifecycle
+  - block lifecycle
+  - slot ownership
+  - storage-tier residency
+  - transfer eligibility
+- Decide whether MLA support is in-scope for the first disaggregated worker:
+  - baseline MLA on the TRT-LLM backend only
+  - DSA sparse MLA with indexer cache later
+  - FlashInfer MLA dual-cache layout later
+
+Exit criteria:
+
+- TRT-LLM can build a valid disaggregation page table from the KVBM-backed
+  manager
+- KVBM-backed TRT-LLM workers can participate in disaggregated transfer without
+  abandoning Rust-owned lifecycle/storage invariants
+
 ## Progress Log
 
 - Completed design inventory against local TRT-LLM checkout.
@@ -342,6 +475,36 @@ Implemented so far:
   path.
 - No additional aggregated-path `impl` methods were found beyond the current
   shim once the public manager teardown behavior was added.
+- The next multi-GPU step should not start with KVBM's older distributed
+  leader/worker transfer path. For baseline TRT-LLM TP/PP, the correct model is
+  one KVBM-backed manager per TRT-LLM rank with TensorRT-LLM still owning
+  schedule/collective coordination.
+- The main disaggregated-serving blocker is no longer generic transfer support;
+  it is the missing V2-style storage/page-table API expected by TRT-LLM's
+  disaggregation extractor/transceiver code.
+- The current TRT-LLM manager constructor is missing the topology surface needed
+  to represent a real worker instance:
+  - `device_id`
+  - `world_size`
+  - `tp_size`
+  - `tp_rank`
+  - `pp_size`
+  - `pp_rank`
+- The current native TRT-LLM pool/state helpers are local-only and therefore
+  usable as the basis of per-rank ownership, but they do not yet encode rank or
+  stage identity for validation, debugging, or disaggregated coordination.
+- TRT-LLM disaggregation expects richer manager metadata than the current shim
+  exposes, notably:
+  - `impl.layer_grouping`
+  - `impl._storage`
+  - `impl._init_config`
+  - `impl._life_cycles`
+  - `impl.get_indexer_k_cache_pool()`
+- The current TRT-LLM manager and plan are still MHA-shaped:
+  - the manager hardcodes `kv_factor=2`
+  - the current export contract assumes `[blocks, layers, kv_factor, page_size, num_heads, head_dim]`
+  - MLA upstream uses different cache contracts, including SELFKONLY latent
+    cache and optional indexer/dual-cache variants
 
 ## Testing Log
 
@@ -395,20 +558,36 @@ Implemented so far:
 
 ## Remaining Work
 
-- Supported-path repo work is complete for the pinned aggregated TRTLLM v2
-  integration surface described above.
-- External blocker only: add a runtime-capable validation path for the Rust
+- Baseline aggregated single-GPU support is complete for the pinned TRTLLM v2
+  surface described above.
+- Multi-GPU repo work is still pending:
+  - topology-aware manager construction
+  - per-rank head/layer export
+  - baseline MLA latent-cache export (`kv_factor=1`) on the same rank-local path
+  - explicit device placement in Rust pool creation
+  - rank/stage-aware validation for `tp>1` and `pp>1`
+- Disaggregated-serving convergence is still pending:
+  - a V2-style storage/page-table surface for TRT-LLM
+  - mapping KVBM storage tiers onto TRT-LLM life cycles / pool groups
+  - preserving Rust-owned lifecycle and residency guarantees through transfer
+    flows
+- External blocker remains: add a runtime-capable validation path for the Rust
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
-- If a future run resumes, the first follow-up is runtime validation against a
-  real TRTLLM/PyTorch environment rather than more contract-surface changes.
 
 ## Exact Next Step
 
-1. If the environment blocker is removed, run runtime-capable validation against
-   a real TRTLLM/PyTorch setup, starting with:
-   `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --lib`
-2. Then validate the pinned supported path end-to-end in the local TRTLLM
-   checkout at `/tmp/trtllm-latest`.
-3. If that runtime environment is still unavailable, no further repo-side code
-   changes are queued from this plan.
+1. Extend
+   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+   with explicit topology/device inputs (`device_id`, `world_size`, `tp_size`,
+   `tp_rank`, `pp_size`, `pp_rank`) and derive per-rank local KV geometry from
+   them, including a baseline MLA latent-cache mode with `kv_factor=1`.
+2. Thread `device_id` and rank/stage identity through
+   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/src/block_manager/trtllm.rs`
+   so the native pool/state helpers are explicitly scoped to one TRT-LLM worker
+   instance and can allocate either standard K/V or baseline MLA latent-cache
+   pools.
+3. After that API lands, add stubbed tests for `tp=4,pp=1` and `tp=2,pp=2`
+   construction/export semantics for both standard attention and baseline MLA
+   before attempting full TRTLLM runtime validation.
+- /workspace/model-performance/michaelfeil1209/mfdynamo/.venv has a installation of torch and tensorrt_llm active, can be patched.
