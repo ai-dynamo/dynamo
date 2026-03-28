@@ -81,7 +81,19 @@ impl Layer {
                         block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
+                block::BlockType::PinnedOwned(block) => {
+                    let block_data = block.block_data_mut();
+                    let mut layer_view_mut =
+                        block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
+                    (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
                 block::BlockType::Device(block) => {
+                    let block_data = block.block_data_mut();
+                    let mut layer_view_mut =
+                        block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
+                    (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+                block::BlockType::DeviceOwned(block) => {
                     let block_data = block.block_data_mut();
                     let mut layer_view_mut =
                         block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
@@ -94,7 +106,17 @@ impl Layer {
                     block.page_size() as i64,
                     block.inner_dim() as i64,
                 ),
+                block::BlockType::PinnedOwned(block) => (
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
                 block::BlockType::Device(block) => (
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
+                block::BlockType::DeviceOwned(block) => (
                     block.num_outer_dims() as i64,
                     block.page_size() as i64,
                     block.inner_dim() as i64,

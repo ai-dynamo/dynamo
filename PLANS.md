@@ -140,7 +140,7 @@ Deferred to later phases:
 - any redesign of `BAD_PAGE_INDEX` beyond the current supported path
 ### Phase 3: Buffer and primary-pool export
 
-Status: in progress
+Status: completed
 
 Goal:
 
@@ -161,13 +161,18 @@ Implemented so far:
 - added pooled block-list primary-pool export support
 - added pooled per-layer export support using explicit non-contiguous strides
 - added Rust unit tests for the exported pool/layer shape-stride contracts
-
-Still pending in this phase:
-
-- construct these export objects from the real KVBM manager path instead of
-  only exposing the building blocks
-- validate the final tensor rank/layout against the exact TRTLLM attention path
-- wire the Python manager to these Rust exports
+- added a dedicated Rust TRTLLM primary-pool constructor that builds a local
+  KVBM-owned `FullyContiguous` slab and exposes it as a `BlockList`
+- extended the generic block wrappers so those exported views can own raw local
+  KVBM blocks instead of requiring pool-managed mutable blocks only
+- wired `KvbmKVCacheManager` to auto-create and use that Rust-backed pool when
+  uniform TRTLLM layer head counts are available
+- reshaped the Rust DLPack exports in Python to the pinned TRTLLM v2 layouts:
+  - primary pool: `[blocks, layers, kv_factor, page_size, num_heads, head_dim]`
+  - layer buffer NHD: `[blocks, kv_factor, page_size, num_heads, head_dim]`
+  - layer buffer HND: `[blocks, kv_factor, num_heads, page_size, head_dim]`
+- added stdlib-only manager tests that verify native pool autowiring without
+  requiring a full TRTLLM runtime or torch at test time
 
 ### Phase 4: Full request lifecycle ownership
 
@@ -228,6 +233,14 @@ Goal:
   - `BlockList.__dlpack__()` now exposes a primary-pool-style block-first view
   - `BlockList.layer_view(layer_idx)` returns a per-layer pooled export with
     explicit non-contiguous strides
+- Added a dedicated TRTLLM primary-pool constructor in
+  `lib/bindings/kvbm/src/block_manager/trtllm.rs` that builds a local
+  KVBM-owned `FullyContiguous` slab rather than reusing the logical/distributed
+  Python `BlockManager`.
+- Wired the Python TRTLLM manager to use that Rust-backed pool automatically
+  when the local layer head counts are uniform, and to reshape the exported
+  DLPack views into TRTLLM v2-compatible NHD/HND tensors lazily via torch only
+  when a real DLPack consumer is present.
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -252,13 +265,14 @@ Goal:
   use `FullyContiguous`-compatible pooled exports with explicit strides for
   per-layer views instead of adding a second tensor-only layout immediately.
 - `FullyContiguous` layout is a good fit for `get_unique_primary_pool()`.
-- The same layout is a poor fit for `get_buffers(layer_idx)` unless one of the
-  following happens:
-  - add stride-aware DLPack export
-  - switch the exported pool layout strategy
-  - maintain a second tensor-oriented export representation
-- This means phase 3 is not just plumbing; it requires an explicit export-model
-  decision before coding the real buffer path.
+- The logical/distributed `BlockManager` binding cannot be the source of TRTLLM
+  DLPack exports because logical blocks do not expose local views.
+- The supported-path answer is therefore:
+  build a dedicated local KVBM-owned `FullyContiguous` export slab for TRTLLM,
+  then reshape the existing block-list DLPack views in Python into TRTLLM's
+  exact NHD/HND tensor layouts.
+- That keeps ownership inside KVBM without inventing a second storage format,
+  and it avoids forcing the Python manager to synthesize fake tensor metadata.
 
 ## Testing Log
 
@@ -276,9 +290,20 @@ Goal:
   `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --lib`
 - Passed again after the same milestone:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after wiring the Rust TRTLLM primary-pool constructor and Python
+  manager autowiring:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
+- Failed in the current environment after the new TRTLLM export milestone:
+  `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --lib`
+  Reason: PyO3 test-binary linking could not resolve Python C-API symbols
+  (`PyErr_Print`, `PyObject_GetAttr`, etc.). `cargo check` still passes, so the
+  code compiles; the blocker is the local Python link environment for the Rust
+  test binary.
 - Commit hooks could not run to completion in this environment:
   - first due read-only pre-commit cache under `/root/.cache/pre-commit`
   - then due network-restricted hook bootstrap (`git fetch` to GitHub failed)
@@ -287,22 +312,26 @@ Goal:
 
 ## Remaining Work
 
-- Implement the phase-3 export surface in Rust:
-  - construct the new block-list export objects from the real KVBM manager path
-  - keep the exported layout compatible with the supported TRTLLM path
-- Wire the Python manager to the real KVBM-backed primary-pool and per-layer
-  export objects instead of constructor-injected placeholders.
-- Add tests that validate exported shapes and indices without requiring the full
-  TRT-LLM runtime.
-- Add Python-side contract tests that exercise these export objects through the
-  manager surface rather than only at the Rust helper level.
+- Phase 4: move request lifecycle ownership out of the Python shell and into a
+  dedicated Rust TRTLLM manager object so allocation, teardown, and reuse are
+  KVBM-owned end to end instead of only the exported tensor slab being
+  KVBM-owned.
+- Phase 4: replace the Python-side free-block/request-state bookkeeping with
+  Rust-backed request lifecycle methods while preserving the pinned TRTLLM v2
+  semantics already covered by the stdlib tests.
+- Phase 5: decide whether the current tiny aggregated-path `impl` shim is
+  sufficient for the pinned supported path once the Rust lifecycle object lands,
+  or whether additional `impl` methods need to move into Rust too.
+- Add a runtime-capable validation path for the Rust test binary once the local
+  PyO3/Python link environment is fixed; until then rely on `cargo check` plus
+  Python contract tests for this machine.
 - Continue updating this file after every milestone with exact next steps.
 
 ## Exact Next Step
 
-1. Decide where the real KVBM manager will source pooled `BlockList` exports
-   from, then add that constructor/wrapper path in Rust.
-2. Replace the Python placeholder export injection in `KvbmKVCacheManager` with
-   those real Rust-backed primary-pool and per-layer objects.
-3. Add manager-level tests that validate `get_unique_primary_pool()` and
-   `get_buffers()` through that path without requiring a full TRTLLM runtime.
+1. Introduce a dedicated Rust TRTLLM manager state object that owns request
+   block allocation/free/reuse on top of the same local export slab.
+2. Repoint `KvbmKVCacheManager` Python methods to that Rust object so Python is
+   only a thin adapter for argument validation and tensor/list conversion.
+3. Extend the existing stdlib tests to cover that Rust-backed lifecycle path,
+   especially repeated allocate/free, teardown, and rewind behavior.

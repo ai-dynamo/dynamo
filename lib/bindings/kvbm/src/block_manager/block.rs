@@ -20,8 +20,22 @@ pub enum BlockType {
             dynamo_llm::block_manager::block::BasicMetadata,
         >,
     ),
+    PinnedOwned(
+        dynamo_llm::block_manager::block::Block<
+            dynamo_llm::block_manager::storage::PinnedStorage,
+            dynamo_llm::block_manager::block::locality::Local,
+            dynamo_llm::block_manager::block::BasicMetadata,
+        >,
+    ),
     Device(
         dynamo_llm::block_manager::block::MutableBlock<
+            dynamo_llm::block_manager::storage::DeviceStorage,
+            dynamo_llm::block_manager::block::locality::Local,
+            dynamo_llm::block_manager::block::BasicMetadata,
+        >,
+    ),
+    DeviceOwned(
+        dynamo_llm::block_manager::block::Block<
             dynamo_llm::block_manager::storage::DeviceStorage,
             dynamo_llm::block_manager::block::locality::Local,
             dynamo_llm::block_manager::block::BasicMetadata,
@@ -57,7 +71,9 @@ impl Block {
         let mutable_block = self.inner.lock().unwrap();
         match &*mutable_block {
             BlockType::Pinned(block) => block.num_layers(),
+            BlockType::PinnedOwned(block) => block.num_layers(),
             BlockType::Device(block) => block.num_layers(),
+            BlockType::DeviceOwned(block) => block.num_layers(),
         }
     }
 }
@@ -159,7 +175,17 @@ impl Block {
                     let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
+                BlockType::PinnedOwned(block) => {
+                    let block_data = block.block_data_mut();
+                    let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
+                    (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
                 BlockType::Device(block) => {
+                    let block_data = block.block_data_mut();
+                    let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
+                    (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+                BlockType::DeviceOwned(block) => {
                     let block_data = block.block_data_mut();
                     let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
@@ -173,7 +199,21 @@ impl Block {
                     block.page_size() as i64,
                     block.inner_dim() as i64,
                 ),
+                BlockType::PinnedOwned(block) => (
+                    block.num_blocks() as i64,
+                    block.num_layers() as i64,
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
                 BlockType::Device(block) => (
+                    block.num_blocks() as i64,
+                    block.num_layers() as i64,
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
+                BlockType::DeviceOwned(block) => (
                     block.num_blocks() as i64,
                     block.num_layers() as i64,
                     block.num_outer_dims() as i64,

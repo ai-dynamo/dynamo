@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 import math
 from typing import Any, Iterable, Optional
 
+from . import rust as rust_bindings
+
 
 BAD_PAGE_INDEX = -1
 
@@ -58,8 +60,8 @@ class KvbmKVCacheManager:
 
     This class implements the v2-shaped scheduling surface and keeps enough
     request state to exercise the contract without depending on the native
-    TensorRT-LLM allocator. Buffer export remains explicit and must be wired to
-    a KVBM-owned backend in a later milestone.
+    TensorRT-LLM allocator. Buffer export uses a KVBM-owned local pool when the
+    Rust helper is available and falls back to explicit injection otherwise.
     """
 
     def __init__(
@@ -111,17 +113,21 @@ class KvbmKVCacheManager:
 
         if self.num_local_layers == 0:
             raise ValueError("pp_layers must contain at least one layer")
-        if len(self.total_num_kv_heads_per_layer) < self.num_local_layers:
+        if len(self.total_num_kv_heads_per_layer) <= max(self.pp_layers):
             raise ValueError(
                 "total_num_kv_heads_per_layer must cover all local layers"
             )
 
-        self.primary_pool = primary_pool
+        self.kv_factor = 2
         self.layer_buffers = dict(layer_buffers or {})
         self.layer_offsets = layer_offsets or {
             layer_idx: layer_idx for layer_idx in range(len(self.pp_layers))
         }
         self.local_layers = {offset: layer_idx for layer_idx, offset in self.layer_offsets.items()}
+        self.num_kv_heads_per_layer = [
+            self.total_num_kv_heads_per_layer[layer_idx] for layer_idx in self.pp_layers
+        ]
+        self.primary_pool = primary_pool or self._maybe_create_native_primary_pool()
         self.kv_cache_pool_mapping = kv_cache_pool_mapping or [
             [0, local_layer_idx] for local_layer_idx in range(self.num_local_layers)
         ]
@@ -145,6 +151,85 @@ class KvbmKVCacheManager:
         self._iteration_events: list[Any] = []
         self._request_slots: dict[int, int] = {}
         self._free_slots = list(range(self.max_num_sequences + 1))
+
+    def _uniform_num_kv_heads(self) -> Optional[int]:
+        if not self.num_kv_heads_per_layer:
+            return None
+        first = self.num_kv_heads_per_layer[0]
+        if any(num_heads != first for num_heads in self.num_kv_heads_per_layer[1:]):
+            return None
+        return first
+
+    def _normalize_dtype_name(self) -> Optional[str]:
+        value = str(self.dtype).lower()
+        if value in {"float16", "torch.float16", "fp16"}:
+            return "float16"
+        if value in {"bfloat16", "torch.bfloat16", "bf16"}:
+            return "bfloat16"
+        if value in {"float32", "torch.float32", "fp32"}:
+            return "float32"
+        return None
+
+    def _maybe_create_native_primary_pool(self) -> Any:
+        create_primary_pool = getattr(rust_bindings, "create_primary_pool", None)
+        if create_primary_pool is None or self.num_blocks == 0:
+            return None
+
+        num_kv_heads = self._uniform_num_kv_heads()
+        dtype_name = self._normalize_dtype_name()
+        if num_kv_heads is None or dtype_name is None:
+            return None
+
+        try:
+            return create_primary_pool(
+                num_blocks=self.num_blocks,
+                num_layers=self.num_local_layers,
+                kv_factor=self.kv_factor,
+                page_size=self.tokens_per_block,
+                inner_dim=num_kv_heads * self.head_dim,
+                dtype=dtype_name,
+            )
+        except Exception:
+            return None
+
+    def _torch_from_dlpack(self, value: Any) -> Any:
+        if not hasattr(value, "__dlpack__"):
+            return value
+        try:
+            import torch
+        except ImportError:
+            return value
+        return torch.utils.dlpack.from_dlpack(value)
+
+    def _reshape_layer_export(self, value: Any, layer_offset: int, kv_layout: str) -> Any:
+        tensor = self._torch_from_dlpack(value)
+        if tensor is value:
+            return value
+
+        num_kv_heads = self.num_kv_heads_per_layer[layer_offset]
+        expected_inner_dim = num_kv_heads * self.head_dim
+        if tensor.dim() != 5 or tensor.shape[1] != 1 or tensor.shape[-1] != expected_inner_dim:
+            return tensor
+
+        tensor = tensor.squeeze(1).unflatten(-1, (num_kv_heads, self.head_dim))
+        if kv_layout == "HND":
+            tensor = tensor.permute(0, 1, 3, 2, 4)
+        return tensor
+
+    def _reshape_primary_pool_export(self, value: Any) -> Any:
+        tensor = self._torch_from_dlpack(value)
+        if tensor is value:
+            return value
+
+        num_kv_heads = self._uniform_num_kv_heads()
+        if num_kv_heads is None:
+            return tensor
+
+        expected_inner_dim = num_kv_heads * self.head_dim
+        if tensor.dim() != 5 or tensor.shape[-1] != expected_inner_dim:
+            return tensor
+
+        return tensor.unflatten(-1, (num_kv_heads, self.head_dim))
 
     def _request_id(self, request: Any) -> int:
         if hasattr(request, "py_request_id"):
@@ -394,12 +479,16 @@ class KvbmKVCacheManager:
             if hasattr(self.primary_pool, "get_layer_view"):
                 return self.primary_pool.get_layer_view(layer_offset, kv_layout=kv_layout)
             if hasattr(self.primary_pool, "layer_view"):
-                return self.primary_pool.layer_view(layer_offset, kv_layout=kv_layout)
+                try:
+                    export = self.primary_pool.layer_view(layer_offset, kv_layout=kv_layout)
+                except TypeError:
+                    export = self.primary_pool.layer_view(layer_offset)
+                return self._reshape_layer_export(export, layer_offset, kv_layout)
         raise self._missing_export("get_buffers")
 
     def get_unique_primary_pool(self) -> Any:
         if self.primary_pool is not None:
-            return self.primary_pool
+            return self._reshape_primary_pool_export(self.primary_pool)
         raise self._missing_export("get_unique_primary_pool")
 
     def get_num_free_blocks(self) -> int:

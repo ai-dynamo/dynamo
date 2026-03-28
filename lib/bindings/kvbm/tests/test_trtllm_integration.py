@@ -91,6 +91,7 @@ class TrtllmIntegrationTest(unittest.TestCase):
         self.assertEqual(
             rust.KvConnectorLeader.__name__, "PyTrtllmKvConnectorLeader"
         )
+        self.assertIsNone(rust.create_primary_pool)
 
     def test_manager_tracks_request_lifecycle_and_indices(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")
@@ -257,6 +258,53 @@ class TrtllmIntegrationTest(unittest.TestCase):
         self.assertEqual([request.py_request_id for request in requests], [201, 202])
         self.assertTrue(manager.is_request_active(201))
         self.assertTrue(draft_manager.is_request_active(202))
+
+    def test_manager_auto_wires_native_primary_pool_when_available(self) -> None:
+        class _NativePool:
+            def layer_view(self, layer_idx: int) -> str:
+                return f"native-layer-{layer_idx}"
+
+        calls = []
+
+        def _create_primary_pool(**kwargs):
+            calls.append(kwargs)
+            return _NativePool()
+
+        sys.modules["kvbm._core"]._trtllm_integration.create_primary_pool = _create_primary_pool
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[2, 4],
+            total_num_kv_heads_per_layer=[8, 8, 8, 8, 8],
+            max_seq_len=32,
+            num_blocks=8,
+            layer_offsets={2: 0, 4: 1},
+        )
+
+        self.assertEqual(manager.get_buffers(4), "native-layer-1")
+        self.assertIs(manager.get_unique_primary_pool(), manager.primary_pool)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "num_blocks": 8,
+                    "num_layers": 2,
+                    "kv_factor": 2,
+                    "page_size": 4,
+                    "inner_dim": 128,
+                    "dtype": "float16",
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

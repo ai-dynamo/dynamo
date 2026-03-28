@@ -19,6 +19,7 @@ try:
     KvConnectorWorker = getattr(_trtllm_integration, "PyTrtllmKvConnectorWorker")
     KvConnectorLeader = getattr(_trtllm_integration, "PyTrtllmKvConnectorLeader")
     SchedulerOutput = getattr(_trtllm_integration, "SchedulerOutput")
+    create_primary_pool = getattr(_trtllm_integration, "create_primary_pool", None)
 
 except ImportError:
     print(
@@ -33,6 +34,7 @@ except ImportError:
     KvConnectorWorker = None
     KvConnectorLeader = None
     SchedulerOutput = None
+    create_primary_pool = None
 
 __all__ = [
     "BlockManager",
@@ -44,4 +46,5 @@ __all__ = [
     "KvConnectorWorker",
     "KvConnectorLeader",
     "SchedulerOutput",
+    "create_primary_pool",
 ]

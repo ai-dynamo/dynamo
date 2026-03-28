@@ -44,7 +44,7 @@ impl ToTensor for DlPackTensor {
     fn device(&self) -> Device {
         let mutable_block = self.owner.first_block().lock().unwrap();
         match &*mutable_block {
-            block::BlockType::Pinned(_) => {
+            block::BlockType::Pinned(_) | block::BlockType::PinnedOwned(_) => {
                 // TODO: Why torch does not support CPU_PINNED here?
                 /*Device {
                     device_type: DeviceType::CudaHost,
@@ -52,7 +52,9 @@ impl ToTensor for DlPackTensor {
                 }*/
                 Device::CPU
             }
-            block::BlockType::Device(_) => Device::cuda(self.device_id),
+            block::BlockType::Device(_) | block::BlockType::DeviceOwned(_) => {
+                Device::cuda(self.device_id)
+            }
         }
     }
 
@@ -157,8 +159,12 @@ pub fn dlpack_device<'py>(
         .call1(("DLDeviceType", dev_type_list))
         .unwrap();
     let dev_type = match &*block.lock().unwrap() {
-        block::BlockType::Pinned(_) => dev_type_enum.getattr("CPU_PINNED").unwrap(),
-        block::BlockType::Device(_) => dev_type_enum.getattr("CUDA").unwrap(),
+        block::BlockType::Pinned(_) | block::BlockType::PinnedOwned(_) => {
+            dev_type_enum.getattr("CPU_PINNED").unwrap()
+        }
+        block::BlockType::Device(_) | block::BlockType::DeviceOwned(_) => {
+            dev_type_enum.getattr("CUDA").unwrap()
+        }
     };
     let dev_id = device_id.into_py(py).into_bound(py);
     let dev = vec![dev_type, dev_id];
