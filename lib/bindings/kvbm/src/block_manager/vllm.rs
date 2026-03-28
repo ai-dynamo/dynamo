@@ -34,6 +34,9 @@ mod request;
 mod slot;
 
 pub use block_list::{BlockListType, BlockState, BlockStates, KvbmBlockList};
+pub use connector::SchedulerOutput;
+pub use connector::trtllm_leader::PyTrtllmKvConnectorLeader;
+pub use connector::trtllm_worker::PyTrtllmKvConnectorWorker;
 pub use request::KvbmRequest;
 pub use slot::{Slot, SlotPosition};
 
@@ -49,10 +52,10 @@ fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<connector::worker::PyKvConnectorWorker>()?;
     m.add_class::<connector::leader::PyKvConnectorLeader>()?;
-    m.add_class::<connector::SchedulerOutput>()?;
+    m.add_class::<SchedulerOutput>()?;
     // TODO: use TRTLLM own integration module
-    m.add_class::<connector::trtllm_worker::PyTrtllmKvConnectorWorker>()?;
-    m.add_class::<connector::trtllm_leader::PyTrtllmKvConnectorLeader>()?;
+    m.add_class::<PyTrtllmKvConnectorWorker>()?;
+    m.add_class::<PyTrtllmKvConnectorLeader>()?;
     Ok(())
 }
 

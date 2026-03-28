@@ -19,6 +19,7 @@ mod cache_stats;
 mod controller;
 mod distributed;
 
+pub mod trtllm;
 pub mod vllm;
 
 /// Add bingings from this crate to the provided module
@@ -31,6 +32,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<controller::ResetBlocksResponse>()?;
 
     vllm::add_to_module(m)?;
+    trtllm::add_to_module(m)?;
 
     Ok(())
 }

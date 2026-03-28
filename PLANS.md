@@ -94,7 +94,7 @@ Observed existing repo state:
 
 ### Phase 1: Dedicated TRTLLM integration module
 
-Status: in progress
+Status: completed
 
 Goal:
 
@@ -112,7 +112,7 @@ Planned changes:
 
 ### Phase 2: Manager shell and request-state contract
 
-Status: pending
+Status: in progress
 
 Goal:
 
@@ -120,14 +120,20 @@ Goal:
 - Back it with minimal internal state and explicit `NotImplementedError`
   boundaries where KVBM-owned tensor export is not wired yet.
 
-Planned changes:
+Implemented so far:
 
 - Constructor/attribute validation
 - request lifecycle bookkeeping
-- host block-offset bookkeeping
 - cache-index export helpers
-- draft path explicitly unsupported in the initial shell - but should be supported asap after, as has high prio.
+- dummy-request seeding
+- explicit `NotImplementedError` boundaries for tensor export
 
+Still pending in this phase:
+
+- host block-offset bookkeeping compatible with TRTLLM tensor expectations
+- integration with a real Rust-backed allocator/export path
+- draft-path semantics beyond basic bookkeeping
+- optional environment bootstrapping for richer TRTLLM/PyTorch validation later
 ### Phase 3: Buffer and primary-pool export
 
 Status: pending
@@ -167,23 +173,36 @@ Goal:
   manager integration.
 - Confirmed the first practical coding milestone is a dedicated TRTLLM module
   boundary plus a manager shell and tests that can run without the full runtime.
+- Added a dedicated Rust `_trtllm_integration` pymodule in
+  `lib/bindings/kvbm/src/block_manager/trtllm.rs`.
+- Updated the Python TRTLLM Rust loader to import `_trtllm_integration` instead
+  of `_vllm_integration`.
+- Added `kvbm.trtllm_integration.kv_cache_manager.KvbmKVCacheManager` as a thin
+  dependency-light manager shell.
+- Added stdlib-only tests in `lib/bindings/kvbm/tests/test_trtllm_integration.py`.
 
 ## Testing Log
 
-- No meaningful tests run yet.
-- Reason: phase 0 was design/inventory only; next milestone will add code and
-  then run targeted tests.
+- Passed: `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed: `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
+- Failed once due to wrong package selector:
+  `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
+  Reason: the crate is named `kvbm-py3`, not `kvbm`.
 
 ## Remaining Work
 
-- Implement Phase 1 module split.
-- Add the TensorRT-LLM manager shell.
-- Add targeted tests that run in the current dependency-constrained shell.
+- Finish Phase 2 by tightening the manager contract around real TRTLLM request
+  semantics and host block-offset handling.
+- Start Phase 3 by wiring KVBM-backed primary-pool and per-layer tensor export.
+- Add tests that validate exported shapes and indices without requiring the full
+  TRT-LLM runtime.
 - Continue updating this file after every milestone with exact next steps.
 
 ## Exact Next Step
 
-1. Add `_trtllm_integration` to `lib/bindings/kvbm/src/block_manager`.
-2. Update `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`.
-3. Add `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`.
-4. Add stub-based unit tests for the new module and manager shell.
+1. Inspect KVBM block/device export internals to find the smallest viable
+   primary-pool export path.
+2. Extend the TRTLLM manager shell or Rust layer with explicit exported buffer
+   providers instead of placeholder `NotImplementedError` behavior.
+3. Add tests for primary-pool export, per-layer buffer export, and cache-index
+   compatibility using stub tensors.
