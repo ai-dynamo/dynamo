@@ -155,14 +155,12 @@ impl Block {
             let mut mutable_block = self.inner.lock().unwrap();
             ptr = match &mut *mutable_block {
                 BlockType::Pinned(block) => {
-                    use dynamo_llm::block_manager::block::private::PrivateToken;
-                    let block_data = block.block_data_mut(PrivateToken);
+                    let block_data = block.block_data_mut();
                     let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 BlockType::Device(block) => {
-                    use dynamo_llm::block_manager::block::private::PrivateToken;
-                    let block_data = block.block_data_mut(PrivateToken);
+                    let block_data = block.block_data_mut();
                     let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }

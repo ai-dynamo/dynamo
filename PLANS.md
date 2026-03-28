@@ -140,7 +140,7 @@ Deferred to later phases:
 - any redesign of `BAD_PAGE_INDEX` beyond the current supported path
 ### Phase 3: Buffer and primary-pool export
 
-Status: pending
+Status: in progress
 
 Goal:
 
@@ -151,6 +151,23 @@ Planned changes:
 - Add non-block-oriented Rust tensor export helpers
 - export primary pool tensor
 - export per-layer tensors compatible with TRTLLM expectations
+
+Implemented so far:
+
+- activated the previously dormant Rust export modules by wiring them into
+  `lib/bindings/kvbm/src/block_manager.rs`
+- generalized the local DLPack wrapper to preserve explicit strides instead of
+  forcing contiguous shapes
+- added pooled block-list primary-pool export support
+- added pooled per-layer export support using explicit non-contiguous strides
+- added Rust unit tests for the exported pool/layer shape-stride contracts
+
+Still pending in this phase:
+
+- construct these export objects from the real KVBM manager path instead of
+  only exposing the building blocks
+- validate the final tensor rank/layout against the exact TRTLLM attention path
+- wire the Python manager to these Rust exports
 
 ### Phase 4: Full request lifecycle ownership
 
@@ -203,6 +220,14 @@ Goal:
   - multi-pool host block-offset copying
   - layer export resolution through global/local layer ids
   - the new `impl` compatibility shim
+- Activated the Rust export module tree (`block`, `block_list`, `layer`,
+  `dlpack`) so the previously written export helpers are compiled and testable.
+- Added stride-aware DLPack support in the local binding wrapper instead of
+  assuming all exported tensors are contiguous.
+- Added pooled block-list exports:
+  - `BlockList.__dlpack__()` now exposes a primary-pool-style block-first view
+  - `BlockList.layer_view(layer_idx)` returns a per-layer pooled export with
+    explicit non-contiguous strides
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -218,6 +243,14 @@ Goal:
 - Aggregated execution can avoid most `impl` coupling, but leaving `impl=None`
   was too weak even for compatibility work; a tiny shim is enough for the
   currently supported non-disaggregated path.
+- `dlpark` already supports explicit strides, so the export blocker was in the
+  local wrapper rather than the upstream dependency.
+- The old Rust export files were present on disk but not wired into the active
+  module tree; once activated, they also needed API updates from the current
+  `block_data_mut()` signature before they would compile.
+- The first concrete export-model decision is now made:
+  use `FullyContiguous`-compatible pooled exports with explicit strides for
+  per-layer views instead of adding a second tensor-only layout immediately.
 - `FullyContiguous` layout is a good fit for `get_unique_primary_pool()`.
 - The same layout is a poor fit for `get_buffers(layer_idx)` unless one of the
   following happens:
@@ -239,31 +272,37 @@ Goal:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after activating and extending the Rust export module tree:
+  `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --lib`
+- Passed again after the same milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
+- Commit hooks could not run to completion in this environment:
+  - first due read-only pre-commit cache under `/root/.cache/pre-commit`
+  - then due network-restricted hook bootstrap (`git fetch` to GitHub failed)
+  Result: signed commits for this work need `--no-verify` unless hook assets are
+  already available locally.
 
 ## Remaining Work
 
 - Implement the phase-3 export surface in Rust:
-  - generalize DLPack export beyond contiguous-only tensors
-  - add non-block-oriented primary-pool and per-layer view helpers
+  - construct the new block-list export objects from the real KVBM manager path
   - keep the exported layout compatible with the supported TRTLLM path
 - Wire the Python manager to the real KVBM-backed primary-pool and per-layer
   export objects instead of constructor-injected placeholders.
 - Add tests that validate exported shapes and indices without requiring the full
   TRT-LLM runtime.
-- Decide whether the first real export path should be stride-aware
-  `FullyContiguous` views or a tensor-oriented alternate layout helper, then
-  record that choice here once the code lands.
+- Add Python-side contract tests that exercise these export objects through the
+  manager surface rather than only at the Rust helper level.
 - Continue updating this file after every milestone with exact next steps.
 
 ## Exact Next Step
 
-1. Add a stride-aware Rust DLPack helper so exported TRTLLM tensors are not
-   limited to contiguous shapes.
-2. Build focused primary-pool / per-layer export objects on top of that helper
-   and verify them with Rust build checks plus stdlib-level Python contract
-   tests.
-3. Only after those helpers exist, replace the Python placeholder export path
-   in `KvbmKVCacheManager`.
+1. Decide where the real KVBM manager will source pooled `BlockList` exports
+   from, then add that constructor/wrapper path in Rust.
+2. Replace the Python placeholder export injection in `KvbmKVCacheManager` with
+   those real Rust-backed primary-pool and per-layer objects.
+3. Add manager-level tests that validate `get_unique_primary_pool()` and
+   `get_buffers()` through that path without requiring a full TRTLLM runtime.

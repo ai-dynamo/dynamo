@@ -15,9 +15,13 @@ use pyo3::PyResult;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+mod block;
+mod block_list;
 mod cache_stats;
 mod controller;
+mod dlpack;
 mod distributed;
+mod layer;
 
 pub mod trtllm;
 pub mod vllm;
@@ -25,8 +29,12 @@ pub mod vllm;
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockManager>()?;
+    m.add_class::<block::Block>()?;
+    m.add_class::<block_list::BlockList>()?;
+    m.add_class::<block_list::BlockListLayerView>()?;
     m.add_class::<distributed::KvbmWorker>()?;
     m.add_class::<distributed::KvbmLeader>()?;
+    m.add_class::<layer::Layer>()?;
     m.add_class::<controller::BlockManagerClient>()?;
     m.add_class::<controller::BlockPoolStatus>()?;
     m.add_class::<controller::ResetBlocksResponse>()?;
