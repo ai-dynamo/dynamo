@@ -176,7 +176,7 @@ Implemented so far:
 
 ### Phase 4: Full request lifecycle ownership
 
-Status: in progress
+Status: completed
 
 Goal:
 
@@ -200,22 +200,40 @@ Implemented so far:
   direct resize calls
 - fixed `get_kv_cache_stats()` to report native-backed allocations instead of
   incorrectly reading only the dormant Python fallback free-list
+- kept host block-offset materialization as a thin Python-side formatting step;
+  the native helper already owns slot assignment plus padded block rows, and
+  the extra Python copy remains sufficient for the pinned aggregated path
+- added repeated allocate/free, slot reuse, public shutdown, and shimmed
+  `impl.shutdown()` coverage for both fallback and native-backed paths
 
-Still pending in this phase:
+Decision:
 
-- decide whether host block-offset materialization should also move into Rust or
-  remain a thin Python-side formatting step
-- add repeated allocate/free and teardown coverage around the now-native dummy
-  and lifecycle path
+- host block-offset formatting remains in Python for now
+- request/block ownership remains native on the supported path
+- no additional native host-row formatter is justified until a real runtime path
+  demonstrates a correctness or performance need
 
 ### Phase 5: `impl` compatibility surface
 
-Status: pending
+Status: completed
 
 Goal:
 
 - Implement or patch the minimal `impl` surface still needed by the pinned
   supported path.
+
+Implemented so far:
+
+- retained the minimal aggregated-path shim for:
+  - `get_primary_pool_data()`
+  - `get_unique_primary_pool()`
+  - `clear_reusable_blocks()`
+  - `shutdown()`
+- routed shim shutdown through the real manager teardown path so both direct
+  `manager.shutdown()` and wrapper-style `impl.shutdown()` teardown behave
+  correctly against the pinned TRT-LLM call sites
+- re-checked the pinned upstream consumers and found no additional aggregated
+  supported-path `impl` methods that need to move into Rust today
 
 ## Progress Log
 
@@ -273,6 +291,9 @@ Goal:
   path no longer needs Python-side dummy request seeding before allocation.
 - Fixed native-backed KV cache stats reporting so allocated bytes now reflect
   native free-block state plus full TRTLLM block geometry.
+- Added public/shimmed shutdown coverage plus repeated slot-reuse teardown
+  coverage, and completed the supported-path decision to keep host block-offset
+  row materialization in Python.
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -315,6 +336,12 @@ Goal:
 - After re-reading the current native lifecycle boundary, the only remaining
   supported-path Python-owned state that materially affects correctness is host
   block-offset row formatting; request/block ownership can stay native.
+- Re-reading the pinned upstream shutdown paths showed both direct
+  `manager.shutdown()` and wrapper-style `impl.shutdown()` matter; routing the
+  shimmed shutdown through the manager is sufficient for the pinned aggregated
+  path.
+- No additional aggregated-path `impl` methods were found beyond the current
+  shim once the public manager teardown behavior was added.
 
 ## Testing Log
 
@@ -346,6 +373,11 @@ Goal:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after adding public/shimmed shutdown coverage and fallback/native
+  teardown regression tests:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
@@ -363,25 +395,20 @@ Goal:
 
 ## Remaining Work
 
-- Phase 4: decide whether host block-offset row materialization should move into
-  Rust now that slot assignment and padded block rows are already available
-  there.
-- Phase 4: add repeated allocate/free and teardown coverage for both fallback
-  and native-backed lifecycle paths.
-- Phase 5: add the public manager shutdown/teardown behavior still required by
-  the pinned executor path, then re-check whether the current tiny aggregated
-  `impl` shim is sufficient.
-- Add a runtime-capable validation path for the Rust test binary once the local
-  PyO3/Python link environment is fixed; until then rely on `cargo check` plus
-  Python contract tests for this machine.
-- Continue updating this file after every milestone with exact next steps.
+- Supported-path repo work is complete for the pinned aggregated TRTLLM v2
+  integration surface described above.
+- External blocker only: add a runtime-capable validation path for the Rust
+  test binary once the local PyO3/Python link environment is fixed; until then
+  rely on `cargo check` plus Python contract tests on this machine.
+- If a future run resumes, the first follow-up is runtime validation against a
+  real TRTLLM/PyTorch environment rather than more contract-surface changes.
 
 ## Exact Next Step
 
-1. Add a public `KvbmKVCacheManager.shutdown()` that clears native/fallback
-   state, host block-offset rows, and owned export references in the way the
-   pinned executor expects.
-2. Keep host block-offset formatting in Python unless shutdown/teardown testing
-   exposes a real native-only correctness need; padded rows are already native.
-3. Extend tests around repeated allocate/free, slot reuse, dummy requests, and
-   teardown, then re-check the pinned aggregated-path `impl` consumers.
+1. If the environment blocker is removed, run runtime-capable validation against
+   a real TRTLLM/PyTorch setup, starting with:
+   `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --lib`
+2. Then validate the pinned supported path end-to-end in the local TRTLLM
+   checkout at `/tmp/trtllm-latest`.
+3. If that runtime environment is still unavailable, no further repo-side code
+   changes are queued from this plan.

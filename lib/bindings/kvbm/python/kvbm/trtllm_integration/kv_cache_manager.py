@@ -51,7 +51,7 @@ class _ImplCompat:
         return None
 
     def shutdown(self) -> None:
-        return None
+        self._manager.shutdown()
 
 
 class KvbmKVCacheManager:
@@ -304,6 +304,10 @@ class KvbmKVCacheManager:
                 row = slot * self.max_beam_width + beam_idx
                 self.host_kv_cache_block_offsets[pool_idx][row][0] = list(padded)
                 self.host_kv_cache_block_offsets[pool_idx][row][1] = list(padded)
+
+    def _reset_host_block_offsets(self) -> None:
+        for slot in range(self.max_num_sequences + 1):
+            self._clear_slot(slot)
 
     def _resolve_layer_offset(self, layer_idx: int) -> int:
         if layer_idx in self.layer_offsets:
@@ -794,11 +798,13 @@ class KvbmKVCacheManager:
         del kv_cache_block_id
 
     def shutdown(self) -> None:
-        if self._native_state is not None:
+        if self._native_state is not None and hasattr(self._native_state, "shutdown"):
             self._native_state.shutdown()
         self._request_state.clear()
         self._free_block_ids = list(range(self.num_blocks))
+        self._iteration_events.clear()
         self._request_slots.clear()
         self._free_slots = list(range(self.max_num_sequences + 1))
-        for slot in self._free_slots:
-            self._clear_slot(slot)
+        self._reset_host_block_offsets()
+        self.layer_buffers.clear()
+        self.primary_pool = None

@@ -476,6 +476,126 @@ class TrtllmIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(manager.get_kv_cache_stats().allocated_bytes, 4096)
 
+    def test_manager_reuses_slots_after_free_in_fallback_path(self) -> None:
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=2,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[0],
+            total_num_kv_heads_per_layer=[8],
+            max_seq_len=16,
+            num_blocks=6,
+        )
+
+        first = _StubRequest(601, context_current_position=0)
+        first.context_chunk_size = 4
+        first.context_remaining_length = 4
+        self.assertTrue(manager.prepare_context(first))
+        self.assertTrue(manager.resize_context(first, 4))
+        self.assertEqual(manager._request_slots[601], 0)
+
+        manager.free_resources(first)
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [-1, -1, -1, -1],
+        )
+
+        second = _StubRequest(602, context_current_position=0)
+        second.context_chunk_size = 2
+        second.context_remaining_length = 2
+        self.assertTrue(manager.prepare_context(second))
+        self.assertTrue(manager.resize_context(second, 2))
+
+        self.assertEqual(manager._request_slots[602], 0)
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [2, -1, -1, -1],
+        )
+        self.assertEqual(manager.get_cache_indices(602), [2])
+        manager.shutdown()
+        self.assertEqual(manager.get_num_free_blocks(), 6)
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [-1, -1, -1, -1],
+        )
+
+    def test_manager_shutdown_clears_native_state_and_owned_exports(self) -> None:
+        class _NativeState:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.block_ids = {}
+                self.slots = {}
+                self.shutdown_calls = 0
+
+            def is_request_active(self, request_id: int) -> bool:
+                return request_id in self.block_ids
+
+            def add_dummy_request(self, request_id: int, target_capacity: int) -> bool:
+                num_blocks = math.ceil(target_capacity / self.kwargs["tokens_per_block"])
+                self.block_ids[request_id] = list(range(num_blocks))
+                self.slots.setdefault(request_id, 0)
+                return True
+
+            def get_padded_block_row(self, request_id: int, bad_page_index: int):
+                row = list(self.block_ids.get(request_id, ()))
+                row.extend([bad_page_index] * 8)
+                return row
+
+            def get_slot(self, request_id: int) -> int:
+                return self.slots.setdefault(request_id, 0)
+
+            def get_num_free_blocks(self) -> int:
+                allocated = sum(len(block_ids) for block_ids in self.block_ids.values())
+                return self.kwargs["num_blocks"] - allocated
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                self.block_ids.clear()
+                self.slots.clear()
+
+        sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager = _NativeState
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        primary_pool = object()
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[0],
+            total_num_kv_heads_per_layer=[8],
+            max_seq_len=32,
+            num_blocks=8,
+            primary_pool=primary_pool,
+            layer_buffers={0: "layer-0"},
+        )
+        manager._iteration_events.append("evt")
+        manager.add_dummy_requests([701], token_nums=[3], is_gen=True)
+
+        self.assertIs(manager.get_unique_primary_pool(), primary_pool)
+        self.assertTrue(manager.is_request_active(701))
+
+        manager.impl.shutdown()
+
+        self.assertEqual(manager._native_state.shutdown_calls, 1)
+        self.assertFalse(manager.is_request_active(701))
+        self.assertEqual(manager.get_num_free_blocks(), 8)
+        self.assertEqual(manager.get_latest_events(), [])
+        self.assertIsNone(manager.primary_pool)
+        self.assertEqual(manager.layer_buffers, {})
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [-1, -1, -1, -1],
+        )
+        with self.assertRaises(NotImplementedError):
+            manager.get_unique_primary_pool()
+
 
 if __name__ == "__main__":
     unittest.main()
