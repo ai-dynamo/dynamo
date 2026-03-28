@@ -205,6 +205,7 @@ Goal:
 
 - Passed: `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed: `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
+- Passed: `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Passed again after host block-offset changes:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Failed once due to wrong package selector:
