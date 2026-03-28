@@ -1078,11 +1078,50 @@ def _find_min_vram(
         safe_kv_mib = safe_kv_bytes // (1024 * 1024)
         min_kv_mib = min_kv_bytes // (1024 * 1024)
 
+        # Final validation probe at safe_kv_bytes to get accurate profiled_vram_gib.
+        # The bisection's last pass was at min_kv_bytes; the recommended marker uses
+        # safe_kv_bytes which allocates more KV cache and thus more VRAM.
+        print(f"  [final probe] Measuring VRAM at safe_kv_bytes={safe_kv_mib} MiB")
+        sys.stdout.flush()
+        rc_final, wall_final, reports_final, samples_final, stdout_final = _run_once(
+            pytest_args,
+            interval=interval,
+            baseline_seconds=baseline_seconds,
+            teardown_seconds=teardown_seconds,
+            extra_env={
+                **_gpu_env,
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES": str(safe_kv_bytes),
+            },
+            quiet=True,
+            run_label="final",
+            timeout=probe_timeout,
+        )
+        if rc_final == 0:
+            last_pass_peak_mib = max((r.peak_mib for r in reports_final), default=0)
+            last_pass_reports = reports_final
+            last_pass_samples = samples_final
+            pass_wall_times.append(wall_final)
+            peak_gib = round(last_pass_peak_mib / 1024, 1)
+            print(
+                f"  [PASS] kv_cache={safe_kv_mib} MiB, "
+                f"peak {_format_mib(last_pass_peak_mib)}, wall {wall_final:.0f}s"
+            )
+        else:
+            print(
+                f"  [FAIL] kv_cache={safe_kv_mib} MiB failed unexpectedly, "
+                f"using VRAM from min_kv_bytes={min_kv_mib} MiB instead"
+            )
+
+        print(f"\n{'=' * 72}")
+        print("MINIMUM KV CACHE RESULT")
+        print(f"{'=' * 72}")
         print(f"  Minimum KV cache : {min_kv_mib} MiB ({min_kv_bytes:,} bytes)")
         print(
             f"  Safe KV cache    : {safe_kv_mib} MiB ({safe_kv_bytes:,} bytes) ({_KV_SAFETY_FACTOR:.0f}x safety)"
         )
-        print(f"  Peak VRAM        : {_format_mib(last_pass_peak_mib)}")
+        print(
+            f"  Peak VRAM        : {_format_mib(last_pass_peak_mib)} (at {safe_kv_mib} MiB)"
+        )
         print()
         print("  Recommended markers:")
         print(f"    @pytest.mark.profiled_vram_gib({peak_gib})")

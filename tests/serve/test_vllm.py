@@ -65,10 +65,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
                 360
             ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
@@ -98,10 +98,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
             pytest.mark.post_merge,
         ],
@@ -130,10 +130,10 @@ vllm_configs = {
         marks=[
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
             pytest.mark.skipif(
@@ -156,10 +156,10 @@ vllm_configs = {
         marks=[
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
             pytest.mark.skipif(
@@ -184,10 +184,10 @@ vllm_configs = {
         script_name="agg_request_planes.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
                 360
             ),  # ~8x observed 43.0s; bumped for GPU-parallel headroom
@@ -206,10 +206,10 @@ vllm_configs = {
         script_name="agg_request_planes.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
                 360
             ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
@@ -367,10 +367,10 @@ vllm_configs = {
         # post_merge because needs real NIXL not stub
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.3),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                258_097_000
-            ),  # KV cache cap (2x safety over min=129_048_500)
+                1_710_490_000
+            ),  # KV cache cap (2x safety over min=855_244_800)
             pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
             pytest.mark.post_merge,
         ],
@@ -456,10 +456,10 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(19.6),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                481_078_000
-            ),  # KV cache cap (2x safety over min=240_539_000)
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
             pytest.mark.timeout(
                 360
             ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
@@ -493,10 +493,10 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(14.6),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                158_994_000
-            ),  # KV cache cap (2x safety over min=79_497_000)
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
             pytest.mark.timeout(
                 300
             ),  # ~7x observed 42.7s; 7B model loads ~48s on CI (A10G/L4)
@@ -744,10 +744,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(16.1),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                4_048_776_000
-            ),  # KV cache cap (2x safety over min=2_024_388_000)
+                4_074_898_000
+            ),  # KV cache cap (2x safety over min=2_037_448_704)
             pytest.mark.timeout(
                 420
             ),  # 7B model loads ~48s on CI (A10G/L4) vs ~15s locally
@@ -786,10 +786,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(2.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                942_054_000
-            ),  # KV cache cap (2x safety over min=471_027_000)
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
             pytest.mark.pre_merge,
         ],
