@@ -112,7 +112,7 @@ Planned changes:
 
 ### Phase 2: Manager shell and request-state contract
 
-Status: in progress
+Status: completed
 
 Goal:
 
@@ -122,18 +122,22 @@ Goal:
 
 Implemented so far:
 
-- Constructor/attribute validation
-- request lifecycle bookkeeping
-- cache-index export helpers
+- constructor and attribute validation
+- request lifecycle bookkeeping aligned more closely with pinned TRTLLM v2
+- first-chunk versus later-chunk context preparation semantics
+- host block-offset bookkeeping with per-slot clearing/restoration
+- generation allocation and rewind bookkeeping
+- cache-index and padded block-id export helpers
 - dummy-request seeding
+- small aggregated-path `impl` compatibility shim
 - explicit `NotImplementedError` boundaries for tensor export
 
-Still pending in this phase:
+Deferred to later phases:
 
-- tensor-shaped host block-offset bookkeeping backed by the real export path
 - integration with a real Rust-backed allocator/export path
-- draft-path semantics beyond basic bookkeeping
+- richer draft-path semantics beyond mirrored bookkeeping
 - optional environment bootstrapping for richer TRTLLM/PyTorch validation later
+- any redesign of `BAD_PAGE_INDEX` beyond the current supported path
 ### Phase 3: Buffer and primary-pool export
 
 Status: pending
@@ -183,6 +187,22 @@ Goal:
 - Added host slot and block-offset bookkeeping to the manager shell so
   `copy_batch_block_offsets()` now mirrors TRTLLM-style cached block rows
   instead of directly returning raw block IDs.
+- Tightened the Python manager shell against pinned TRTLLM v2 semantics:
+  - non-first context chunks now require existing request state
+  - context resize preserves existing capacity like upstream v2
+  - generation allocation on unknown requests now fails cleanly instead of
+    raising
+  - suspended requests are skipped during late updates
+  - generation updates now apply rewind before committing the new history
+- Added a minimal aggregated-path `impl` compatibility shim that delegates
+  `get_primary_pool_data()` and `get_unique_primary_pool()` back to the Python
+  manager surface instead of leaving `impl=None`.
+- Extended stdlib-only tests to cover:
+  - non-first context chunk semantics
+  - missing-generation behavior
+  - multi-pool host block-offset copying
+  - layer export resolution through global/local layer ids
+  - the new `impl` compatibility shim
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -192,6 +212,12 @@ Goal:
 
 - Current DLPack export in `lib/bindings/kvbm/src/block_manager/dlpack.rs`
   assumes contiguous tensors only.
+- The pinned TRTLLM v2 control path is close enough to model in Python without
+  native TRTLLM bindings; the biggest local semantic gaps were chunked-context
+  handling and late generation rewind, not raw allocator shape.
+- Aggregated execution can avoid most `impl` coupling, but leaving `impl=None`
+  was too weak even for compatibility work; a tiny shim is enough for the
+  currently supported non-disaggregated path.
 - `FullyContiguous` layout is a good fit for `get_unique_primary_pool()`.
 - The same layout is a poor fit for `get_buffers(layer_idx)` unless one of the
   following happens:
@@ -208,25 +234,36 @@ Goal:
 - Passed: `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Passed again after host block-offset changes:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after aligning pinned v2 Python semantics and adding `impl` compat
+  coverage:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
 
 ## Remaining Work
 
-- Finish Phase 2 by tightening the manager contract around real TRTLLM request
-  semantics and host block-offset handling.
-- Resolve the phase-3 export-model decision and then wire KVBM-backed
-  primary-pool and per-layer tensor export.
+- Implement the phase-3 export surface in Rust:
+  - generalize DLPack export beyond contiguous-only tensors
+  - add non-block-oriented primary-pool and per-layer view helpers
+  - keep the exported layout compatible with the supported TRTLLM path
+- Wire the Python manager to the real KVBM-backed primary-pool and per-layer
+  export objects instead of constructor-injected placeholders.
 - Add tests that validate exported shapes and indices without requiring the full
   TRT-LLM runtime.
+- Decide whether the first real export path should be stride-aware
+  `FullyContiguous` views or a tensor-oriented alternate layout helper, then
+  record that choice here once the code lands.
 - Continue updating this file after every milestone with exact next steps.
 
 ## Exact Next Step
 
-1. Decide the phase-3 export model:
-   stride-aware DLPack versus alternate layout versus dual representation.
-2. If no TRTLLM/PyTorch runtime is available locally, treat that validation gap
-   as an external blocker and avoid landing an unverified buffer ABI.
-3. Once the export model is chosen, add focused Rust export objects and tests
-   before wiring them into `KvbmKVCacheManager`.
+1. Add a stride-aware Rust DLPack helper so exported TRTLLM tensors are not
+   limited to contiguous shapes.
+2. Build focused primary-pool / per-layer export objects on top of that helper
+   and verify them with Rust build checks plus stdlib-level Python contract
+   tests.
+3. Only after those helpers exist, replace the Python placeholder export path
+   in `KvbmKVCacheManager`.

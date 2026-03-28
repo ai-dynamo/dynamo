@@ -33,6 +33,25 @@ class _RequestState:
     committed_tokens: int = 0
 
 
+class _ImplCompat:
+    """Small compatibility surface for aggregated TensorRT-LLM call sites."""
+
+    def __init__(self, manager: "KvbmKVCacheManager") -> None:
+        self._manager = manager
+
+    def get_primary_pool_data(self, layer_idx: int) -> Any:
+        return self._manager.get_buffers(layer_idx)
+
+    def get_unique_primary_pool(self) -> Any:
+        return self._manager.get_unique_primary_pool()
+
+    def clear_reusable_blocks(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
 class KvbmKVCacheManager:
     """
     Thin TensorRT-LLM-facing manager shell.
@@ -78,6 +97,7 @@ class KvbmKVCacheManager:
         self.dtype = dtype
         self.head_dim = head_dim
         self.pp_layers = list(pp_layers)
+        self.num_local_layers = len(self.pp_layers)
         self.total_num_kv_heads_per_layer = list(total_num_kv_heads_per_layer)
         self.max_seq_len = max_seq_len
         self.num_blocks = num_blocks
@@ -89,15 +109,25 @@ class KvbmKVCacheManager:
         self.num_extra_kv_tokens = num_extra_kv_tokens
         self.is_draft = is_draft
 
+        if self.num_local_layers == 0:
+            raise ValueError("pp_layers must contain at least one layer")
+        if len(self.total_num_kv_heads_per_layer) < self.num_local_layers:
+            raise ValueError(
+                "total_num_kv_heads_per_layer must cover all local layers"
+            )
+
         self.primary_pool = primary_pool
         self.layer_buffers = dict(layer_buffers or {})
         self.layer_offsets = layer_offsets or {
             layer_idx: layer_idx for layer_idx in range(len(self.pp_layers))
         }
-        self.kv_cache_pool_mapping = kv_cache_pool_mapping or [0] * len(
-            self.layer_offsets
-        )
-        self.kv_cache_pool_pointers = kv_cache_pool_pointers or []
+        self.local_layers = {offset: layer_idx for layer_idx, offset in self.layer_offsets.items()}
+        self.kv_cache_pool_mapping = kv_cache_pool_mapping or [
+            [0, local_layer_idx] for local_layer_idx in range(self.num_local_layers)
+        ]
+        self.kv_cache_pool_pointers = kv_cache_pool_pointers or [
+            [0, 0] for _ in range(self.num_pools)
+        ]
         self.host_kv_cache_block_offsets = host_kv_cache_block_offsets or [
             [
                 [
@@ -109,7 +139,7 @@ class KvbmKVCacheManager:
             for _ in range(self.num_pools)
         ]
 
-        self.impl = None
+        self.impl = _ImplCompat(self)
         self._request_state: dict[int, _RequestState] = {}
         self._free_block_ids = list(range(num_blocks))
         self._iteration_events: list[Any] = []
@@ -148,6 +178,13 @@ class KvbmKVCacheManager:
                 self.host_kv_cache_block_offsets[pool_idx][row][1] = [
                     BAD_PAGE_INDEX for _ in range(self.max_blocks_per_seq)
                 ]
+
+    def _resolve_layer_offset(self, layer_idx: int) -> int:
+        if layer_idx in self.layer_offsets:
+            return self.layer_offsets[layer_idx]
+        if layer_idx in self.local_layers:
+            return layer_idx
+        raise KeyError(f"unknown TRTLLM layer index: {layer_idx}")
 
     def _write_host_block_offsets(self, request_id: int) -> None:
         state = self._request_state_for(request_id)
@@ -197,7 +234,11 @@ class KvbmKVCacheManager:
 
     def prepare_context(self, req: Any) -> bool:
         request_id = self._request_id(req)
-        state = self._request_state.setdefault(request_id, _RequestState())
+        is_first_chunk = getattr(req, "is_first_context_chunk", True)
+        if is_first_chunk:
+            state = self._request_state.setdefault(request_id, _RequestState())
+        else:
+            state = self._request_state_for(request_id)
         self._slot_for(request_id)
         state.active = True
         self._write_host_block_offsets(request_id)
@@ -208,14 +249,19 @@ class KvbmKVCacheManager:
         state = self._request_state_for(request_id)
         target = getattr(req, "context_current_position", 0) + num_tokens
         target += self.num_extra_kv_tokens
+        target = max(state.capacity, target)
         resized = self._resize_state(state, target)
         if resized:
             self._write_host_block_offsets(request_id)
+        elif getattr(req, "is_first_context_chunk", True):
+            state.active = False
         return resized
 
     def try_allocate_generation(self, req: Any) -> bool:
         request_id = self._request_id(req)
-        state = self._request_state_for(request_id)
+        state = self._request_state.get(request_id)
+        if state is None:
+            return False
         state.active = True
         target = state.capacity + 1 + self._get_draft_token_length(req)
         resized = self._resize_state(state, target)
@@ -258,22 +304,40 @@ class KvbmKVCacheManager:
         del kv_cache_dtype_byte_size
 
         for request in getattr(scheduled_batch, "context_requests", ()):
-            state = self._request_state.get(self._request_id(request))
+            request_id = self._request_id(request)
+            state = self._request_state.get(request_id)
             if state is None:
                 continue
+            if not state.active:
+                continue
+            if state.capacity < getattr(request, "context_current_position", 0):
+                if not self._resize_state(
+                    state,
+                    getattr(request, "context_current_position", 0)
+                    + self.num_extra_kv_tokens,
+                ):
+                    raise ValueError(
+                        f"failed to resize context history for request {request_id}"
+                    )
             state.history_length = getattr(request, "context_current_position", 0)
             state.committed_tokens = state.history_length
-            self._write_host_block_offsets(self._request_id(request))
+            self._write_host_block_offsets(request_id)
 
         for request in getattr(scheduled_batch, "generation_requests", ()):
             request_id = self._request_id(request)
             state = self._request_state.get(request_id)
             if state is None:
                 continue
+            if not state.active:
+                continue
             rewind_len = getattr(request, "py_rewind_len", 0)
-            target = max(state.capacity - rewind_len, state.history_length)
-            self._resize_state(state, target)
-            state.history_length = max(getattr(request, "max_beam_num_tokens", 1) - 1, 0)
+            history_length = max(getattr(request, "max_beam_num_tokens", 1) - 1, 0)
+            target = max(state.capacity - rewind_len, history_length)
+            if not self._resize_state(state, target):
+                raise ValueError(
+                    f"failed to update generation state for request {request_id}"
+                )
+            state.history_length = history_length
             state.committed_tokens = state.history_length
             self._write_host_block_offsets(request_id)
 
@@ -303,7 +367,14 @@ class KvbmKVCacheManager:
         return [self.get_cache_indices(request_id) for request_id in request_ids]
 
     def get_block_ids_per_seq(self, request_ids: list[int]) -> list[list[int]]:
-        return self.get_batch_cache_indices(request_ids)
+        rows = self.get_batch_cache_indices(request_ids)
+        padded_len = max((len(row) for row in rows), default=0)
+        result = []
+        for row in rows:
+            padded = list(row)
+            padded.extend([0] * (padded_len - len(padded)))
+            result.append(padded)
+        return result
 
     def _missing_export(self, export_name: str) -> NotImplementedError:
         return NotImplementedError(
@@ -312,9 +383,18 @@ class KvbmKVCacheManager:
         )
 
     def get_buffers(self, layer_idx: int, kv_layout: str = "NHD") -> Any:
-        del kv_layout
+        if kv_layout not in {"NHD", "HND"}:
+            raise ValueError(f"Unsupported kv_layout: {kv_layout}")
+        layer_offset = self._resolve_layer_offset(layer_idx)
         if layer_idx in self.layer_buffers:
             return self.layer_buffers[layer_idx]
+        if layer_offset in self.layer_buffers:
+            return self.layer_buffers[layer_offset]
+        if self.primary_pool is not None:
+            if hasattr(self.primary_pool, "get_layer_view"):
+                return self.primary_pool.get_layer_view(layer_offset, kv_layout=kv_layout)
+            if hasattr(self.primary_pool, "layer_view"):
+                return self.primary_pool.layer_view(layer_offset, kv_layout=kv_layout)
         raise self._missing_export("get_buffers")
 
     def get_unique_primary_pool(self) -> Any:
@@ -362,6 +442,7 @@ class KvbmKVCacheManager:
             request = type("DummyRequest", (), {})()
             request.request_id = request_id
             request.py_request_id = request_id
+            request.is_first_context_chunk = True
             request.context_current_position = token_num
             request.context_chunk_size = token_num
             request.context_remaining_length = token_num
@@ -412,9 +493,22 @@ class KvbmKVCacheManager:
                 f"num_seqs={num_seqs} does not match request_ids={len(block_ids)}"
             )
 
+        multi_pool_dst = (
+            self.num_pools > 1
+            and isinstance(dst_tensor, list)
+            and len(dst_tensor) == self.num_pools
+        )
+
         for index, value in enumerate(block_ids):
+            del value
             slot = self._slot_for(request_ids[index]) * self.max_beam_width
-            dst_tensor[index] = list(self.host_kv_cache_block_offsets[0][slot][0])
+            if multi_pool_dst:
+                for pool_idx in range(self.num_pools):
+                    dst_tensor[pool_idx][index] = list(
+                        self.host_kv_cache_block_offsets[pool_idx][slot][0]
+                    )
+            else:
+                dst_tensor[index] = list(self.host_kv_cache_block_offsets[0][slot][0])
 
     def flush_iteration_events(self) -> None:
         self._iteration_events.clear()
