@@ -53,6 +53,10 @@ class _ImplCompat:
     def shutdown(self) -> None:
         self._manager.shutdown()
 
+    @property
+    def layer_grouping(self) -> list[list[int]]:
+        return [list(range(self._manager.num_local_layers))]
+
 
 class KvbmKVCacheManager:
     """
@@ -87,6 +91,13 @@ class KvbmKVCacheManager:
         host_kv_cache_block_offsets: Optional[Any] = None,
         num_extra_kv_tokens: int = 0,
         is_draft: bool = False,
+        device_id: int = 0,
+        world_size: int = 1,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        pp_size: int = 1,
+        pp_rank: int = 0,
+        cache_mode: str = "standard",
     ) -> None:
         if tokens_per_block <= 0:
             raise ValueError("tokens_per_block must be greater than 0")
@@ -94,6 +105,22 @@ class KvbmKVCacheManager:
             raise ValueError("num_blocks must be non-negative")
         if kv_layout not in {"NHD", "HND"}:
             raise ValueError(f"Unsupported kv_layout: {kv_layout}")
+        if device_id < 0:
+            raise ValueError("device_id must be non-negative")
+        if world_size <= 0:
+            raise ValueError("world_size must be greater than 0")
+        if tp_size <= 0:
+            raise ValueError("tp_size must be greater than 0")
+        if pp_size <= 0:
+            raise ValueError("pp_size must be greater than 0")
+        if not 0 <= tp_rank < tp_size:
+            raise ValueError("tp_rank must be within [0, tp_size)")
+        if not 0 <= pp_rank < pp_size:
+            raise ValueError("pp_rank must be within [0, pp_size)")
+        if world_size != tp_size * pp_size:
+            raise ValueError("world_size must equal tp_size * pp_size")
+        if cache_mode not in {"standard", "mla"}:
+            raise ValueError(f"Unsupported cache_mode: {cache_mode}")
 
         self.tokens_per_block = tokens_per_block
         self.dtype = dtype
@@ -110,6 +137,15 @@ class KvbmKVCacheManager:
         self.kv_layout = kv_layout
         self.num_extra_kv_tokens = num_extra_kv_tokens
         self.is_draft = is_draft
+        self.device_id = device_id
+        self.world_size = world_size
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
+        self.pp_size = pp_size
+        self.pp_rank = pp_rank
+        self.cache_mode = cache_mode
+        self.is_mla = cache_mode == "mla"
+        self.is_mla_enable = self.is_mla
 
         if self.num_local_layers == 0:
             raise ValueError("pp_layers must contain at least one layer")
@@ -118,14 +154,15 @@ class KvbmKVCacheManager:
                 "total_num_kv_heads_per_layer must cover all local layers"
             )
 
-        self.kv_factor = 2
+        self.kv_factor = 1 if self.is_mla else 2
         self.layer_buffers = dict(layer_buffers or {})
         self.layer_offsets = layer_offsets or {
-            layer_idx: layer_idx for layer_idx in range(len(self.pp_layers))
+            layer_idx: offset for offset, layer_idx in enumerate(self.pp_layers)
         }
         self.local_layers = {offset: layer_idx for layer_idx, offset in self.layer_offsets.items()}
         self.num_kv_heads_per_layer = [
-            self.total_num_kv_heads_per_layer[layer_idx] for layer_idx in self.pp_layers
+            self._local_num_kv_heads(self.total_num_kv_heads_per_layer[layer_idx])
+            for layer_idx in self.pp_layers
         ]
         self.primary_pool = primary_pool or self._maybe_create_native_primary_pool()
         self._native_state = self._maybe_create_native_state()
@@ -152,6 +189,25 @@ class KvbmKVCacheManager:
         self._iteration_events: list[Any] = []
         self._request_slots: dict[int, int] = {}
         self._free_slots = list(range(self.max_num_sequences + 1))
+
+    def _local_num_kv_heads(self, total_num_kv_heads: int) -> int:
+        if total_num_kv_heads < 0:
+            raise ValueError("total_num_kv_heads_per_layer values must be non-negative")
+        if self.is_mla:
+            return total_num_kv_heads
+        return math.ceil(total_num_kv_heads / self.tp_size)
+
+    def get_worker_identity(self) -> dict[str, Any]:
+        return {
+            "device_id": self.device_id,
+            "world_size": self.world_size,
+            "tp_size": self.tp_size,
+            "tp_rank": self.tp_rank,
+            "pp_size": self.pp_size,
+            "pp_rank": self.pp_rank,
+            "cache_mode": self.cache_mode,
+            "kv_factor": self.kv_factor,
+        }
 
     def _uniform_num_kv_heads(self) -> Optional[int]:
         if not self.num_kv_heads_per_layer:
@@ -199,6 +255,7 @@ class KvbmKVCacheManager:
                 page_size=self.tokens_per_block,
                 inner_dim=num_kv_heads * self.head_dim,
                 dtype=dtype_name,
+                device_id=self.device_id,
             )
         except Exception:
             return None
@@ -215,6 +272,14 @@ class KvbmKVCacheManager:
                 max_blocks_per_seq=self.max_blocks_per_seq,
                 max_num_sequences=self.max_num_sequences,
                 max_beam_width=self.max_beam_width,
+                device_id=self.device_id,
+                world_size=self.world_size,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                pp_size=self.pp_size,
+                pp_rank=self.pp_rank,
+                kv_factor=self.kv_factor,
+                cache_mode=self.cache_mode,
             )
         except Exception:
             return None

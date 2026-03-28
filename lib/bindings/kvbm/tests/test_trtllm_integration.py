@@ -303,6 +303,7 @@ class TrtllmIntegrationTest(unittest.TestCase):
                     "page_size": 4,
                     "inner_dim": 128,
                     "dtype": "float16",
+                    "device_id": 0,
                 }
             ],
         )
@@ -595,6 +596,214 @@ class TrtllmIntegrationTest(unittest.TestCase):
         )
         with self.assertRaises(NotImplementedError):
             manager.get_unique_primary_pool()
+
+    def test_manager_derives_rank_local_standard_geometry(self) -> None:
+        calls = []
+
+        class _NativePool:
+            def layer_view(self, layer_idx: int) -> str:
+                return f"standard-layer-{layer_idx}"
+
+        def _create_primary_pool(**kwargs):
+            calls.append(kwargs)
+            return _NativePool()
+
+        sys.modules["kvbm._core"]._trtllm_integration.create_primary_pool = _create_primary_pool
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=8,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[2, 3],
+            total_num_kv_heads_per_layer=[12, 12, 12, 12],
+            max_seq_len=64,
+            num_blocks=16,
+            device_id=3,
+            world_size=4,
+            tp_size=2,
+            tp_rank=1,
+            pp_size=2,
+            pp_rank=1,
+        )
+
+        self.assertEqual(manager.num_kv_heads_per_layer, [6, 6])
+        self.assertEqual(manager.kv_factor, 2)
+        self.assertEqual(
+            manager.get_worker_identity(),
+            {
+                "device_id": 3,
+                "world_size": 4,
+                "tp_size": 2,
+                "tp_rank": 1,
+                "pp_size": 2,
+                "pp_rank": 1,
+                "cache_mode": "standard",
+                "kv_factor": 2,
+            },
+        )
+        self.assertEqual(manager.get_buffers(3), "standard-layer-1")
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "num_blocks": 16,
+                    "num_layers": 2,
+                    "kv_factor": 2,
+                    "page_size": 8,
+                    "inner_dim": 96,
+                    "dtype": "float16",
+                    "device_id": 3,
+                }
+            ],
+        )
+
+    def test_manager_keeps_mla_latent_geometry_rank_local(self) -> None:
+        calls = []
+
+        class _NativePool:
+            def layer_view(self, layer_idx: int) -> str:
+                return f"mla-layer-{layer_idx}"
+
+        def _create_primary_pool(**kwargs):
+            calls.append(kwargs)
+            return _NativePool()
+
+        sys.modules["kvbm._core"]._trtllm_integration.create_primary_pool = _create_primary_pool
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=576,
+            pp_layers=[0, 1],
+            total_num_kv_heads_per_layer=[1, 1, 1, 1],
+            max_seq_len=64,
+            num_blocks=10,
+            device_id=1,
+            world_size=4,
+            tp_size=4,
+            tp_rank=2,
+            pp_size=1,
+            pp_rank=0,
+            cache_mode="mla",
+        )
+
+        self.assertTrue(manager.is_mla_enable)
+        self.assertEqual(manager.kv_factor, 1)
+        self.assertEqual(manager.num_kv_heads_per_layer, [1, 1])
+        self.assertEqual(manager.get_buffers(1), "mla-layer-1")
+        self.assertEqual(
+            manager.get_worker_identity(),
+            {
+                "device_id": 1,
+                "world_size": 4,
+                "tp_size": 4,
+                "tp_rank": 2,
+                "pp_size": 1,
+                "pp_rank": 0,
+                "cache_mode": "mla",
+                "kv_factor": 1,
+            },
+        )
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "num_blocks": 10,
+                    "num_layers": 2,
+                    "kv_factor": 1,
+                    "page_size": 4,
+                    "inner_dim": 576,
+                    "dtype": "float16",
+                    "device_id": 1,
+                }
+            ],
+        )
+
+    def test_manager_passes_topology_into_native_state(self) -> None:
+        constructed = []
+
+        class _NativeState:
+            def __init__(self, **kwargs) -> None:
+                constructed.append(kwargs)
+
+        sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager = _NativeState
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        integration.KvbmKVCacheManager(
+            tokens_per_block=8,
+            dtype="float16",
+            head_dim=64,
+            pp_layers=[4, 5],
+            total_num_kv_heads_per_layer=[8, 8, 8, 8, 8, 8],
+            max_seq_len=128,
+            num_blocks=20,
+            device_id=2,
+            world_size=4,
+            tp_size=2,
+            tp_rank=0,
+            pp_size=2,
+            pp_rank=1,
+            cache_mode="standard",
+        )
+
+        self.assertEqual(
+            constructed,
+            [
+                {
+                    "tokens_per_block": 8,
+                    "max_seq_len": 128,
+                    "num_blocks": 20,
+                    "max_blocks_per_seq": 20,
+                    "max_num_sequences": 32,
+                    "max_beam_width": 1,
+                    "device_id": 2,
+                    "world_size": 4,
+                    "tp_size": 2,
+                    "tp_rank": 0,
+                    "pp_size": 2,
+                    "pp_rank": 1,
+                    "kv_factor": 2,
+                    "cache_mode": "standard",
+                }
+            ],
+        )
+
+    def test_manager_rejects_invalid_topology(self) -> None:
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        with self.assertRaises(ValueError):
+            integration.KvbmKVCacheManager(
+                tokens_per_block=4,
+                dtype="float16",
+                head_dim=16,
+                pp_layers=[0],
+                total_num_kv_heads_per_layer=[8],
+                max_seq_len=16,
+                num_blocks=4,
+                world_size=8,
+                tp_size=2,
+                pp_size=2,
+            )
 
 
 if __name__ == "__main__":

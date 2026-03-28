@@ -237,7 +237,7 @@ Implemented so far:
 
 ### Phase 6: Rank-local multi-GPU expansion
 
-Status: pending
+Status: completed
 
 Goal:
 
@@ -304,6 +304,37 @@ Exit criteria:
   - baseline MLA latent-cache layout
 - The manager can be instantiated independently on each TRT-LLM rank for
   `tp=4,pp=1` and `tp=2,pp=2` shapes without pretending KV is globally shared
+
+Implemented so far:
+
+- extended `KvbmKVCacheManager` construction with explicit worker topology:
+  - `device_id`
+  - `world_size`
+  - `tp_size`
+  - `tp_rank`
+  - `pp_size`
+  - `pp_rank`
+- added explicit cache-mode selection:
+  - `standard` keeps K/V layout with `kv_factor=2`
+  - `mla` keeps baseline TRT-LLM latent-cache layout with `kv_factor=1`
+- made local exported KV geometry rank-aware:
+  - standard attention now derives rank-local heads with the same ceil-TP shard
+    rule used by pinned TRT-LLM
+  - baseline MLA keeps latent-cache head geometry local without pretending it
+    follows standard `num_heads / tp_size` sharding
+  - default `layer_offsets` now map global PP layers to local offsets, so the
+    manager surface is PP-rank aware even without manual overrides
+- threaded worker identity plus `kv_factor` / `cache_mode` into the native Rust
+  `TrtllmStateManager`
+- threaded `device_id` into Rust primary-pool creation so each manager can
+  allocate its own rank-local export slab
+- exposed a stable `get_worker_identity()` surface in Python and native helper
+  identity getters in Rust for later validation/debugging work
+- added stdlib-only tests that validate:
+  - `tp=4,pp=1` style standard construction/export semantics
+  - `tp=2,pp=2` style rank-local standard construction/export semantics
+  - baseline MLA latent-cache construction/export semantics with `kv_factor=1`
+  - native state helper construction receives the full worker topology scope
 
 ### Phase 7: Disaggregated serving convergence
 
@@ -427,6 +458,12 @@ Exit criteria:
 - Added public/shimmed shutdown coverage plus repeated slot-reuse teardown
   coverage, and completed the supported-path decision to keep host block-offset
   row materialization in Python.
+- Completed the rank-local multi-GPU expansion milestone:
+  - topology-aware TRT-LLM manager construction now models one KVBM-backed
+    manager per TRT-LLM worker/rank
+  - standard attention derives local KV head geometry from TP size
+  - baseline MLA keeps a single latent-cache pool with `kv_factor=1`
+  - native pool/state helpers now carry device/rank/stage identity
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -501,10 +538,22 @@ Exit criteria:
   - `impl._life_cycles`
   - `impl.get_indexer_k_cache_pool()`
 - The current TRT-LLM manager and plan are still MHA-shaped:
-  - the manager hardcodes `kv_factor=2`
-  - the current export contract assumes `[blocks, layers, kv_factor, page_size, num_heads, head_dim]`
-  - MLA upstream uses different cache contracts, including SELFKONLY latent
-    cache and optional indexer/dual-cache variants
+  - this is now fixed for the baseline worker path:
+    - the manager supports both `standard` (`kv_factor=2`) and baseline `mla`
+      (`kv_factor=1`) modes
+    - local exported head geometry is now TP-aware for standard attention
+    - baseline MLA latent-cache geometry no longer pretends to use standard TP
+      head sharding
+  - the remaining MLA gap is disaggregated/storage-aware support for indexer or
+    dual-cache variants, not the baseline worker-local latent-cache shape
+- The default `layer_offsets` mapping needed to change from synthetic
+  `0..N-1 -> 0..N-1` aliases to `global_pp_layer -> local_offset`; otherwise a
+  multi-stage manager without explicit overrides could not resolve its own
+  global layer IDs correctly.
+- Rank/stage identity is now explicit on both sides of the Python/Rust seam,
+  which is enough for local worker validation and future disaggregation
+  adapters. The remaining phase-7 blocker is not identity; it is missing
+  storage/page-table metadata.
 
 ## Testing Log
 
@@ -541,6 +590,10 @@ Exit criteria:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after the rank-local topology + baseline MLA milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
@@ -560,10 +613,12 @@ Exit criteria:
 
 - Baseline aggregated single-GPU support is complete for the pinned TRTLLM v2
   surface described above.
-- Multi-GPU repo work is still pending:
+- Baseline rank-local multi-GPU worker support is now complete for the pinned
+  non-disaggregated path:
   - topology-aware manager construction
-  - per-rank head/layer export
-  - baseline MLA latent-cache export (`kv_factor=1`) on the same rank-local path
+  - per-rank head/layer export semantics
+  - baseline MLA latent-cache export (`kv_factor=1`) on the same worker-local
+    path
   - explicit device placement in Rust pool creation
   - rank/stage-aware validation for `tp>1` and `pp>1`
 - Disaggregated-serving convergence is still pending:
@@ -577,17 +632,21 @@ Exit criteria:
 
 ## Exact Next Step
 
-1. Extend
-   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
-   with explicit topology/device inputs (`device_id`, `world_size`, `tp_size`,
-   `tp_rank`, `pp_size`, `pp_rank`) and derive per-rank local KV geometry from
-   them, including a baseline MLA latent-cache mode with `kv_factor=1`.
-2. Thread `device_id` and rank/stage identity through
-   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/src/block_manager/trtllm.rs`
-   so the native pool/state helpers are explicitly scoped to one TRT-LLM worker
-   instance and can allocate either standard K/V or baseline MLA latent-cache
-   pools.
-3. After that API lands, add stubbed tests for `tp=4,pp=1` and `tp=2,pp=2`
-   construction/export semantics for both standard attention and baseline MLA
-   before attempting full TRTLLM runtime validation.
+1. Inspect the pinned TRT-LLM disaggregation entry points again, then extend
+   the local `impl` compatibility surface beyond aggregated mode starting with
+   metadata that page-table builders consume first:
+   - `impl.layer_grouping`
+   - `impl._storage`
+   - `impl._init_config`
+   - `impl._life_cycles`
+2. Decide whether the least-risk next increment is:
+   - a KVBM-specific page-table builder/adapter for the pinned extractor path,
+     or
+   - a narrower fake-V2 storage surface on `impl` that can satisfy
+     `KVRegionExtractorV1` / `KvCacheTransceiverV2` without copying ownership
+     back into Python.
+3. Whichever seam is smaller, land it with stdlib tests first, then use the
+   repo `.venv` runtime (`/workspace/model-performance/michaelfeil1209/mfdynamo/.venv`)
+   for a direct import/smoke check against installed `torch` and
+   `tensorrt_llm` before attempting broader runtime validation.
 - /workspace/model-performance/michaelfeil1209/mfdynamo/.venv has a installation of torch and tensorrt_llm active, can be patched.

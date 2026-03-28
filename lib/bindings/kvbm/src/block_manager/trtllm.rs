@@ -45,6 +45,14 @@ pub struct TrtllmStateManager {
     num_blocks: usize,
     max_blocks_per_seq: usize,
     max_num_sequences: usize,
+    device_id: usize,
+    world_size: usize,
+    tp_size: usize,
+    tp_rank: usize,
+    pp_size: usize,
+    pp_rank: usize,
+    kv_factor: usize,
+    cache_mode: String,
     _max_beam_width: usize,
     request_state: HashMap<u64, RequestState>,
     free_block_ids: Vec<usize>,
@@ -119,7 +127,7 @@ impl TrtllmStateManager {
 #[pymethods]
 impl TrtllmStateManager {
     #[new]
-    #[pyo3(signature = (tokens_per_block, max_seq_len, num_blocks, max_blocks_per_seq, max_num_sequences=32, max_beam_width=1))]
+    #[pyo3(signature = (tokens_per_block, max_seq_len, num_blocks, max_blocks_per_seq, max_num_sequences=32, max_beam_width=1, device_id=0, world_size=1, tp_size=1, tp_rank=0, pp_size=1, pp_rank=0, kv_factor=2, cache_mode="standard"))]
     fn new(
         tokens_per_block: usize,
         max_seq_len: usize,
@@ -127,11 +135,59 @@ impl TrtllmStateManager {
         max_blocks_per_seq: usize,
         max_num_sequences: usize,
         max_beam_width: usize,
+        device_id: usize,
+        world_size: usize,
+        tp_size: usize,
+        tp_rank: usize,
+        pp_size: usize,
+        pp_rank: usize,
+        kv_factor: usize,
+        cache_mode: &str,
     ) -> PyResult<Self> {
         if tokens_per_block == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tokens_per_block must be greater than 0",
             ));
+        }
+        if world_size == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "world_size must be greater than 0",
+            ));
+        }
+        if tp_size == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tp_size must be greater than 0",
+            ));
+        }
+        if pp_size == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pp_size must be greater than 0",
+            ));
+        }
+        if tp_rank >= tp_size {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tp_rank must be within [0, tp_size)",
+            ));
+        }
+        if pp_rank >= pp_size {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pp_rank must be within [0, pp_size)",
+            ));
+        }
+        if world_size != tp_size * pp_size {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "world_size must equal tp_size * pp_size",
+            ));
+        }
+        if !(kv_factor == 1 || kv_factor == 2) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "kv_factor must be 1 or 2",
+            ));
+        }
+        if !(cache_mode == "standard" || cache_mode == "mla") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unsupported cache_mode: {cache_mode}"
+            )));
         }
         Ok(Self {
             tokens_per_block,
@@ -139,6 +195,14 @@ impl TrtllmStateManager {
             num_blocks,
             max_blocks_per_seq,
             max_num_sequences,
+            device_id,
+            world_size,
+            tp_size,
+            tp_rank,
+            pp_size,
+            pp_rank,
+            kv_factor,
+            cache_mode: cache_mode.to_string(),
             _max_beam_width: max_beam_width,
             request_state: HashMap::new(),
             free_block_ids: (0..num_blocks).collect(),
@@ -312,6 +376,38 @@ impl TrtllmStateManager {
 
     fn get_num_kv_blocks(&self) -> usize {
         self.num_blocks
+    }
+
+    fn get_device_id(&self) -> usize {
+        self.device_id
+    }
+
+    fn get_world_size(&self) -> usize {
+        self.world_size
+    }
+
+    fn get_tp_size(&self) -> usize {
+        self.tp_size
+    }
+
+    fn get_tp_rank(&self) -> usize {
+        self.tp_rank
+    }
+
+    fn get_pp_size(&self) -> usize {
+        self.pp_size
+    }
+
+    fn get_pp_rank(&self) -> usize {
+        self.pp_rank
+    }
+
+    fn get_kv_factor(&self) -> usize {
+        self.kv_factor
+    }
+
+    fn get_cache_mode(&self) -> String {
+        self.cache_mode.clone()
     }
 
     fn add_dummy_request(&mut self, request_id: u64, target_capacity: usize) -> PyResult<bool> {
