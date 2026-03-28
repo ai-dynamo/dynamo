@@ -115,6 +115,84 @@ The v2 manager in `tensorrt_llm/runtime/kv_cache_manager_v2/` is more Python-vis
 
 v2 may still be the better reference model for page-index semantics, but it does not solve GPU ownership by itself.
 
+### 3.6 v1 versus v2 fit for the PyTorch flow
+
+The two manager families are not equally attractive replacement seams.
+
+**v1 strengths**
+
+- It is used broadly in the current PyTorch executor.
+- One-model speculative flows already know how to drive it.
+- Rewind and dummy-request behavior are mature enough to use as semantic reference.
+
+**v1 weaknesses**
+
+- The real seam is `impl`, not the Python wrapper.
+- Request lifecycle is expressed through allocator-like calls such as `add_sequence`, `add_token`, `refresh_blocks`, `rewind_kv_cache`, `get_primary_pool_data`, and `get_unique_primary_pool`.
+- Replacing ownership cleanly would require either deep `impl` emulation or broad patching.
+
+**v2 strengths**
+
+- The scheduling boundary is more explicit in Python.
+- `prepare_context`, `resize_context`, `try_allocate_generation`, `suspend_request`, and `copy_batch_block_offsets` map more directly onto a KVBM-owned request lifecycle.
+- Buffer metadata such as pool pointers, pool mapping, and page-index scale are more visible at the Python layer.
+
+**v2 weaknesses**
+
+- The underlying implementation still self-allocates.
+- One-model speculative support is not fully first-class in the scheduler. The primary scheduler manages the main cache directly, while a draft v2 manager mirrors allocations separately.
+- Some creation paths still fall back away from v2 for unsupported draft scenarios.
+
+**Recommendation**
+
+For milestone 1, target the v2-shaped PyTorch seam for the primary manager. Use v1 as a semantic reference, not as the first replacement boundary.
+
+The cancellation path also favors v2. Both v1 and v2 abort cooperatively at iteration boundaries rather than interrupting an already-launched prefill or decode step, but v2's post-cancel cleanup is easier to reason about because request state is guarded through `kv_cache_map` instead of flowing through a thinner Python wrapper over `impl`.
+
+### 3.7 One-model speculative integration is a dual-view problem
+
+One-model speculative decoding does not mean there is only one KV manager object in the PyTorch stack.
+
+Local upstream behavior:
+
+- `_torch/pyexecutor/_util.py` may create a separate `draft_kv_cache_manager` even in one-model mode.
+- For MTP one-model mode, draft KV creation may reuse the target model config because the draft layers share the target architecture.
+- `_torch/attention_backend/trtllm.py` allocates separate `draft_kv_cache_block_offsets` buffers when a draft manager exists.
+- `_torch/speculative/interface.py` temporarily swaps attention metadata from the main KV manager to the draft KV manager during draft replay.
+
+The important implication is architectural:
+
+- the main and draft paths must share ownership state
+- they may still need separate exported views, page-index buffers, and lifecycle hooks
+
+So the KVBM design should not model one-model support as "just one manager". It should model it as one owner with one or two TensorRT-LLM-facing facades.
+
+### 3.8 Abort is iteration-scoped, not immediate
+
+The PyTorch executor does support request cancellation, but the observed behavior is cooperative rather than preemptive.
+
+Local upstream behavior:
+
+- `cancel_request()` enqueues a cancel item instead of immediately tearing down active work.
+- scheduler preparation still happens before canceled requests are marked finished for the current loop iteration
+- chunked prefill work that has already been scheduled can still run to completion for that iteration
+- for non-final chunked-prefill requests, another chunk can be scheduled before the cancel is applied because those requests are not always treated as inflight in the same way as generation requests
+
+For this integration, that behavior is acceptable. The design should target iteration-level cancellation semantics:
+
+- no requirement to stop an in-flight kernel or half-executed prefill chunk
+- cancellation must become visible by the next scheduler iteration
+- teardown and post-cancel updates must be idempotent even if the last scheduled chunk completed normally
+
+### 3.9 v2 has a cleaner abort story than v1
+
+The observed v1 and v2 behaviors are not identical after cancellation.
+
+- v1 cleanup flows through the older manager wrapper and still performs context-block update logic late in the iteration
+- v2 cleanup removes the request from `kv_cache_map`, and later update steps first check whether that request is still present
+
+The practical implication is that v2 is a better primary seam for KVBM not just because its scheduler lifecycle is more explicit, but because iteration-level abort is less likely to race with post-step KV update logic.
+
 ---
 
 ## 4. Design Constraints
@@ -130,6 +208,8 @@ The replacement manager must satisfy all of the following:
 - Reserve writable KV capacity for speculative tokens without making that capacity immediately reusable.
 - Support partial rewind of speculative writes after acceptance.
 - Support a coordinated main-cache and draft-cache view if the chosen speculative mode requires separate draft KV layout.
+- Preserve iteration-level cancellation semantics during chunked prefill and decode.
+- Make post-cancel update and teardown paths idempotent.
 
 The hardest constraints are not policy-related. They are:
 
@@ -253,6 +333,19 @@ That means KVBM currently lacks a first-class notion of:
 
 Without those concepts, MTP support will either be incorrect or will devolve into shadow allocation outside KVBM, which violates the ownership goal.
 
+### 5.9 Abort during chunked prefill is a real lifecycle edge case
+
+Chunked prefill cancellation is not a side detail. It constrains how KVBM must implement request lifecycle methods.
+
+Local upstream behavior:
+
+- abort is handled by the executor, not by interrupting an already-running attention step
+- a request canceled during chunked prefill can still finish the currently scheduled chunk
+- v1 appears more fragile if cancellation lands on the final prefill chunk because update logic may still try to store completed context blocks late in the same iteration
+- v2 is safer because cleanup removes the request from the active cache map before later update code runs
+
+The KVBM-backed manager should therefore preserve cooperative iteration-level abort semantics and make every late update path tolerate already-freed or already-canceled request state.
+
 ---
 
 ## 6. Target Architecture
@@ -284,30 +377,32 @@ The manager boundary must be explicit. TensorRT-LLM should interact with KVBM th
 
 The KVBM-backed manager must provide the TensorRT-LLM surface actually used by the supported path.
 
+Milestone 1 should target the v2-shaped primary manager surface. v1 behaviors are still relevant as semantic reference, but they should not define the first replacement boundary.
+
 ### 7.1 Manager methods and attributes
 
-At minimum, the supported path uses or is expected to use:
+For the primary v2-shaped path, the required surface is:
 
+- `prepare_context`
+- `resize_context`
+- `try_allocate_generation`
+- `is_request_active`
+- `suspend_request`
 - `prepare_resources`
 - `update_resources`
 - `free_resources`
+- `copy_batch_block_offsets`
 - `get_cache_indices`
 - `get_batch_cache_indices`
 - `get_block_ids_per_seq`
 - `get_buffers`
-- `get_unique_primary_pool`
-- `probe_prefix_match_length`
 - `get_num_free_blocks`
 - `get_num_available_tokens`
 - `get_num_kv_blocks`
 - `add_dummy_requests`
 - `get_kv_cache_stats`
-- `flush_iteration_events`
-- `get_latest_events`
-- `store_blocks_for_reuse`
-- `unpin_blocks_by_id`
 
-The supported path may also rely on attributes such as:
+The primary path also depends on attributes such as:
 
 - `tokens_per_block`
 - `dtype`
@@ -315,6 +410,27 @@ The supported path may also rely on attributes such as:
 - `pp_layers`
 - `total_num_kv_heads_per_layer`
 - `max_seq_len`
+- `num_pools`
+- `max_blocks_per_seq`
+- `host_kv_cache_block_offsets`
+- `kv_cache_pool_pointers`
+- `kv_cache_pool_mapping`
+- `layer_offsets`
+
+For one-model speculative support, the design must additionally support:
+
+- an optional draft-manager facade with the same block-offset export behavior
+- draft-specific block-offset buffers
+- coordinated capacity accounting between main and draft views
+
+The older v1-style surface remains useful only where the replacement must preserve established behavior:
+
+- `get_unique_primary_pool`
+- rewind semantics
+- `flush_iteration_events`
+- `get_latest_events`
+- `store_blocks_for_reuse`
+- `unpin_blocks_by_id`
 
 ### 7.2 Buffer contract
 
@@ -557,6 +673,32 @@ Concrete changes:
 
 This keeps the new code concentrated at the framework boundary and preserves maximum reuse underneath it.
 
+### 8.11 Fast iteration and mock-testing strategy
+
+The implementation should not depend on repeated full TensorRT-LLM source builds. The local build cost is too high for design iteration.
+
+Recommended test ladder:
+
+1. Rust state-machine tests first.
+   Use `lib/kvbm-logical/src/integrations/scheduled.rs` as the executable reference for speculative reservation, partial accept, rewind, and revert semantics. Extend or mirror those semantics in the TensorRT-LLM-facing slot manager before touching TRT-LLM integration code.
+
+2. Rust unit tests for tensor export and page-index translation.
+   Test contiguous pool layout, per-layer views, block-ID to page-index conversion, and draft-view derivation without importing TensorRT-LLM.
+
+3. Python contract tests with fake TensorRT-LLM objects.
+   Build small request, scheduler, and attention-metadata stubs that exercise `prepare_context`, `resize_context`, `try_allocate_generation`, `copy_batch_block_offsets`, `draft_kv_cache_context`, rewind flows, and abort during chunked prefill. These tests should not run kernels or require compiled TRT-LLM extensions.
+
+4. Python compatibility tests against the pinned TRT-LLM source tree.
+   Import the local checkout from `/tmp/trtllm-latest`, monkeypatch C++-backed classes with fakes where necessary, and validate that scheduler and speculative helper code can drive the KVBM adapter.
+
+5. Full TRT-LLM runtime smoke tests last.
+   Run these only after the lower layers pass, ideally against a prebuilt wheel or containerized runtime rather than a fresh source build for every iteration.
+
+Practical implication:
+
+- Most design bugs should be caught by steps 1 through 4.
+- Full TRT-LLM execution should be reserved for final compatibility and performance validation.
+
 ---
 
 ## 9. Implementation Plan
@@ -568,15 +710,18 @@ This keeps the new code concentrated at the framework boundary and preserves max
 **Tasks**
 
 - Pin a TensorRT-LLM commit or release.
+- Choose the primary replacement seam explicitly: v2-shaped manager surface for the main cache.
 - Inventory every supported-path use of `kv_cache_manager` and `kv_cache_manager.impl`.
+- Inventory one-model draft-manager creation and every call site that touches `draft_kv_cache_manager`.
 - Select the initial attention backend and KV layout.
 - Record the expected buffer and page-index semantics for that path.
+- Record the expected cancellation and abort ordering for active requests, especially chunked prefill.
 - Decide whether to emulate `impl` or patch call sites.
 
 **Exit criteria**
 
 - One TensorRT-LLM version is explicitly supported.
-- One executor path and one attention backend are explicitly supported.
+- One executor path, one attention backend, and one primary manager seam are explicitly supported.
 - The required manager and `impl` surface is documented.
 
 ### Phase 1: Build the KVBM-backed manager shell
@@ -587,7 +732,7 @@ This keeps the new code concentrated at the framework boundary and preserves max
 
 - Add a dedicated TensorRT-LLM manager module.
 - Add TensorRT-LLM-specific Rust exports instead of relying on `_vllm_integration` reuse.
-- Expose required public attributes and lifecycle methods.
+- Expose the v2-shaped public attributes and lifecycle methods needed by the primary path.
 - Wire manager creation so KVBM owns the device pool from the beginning.
 
 **Exit criteria**
@@ -638,6 +783,7 @@ This keeps the new code concentrated at the framework boundary and preserves max
 - Implement warmup and dummy-request handling.
 - Implement prefix reuse and block reuse under KVBM ownership.
 - Introduce explicit reserve, commit, and rewind semantics for speculative paths even if MTP is enabled in a later phase.
+- Preserve iteration-level abort behavior and make late update paths safe after cancellation.
 
 **Exit criteria**
 
@@ -666,7 +812,8 @@ This keeps the new code concentrated at the framework boundary and preserves max
 
 **Tasks**
 
-- Add MTP and other speculative decoding support on top of the explicit speculative state model.
+- Add one-model MTP and other speculative decoding support on top of the explicit speculative state model.
+- Add the optional draft-manager facade over the same KVBM owner.
 - Add more attention backends or layouts.
 - Add connector and disaggregation support.
 - Add CPU and disk tiering under the same manager.
@@ -688,6 +835,9 @@ This keeps the new code concentrated at the framework boundary and preserves max
 - prefix reuse
 - request teardown
 - warmup and dummy-request flows
+- abort during non-final chunked prefill
+- abort during final chunked prefill
+- abort during active decode iteration
 
 ### Buffer correctness
 
@@ -719,8 +869,12 @@ This keeps the new code concentrated at the framework boundary and preserves max
 | `impl` coupling is deeper than expected | High | Inventory all supported-path consumers before implementation |
 | Different attention backends require different page semantics | High | Support one backend first |
 | v1 and v2 are both self-allocating designs | High | Treat this as a full replacement, not a wrapper |
+| Choosing the wrong primary seam would force broad rewrites later | High | Target the v2-shaped primary scheduler/resource seam and use v1 only as semantic reference |
 | Speculative decoding requires tentative writes and rewind, not just ordinary block allocation | High | Add explicit speculative state and do not treat lookahead as normal reuse |
 | One-engine MTP may require separate draft KV views over the same ownership model | High | Support dual exported manager views without introducing a second allocator |
+| Chunked-prefill cancellation can leave late update paths touching already-freed request state | High | Preserve cooperative iteration-level abort and make post-cancel updates idempotent; prefer the v2-shaped seam |
+| The v2 main scheduler does not manage draft allocations directly | Medium | Treat the draft manager as a mirrored facade with shared ownership state |
+| Requiring a full TRT-LLM source build for every change will stall iteration | Medium | Use a mock-heavy test ladder and reserve full runtime validation for late-stage smoke tests |
 | Scope expansion increases blast radius too early | Medium | Keep the first supported matrix deliberately narrow |
 | Connector and disaggregation code assume native ownership | Medium | Defer until the aggregated path is stable |
 
@@ -733,6 +887,7 @@ The first milestone is successful when:
 - KVBM owns the GPU KV buffers
 - TensorRT-LLM attention consumes KVBM-owned buffers correctly
 - prefills and decodes succeed on the supported path
+- abort during active requests is handled at iteration granularity without leaking or corrupting KV state
 - request lifecycle is fully under KVBM ownership
 - TensorRT-LLM no longer depends on its native KV allocator in the supported path
 
