@@ -103,10 +103,14 @@ class TrtllmIntegrationTest(unittest.TestCase):
         self.assertTrue(manager.prepare_context(request))
         self.assertTrue(manager.resize_context(request, 6))
         self.assertEqual(manager.get_cache_indices(101), [0, 1])
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [0, 1, -1, -1],
+        )
 
         dst = [None]
         manager.copy_batch_block_offsets(dst, [101], beam_width=1, num_contexts=1, num_seqs=1)
-        self.assertEqual(dst[0], [0, 1])
+        self.assertEqual(dst[0][:4], [0, 1, -1, -1])
 
         request.py_draft_tokens = [1, 2]
         self.assertTrue(manager.try_allocate_generation(request))
@@ -121,6 +125,10 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
         manager.free_resources(request)
         self.assertEqual(manager.get_num_free_blocks(), 8)
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [-1, -1, -1, -1],
+        )
 
     def test_manager_requires_explicit_tensor_export_wiring(self) -> None:
         manager_mod = importlib.import_module(

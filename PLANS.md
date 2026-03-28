@@ -130,7 +130,7 @@ Implemented so far:
 
 Still pending in this phase:
 
-- host block-offset bookkeeping compatible with TRTLLM tensor expectations
+- tensor-shaped host block-offset bookkeeping backed by the real export path
 - integration with a real Rust-backed allocator/export path
 - draft-path semantics beyond basic bookkeeping
 - optional environment bootstrapping for richer TRTLLM/PyTorch validation later
@@ -180,11 +180,16 @@ Goal:
 - Added `kvbm.trtllm_integration.kv_cache_manager.KvbmKVCacheManager` as a thin
   dependency-light manager shell.
 - Added stdlib-only tests in `lib/bindings/kvbm/tests/test_trtllm_integration.py`.
+- Added host slot and block-offset bookkeeping to the manager shell so
+  `copy_batch_block_offsets()` now mirrors TRTLLM-style cached block rows
+  instead of directly returning raw block IDs.
 
 ## Testing Log
 
 - Passed: `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed: `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
+- Passed again after host block-offset changes:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Failed once due to wrong package selector:
   `cargo test -p kvbm --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
   Reason: the crate is named `kvbm-py3`, not `kvbm`.
@@ -202,7 +207,7 @@ Goal:
 
 1. Inspect KVBM block/device export internals to find the smallest viable
    primary-pool export path.
-2. Extend the TRTLLM manager shell or Rust layer with explicit exported buffer
-   providers instead of placeholder `NotImplementedError` behavior.
+2. Decide whether phase 3 should use a new Rust-owned contiguous layout object
+   or a lightweight export wrapper over existing block/layout primitives.
 3. Add tests for primary-pool export, per-layer buffer export, and cache-index
    compatibility using stub tensors.

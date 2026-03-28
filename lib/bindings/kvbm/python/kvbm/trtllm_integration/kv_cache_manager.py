@@ -54,6 +54,8 @@ class KvbmKVCacheManager:
         max_seq_len: int,
         num_blocks: int,
         num_pools: int = 1,
+        max_num_sequences: int = 32,
+        max_beam_width: int = 1,
         max_blocks_per_seq: Optional[int] = None,
         kv_layout: str = "NHD",
         primary_pool: Any = None,
@@ -80,6 +82,8 @@ class KvbmKVCacheManager:
         self.max_seq_len = max_seq_len
         self.num_blocks = num_blocks
         self.num_pools = num_pools
+        self.max_num_sequences = max_num_sequences
+        self.max_beam_width = max_beam_width
         self.max_blocks_per_seq = max_blocks_per_seq or num_blocks
         self.kv_layout = kv_layout
         self.num_extra_kv_tokens = num_extra_kv_tokens
@@ -94,12 +98,23 @@ class KvbmKVCacheManager:
             self.layer_offsets
         )
         self.kv_cache_pool_pointers = kv_cache_pool_pointers or []
-        self.host_kv_cache_block_offsets = host_kv_cache_block_offsets
+        self.host_kv_cache_block_offsets = host_kv_cache_block_offsets or [
+            [
+                [
+                    [BAD_PAGE_INDEX for _ in range(self.max_blocks_per_seq)]
+                    for _ in range(2)
+                ]
+                for _ in range((self.max_num_sequences + 1) * self.max_beam_width)
+            ]
+            for _ in range(self.num_pools)
+        ]
 
         self.impl = None
         self._request_state: dict[int, _RequestState] = {}
         self._free_block_ids = list(range(num_blocks))
         self._iteration_events: list[Any] = []
+        self._request_slots: dict[int, int] = {}
+        self._free_slots = list(range(self.max_num_sequences + 1))
 
     def _request_id(self, request: Any) -> int:
         if hasattr(request, "py_request_id"):
@@ -113,6 +128,38 @@ class KvbmKVCacheManager:
         if state is None:
             raise KeyError(f"request {request_id} is not active")
         return state
+
+    def _slot_for(self, request_id: int) -> int:
+        if request_id in self._request_slots:
+            return self._request_slots[request_id]
+        if not self._free_slots:
+            raise RuntimeError("no free TRTLLM cache slots available")
+        slot = self._free_slots.pop(0)
+        self._request_slots[request_id] = slot
+        return slot
+
+    def _clear_slot(self, slot: int) -> None:
+        for pool_idx in range(self.num_pools):
+            for beam_idx in range(self.max_beam_width):
+                row = slot * self.max_beam_width + beam_idx
+                self.host_kv_cache_block_offsets[pool_idx][row][0] = [
+                    BAD_PAGE_INDEX for _ in range(self.max_blocks_per_seq)
+                ]
+                self.host_kv_cache_block_offsets[pool_idx][row][1] = [
+                    BAD_PAGE_INDEX for _ in range(self.max_blocks_per_seq)
+                ]
+
+    def _write_host_block_offsets(self, request_id: int) -> None:
+        state = self._request_state_for(request_id)
+        slot = self._slot_for(request_id)
+        padded = list(state.block_ids[: self.max_blocks_per_seq])
+        padded.extend([BAD_PAGE_INDEX] * (self.max_blocks_per_seq - len(padded)))
+
+        for pool_idx in range(self.num_pools):
+            for beam_idx in range(self.max_beam_width):
+                row = slot * self.max_beam_width + beam_idx
+                self.host_kv_cache_block_offsets[pool_idx][row][0] = list(padded)
+                self.host_kv_cache_block_offsets[pool_idx][row][1] = list(padded)
 
     def _required_blocks(self, token_capacity: int) -> int:
         if token_capacity <= 0:
@@ -151,20 +198,30 @@ class KvbmKVCacheManager:
     def prepare_context(self, req: Any) -> bool:
         request_id = self._request_id(req)
         state = self._request_state.setdefault(request_id, _RequestState())
+        self._slot_for(request_id)
         state.active = True
+        self._write_host_block_offsets(request_id)
         return True
 
     def resize_context(self, req: Any, num_tokens: int) -> bool:
-        state = self._request_state_for(self._request_id(req))
+        request_id = self._request_id(req)
+        state = self._request_state_for(request_id)
         target = getattr(req, "context_current_position", 0) + num_tokens
         target += self.num_extra_kv_tokens
-        return self._resize_state(state, target)
+        resized = self._resize_state(state, target)
+        if resized:
+            self._write_host_block_offsets(request_id)
+        return resized
 
     def try_allocate_generation(self, req: Any) -> bool:
-        state = self._request_state_for(self._request_id(req))
+        request_id = self._request_id(req)
+        state = self._request_state_for(request_id)
         state.active = True
         target = state.capacity + 1 + self._get_draft_token_length(req)
-        return self._resize_state(state, target)
+        resized = self._resize_state(state, target)
+        if resized:
+            self._write_host_block_offsets(request_id)
+        return resized
 
     def suspend_request(self, req: Any) -> None:
         self._request_state_for(self._request_id(req)).active = False
@@ -206,9 +263,11 @@ class KvbmKVCacheManager:
                 continue
             state.history_length = getattr(request, "context_current_position", 0)
             state.committed_tokens = state.history_length
+            self._write_host_block_offsets(self._request_id(request))
 
         for request in getattr(scheduled_batch, "generation_requests", ()):
-            state = self._request_state.get(self._request_id(request))
+            request_id = self._request_id(request)
+            state = self._request_state.get(request_id)
             if state is None:
                 continue
             rewind_len = getattr(request, "py_rewind_len", 0)
@@ -216,6 +275,7 @@ class KvbmKVCacheManager:
             self._resize_state(state, target)
             state.history_length = max(getattr(request, "max_beam_num_tokens", 1) - 1, 0)
             state.committed_tokens = state.history_length
+            self._write_host_block_offsets(request_id)
 
     def free_resources(self, request: Any, pin_on_release: bool = False) -> None:
         del pin_on_release
@@ -225,6 +285,11 @@ class KvbmKVCacheManager:
         if state is None:
             return
         self._free_block_ids.extend(state.block_ids)
+        slot = self._request_slots.pop(request_id, None)
+        if slot is not None:
+            self._clear_slot(slot)
+            self._free_slots.append(slot)
+            self._free_slots.sort()
 
     def get_cache_indices(self, request_id: int) -> list[int]:
         return list(self._request_state_for(request_id).block_ids)
@@ -348,7 +413,8 @@ class KvbmKVCacheManager:
             )
 
         for index, value in enumerate(block_ids):
-            dst_tensor[index] = value
+            slot = self._slot_for(request_ids[index]) * self.max_beam_width
+            dst_tensor[index] = list(self.host_kv_cache_block_offsets[0][slot][0])
 
     def flush_iteration_events(self) -> None:
         self._iteration_events.clear()
@@ -376,3 +442,7 @@ class KvbmKVCacheManager:
     def shutdown(self) -> None:
         self._request_state.clear()
         self._free_block_ids = list(range(self.num_blocks))
+        self._request_slots.clear()
+        self._free_slots = list(range(self.max_num_sequences + 1))
+        for slot in self._free_slots:
+            self._clear_slot(slot)
