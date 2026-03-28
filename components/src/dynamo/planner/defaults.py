@@ -86,6 +86,10 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
 
+    # Number of consecutive intervals with no valid metrics (zero traffic) before
+    # the planner proactively scales down to min_endpoint.  Set to 0 to disable.
+    nan_scaledown_threshold = 3
+
 
 class ComponentName:
     """Base class for backend component name configurations."""
