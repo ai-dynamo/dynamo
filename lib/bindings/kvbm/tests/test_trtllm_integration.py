@@ -306,6 +306,104 @@ class TrtllmIntegrationTest(unittest.TestCase):
             ],
         )
 
+    def test_manager_can_delegate_request_state_to_native_helper(self) -> None:
+        class _NativeState:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.block_ids = {}
+                self.slots = {}
+
+            def is_request_active(self, request_id: int) -> bool:
+                return request_id in self.block_ids
+
+            def prepare_context(self, request_id: int, is_first_context_chunk: bool) -> bool:
+                del is_first_context_chunk
+                self.block_ids.setdefault(request_id, [])
+                self.slots.setdefault(request_id, 0)
+                return True
+
+            def resize_context(
+                self,
+                request_id: int,
+                context_current_position: int,
+                num_tokens: int,
+                num_extra_kv_tokens: int,
+                is_first_context_chunk: bool,
+            ) -> bool:
+                del context_current_position
+                del num_tokens
+                del num_extra_kv_tokens
+                del is_first_context_chunk
+                self.block_ids[request_id] = [0, 1]
+                return True
+
+            def get_padded_block_row(self, request_id: int, bad_page_index: int):
+                del bad_page_index
+                return self.block_ids.get(request_id, []) + [-1, -1]
+
+            def get_slot(self, request_id: int) -> int:
+                return self.slots.setdefault(request_id, 0)
+
+            def get_cache_indices(self, request_id: int):
+                return self.block_ids[request_id]
+
+            def get_batch_cache_indices(self, request_ids):
+                return [self.block_ids[request_id] for request_id in request_ids]
+
+            def get_num_free_blocks(self) -> int:
+                return 6
+
+            def get_num_available_tokens(
+                self,
+                token_num_upper_bound: int,
+                max_num_draft_tokens: int,
+                num_extra_kv_tokens: int,
+            ) -> int:
+                del max_num_draft_tokens
+                del num_extra_kv_tokens
+                return token_num_upper_bound
+
+            def get_num_kv_blocks(self) -> int:
+                return 8
+
+            def free_resources(self, request_id: int) -> int:
+                self.block_ids.pop(request_id, None)
+                return self.slots.pop(request_id, 0)
+
+            def shutdown(self) -> None:
+                self.block_ids.clear()
+                self.slots.clear()
+
+        sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager = _NativeState
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[0],
+            total_num_kv_heads_per_layer=[8],
+            max_seq_len=32,
+            num_blocks=8,
+        )
+
+        request = _StubRequest(401, context_current_position=0)
+        request.context_chunk_size = 4
+        request.context_remaining_length = 4
+        self.assertTrue(manager.prepare_context(request))
+        self.assertTrue(manager.resize_context(request, 4))
+        self.assertEqual(manager.get_cache_indices(401), [0, 1])
+        self.assertEqual(
+            manager.host_kv_cache_block_offsets[0][0][0][:4],
+            [0, 1, -1, -1],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

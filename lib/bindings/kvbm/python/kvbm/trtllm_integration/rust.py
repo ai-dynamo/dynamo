@@ -15,6 +15,7 @@ try:
     BlockState = getattr(_trtllm_integration, "BlockState")
     BlockStates = getattr(_trtllm_integration, "BlockStates")
     SlotUpdate = getattr(_trtllm_integration, "SlotUpdate")
+    TrtllmStateManager = getattr(_trtllm_integration, "TrtllmStateManager", None)
 
     KvConnectorWorker = getattr(_trtllm_integration, "PyTrtllmKvConnectorWorker")
     KvConnectorLeader = getattr(_trtllm_integration, "PyTrtllmKvConnectorLeader")
@@ -31,6 +32,7 @@ except ImportError:
     BlockState = None
     BlockStates = None
     SlotUpdate = None
+    TrtllmStateManager = None
     KvConnectorWorker = None
     KvConnectorLeader = None
     SchedulerOutput = None
@@ -43,6 +45,7 @@ __all__ = [
     "BlockState",
     "BlockStates",
     "SlotUpdate",
+    "TrtllmStateManager",
     "KvConnectorWorker",
     "KvConnectorLeader",
     "SchedulerOutput",

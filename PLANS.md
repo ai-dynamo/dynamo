@@ -176,12 +176,32 @@ Implemented so far:
 
 ### Phase 4: Full request lifecycle ownership
 
-Status: pending
+Status: in progress
 
 Goal:
 
 - Move context/generation growth, teardown, and reuse fully under the KVBM
   manager for the supported path.
+
+Implemented so far:
+
+- added a Rust `TrtllmStateManager` that owns:
+  - request-to-block allocation state
+  - request slot assignment
+  - generation growth / rewind bookkeeping
+  - free-block accounting
+- updated the Python TRTLLM manager to auto-create and delegate to that Rust
+  lifecycle helper when available, while keeping the old Python logic as a
+  fallback for stub-only tests and environments without the extension
+- added stdlib-only tests that verify the Python manager can delegate request
+  lifecycle state to the native helper surface
+
+Still pending in this phase:
+
+- replace the remaining Python fallback bookkeeping entirely once the Rust path
+  covers dummy requests, iteration events, and any remaining edge semantics
+- decide whether host block-offset materialization should also move into Rust or
+  remain a thin Python-side formatting step
 
 ### Phase 5: `impl` compatibility surface
 
@@ -241,6 +261,9 @@ Goal:
   when the local layer head counts are uniform, and to reshape the exported
   DLPack views into TRTLLM v2-compatible NHD/HND tensors lazily via torch only
   when a real DLPack consumer is present.
+- Added a native Rust `TrtllmStateManager` and started delegating request
+  lifecycle bookkeeping from the Python manager into that object for the
+  supported path.
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -273,6 +296,10 @@ Goal:
   exact NHD/HND tensor layouts.
 - That keeps ownership inside KVBM without inventing a second storage format,
   and it avoids forcing the Python manager to synthesize fake tensor metadata.
+- The same logical/local split applies to lifecycle ownership: the Python shell
+  can delegate request accounting to Rust without reusing the logical
+  distributed `BlockManager`, because the supported path only needs local
+  request/block bookkeeping plus exported tensor views today.
 
 ## Testing Log
 
@@ -283,6 +310,10 @@ Goal:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after aligning pinned v2 Python semantics and adding `impl` compat
   coverage:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after starting the Rust lifecycle delegation milestone:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
@@ -312,13 +343,12 @@ Goal:
 
 ## Remaining Work
 
-- Phase 4: move request lifecycle ownership out of the Python shell and into a
-  dedicated Rust TRTLLM manager object so allocation, teardown, and reuse are
-  KVBM-owned end to end instead of only the exported tensor slab being
-  KVBM-owned.
-- Phase 4: replace the Python-side free-block/request-state bookkeeping with
-  Rust-backed request lifecycle methods while preserving the pinned TRTLLM v2
-  semantics already covered by the stdlib tests.
+- Phase 4: finish moving the remaining Python fallback lifecycle logic into the
+  Rust `TrtllmStateManager`, especially dummy-request helpers and any other
+  paths that still touch Python-owned request/block state directly.
+- Phase 4: decide whether host block-offset row materialization should move into
+  Rust now that slot assignment and padded block rows are already available
+  there.
 - Phase 5: decide whether the current tiny aggregated-path `impl` shim is
   sufficient for the pinned supported path once the Rust lifecycle object lands,
   or whether additional `impl` methods need to move into Rust too.
@@ -329,9 +359,9 @@ Goal:
 
 ## Exact Next Step
 
-1. Introduce a dedicated Rust TRTLLM manager state object that owns request
-   block allocation/free/reuse on top of the same local export slab.
-2. Repoint `KvbmKVCacheManager` Python methods to that Rust object so Python is
-   only a thin adapter for argument validation and tensor/list conversion.
-3. Extend the existing stdlib tests to cover that Rust-backed lifecycle path,
-   especially repeated allocate/free, teardown, and rewind behavior.
+1. Finish delegating `add_dummy_requests()` and any remaining direct Python
+   block-state mutations to `TrtllmStateManager`.
+2. Decide whether to move host block-offset formatting into Rust or keep it in
+   Python, then update the tests around repeated allocate/free and teardown.
+3. Re-read the pinned TRTLLM `impl` consumers and either keep the current shim
+   or move any still-required methods into the native helper layer.
