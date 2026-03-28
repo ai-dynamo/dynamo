@@ -183,6 +183,23 @@ Goal:
 - Added host slot and block-offset bookkeeping to the manager shell so
   `copy_batch_block_offsets()` now mirrors TRTLLM-style cached block rows
   instead of directly returning raw block IDs.
+- Inspected KVBM storage/layout internals and found the key phase-3 tension:
+  `FullyContiguous` can provide a clean primary-pool slab, but the current
+  DLPack helper only exports contiguous shapes, while TRTLLM also needs
+  per-layer views that are not naturally contiguous in that layout.
+
+## New Findings
+
+- Current DLPack export in `lib/bindings/kvbm/src/block_manager/dlpack.rs`
+  assumes contiguous tensors only.
+- `FullyContiguous` layout is a good fit for `get_unique_primary_pool()`.
+- The same layout is a poor fit for `get_buffers(layer_idx)` unless one of the
+  following happens:
+  - add stride-aware DLPack export
+  - switch the exported pool layout strategy
+  - maintain a second tensor-oriented export representation
+- This means phase 3 is not just plumbing; it requires an explicit export-model
+  decision before coding the real buffer path.
 
 ## Testing Log
 
@@ -198,16 +215,17 @@ Goal:
 
 - Finish Phase 2 by tightening the manager contract around real TRTLLM request
   semantics and host block-offset handling.
-- Start Phase 3 by wiring KVBM-backed primary-pool and per-layer tensor export.
+- Resolve the phase-3 export-model decision and then wire KVBM-backed
+  primary-pool and per-layer tensor export.
 - Add tests that validate exported shapes and indices without requiring the full
   TRT-LLM runtime.
 - Continue updating this file after every milestone with exact next steps.
 
 ## Exact Next Step
 
-1. Inspect KVBM block/device export internals to find the smallest viable
-   primary-pool export path.
-2. Decide whether phase 3 should use a new Rust-owned contiguous layout object
-   or a lightweight export wrapper over existing block/layout primitives.
-3. Add tests for primary-pool export, per-layer buffer export, and cache-index
-   compatibility using stub tensors.
+1. Decide the phase-3 export model:
+   stride-aware DLPack versus alternate layout versus dual representation.
+2. If no TRTLLM/PyTorch runtime is available locally, treat that validation gap
+   as an external blocker and avoid landing an unverified buffer ABI.
+3. Once the export model is chosen, add focused Rust export objects and tests
+   before wiring them into `KvbmKVCacheManager`.
