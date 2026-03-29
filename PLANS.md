@@ -4,55 +4,40 @@ Last updated: 2026-03-28 UTC
 
 Current run outcome:
 
-- re-read `Agents.md`, the full current `PLANS.md`, and the active
-  TRT-LLM manager/audit seam before changing anything in this run:
+- re-read `Agents.md`, the full current `PLANS.md`, the phase-5 helper check in
+  `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
-- searched the active TRT-LLM integration surface for leftover repo-local
-  cleanup work (`TODO`, `FIXME`, permissive `getattr(...)`, broad exception
-  fallbacks, and pinned transceiver/disaggregation seam references)
-- no new repo-local supported-path contract gap or pending cleanup milestone was
-  exposed by that seam review:
-  - remaining `NotImplementedError` sites are still limited to explicitly
+- searched that seam again for remaining repo-local cleanup markers and pinned
+  interface drift (`TODO`, `FIXME`, permissive `getattr(...)`, broad fallbacks,
+  and transceiver/disaggregation-specific references)
+- no new repo-local supported-path gap was exposed in this run:
+  - remaining `NotImplementedError` sites are still only for explicitly
     unsupported indexer/disaggregation export variants
-  - the strict Rust-loader seam still requires the pinned exported symbols
-  - no additional permissive request-interface drift handling was found in the
-    active manager path
-- re-ran the validated local checks from this sandbox again on 2026-03-28 UTC:
+  - the stricter Rust-loader seam still requires the pinned exported symbols
+  - no additional permissive request-interface or batch-interface fallback was
+    found in the active manager path
+- re-ran the validated local checks from this sandbox on 2026-03-28 UTC:
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+    -> pass (`Ran 27 tests`, `OK`)
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-  - `.venv/bin/python -c 'import kvbm, kvbm._core'`
+    -> pass
+  - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
-- local validation still passes repo-locally after that seam review
-- phase-7 runtime validation is still blocked only by external TRT-LLM runtime
-  environment prerequisites on this host:
-  - installed TRT-LLM wheel in `.venv` still lacks `_torch/disaggregation`
+    -> `status: "blocked"`
+- current runtime blockers are unchanged and still external to this repo:
+  - installed TRT-LLM wheel in `.venv` is `1.2.0` and still lacks
+    `_torch/disaggregation`
   - installed TRT-LLM wheel still expects CUDA major `13`
   - host/container still exposes only `libcublasLt.so.12*`
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-- re-read the full execution log, repo instructions, the phase-5 validation
-  note in `docs/design-docs/kvbm-trtllm-integration.md`, and the current
-  TRT-LLM manager/audit code before making further changes
-- re-ran the validated local checks from this sandbox on 2026-03-28 UTC:
-  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
-  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
-- no new repo-local contract gap was exposed in this run
-- the design-doc phase-5 helper-validation reminder is still satisfied:
-  - no additional supported-path `impl` consumer or helper-class API mismatch
-    was found after re-reading the pinned seam and re-running the audit/tests
-- remaining blockers are still machine/runtime-specific:
-  - installed TRT-LLM wheel in `.venv` still lacks `_torch/disaggregation`
-  - installed TRT-LLM wheel still expects CUDA major `13`
-  - this host still exposes only `libcublasLt.so.12*`
-  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
-    `tensorrt_llm._torch.disaggregation.transceiver` aborts in Open MPI / PMIx
-    before runtime validation can proceed
+- no code change was justified by this run; the only repo-local update needed
+  was to refresh this handoff with the exact validated state and next command
+  sequence for a runtime-capable host
 
 ## Objective
 
@@ -1258,37 +1243,30 @@ Implemented so far:
 
 ## Exact Next Step
 
-1. Run the stricter runtime audit first on the intended validation host:
+1. First command on the next runtime-capable host:
    `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
-   Do not attempt the phase-7 smoke path until it reports all of:
+2. Do not attempt the phase-7 smoke path until that audit reports all of:
    - installed TRT-LLM surface includes `_torch/disaggregation`, or the host is
-     explicitly using `/tmp/trtllm-latest/tensorrt_llm` as the import root
+     intentionally importing from `/tmp/trtllm-latest/tensorrt_llm`
    - available `libcublasLt` major version matches the installed TRT-LLM wheel
      expectation
    - subprocess import of the targeted TRT-LLM module path no longer aborts in
      Open MPI / PMIx during import
-2. Re-run the direct TRT-LLM smoke check on a host or container where importing
-   the targeted TRT-LLM disaggregation modules has all of:
-   - an MPI environment that either works normally or is intentionally bypassed
-     for import-only validation
-   - CUDA user-space libraries matching the targeted TRT-LLM wheel/source build
-   - a TRT-LLM Python surface that actually contains
-     `_torch.disaggregation.resource.kv_extractor`,
-     `_torch.disaggregation.native.rank_info`, and
-     `_torch.disaggregation.transceiver`
-   The repo-local adapter now passes the pinned-source
-   `build_page_table_from_manager(manager)`,
-   `RankInfo.from_kv_cache_manager(...)`, and
-   `KvCacheTransceiverV2` Python construction/send/receive paths, so the next
-   unresolved checkpoint is a real runtime import/transfer environment rather
-   than another known Python manager API mismatch.
-3. In this sandbox, keep using the now-validated editable-install command
-   before that runtime smoke check:
+3. Once the audit is clean, re-run the real TRT-LLM disaggregation smoke path.
+   The repo-local adapter already passes the pinned-source Python validations
+   for:
+   - `build_page_table_from_manager(manager)`
+   - `RankInfo.from_kv_cache_manager(...)`
+   - `KvCacheTransceiverV2` construction/send/receive/status/shutdown
+   So the next unresolved checkpoint is a real runtime import/transfer host,
+   not another known repo-local manager API mismatch.
+4. In this sandbox, keep using the validated editable-install command before
+   any further runtime attempt:
    `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-4. If that runtime path reports another missing manager field or storage shape,
-   extend:
+5. If a runtime-capable host exposes another missing manager field or storage
+   shape, touch this file first:
    `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
-   specifically:
+   Then inspect and extend only the relevant metadata helpers:
    - `_build_disagg_metadata()`
    - `get_disagg_storage_metadata()`
    - `get_disagg_init_config()`
