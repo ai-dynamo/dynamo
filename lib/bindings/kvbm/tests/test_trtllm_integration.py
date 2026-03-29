@@ -4,16 +4,29 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
+import enum
 import math
 from pathlib import Path
+import pickle
 import sys
 import types
 import unittest
 
 
 PYTHON_ROOT = Path(__file__).resolve().parents[1] / "python"
+TRTLLM_ROOT = Path("/tmp/trtllm-latest/tensorrt_llm")
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class _StubRequest:
@@ -46,7 +59,11 @@ class TrtllmIntegrationTest(unittest.TestCase):
         self._saved_modules = {
             name: module
             for name, module in sys.modules.items()
-            if name == "kvbm" or name.startswith("kvbm.") or name == "nixl"
+            if name == "kvbm"
+            or name.startswith("kvbm.")
+            or name == "nixl"
+            or name == "tensorrt_llm"
+            or name.startswith("tensorrt_llm.")
         }
 
         for name in list(self._saved_modules):
@@ -77,9 +94,146 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         for name in list(sys.modules):
-            if name == "kvbm" or name.startswith("kvbm.") or name == "nixl":
+            if (
+                name == "kvbm"
+                or name.startswith("kvbm.")
+                or name == "nixl"
+                or name == "tensorrt_llm"
+                or name.startswith("tensorrt_llm.")
+            ):
                 sys.modules.pop(name, None)
         sys.modules.update(self._saved_modules)
+
+    def _install_pinned_trtllm_disagg_stubs(self):
+        tensorrt_llm = types.ModuleType("tensorrt_llm")
+        tensorrt_llm.__path__ = [str(TRTLLM_ROOT)]
+        sys.modules["tensorrt_llm"] = tensorrt_llm
+
+        for package_name in (
+            "tensorrt_llm._torch",
+            "tensorrt_llm._torch.disaggregation",
+            "tensorrt_llm._torch.disaggregation.base",
+            "tensorrt_llm._torch.disaggregation.resource",
+            "tensorrt_llm._torch.disaggregation.native",
+            "tensorrt_llm._torch.disaggregation.native.mixers",
+            "tensorrt_llm._torch.disaggregation.native.mixers.attention",
+            "tensorrt_llm._torch.pyexecutor",
+            "tensorrt_llm.runtime",
+        ):
+            package = types.ModuleType(package_name)
+            package.__path__ = []
+            sys.modules[package_name] = package
+
+        base_region = types.ModuleType("tensorrt_llm._torch.disaggregation.base.region")
+
+        class _DataLayout(enum.Enum):
+            HND = "HND"
+            NHD = "NHD"
+
+        class _DataRole(enum.IntFlag):
+            KEY = 1
+            VALUE = 2
+            BLOCK_QUANT = 4
+
+        class _RegionExtractorBase:
+            pass
+
+        class _MemRegionGroup:
+            def __init__(self, ptrs, bytes_per_region) -> None:
+                self.ptrs = ptrs
+                self.bytes_per_region = bytes_per_region
+
+        class _SpecRegion:
+            def __init__(self, memory) -> None:
+                self.memory = memory
+
+        base_region.DataLayout = _DataLayout
+        base_region.DataRole = _DataRole
+        base_region.RegionExtractorBase = _RegionExtractorBase
+        base_region.MemRegionGroup = _MemRegionGroup
+        base_region.SpecRegion = _SpecRegion
+        sys.modules["tensorrt_llm._torch.disaggregation.base.region"] = base_region
+
+        resource_manager = types.ModuleType("tensorrt_llm._torch.pyexecutor.resource_manager")
+        resource_manager.KVCacheManager = type("KVCacheManager", (), {})
+        resource_manager.Role = type(
+            "Role",
+            (),
+            {
+                "KEY": "key",
+                "VALUE": "value",
+                "KEY_BLOCK_SCALE": "key_block_scale",
+                "VALUE_BLOCK_SCALE": "value_block_scale",
+            },
+        )
+        sys.modules["tensorrt_llm._torch.pyexecutor.resource_manager"] = resource_manager
+
+        utils_mod = types.ModuleType("tensorrt_llm._utils")
+        utils_mod.get_size_in_bytes = lambda elems, dtype: int(elems) * (2 if str(dtype) == "float16" else 4)
+        sys.modules["tensorrt_llm._utils"] = utils_mod
+
+        bindings_mod = types.ModuleType("tensorrt_llm.bindings")
+        bindings_mod.DataType = type("DataType", (), {"NVFP4": object()})
+        sys.modules["tensorrt_llm.bindings"] = bindings_mod
+
+        kv_cache_manager_v2 = types.ModuleType("tensorrt_llm.runtime.kv_cache_manager_v2")
+        kv_cache_manager_v2.CacheTier = type("CacheTier", (), {"GPU_MEM": "gpu_mem"})
+        sys.modules["tensorrt_llm.runtime.kv_cache_manager_v2"] = kv_cache_manager_v2
+
+        msgpack_mod = types.ModuleType("msgpack")
+        msgpack_mod.packb = lambda data: pickle.dumps(data)
+        msgpack_mod.unpackb = lambda data, strict_map_key=False: pickle.loads(data)
+        sys.modules["msgpack"] = msgpack_mod
+
+        auxiliary_mod = types.ModuleType("tensorrt_llm._torch.disaggregation.native.auxiliary")
+
+        class _AuxBufferMeta:
+            def __init__(self, **kwargs) -> None:
+                self.__dict__.update(kwargs)
+
+            def to_dict(self) -> dict:
+                return dict(self.__dict__)
+
+            @classmethod
+            def from_dict(cls, data: dict):
+                return cls(**data)
+
+        auxiliary_mod.AuxBufferMeta = _AuxBufferMeta
+        sys.modules["tensorrt_llm._torch.disaggregation.native.auxiliary"] = auxiliary_mod
+
+        spec_mod = types.ModuleType("tensorrt_llm._torch.disaggregation.native.mixers.attention.spec")
+
+        class _AttentionInfo:
+            def __init__(self, **kwargs) -> None:
+                self.__dict__.update(kwargs)
+
+            def to_dict(self) -> dict:
+                return dict(self.__dict__)
+
+            @classmethod
+            def from_dict(cls, data: dict):
+                return cls(**data)
+
+        spec_mod.AttentionInfo = _AttentionInfo
+        sys.modules["tensorrt_llm._torch.disaggregation.native.mixers.attention.spec"] = spec_mod
+
+        page_mod = _load_module(
+            "tensorrt_llm._torch.disaggregation.resource.page",
+            TRTLLM_ROOT / "_torch/disaggregation/resource/page.py",
+        )
+        utils_page_mod = _load_module(
+            "tensorrt_llm._torch.disaggregation.resource.utils",
+            TRTLLM_ROOT / "_torch/disaggregation/resource/utils.py",
+        )
+        kv_extractor_mod = _load_module(
+            "tensorrt_llm._torch.disaggregation.resource.kv_extractor",
+            TRTLLM_ROOT / "_torch/disaggregation/resource/kv_extractor.py",
+        )
+        rank_info_mod = _load_module(
+            "tensorrt_llm._torch.disaggregation.native.rank_info",
+            TRTLLM_ROOT / "_torch/disaggregation/native/rank_info.py",
+        )
+        return page_mod, utils_page_mod, kv_extractor_mod, rank_info_mod
 
     def test_rust_loader_uses_dedicated_trtllm_module(self) -> None:
         rust = importlib.import_module("kvbm.trtllm_integration.rust")
@@ -912,6 +1066,132 @@ class TrtllmIntegrationTest(unittest.TestCase):
         self.assertEqual(storage._buffer_attr[(1, "key")].offset, 4608)
         with self.assertRaises(NotImplementedError):
             manager.impl.get_indexer_k_cache_pool()
+
+    def test_manager_supports_pinned_trtllm_page_table_builder(self) -> None:
+        _, utils_mod, kv_extractor_mod, _ = self._install_pinned_trtllm_disagg_stubs()
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        class _FakeTensor:
+            def __init__(self, shape: tuple[int, ...], strides: tuple[int, ...], ptr: int) -> None:
+                self.shape = shape
+                self._strides = strides
+                self._ptr = ptr
+
+            def stride(self, dim: int) -> int:
+                return self._strides[dim]
+
+            def element_size(self) -> int:
+                return 2
+
+            def data_ptr(self) -> int:
+                return self._ptr
+
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=8,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[4, 5],
+            total_num_kv_heads_per_layer=[8, 8, 8, 8, 6, 6],
+            max_seq_len=128,
+            num_blocks=12,
+            primary_pool=_FakeTensor(
+                shape=(12, 2, 2, 8, 6, 16),
+                strides=(3072, 1536, 768, 96, 16, 1),
+                ptr=12288,
+            ),
+            device_id=2,
+            world_size=4,
+            tp_size=2,
+            tp_rank=1,
+            pp_size=2,
+            pp_rank=1,
+        )
+
+        page_table = kv_extractor_mod.build_page_table_from_manager(manager)
+        self.assertEqual(page_table.tokens_per_block, 8)
+        self.assertEqual(len(page_table.layer_groups), 1)
+        self.assertEqual(len(page_table.pool_groups), 1)
+        self.assertEqual(utils_mod.get_total_slots(page_table), 12)
+        self.assertEqual(utils_mod.get_total_pool_bytes(page_table), 12 * 6144)
+        self.assertEqual(
+            utils_mod.get_global_layer_ids(page_table.layer_groups[0]),
+            [4, 5],
+        )
+        pool = page_table.pool_groups[0].pools[0]
+        self.assertEqual(pool.base_address, 12288)
+        self.assertEqual(pool.slot_bytes, 6144)
+        self.assertEqual(pool.num_slots, 12)
+        entries = page_table.layer_groups[0].pool_views[0].buffer_entries.tolist()
+        self.assertEqual(
+            entries,
+            [
+                (0, 1, 0, 1536),
+                (0, 2, 1536, 1536),
+                (1, 1, 3072, 1536),
+                (1, 2, 4608, 1536),
+            ],
+        )
+
+    def test_manager_supports_pinned_trtllm_rank_info_builder(self) -> None:
+        _, _, _, rank_info_mod = self._install_pinned_trtllm_disagg_stubs()
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        class _FakeTensor:
+            def __init__(self, shape: tuple[int, ...], strides: tuple[int, ...], ptr: int) -> None:
+                self.shape = shape
+                self._strides = strides
+                self._ptr = ptr
+
+            def stride(self, dim: int) -> int:
+                return self._strides[dim]
+
+            def element_size(self) -> int:
+                return 2
+
+            def data_ptr(self) -> int:
+                return self._ptr
+
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=576,
+            pp_layers=[0, 1],
+            total_num_kv_heads_per_layer=[1, 1],
+            max_seq_len=64,
+            num_blocks=8,
+            cache_mode="mla",
+            primary_pool=_FakeTensor(
+                shape=(8, 2, 1, 4, 1, 576),
+                strides=(4608, 2304, 2304, 576, 576, 1),
+                ptr=8192,
+            ),
+            world_size=4,
+            tp_size=4,
+            tp_rank=2,
+            pp_size=1,
+            pp_rank=0,
+            device_id=7,
+        )
+
+        rank_info = rank_info_mod.RankInfo.from_kv_cache_manager(
+            instance_name="kvbm-rank",
+            kv_cache_manager=manager,
+            device_id=7,
+        )
+
+        self.assertEqual(rank_info.instance_name, "kvbm-rank")
+        self.assertEqual(rank_info.instance_rank, manager.mapping.rank)
+        self.assertEqual(rank_info.device_id, 7)
+        self.assertEqual(rank_info.attention.kv_heads_per_rank, 1)
+        self.assertEqual(rank_info.attention.tokens_per_block, 4)
+        self.assertEqual(rank_info.attention.dims_per_head, 576)
+        self.assertTrue(rank_info.attention.is_mla)
+        self.assertEqual(rank_info.layer_num_per_pp, [2])
+        self.assertEqual(rank_info.page_table.tokens_per_block, 4)
+        self.assertEqual(rank_info.page_table.pool_groups[0].pools[0].slot_bytes, 9216)
+        round_trip = rank_info_mod.RankInfo.from_bytes(rank_info.to_bytes())
+        self.assertEqual(round_trip.instance_name, "kvbm-rank")
+        self.assertEqual(round_trip.page_table.pool_groups[0].pools[0].num_slots, 8)
 
 
 if __name__ == "__main__":

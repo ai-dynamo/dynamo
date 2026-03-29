@@ -138,6 +138,9 @@ Deferred to later phases:
 - richer draft-path semantics beyond mirrored bookkeeping
 - optional environment bootstrapping for richer TRTLLM/PyTorch validation later
 - any redesign of `BAD_PAGE_INDEX` beyond the current supported path
+- review against main, seeing what baggage this pr introduced and clean it up, keep the functionality we need, without caring about the things we intoduced on the way there. 
+
+
 ### Phase 3: Buffer and primary-pool export
 
 Status: completed
@@ -338,7 +341,7 @@ Implemented so far:
 
 ### Phase 7: Disaggregated serving convergence
 
-Status: in progress
+Status: blocked on external runtime validation
 
 Goal:
 
@@ -348,27 +351,17 @@ Goal:
 
 Current blockers identified from the pinned TRT-LLM disaggregation surface:
 
-- The current aggregated-path `_ImplCompat` shim is too small for
-  `KVRegionExtractorV1` / `KvCacheTransceiverV2`
-- The TRT-LLM disaggregation path expects manager/impl storage metadata that
-  the current manager does not expose, including:
-  - `impl.layer_grouping`
-  - `impl._storage`
-  - `impl._init_config`
-  - `impl._life_cycles`
-  - `impl.get_indexer_k_cache_pool()`
-- The current manager does not model multi-life-cycle/layer-group storage
-  ownership, so TRT-LLM cannot build a V2 page table from it
-- The current TRT-LLM manager path has no local representation of KVBM storage
-  tiers (GPU/host/disk) even though the older connector path and KVBM storage
-  layer do
-- Rank exchange for disaggregation currently exists in TRT-LLM and in the older
-  KVBM connector path, but not in the new TRT-LLM KV manager path
-- MLA-specific transfer/storage shapes are not modeled yet:
-  - standard TRT-LLM MLA uses a single latent-cache pool (`kv_factor=1`)
-  - FlashInfer MLA uses two separate caches (`ckv_cache`, `kpe_cache`)
-  - DSA sparse MLA adds an indexer K-cache side pool and extra block-offset
-    metadata
+- The repo-local manager now satisfies the pinned Python page-table and
+  rank-info builders, but actual `.venv` TRT-LLM disaggregation imports still
+  abort in Open MPI / PMIx before `KvCacheTransceiverV2` setup can be exercised
+  on this machine.
+- The current adapter still models only one GPU-resident life cycle / pool
+  group for the supported path; if real transfer-worker startup demands richer
+  storage-tier detail, that mapping work remains to be done.
+- MLA-specific transfer/storage variants beyond the baseline latent-cache path
+  are still out of scope:
+  - FlashInfer MLA dual-cache layout (`ckv_cache`, `kpe_cache`)
+  - DSA sparse MLA indexer K-cache and related metadata
 
 Required design work:
 
@@ -417,9 +410,26 @@ Implemented so far:
 - added a lightweight `mapping` shim plus derived `max_batch_size`,
   `is_vswa=False`, and `max_draft_len=0` so TRT-LLM's Python
   disaggregation/rank-info helpers have the manager fields they read first
+- added low-cost compatibility helpers needed by the pinned Python
+  disaggregation helpers without broadening the supported feature matrix:
+  - `enable_indexer_k_cache=False`
+  - `_get_window_size_to_layers()`
+  - `mapping.is_first_pp_rank()`
+  - `mapping.is_last_pp_rank()`
+- tightened the Python request surface to the pinned TRT-LLM request contract:
+  - request fields are normalized once through `_RequestSnapshot`
+  - repeated ad-hoc `getattr(request, ...)` access was removed from lifecycle
+    methods
+  - dynamic dummy-request shells were replaced with a small typed dataclass
 - added stdlib-only tests that validate the fake-V2 metadata contract for:
   - standard K/V layout
   - baseline MLA key-only layout
+- added direct pinned-upstream source validation, still without requiring the
+  broken local TRT-LLM runtime:
+  - `build_page_table_from_manager(manager)` from the pinned local TRT-LLM
+    checkout succeeds against the KVBM-backed manager
+  - `RankInfo.from_kv_cache_manager(...)` from the pinned local TRT-LLM
+    checkout succeeds and round-trips through serialization
 
 ## Progress Log
 
@@ -492,6 +502,14 @@ Implemented so far:
   - the manager now exposes the lightweight `mapping` and batch-size fields
     that TRT-LLM's Python transfer/rank-info helpers read before transfer
     starts
+- Hardened the phase-7 Python surface after re-reading the pinned TRT-LLM
+  helpers:
+  - normalized request access through `_RequestSnapshot` instead of scattered
+    fallback lookups
+  - added explicit compatibility shims for window-size grouping and PP-rank
+    predicates
+  - validated the adapter against the pinned TRT-LLM `kv_extractor.py` and
+    `rank_info.py` sources directly, using stub-only dependencies
 - Inspected KVBM storage/layout internals and found the key phase-3 tension:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
@@ -594,6 +612,15 @@ Implemented so far:
   `RankInfo.from_kv_cache_manager()` and `KvCacheTransceiverV2` expect
   `mapping` and `max_batch_size`, so the phase-7 minimum viable adapter had to
   include those fields as well.
+- After validating against the pinned local TRT-LLM source files directly, no
+  additional repo-local API gaps were found for:
+  - `build_page_table_from_manager(manager)`
+  - `RankInfo.from_kv_cache_manager(...)`
+  The remaining blocker is runtime environment bring-up, not another missing
+  Python attribute on the manager.
+- The request-facing Python code no longer needs repeated permissive attribute
+  probing for the pinned TRT-LLM path; one normalization shim is sufficient and
+  keeps the supported interface explicit.
 
 ## Testing Log
 
@@ -638,6 +665,11 @@ Implemented so far:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after tightening the Python request adapter and adding direct
+  pinned-TRTLLM source validation:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed in the repo `.venv` direct TRT-LLM smoke path before page-table
   validation completed:
   `TLLM_DISABLE_MPI=1 .venv/bin/python ... build_page_table_from_manager(manager)`
@@ -678,34 +710,47 @@ Implemented so far:
   - explicit device placement in Rust pool creation
   - rank/stage-aware validation for `tp>1` and `pp>1`
 - Disaggregated-serving convergence is still pending:
-  - validate the new V2-style storage/page-table surface against a TRT-LLM
+  - validate the now-passing page-table / rank-info adapter against a TRT-LLM
     runtime environment that can import disaggregation modules without MPI/PMIx
     aborting
   - mapping KVBM storage tiers onto TRT-LLM life cycles / pool groups
-  - preserving Rust-owned lifecycle and residency guarantees through transfer
-    flows
+  - preserving Rust-owned lifecycle and residency guarantees through actual
+    transfer-worker flows if the runtime reveals more than the current adapter
 - External blocker remains: add a runtime-capable validation path for the Rust
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
 - Additional external blocker now identified for phase 7 runtime validation:
   the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
-  direct disaggregation page-table smoke check can run.
+  direct `KvCacheTransceiverV2` / transfer-worker smoke check can run.
 
 ## Exact Next Step
 
 1. Re-run the direct TRT-LLM smoke check on a host or container where importing
    `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
-   PMIx. Use the same manager construction added in this repo and validate that
-   `build_page_table_from_manager(manager)` succeeds end-to-end.
-2. Once that runtime import blocker is gone, continue phase 7 by checking
-   whether `KvCacheTransceiverV2` can progress past `RankInfo` and transfer
-   worker setup using the current fake-V2 metadata, or whether it still needs
-   additional `impl` storage-tier/life-cycle detail.
-3. If more detail is required, the next file to extend is:
+   PMIx. The repo-local adapter already passes the pinned-source
+   `build_page_table_from_manager(manager)` and
+   `RankInfo.from_kv_cache_manager(...)` paths, so the next unresolved runtime
+   checkpoint is `KvCacheTransceiverV2` / transfer-worker construction.
+2. If that runtime path reports another missing manager field or storage shape,
+   extend:
    `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
-   specifically the fake-V2 metadata builders:
+   specifically:
    - `_build_disagg_metadata()`
    - `get_disagg_storage_metadata()`
    - `get_disagg_init_config()`
    - `get_disagg_life_cycles()`
+   - `get_layer_grouping()`
+   - `_get_window_size_to_layers()`
 - /workspace/model-performance/michaelfeil1209/mfdynamo/.venv has a installation of torch and tensorrt_llm active, can be patched.
+ImportError: libcublasLt.so.13: cannot open shared object file: No such file or directory known issue. 
+
+# Wishes:
+- minimize python interface.
+  Status: partially addressed in this run by centralizing request access into
+  `_RequestSnapshot` and replacing dynamic Python shims with dataclasses.
+- fewer getattr(request, "id") etc items where its clear that tensorrt-llm will provide a item which such api. Make sure the code is in good standards, especially in python. Keep the interface more on the rust side, if possible.
+  Status: addressed for the pinned TRT-LLM request contract on the Python side;
+  any further reduction should come from future Rust-native transfer/storage
+  ownership if phase-7 runtime work reopens the seam.
+- maturin build should be able to unblock codex.
+- there is no need for fallback e.g. when the interface breaks. if someone moves the trt-llm commit, and e.g. a typed object from trt-llm side has changed, that is ok. 

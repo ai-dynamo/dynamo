@@ -41,6 +41,13 @@ class _MappingShim:
     cp_rank: int = 0
     gpus_per_node: int = 1
     enable_attention_dp: bool = False
+    cp_config: dict[str, Any] = field(default_factory=dict)
+
+    def is_first_pp_rank(self) -> bool:
+        return self.pp_rank == 0
+
+    def is_last_pp_rank(self) -> bool:
+        return self.pp_rank == self.pp_size - 1
 
 
 @dataclass(frozen=True)
@@ -76,14 +83,72 @@ class _FakeStorageLevel:
 
 
 @dataclass(frozen=True)
+class _FakePoolGroups:
+    _pool_groups: list[_FakeStoragePoolGroup]
+
+
+@dataclass(frozen=True)
 class _FakeLifeCycle:
     window_size: Optional[int]
+
+
+@dataclass(frozen=True)
+class _FakeCacheTierConfig:
+    tier: Any
+
+
+@dataclass(frozen=True)
+class _FakeInitConfig:
+    tokens_per_block: int
+    cache_tiers: list[_FakeCacheTierConfig]
+
+
+@dataclass(frozen=True)
+class _RequestSnapshot:
+    request_id: int
+    is_first_context_chunk: bool = True
+    context_current_position: int = 0
+    context_chunk_size: int = 0
+    max_beam_num_tokens: int = 1
+    py_rewind_len: int = 0
+    draft_token_length: int = 0
+
+    @classmethod
+    def from_request(cls, request: Any) -> "_RequestSnapshot":
+        try:
+            context_chunk_size = request.context_chunk_size
+        except AttributeError:
+            context_chunk_size = request.context_remaining_length
+
+        draft_tokens = request.py_draft_tokens
+        return cls(
+            request_id=int(request.py_request_id),
+            is_first_context_chunk=bool(request.is_first_context_chunk),
+            context_current_position=int(request.context_current_position),
+            context_chunk_size=int(context_chunk_size),
+            max_beam_num_tokens=int(request.max_beam_num_tokens),
+            py_rewind_len=int(request.py_rewind_len),
+            draft_token_length=len(draft_tokens or ()),
+        )
+
+
+@dataclass
+class _DummyRequest:
+    request_id: int
+    py_request_id: int
+    is_first_context_chunk: bool
+    context_current_position: int
+    context_chunk_size: int
+    context_remaining_length: int
+    max_beam_num_tokens: int
+    py_rewind_len: int
+    py_draft_tokens: list[int]
 
 
 class _FakeStorage:
     def __init__(self, pool_group: _FakeStoragePoolGroup, buffer_attr: dict[Any, Any]) -> None:
         self._buffer_attr = buffer_attr
-        self._levels = [_FakeStorageLevel(storage=type("PoolGroups", (), {"_pool_groups": [pool_group]})())]
+        self._levels = [_FakeStorageLevel(storage=_FakePoolGroups(_pool_groups=[pool_group]))]
         self.num_life_cycles = 1
 
     def get_pool_group_index(self, life_cycle_id: int) -> int:
@@ -120,7 +185,7 @@ class _ImplCompat:
 
     @property
     def layer_grouping(self) -> list[list[int]]:
-        return [list(range(self._manager.num_local_layers))]
+        return self._manager.get_layer_grouping()
 
     @property
     def _storage(self) -> Any:
@@ -231,6 +296,7 @@ class KvbmKVCacheManager:
         self.max_batch_size = max(1, math.ceil(self.max_num_sequences / self.pp_size))
         self.is_vswa = False
         self.max_draft_len = 0
+        self.enable_indexer_k_cache = False
         self.mapping = _MappingShim(
             world_size=self.world_size,
             tp_size=self.tp_size,
@@ -304,6 +370,15 @@ class KvbmKVCacheManager:
             "cache_mode": self.cache_mode,
             "kv_factor": self.kv_factor,
         }
+
+    def get_layer_grouping(self) -> list[list[int]]:
+        return [list(range(self.num_local_layers))]
+
+    def _get_window_size_to_layers(self) -> dict[Optional[int], list[int]]:
+        window_size_to_layers: dict[Optional[int], list[int]] = {}
+        for life_cycle, layers in zip(self.get_disagg_life_cycles(), self.get_layer_grouping()):
+            window_size_to_layers.setdefault(life_cycle.window_size, []).extend(layers)
+        return window_size_to_layers
 
     def _build_disagg_metadata(self) -> dict[str, Any]:
         pool = self.get_unique_primary_pool()
@@ -379,14 +454,10 @@ class KvbmKVCacheManager:
 
         return {
             "storage": _FakeStorage(pool_group=pool_group, buffer_attr=buffer_attr),
-            "init_config": type(
-                "FakeInitConfig",
-                (),
-                {
-                    "tokens_per_block": self.tokens_per_block,
-                    "cache_tiers": [type("FakeCacheTierConfig", (), {"tier": cache_tier})()],
-                },
-            )(),
+            "init_config": _FakeInitConfig(
+                tokens_per_block=self.tokens_per_block,
+                cache_tiers=[_FakeCacheTierConfig(tier=cache_tier)],
+            ),
             "life_cycles": [_FakeLifeCycle(window_size=None)],
         }
 
@@ -518,13 +589,6 @@ class KvbmKVCacheManager:
 
         return tensor.unflatten(-1, (num_kv_heads, self.head_dim))
 
-    def _request_id(self, request: Any) -> int:
-        if hasattr(request, "py_request_id"):
-            return int(request.py_request_id)
-        if hasattr(request, "request_id"):
-            return int(request.request_id)
-        raise AttributeError("request object is missing py_request_id/request_id")
-
     def _request_state_for(self, request_id: int) -> _RequestState:
         state = self._request_state.get(request_id)
         if state is None:
@@ -615,9 +679,6 @@ class KvbmKVCacheManager:
         state.capacity = min(target_capacity, required_blocks * self.tokens_per_block)
         return True
 
-    def _get_draft_token_length(self, request: Any) -> int:
-        return len(getattr(request, "py_draft_tokens", ()) or ())
-
     def is_request_active(self, request_id: int) -> bool:
         if self._native_state is not None:
             return self._native_state.is_request_active(request_id)
@@ -625,97 +686,105 @@ class KvbmKVCacheManager:
         return state is not None and state.active
 
     def prepare_context(self, req: Any) -> bool:
-        request_id = self._request_id(req)
-        is_first_chunk = getattr(req, "is_first_context_chunk", True)
+        request = _RequestSnapshot.from_request(req)
         if self._native_state is not None:
-            prepared = self._native_state.prepare_context(request_id, is_first_chunk)
+            prepared = self._native_state.prepare_context(
+                request.request_id, request.is_first_context_chunk
+            )
             if prepared:
                 self._write_host_block_offsets_row(
-                    request_id, self._native_state.get_padded_block_row(request_id, BAD_PAGE_INDEX)
+                    request.request_id,
+                    self._native_state.get_padded_block_row(
+                        request.request_id, BAD_PAGE_INDEX
+                    ),
                 )
             return prepared
-        if is_first_chunk:
-            state = self._request_state.setdefault(request_id, _RequestState())
+        if request.is_first_context_chunk:
+            state = self._request_state.setdefault(request.request_id, _RequestState())
         else:
-            state = self._request_state_for(request_id)
-        self._slot_for(request_id)
+            state = self._request_state_for(request.request_id)
+        self._slot_for(request.request_id)
         state.active = True
-        self._write_host_block_offsets(request_id)
+        self._write_host_block_offsets(request.request_id)
         return True
 
     def resize_context(self, req: Any, num_tokens: int) -> bool:
-        request_id = self._request_id(req)
+        request = _RequestSnapshot.from_request(req)
         if self._native_state is not None:
             resized = self._native_state.resize_context(
-                request_id,
-                getattr(req, "context_current_position", 0),
+                request.request_id,
+                request.context_current_position,
                 num_tokens,
                 self.num_extra_kv_tokens,
-                getattr(req, "is_first_context_chunk", True),
+                request.is_first_context_chunk,
             )
             if resized:
                 self._write_host_block_offsets_row(
-                    request_id, self._native_state.get_padded_block_row(request_id, BAD_PAGE_INDEX)
+                    request.request_id,
+                    self._native_state.get_padded_block_row(
+                        request.request_id, BAD_PAGE_INDEX
+                    ),
                 )
             return resized
-        state = self._request_state_for(request_id)
-        target = getattr(req, "context_current_position", 0) + num_tokens
+        state = self._request_state_for(request.request_id)
+        target = request.context_current_position + num_tokens
         target += self.num_extra_kv_tokens
         target = max(state.capacity, target)
         resized = self._resize_state(state, target)
         if resized:
-            self._write_host_block_offsets(request_id)
-        elif getattr(req, "is_first_context_chunk", True):
+            self._write_host_block_offsets(request.request_id)
+        elif request.is_first_context_chunk:
             state.active = False
         return resized
 
     def try_allocate_generation(self, req: Any) -> bool:
-        request_id = self._request_id(req)
+        request = _RequestSnapshot.from_request(req)
         if self._native_state is not None:
             resized = self._native_state.try_allocate_generation(
-                request_id, self._get_draft_token_length(req)
+                request.request_id, request.draft_token_length
             )
             if resized:
                 self._write_host_block_offsets_row(
-                    request_id, self._native_state.get_padded_block_row(request_id, BAD_PAGE_INDEX)
+                    request.request_id,
+                    self._native_state.get_padded_block_row(
+                        request.request_id, BAD_PAGE_INDEX
+                    ),
                 )
             return resized
-        state = self._request_state.get(request_id)
+        state = self._request_state.get(request.request_id)
         if state is None:
             return False
         state.active = True
-        target = state.capacity + 1 + self._get_draft_token_length(req)
+        target = state.capacity + 1 + request.draft_token_length
         resized = self._resize_state(state, target)
         if resized:
-            self._write_host_block_offsets(request_id)
+            self._write_host_block_offsets(request.request_id)
         return resized
 
     def suspend_request(self, req: Any) -> None:
+        request = _RequestSnapshot.from_request(req)
         if self._native_state is not None:
-            self._native_state.suspend_request(self._request_id(req))
+            self._native_state.suspend_request(request.request_id)
             return
-        self._request_state_for(self._request_id(req)).active = False
+        self._request_state_for(request.request_id).active = False
 
     def prepare_resources(self, scheduled_batch: Any) -> None:
         for request in getattr(scheduled_batch, "context_requests", ()):
+            request_state = _RequestSnapshot.from_request(request)
             if not self.prepare_context(request):
                 raise RuntimeError(
-                    f"failed to prepare context for request {self._request_id(request)}"
+                    f"failed to prepare context for request {request_state.request_id}"
                 )
-            chunk_size = getattr(
-                request,
-                "context_chunk_size",
-                getattr(request, "context_remaining_length", 0),
-            )
-            if not self.resize_context(request, chunk_size):
+            if not self.resize_context(request, request_state.context_chunk_size):
                 raise RuntimeError(
-                    f"failed to resize context for request {self._request_id(request)}"
+                    f"failed to resize context for request {request_state.request_id}"
                 )
 
         for request in getattr(scheduled_batch, "generation_requests", ()):
+            request_state = _RequestSnapshot.from_request(request)
             if not self.try_allocate_generation(request):
                 raise RuntimeError(
-                    f"failed to allocate generation for request {self._request_id(request)}"
+                    f"failed to allocate generation for request {request_state.request_id}"
                 )
 
     def update_resources(
@@ -728,11 +797,12 @@ class KvbmKVCacheManager:
         del kv_cache_dtype_byte_size
 
         for request in getattr(scheduled_batch, "context_requests", ()):
-            request_id = self._request_id(request)
+            request_state = _RequestSnapshot.from_request(request)
+            request_id = request_state.request_id
             if self._native_state is not None:
                 updated = self._native_state.update_context(
                     request_id,
-                    getattr(request, "context_current_position", 0),
+                    request_state.context_current_position,
                     self.num_extra_kv_tokens,
                 )
                 if not updated:
@@ -752,26 +822,26 @@ class KvbmKVCacheManager:
                 continue
             if not state.active:
                 continue
-            if state.capacity < getattr(request, "context_current_position", 0):
+            if state.capacity < request_state.context_current_position:
                 if not self._resize_state(
                     state,
-                    getattr(request, "context_current_position", 0)
-                    + self.num_extra_kv_tokens,
+                    request_state.context_current_position + self.num_extra_kv_tokens,
                 ):
                     raise ValueError(
                         f"failed to resize context history for request {request_id}"
                     )
-            state.history_length = getattr(request, "context_current_position", 0)
+            state.history_length = request_state.context_current_position
             state.committed_tokens = state.history_length
             self._write_host_block_offsets(request_id)
 
         for request in getattr(scheduled_batch, "generation_requests", ()):
-            request_id = self._request_id(request)
+            request_state = _RequestSnapshot.from_request(request)
+            request_id = request_state.request_id
             if self._native_state is not None:
                 updated = self._native_state.update_generation(
                     request_id,
-                    max(getattr(request, "max_beam_num_tokens", 1), 0),
-                    getattr(request, "py_rewind_len", 0),
+                    max(request_state.max_beam_num_tokens, 0),
+                    request_state.py_rewind_len,
                 )
                 if not updated:
                     raise ValueError(
@@ -790,8 +860,8 @@ class KvbmKVCacheManager:
                 continue
             if not state.active:
                 continue
-            rewind_len = getattr(request, "py_rewind_len", 0)
-            history_length = max(getattr(request, "max_beam_num_tokens", 1) - 1, 0)
+            rewind_len = request_state.py_rewind_len
+            history_length = max(request_state.max_beam_num_tokens - 1, 0)
             target = max(state.capacity - rewind_len, history_length)
             if not self._resize_state(state, target):
                 raise ValueError(
@@ -804,7 +874,7 @@ class KvbmKVCacheManager:
     def free_resources(self, request: Any, pin_on_release: bool = False) -> None:
         del pin_on_release
 
-        request_id = self._request_id(request)
+        request_id = _RequestSnapshot.from_request(request).request_id
         if self._native_state is not None:
             slot = self._native_state.free_resources(request_id)
             if slot is not None:
@@ -924,16 +994,17 @@ class KvbmKVCacheManager:
         requests = []
         for index, request_id in enumerate(request_ids):
             token_num = token_nums[index] if token_nums is not None else 1
-            request = type("DummyRequest", (), {})()
-            request.request_id = request_id
-            request.py_request_id = request_id
-            request.is_first_context_chunk = True
-            request.context_current_position = token_num
-            request.context_chunk_size = token_num
-            request.context_remaining_length = token_num
-            request.max_beam_num_tokens = token_num
-            request.py_rewind_len = 0
-            request.py_draft_tokens = [1] * max_num_draft_tokens if is_gen else []
+            request = _DummyRequest(
+                request_id=request_id,
+                py_request_id=request_id,
+                is_first_context_chunk=True,
+                context_current_position=token_num,
+                context_chunk_size=token_num,
+                context_remaining_length=token_num,
+                max_beam_num_tokens=token_num,
+                py_rewind_len=0,
+                py_draft_tokens=[1] * max_num_draft_tokens if is_gen else [],
+            )
             requests.append(request)
 
             if not prepare_resource:
