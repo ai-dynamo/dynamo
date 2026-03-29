@@ -40,7 +40,7 @@ func runCheckpoint(args []string) error {
 	flags := flag.NewFlagSet("checkpoint", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
-	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang DynamoGraphDeployment manifest")
+	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang worker Pod manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	checkpointHash := flags.String("checkpoint-hash", "", "Explicit checkpoint hash; defaults to a generated value")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
@@ -65,7 +65,6 @@ func runCheckpoint(args []string) error {
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
 	fmt.Printf("name=%s\n", result.Name)
-	fmt.Printf("worker_service=%s\n", result.WorkerService)
 	fmt.Printf("backend=%s\n", result.Backend)
 	fmt.Printf("checkpoint_job=%s\n", result.CheckpointJob)
 	fmt.Printf("checkpoint_hash=%s\n", result.CheckpointHash)
@@ -77,7 +76,7 @@ func runRestore(args []string) error {
 	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
-	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang DynamoGraphDeployment manifest")
+	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang worker Pod manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	checkpointHash := flags.String("checkpoint-hash", "", "Checkpoint hash to restore")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
@@ -102,7 +101,6 @@ func runRestore(args []string) error {
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
 	fmt.Printf("name=%s\n", result.Name)
-	fmt.Printf("worker_service=%s\n", result.WorkerService)
 	fmt.Printf("backend=%s\n", result.Backend)
 	fmt.Printf("restore_service=%s\n", result.RestoreService)
 	fmt.Printf("restore_pod=%s\n", result.RestorePod)
@@ -112,14 +110,14 @@ func runRestore(args []string) error {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `snapshotctl runs manual snapshot checkpoint and restore flows from a DynamoGraphDeployment manifest.
+	fmt.Fprintf(os.Stderr, `snapshotctl runs manual snapshot checkpoint and restore flows from a worker Pod manifest.
 
 Subcommands:
   checkpoint
   restore
 
 Examples:
-  snapshotctl checkpoint --manifest examples/backends/vllm/deploy/agg.yaml
-  snapshotctl restore --manifest examples/backends/sglang/deploy/agg.yaml --checkpoint-hash manual-snapshot-123
+  snapshotctl checkpoint --manifest /tmp/vllm-worker-pod.yaml
+  snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --checkpoint-hash manual-snapshot-123
 `)
 }

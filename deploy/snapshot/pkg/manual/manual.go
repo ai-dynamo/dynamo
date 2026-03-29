@@ -61,7 +61,6 @@ type RestoreOptions struct {
 type Result struct {
 	Name               string
 	Namespace          string
-	WorkerService      string
 	Backend            string
 	CheckpointHash     string
 	CheckpointLocation string
@@ -71,84 +70,24 @@ type Result struct {
 	Status             string
 }
 
-type dgdManifest struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
-		Name      string `yaml:"name"`
-		Namespace string `yaml:"namespace"`
-	} `yaml:"metadata"`
-	Spec struct {
-		Envs     []corev1.EnvVar       `yaml:"envs"`
-		Services map[string]dgdService `yaml:"services"`
-	} `yaml:"spec"`
-}
-
-type dgdService struct {
-	ComponentType string           `yaml:"componentType"`
-	EnvFromSecret string           `yaml:"envFromSecret"`
-	Envs          []corev1.EnvVar  `yaml:"envs"`
-	VolumeMounts  []dgdVolumeMount `yaml:"volumeMounts"`
-	ExtraPodSpec  dgdExtraPodSpec  `yaml:"extraPodSpec"`
-	Resources     struct {
-		Limits struct {
-			GPU string `yaml:"gpu"`
-		} `yaml:"limits"`
-	} `yaml:"resources"`
-}
-
-type dgdMainContainer struct {
-	Image           string            `yaml:"image"`
-	ImagePullPolicy corev1.PullPolicy `yaml:"imagePullPolicy"`
-	WorkingDir      string            `yaml:"workingDir"`
-	Command         []string          `yaml:"command"`
-	Args            []string          `yaml:"args"`
-	Env             []corev1.EnvVar   `yaml:"env"`
-}
-
-type dgdExtraPodSpec struct {
-	RuntimeClassName string                        `yaml:"runtimeClassName"`
-	NodeName         string                        `yaml:"nodeName"`
-	NodeSelector     map[string]string             `yaml:"nodeSelector"`
-	Affinity         *corev1.Affinity              `yaml:"affinity"`
-	Tolerations      []corev1.Toleration           `yaml:"tolerations"`
-	ImagePullSecrets []corev1.LocalObjectReference `yaml:"imagePullSecrets"`
-	MainContainer    dgdMainContainer              `yaml:"mainContainer"`
-}
-
-type dgdVolumeMount struct {
-	Name       string `yaml:"name"`
-	MountPoint string `yaml:"mountPoint"`
-}
-
 type selectedWorker struct {
-	DGDName           string
-	ManifestNamespace string
-	ServiceName       string
-	Backend           string
-	Image             string
-	ImagePullPolicy   corev1.PullPolicy
-	WorkingDir        string
-	Command           []string
-	Args              []string
-	Env               []corev1.EnvVar
-	EnvFromSecret     string
-	GPUCount          int
-	RuntimeClass      string
-	NodeName          string
-	NodeSelector      map[string]string
-	Affinity          *corev1.Affinity
-	Tolerations       []corev1.Toleration
-	ImagePullSecrets  []string
-	VolumeMounts      []corev1.VolumeMount
-	Volumes           []corev1.Volume
+	WorkloadName       string
+	ManifestNamespace  string
+	DGDName            string
+	Backend            string
+	Labels             map[string]string
+	Annotations        map[string]string
+	PodSpec            corev1.PodSpec
+	MainContainerIndex int
+	GPUCount           int
 }
 
 type runSpec struct {
 	Namespace               string
 	DGDName                 string
+	WorkloadName            string
 	ResourcePrefix          string
 	CheckpointHash          string
-	EnvFromSecret           string
 	SeccompLocalhostProfile string
 	CudaCheckpointLaunchJob bool
 	Worker                  selectedWorker
@@ -203,9 +142,8 @@ func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error)
 	}
 
 	return &Result{
-		Name:               spec.DGDName,
+		Name:               spec.WorkloadName,
 		Namespace:          spec.Namespace,
-		WorkerService:      spec.Worker.ServiceName,
 		Backend:            spec.Worker.Backend,
 		CheckpointHash:     spec.CheckpointHash,
 		CheckpointLocation: spec.checkpointLocation(),
@@ -254,9 +192,8 @@ func RunRestore(ctx context.Context, opts RestoreOptions) (*Result, error) {
 	}
 
 	return &Result{
-		Name:               spec.DGDName,
+		Name:               spec.WorkloadName,
 		Namespace:          spec.Namespace,
-		WorkerService:      spec.Worker.ServiceName,
 		Backend:            spec.Worker.Backend,
 		CheckpointHash:     spec.CheckpointHash,
 		CheckpointLocation: spec.checkpointLocation(),
@@ -394,98 +331,57 @@ func loadWorker(manifestPath string) (selectedWorker, error) {
 		return selectedWorker{}, fmt.Errorf("read manifest %s: %w", manifestPath, err)
 	}
 
-	var manifest dgdManifest
-	if err := yaml.Unmarshal(content, &manifest); err != nil {
+	var pod corev1.Pod
+	if err := yaml.Unmarshal(content, &pod); err != nil {
 		return selectedWorker{}, fmt.Errorf("parse manifest %s: %w", manifestPath, err)
 	}
-	if manifest.Kind != "DynamoGraphDeployment" {
-		return selectedWorker{}, fmt.Errorf("manifest %s is kind %q, expected DynamoGraphDeployment", manifestPath, manifest.Kind)
+	if kind := strings.TrimSpace(pod.Kind); kind != "" && kind != "Pod" {
+		return selectedWorker{}, fmt.Errorf("manifest %s is kind %q, expected Pod", manifestPath, kind)
 	}
-
-	workerNames := make([]string, 0, len(manifest.Spec.Services))
-	for serviceName, service := range manifest.Spec.Services {
-		if strings.EqualFold(strings.TrimSpace(service.ComponentType), "worker") {
-			workerNames = append(workerNames, serviceName)
-		}
+	if len(pod.Spec.Containers) == 0 {
+		return selectedWorker{}, fmt.Errorf("manifest %s has no containers", manifestPath)
 	}
-	slices.Sort(workerNames)
-	if len(workerNames) == 0 {
-		return selectedWorker{}, fmt.Errorf("manifest %s has no worker services", manifestPath)
+	if len(pod.Spec.Containers) > 1 {
+		return selectedWorker{}, fmt.Errorf("manifest %s has %d containers; snapshotctl requires exactly one worker container", manifestPath, len(pod.Spec.Containers))
 	}
-
-	if len(workerNames) > 1 {
-		return selectedWorker{}, fmt.Errorf("manifest %s has multiple worker services (%s); snapshotctl requires exactly one worker service", manifestPath, strings.Join(workerNames, ", "))
+	container := pod.Spec.Containers[0]
+	if strings.TrimSpace(container.Image) == "" {
+		return selectedWorker{}, fmt.Errorf("manifest %s: worker container image is required", manifestPath)
 	}
-	serviceName := workerNames[0]
-
-	service, ok := manifest.Spec.Services[serviceName]
-	if !ok {
-		return selectedWorker{}, fmt.Errorf("worker service %q not found in %s", serviceName, manifestPath)
-	}
-	if !strings.EqualFold(strings.TrimSpace(service.ComponentType), "worker") {
-		return selectedWorker{}, fmt.Errorf("service %q in %s is componentType %q, expected worker", serviceName, manifestPath, service.ComponentType)
-	}
-
-	backend, err := inferBackend(service)
+	backend, err := inferBackend(container)
 	if err != nil {
-		return selectedWorker{}, fmt.Errorf("service %q in %s: %w", serviceName, manifestPath, err)
+		return selectedWorker{}, fmt.Errorf("manifest %s: %w", manifestPath, err)
 	}
-
-	gpuCount, err := parseGPUCount(service.Resources.Limits.GPU)
+	gpuCount, err := parseGPUCount(container.Resources)
 	if err != nil {
-		return selectedWorker{}, fmt.Errorf("service %q in %s: %w", serviceName, manifestPath, err)
+		return selectedWorker{}, fmt.Errorf("manifest %s: %w", manifestPath, err)
 	}
-
-	command := append([]string(nil), service.ExtraPodSpec.MainContainer.Command...)
-	if len(command) == 0 {
-		command = []string{"python3", "-m", "dynamo." + backend}
-	}
-	if strings.TrimSpace(service.ExtraPodSpec.MainContainer.Image) == "" {
-		return selectedWorker{}, fmt.Errorf("service %q in %s: worker image is required in extraPodSpec.mainContainer.image", serviceName, manifestPath)
-	}
-
-	imagePullPolicy := service.ExtraPodSpec.MainContainer.ImagePullPolicy
-	if imagePullPolicy == "" {
-		imagePullPolicy = corev1.PullPolicy(defaultImagePullPolicy)
-	}
-	volumeMounts, volumes, err := pvcVolumeSpec(service.VolumeMounts)
-	if err != nil {
-		return selectedWorker{}, fmt.Errorf("service %q in %s: %w", serviceName, manifestPath, err)
-	}
-
-	env := append([]corev1.EnvVar(nil), manifest.Spec.Envs...)
-	env = append(env, service.Envs...)
-	env = append(env, service.ExtraPodSpec.MainContainer.Env...)
 
 	return selectedWorker{
-		DGDName:           sanitizeName(manifest.Metadata.Name),
-		ManifestNamespace: strings.TrimSpace(manifest.Metadata.Namespace),
-		ServiceName:       serviceName,
-		Backend:           backend,
-		Image:             strings.TrimSpace(service.ExtraPodSpec.MainContainer.Image),
-		ImagePullPolicy:   imagePullPolicy,
-		WorkingDir:        strings.TrimSpace(service.ExtraPodSpec.MainContainer.WorkingDir),
-		Command:           command,
-		Args:              append([]string(nil), service.ExtraPodSpec.MainContainer.Args...),
-		Env:               env,
-		EnvFromSecret:     strings.TrimSpace(service.EnvFromSecret),
-		GPUCount:          gpuCount,
-		RuntimeClass:      strings.TrimSpace(service.ExtraPodSpec.RuntimeClassName),
-		NodeName:          strings.TrimSpace(service.ExtraPodSpec.NodeName),
-		NodeSelector:      cloneMap(service.ExtraPodSpec.NodeSelector),
-		Affinity:          service.ExtraPodSpec.Affinity.DeepCopy(),
-		Tolerations:       append([]corev1.Toleration(nil), service.ExtraPodSpec.Tolerations...),
-		ImagePullSecrets:  localObjectReferenceNames(service.ExtraPodSpec.ImagePullSecrets),
-		VolumeMounts:      volumeMounts,
-		Volumes:           volumes,
+		WorkloadName:       sanitizeName(firstNonEmpty(pod.Name, graphNameForPod(pod), "snapshot-worker")),
+		ManifestNamespace:  strings.TrimSpace(pod.Namespace),
+		DGDName:            sanitizeName(firstNonEmpty(graphNameForPod(pod), pod.Name, "snapshot-worker")),
+		Backend:            backend,
+		Labels:             cloneMap(pod.Labels),
+		Annotations:        cloneMap(pod.Annotations),
+		PodSpec:            *pod.Spec.DeepCopy(),
+		MainContainerIndex: 0,
+		GPUCount:           gpuCount,
 	}, nil
 }
 
-func inferBackend(service dgdService) (string, error) {
-	candidate := strings.ToLower(strings.Join(service.ExtraPodSpec.MainContainer.Command, " ") +
-		" " + strings.Join(service.ExtraPodSpec.MainContainer.Args, " ") +
-		" " + service.ExtraPodSpec.MainContainer.WorkingDir +
-		" " + service.ExtraPodSpec.MainContainer.Image)
+func graphNameForPod(pod corev1.Pod) string {
+	return strings.TrimSpace(firstNonEmpty(
+		pod.Annotations["nvidia.com/dyn-parent-dgd-name"],
+		pod.Labels["nvidia.com/dynamo-graph-deployment-name"],
+	))
+}
+
+func inferBackend(container corev1.Container) (string, error) {
+	candidate := strings.ToLower(strings.Join(container.Command, " ") +
+		" " + strings.Join(container.Args, " ") +
+		" " + container.WorkingDir +
+		" " + container.Image)
 
 	switch {
 	case strings.Contains(candidate, "trtllm"):
@@ -503,16 +399,16 @@ func inferBackend(service dgdService) (string, error) {
 	}
 }
 
-func parseGPUCount(raw string) (int, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return 0, errors.New("worker resources.limits.gpu is required")
+func parseGPUCount(resources corev1.ResourceRequirements) (int, error) {
+	quantity, ok := resources.Limits[corev1.ResourceName("nvidia.com/gpu")]
+	if !ok {
+		return 0, errors.New("worker resources.limits[\"nvidia.com/gpu\"] is required")
 	}
-	value, err := strconv.Atoi(trimmed)
-	if err != nil || value <= 0 {
-		return 0, fmt.Errorf("worker resources.limits.gpu must be a positive integer, got %q", raw)
+	value := quantity.Value()
+	if value <= 0 {
+		return 0, fmt.Errorf("worker resources.limits[\"nvidia.com/gpu\"] must be positive, got %q", quantity.String())
 	}
-	return value, nil
+	return int(value), nil
 }
 
 func resolveNamespace(explicitNamespace string, manifestNamespace string, currentNamespace string) string {
@@ -537,47 +433,6 @@ func cloneMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func localObjectReferenceNames(refs []corev1.LocalObjectReference) []string {
-	names := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		if name := strings.TrimSpace(ref.Name); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-func pvcVolumeSpec(mounts []dgdVolumeMount) ([]corev1.VolumeMount, []corev1.Volume, error) {
-	volumeMounts := make([]corev1.VolumeMount, 0, len(mounts))
-	volumes := make([]corev1.Volume, 0, len(mounts))
-	seenClaims := map[string]string{}
-	for _, mount := range mounts {
-		claimName := strings.TrimSpace(mount.Name)
-		mountPoint := strings.TrimSpace(mount.MountPoint)
-		if claimName == "" {
-			return nil, nil, errors.New("service volumeMounts entries require name")
-		}
-		if mountPoint == "" {
-			return nil, nil, fmt.Errorf("service volumeMount %q requires mountPoint", claimName)
-		}
-		volumeName, ok := seenClaims[claimName]
-		if !ok {
-			volumeName = sanitizeName("pvc-" + claimName)
-			seenClaims[claimName] = volumeName
-			volumes = append(volumes, corev1.Volume{
-				Name: volumeName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: claimName,
-					},
-				},
-			})
-		}
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: mountPoint})
-	}
-	return volumeMounts, volumes, nil
 }
 
 func shouldUseCudaCheckpointLaunchJob(args []string) bool {
@@ -616,16 +471,17 @@ func buildRunSpec(namespace string, checkpointHash string, worker selectedWorker
 	if strings.TrimSpace(checkpointHash) == "" {
 		checkpointHash = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointHashPrefix, time.Now().UTC().UnixNano())
 	}
-	resourcePrefix := sanitizeName(worker.DGDName + "-" + shortNameSuffix(checkpointHash))
+	resourcePrefix := sanitizeName(worker.WorkloadName + "-" + shortNameSuffix(checkpointHash))
+	container := worker.mainContainer()
 
 	return runSpec{
 		Namespace:               namespace,
 		DGDName:                 worker.DGDName,
+		WorkloadName:            worker.WorkloadName,
 		ResourcePrefix:          resourcePrefix,
 		CheckpointHash:          checkpointHash,
-		EnvFromSecret:           worker.EnvFromSecret,
 		SeccompLocalhostProfile: defaultSeccompLocalhostProfile,
-		CudaCheckpointLaunchJob: shouldUseCudaCheckpointLaunchJob(worker.Args),
+		CudaCheckpointLaunchJob: shouldUseCudaCheckpointLaunchJob(append(append([]string(nil), container.Command...), container.Args...)),
 		Worker:                  worker,
 		SnapshotStorage:         storage,
 		ServiceAccountName:      sanitizeName(resourcePrefix + "-snapshot-sa"),
@@ -650,7 +506,7 @@ func (s runSpec) tritonCacheDir() string {
 }
 
 func (s runSpec) sharedAnnotations() map[string]string {
-	return map[string]string{
+	return mergeStringMaps(s.Worker.Annotations, map[string]string{
 		"nvidia.com/dyn-namespace":            s.dynNamespace(),
 		"nvidia.com/dyn-component":            "worker",
 		"nvidia.com/dyn-parent-dgd-name":      s.DGDName,
@@ -658,7 +514,7 @@ func (s runSpec) sharedAnnotations() map[string]string {
 		"nvidia.com/dyn-discovery-backend":    manualDiscoveryBackend,
 		checkpointLocationAnnotation:          s.checkpointLocation(),
 		checkpointStorageTypeAnnotation:       "pvc",
-	}
+	})
 }
 
 func (s runSpec) sharedEnvVars() []corev1.EnvVar {
@@ -711,7 +567,7 @@ func (s runSpec) sharedEnvVars() []corev1.EnvVar {
 		env = append(env, corev1.EnvVar{Name: "TRITON_CACHE_DIR", Value: s.tritonCacheDir()})
 	}
 
-	return append(env, s.Worker.Env...)
+	return env
 }
 
 func (s runSpec) checkpointEnvVars() []corev1.EnvVar {
@@ -730,7 +586,7 @@ func (s runSpec) checkpointEnvVars() []corev1.EnvVar {
 }
 
 func (s runSpec) sharedVolumes() []corev1.Volume {
-	volumes := []corev1.Volume{
+	return []corev1.Volume{
 		{
 			Name: "checkpoint-storage",
 			VolumeSource: corev1.VolumeSource{
@@ -766,27 +622,14 @@ func (s runSpec) sharedVolumes() []corev1.Volume {
 			},
 		},
 	}
-	return append(volumes, s.Worker.Volumes...)
 }
 
 func (s runSpec) sharedVolumeMounts() []corev1.VolumeMount {
-	volumeMounts := []corev1.VolumeMount{
+	return []corev1.VolumeMount{
 		{Name: "checkpoint-storage", MountPath: s.SnapshotStorage.BasePath},
 		{Name: "shared-memory", MountPath: "/dev/shm"},
 		{Name: "podinfo", MountPath: "/etc/podinfo", ReadOnly: true},
 	}
-	return append(volumeMounts, s.Worker.VolumeMounts...)
-}
-
-func (s runSpec) imagePullSecretRefs() []corev1.LocalObjectReference {
-	if len(s.Worker.ImagePullSecrets) == 0 {
-		return nil
-	}
-	refs := make([]corev1.LocalObjectReference, 0, len(s.Worker.ImagePullSecrets))
-	for _, secret := range s.Worker.ImagePullSecrets {
-		refs = append(refs, corev1.LocalObjectReference{Name: secret})
-	}
-	return refs
 }
 
 func (s runSpec) podSecurityContext() *corev1.PodSecurityContext {
@@ -799,30 +642,17 @@ func (s runSpec) podSecurityContext() *corev1.PodSecurityContext {
 }
 
 func (s runSpec) podSpecBase() corev1.PodSpec {
-	spec := corev1.PodSpec{
-		RestartPolicy:      corev1.RestartPolicyNever,
-		ServiceAccountName: s.ServiceAccountName,
-		SecurityContext:    s.podSecurityContext(),
-		Tolerations:        append([]corev1.Toleration(nil), s.Worker.Tolerations...),
-	}
-	if s.Worker.RuntimeClass != "" {
-		spec.RuntimeClassName = stringPtr(s.Worker.RuntimeClass)
-	}
-	if s.Worker.NodeName != "" {
-		spec.NodeName = s.Worker.NodeName
-	}
-	if len(s.Worker.NodeSelector) > 0 {
-		spec.NodeSelector = cloneMap(s.Worker.NodeSelector)
-	}
-	if s.Worker.Affinity != nil {
-		spec.Affinity = s.Worker.Affinity.DeepCopy()
-	}
+	spec := *s.Worker.PodSpec.DeepCopy()
+	spec.RestartPolicy = corev1.RestartPolicyNever
+	spec.ServiceAccountName = s.ServiceAccountName
+	spec.SecurityContext = s.podSecurityContext()
 	return spec
 }
 
 func (s runSpec) checkpointCommandAndArgs() ([]string, []string) {
-	command := append([]string(nil), s.Worker.Command...)
-	args := append([]string(nil), s.Worker.Args...)
+	container := s.Worker.mainContainer()
+	command := append([]string(nil), container.Command...)
+	args := append([]string(nil), container.Args...)
 	if !containsFlag(args, "--event-plane") {
 		args = append(args, "--event-plane", defaultEventPlane)
 	}
@@ -846,7 +676,7 @@ func buildServiceAccount(spec runSpec) *corev1.ServiceAccount {
 			Name:      spec.ServiceAccountName,
 			Namespace: spec.Namespace,
 		},
-		ImagePullSecrets: spec.imagePullSecretRefs(),
+		ImagePullSecrets: append([]corev1.LocalObjectReference(nil), spec.Worker.PodSpec.ImagePullSecrets...),
 	}
 }
 
@@ -897,34 +727,22 @@ func buildRoleBinding(spec runSpec) *rbacv1.RoleBinding {
 func buildCheckpointJob(spec runSpec) *batchv1.Job {
 	command, args := spec.checkpointCommandAndArgs()
 	podSpec := spec.podSpecBase()
-	podSpec.Containers = []corev1.Container{
-		{
-			Name:            "main",
-			Image:           spec.Worker.Image,
-			ImagePullPolicy: spec.Worker.ImagePullPolicy,
-			WorkingDir:      spec.Worker.WorkingDir,
-			Command:         command,
-			Args:            args,
-			Env:             spec.checkpointEnvVars(),
-			EnvFrom:         envFromSecretRefs(spec.EnvFromSecret),
-			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					"nvidia.com/gpu": resource.MustParse(strconv.Itoa(spec.Worker.GPUCount)),
-				},
+	container := spec.Worker.mainContainer()
+	container.Command = command
+	container.Args = args
+	container.Env = mergeEnv(container.Env, spec.checkpointEnvVars())
+	container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"sh", "-c", "cat /tmp/checkpoint-ready 2>/dev/null || cat /tmp/ready-for-checkpoint"},
 			},
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{
-						Command: []string{"sh", "-c", "cat /tmp/checkpoint-ready 2>/dev/null || cat /tmp/ready-for-checkpoint"},
-					},
-				},
-				InitialDelaySeconds: 15,
-				PeriodSeconds:       2,
-			},
-			VolumeMounts: spec.sharedVolumeMounts(),
 		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       2,
 	}
-	podSpec.Volumes = spec.sharedVolumes()
+	container.VolumeMounts = mergeVolumeMounts(container.VolumeMounts, spec.sharedVolumeMounts())
+	podSpec.Containers = []corev1.Container{container}
+	podSpec.Volumes = mergeVolumes(podSpec.Volumes, spec.sharedVolumes())
 
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
@@ -937,13 +755,13 @@ func buildCheckpointJob(spec runSpec) *batchv1.Job {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: spec.sharedAnnotations(),
-					Labels: map[string]string{
+					Labels: mergeStringMaps(spec.Worker.Labels, map[string]string{
 						"app":                         spec.CheckpointPodLabel,
 						"nvidia.com/dynamo-component": "worker",
 						"nvidia.com/dynamo-graph-deployment-name": spec.DGDName,
 						checkpointSourceLabel:                     "true",
 						checkpointHashLabel:                       spec.CheckpointHash,
-					},
+					}),
 				},
 				Spec: podSpec,
 			},
@@ -953,7 +771,7 @@ func buildCheckpointJob(spec runSpec) *batchv1.Job {
 
 func buildRestorePod(spec runSpec) *corev1.Pod {
 	tunType := corev1.HostPathCharDev
-	volumes := append(spec.sharedVolumes(), corev1.Volume{
+	volumes := mergeVolumes(spec.sharedVolumes(), []corev1.Volume{{
 		Name: "host-dev-net-tun",
 		VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{
@@ -961,66 +779,54 @@ func buildRestorePod(spec runSpec) *corev1.Pod {
 				Type: &tunType,
 			},
 		},
-	})
-	volumeMounts := append(spec.sharedVolumeMounts(), corev1.VolumeMount{
+	}})
+	volumeMounts := mergeVolumeMounts(spec.sharedVolumeMounts(), []corev1.VolumeMount{{
 		Name:      "host-dev-net-tun",
 		MountPath: "/dev/net/tun",
-	})
+	}})
 
 	podSpec := spec.podSpecBase()
-	podSpec.Containers = []corev1.Container{
-		{
-			Name:            "main",
-			Image:           spec.Worker.Image,
-			ImagePullPolicy: spec.Worker.ImagePullPolicy,
-			Command:         []string{"sleep", "infinity"},
-			Env:             spec.sharedEnvVars(),
-			EnvFrom:         envFromSecretRefs(spec.EnvFromSecret),
-			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					"nvidia.com/gpu": resource.MustParse(strconv.Itoa(spec.Worker.GPUCount)),
-				},
+	container := spec.Worker.mainContainer()
+	container.Command = []string{"sleep", "infinity"}
+	container.Args = nil
+	container.Env = mergeEnv(container.Env, spec.sharedEnvVars())
+	container.Ports = []corev1.ContainerPort{{Name: "system", ContainerPort: 9090}}
+	container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/live",
+				Port: intstr.FromString("system"),
 			},
-			Ports: []corev1.ContainerPort{
-				{Name: "system", ContainerPort: 9090},
-			},
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/live",
-						Port: intstr.FromString("system"),
-					},
-				},
-				PeriodSeconds:    1,
-				TimeoutSeconds:   4,
-				FailureThreshold: 3,
-			},
-			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/live",
-						Port: intstr.FromString("system"),
-					},
-				},
-				PeriodSeconds:    5,
-				TimeoutSeconds:   4,
-				FailureThreshold: 1,
-			},
-			StartupProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/live",
-						Port: intstr.FromString("system"),
-					},
-				},
-				PeriodSeconds:    1,
-				TimeoutSeconds:   5,
-				FailureThreshold: 720,
-			},
-			VolumeMounts: volumeMounts,
 		},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   4,
+		FailureThreshold: 3,
 	}
-	podSpec.Volumes = volumes
+	container.LivenessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/live",
+				Port: intstr.FromString("system"),
+			},
+		},
+		PeriodSeconds:    5,
+		TimeoutSeconds:   4,
+		FailureThreshold: 1,
+	}
+	container.StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/live",
+				Port: intstr.FromString("system"),
+			},
+		},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   5,
+		FailureThreshold: 720,
+	}
+	container.VolumeMounts = mergeVolumeMounts(container.VolumeMounts, volumeMounts)
+	podSpec.Containers = []corev1.Container{container}
+	podSpec.Volumes = mergeVolumes(podSpec.Volumes, volumes)
 
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
@@ -1028,14 +834,14 @@ func buildRestorePod(spec runSpec) *corev1.Pod {
 			Name:        spec.RestorePodName,
 			Namespace:   spec.Namespace,
 			Annotations: spec.sharedAnnotations(),
-			Labels: map[string]string{
+			Labels: mergeStringMaps(spec.Worker.Labels, map[string]string{
 				"app":                         spec.RestorePodName,
 				"nvidia.com/dynamo-component": "worker",
 				"nvidia.com/dynamo-graph-deployment-name": spec.DGDName,
 				"nvidia.com/checkpoint-restore":           "true",
 				restoreTargetLabel:                        "true",
 				checkpointHashLabel:                       spec.CheckpointHash,
-			},
+			}),
 		},
 		Spec: podSpec,
 	}
@@ -1246,18 +1052,8 @@ func checkpointPodSummary(ctx context.Context, clientset kubernetes.Interface, s
 	return strings.Join(parts, " ")
 }
 
-func envFromSecretRefs(secretName string) []corev1.EnvFromSource {
-	secretName = strings.TrimSpace(secretName)
-	if secretName == "" {
-		return nil
-	}
-	return []corev1.EnvFromSource{
-		{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-			},
-		},
-	}
+func (w selectedWorker) mainContainer() corev1.Container {
+	return *w.PodSpec.Containers[w.MainContainerIndex].DeepCopy()
 }
 
 func containsFlag(args []string, name string) bool {
@@ -1280,6 +1076,84 @@ func compactStrings(values []string) []string {
 		}
 	}
 	return compacted
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func mergeStringMaps(base map[string]string, overlays ...map[string]string) map[string]string {
+	merged := cloneMap(base)
+	for _, overlay := range overlays {
+		if len(overlay) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for key, value := range overlay {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
+func mergeEnv(base []corev1.EnvVar, overlays ...[]corev1.EnvVar) []corev1.EnvVar {
+	merged := append([]corev1.EnvVar(nil), base...)
+	indexByName := map[string]int{}
+	for index, envVar := range merged {
+		indexByName[envVar.Name] = index
+	}
+	for _, overlay := range overlays {
+		for _, envVar := range overlay {
+			if index, ok := indexByName[envVar.Name]; ok {
+				merged[index] = envVar
+				continue
+			}
+			indexByName[envVar.Name] = len(merged)
+			merged = append(merged, envVar)
+		}
+	}
+	return merged
+}
+
+func mergeVolumes(base []corev1.Volume, overlays []corev1.Volume) []corev1.Volume {
+	merged := append([]corev1.Volume(nil), base...)
+	indexByName := map[string]int{}
+	for index, volume := range merged {
+		indexByName[volume.Name] = index
+	}
+	for _, volume := range overlays {
+		if index, ok := indexByName[volume.Name]; ok {
+			merged[index] = volume
+			continue
+		}
+		indexByName[volume.Name] = len(merged)
+		merged = append(merged, volume)
+	}
+	return merged
+}
+
+func mergeVolumeMounts(base []corev1.VolumeMount, overlays []corev1.VolumeMount) []corev1.VolumeMount {
+	merged := append([]corev1.VolumeMount(nil), base...)
+	indexByName := map[string]int{}
+	for index, mount := range merged {
+		indexByName[mount.Name] = index
+	}
+	for _, mount := range overlays {
+		if index, ok := indexByName[mount.Name]; ok {
+			merged[index] = mount
+			continue
+		}
+		indexByName[mount.Name] = len(merged)
+		merged = append(merged, mount)
+	}
+	return merged
 }
 
 func sanitizeName(value string) string {
