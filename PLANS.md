@@ -1,9 +1,54 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 02:38:58 UTC
+Last updated: 2026-03-29 02:45:21 UTC
 
 Current run outcome:
 
+- re-read the repo instructions from the user-provided `AGENTS.md` content,
+  the full current `PLANS.md`, and the active TRT-LLM seam:
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
+- found one remaining repo-local strictness gap in the supported pinned seam:
+  `kvbm.trtllm_integration.rust` still swallowed `ImportError` across the whole
+  import block, so an importable `kvbm._core` without the dedicated
+  `_trtllm_integration` module could silently degrade instead of failing
+  immediately
+- fixed that loader gap by making the fallback trigger only when
+  `kvbm._core` itself is unavailable; once `kvbm._core` imports, the dedicated
+  `_trtllm_integration` module and its pinned symbols are now required
+- added a regression test that deletes `kvbm._core._trtllm_integration` and
+  confirms importing `kvbm.trtllm_integration.rust` now raises immediately
+- re-ran the repo-local validation stack on 2026-03-29 UTC and confirmed the
+  tightened seam is green:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+    -> pass (`Ran 25 tests`, `OK`)
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 8 tests`, `OK`)
+  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+    -> pass (`Ran 33 tests`, `OK`)
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+    -> pass
+  - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
+- re-ran the strict runtime gate and confirmed the phase-7 blockers are still
+  entirely external to this repo after the loader fix:
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+    -> exit `1`, report `status: "blocked"`
+  - installed package root:
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+  - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
+  - installed wheel still exposes `_torch/pyexecutor` but not
+    `_torch/disaggregation`
+  - installed wheel metadata still expects CUDA major `13`
+  - host/container still only exposes `libcublasLt.so.12*`
+  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
+    `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
+    PMIx during import (`The PMIx server's listener thread failed to start`)
+- no additional repo-local code change is justified in this sandbox beyond the
+  loader strictness fix above; the remaining work is still phase-7 validation
+  on a runtime-capable host with a compatible TRT-LLM wheel/source surface plus
+  matching CUDA/MPI user-space
 - re-read the repo instructions from the user-provided `AGENTS.md` content,
   `docs/design-docs/kvbm-trtllm-integration.md`, the full current `PLANS.md`,
   and the active TRT-LLM seam:
@@ -789,9 +834,25 @@ Implemented so far:
   - the strict runtime audit now shows the pinned-checkout transceiver import
     failing with the same PMIx listener-startup abort as the installed wheel
     path, not a less-informative timeout summary
+- Completed the remaining repo-local TRT-LLM loader strictness cleanup:
+  - `kvbm.trtllm_integration.rust` now falls back only when `kvbm._core`
+    itself is unavailable
+  - if `kvbm._core` is importable, the dedicated `_trtllm_integration` module
+    is now required instead of being silently treated as optional on
+    `ImportError`
+  - added a regression test that confirms missing `_trtllm_integration` now
+    fails the import immediately
 
 ## New Findings
 
+- One more repo-local pinned-interface gap was still present before this run:
+  `kvbm.trtllm_integration.rust` could still silently degrade if
+  `kvbm._core` imported but the dedicated `_trtllm_integration` module was
+  missing, because the loader caught `ImportError` across the whole import
+  block.
+- That gap is now fixed; the remaining pinned-interface drift surface in the
+  active TRT-LLM seam fails loudly when `kvbm._core` is present but the
+  dedicated TRT-LLM extension module is absent.
 - Another source-of-truth review in this run still did not expose a new
   executable repo-local milestone in the active TRT-LLM manager/rust-loader/
   audit seam:
@@ -1335,6 +1396,32 @@ Implemented so far:
   - reported `status: blocked`
   - both subprocess import probes now report the same PMIx listener-startup
     failure directly instead of one falling back to a timeout-only summary
+- Passed after tightening the TRT-LLM Rust-loader contract:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+  Notes:
+  - ran 25 tests
+- Passed after the same loader-contract milestone:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  Notes:
+  - ran 8 tests
+- Passed after the same loader-contract milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 33 tests
+- Passed after the same loader-contract milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after the same loader-contract milestone:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after the same loader-contract milestone:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+- Failed as expected after the same loader-contract milestone:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+  Notes:
+  - exit status is `1` by design when the audit remains blocked
+  - findings were unchanged:
+    - installed wheel surface mismatch vs pinned checkout
+    - CUDA major mismatch (`expected 13`, local `libcublasLt.so.12*`)
+    - Open MPI / PMIx listener-startup abort on both subprocess import probes
 - Passed after the audit-CLI milestone:
   `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
   Notes:
