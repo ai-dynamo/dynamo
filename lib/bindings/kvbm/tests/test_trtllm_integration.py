@@ -78,9 +78,11 @@ class TrtllmIntegrationTest(unittest.TestCase):
             BlockState=type("BlockState", (), {}),
             BlockStates=type("BlockStates", (), {}),
             SlotUpdate=type("SlotUpdate", (), {}),
+            TrtllmStateManager=None,
             PyTrtllmKvConnectorWorker=type("PyTrtllmKvConnectorWorker", (), {}),
             PyTrtllmKvConnectorLeader=type("PyTrtllmKvConnectorLeader", (), {}),
             SchedulerOutput=type("SchedulerOutput", (), {}),
+            create_primary_pool=None,
         )
 
         core = types.ModuleType("kvbm._core")
@@ -247,6 +249,17 @@ class TrtllmIntegrationTest(unittest.TestCase):
             rust.KvConnectorLeader.__name__, "PyTrtllmKvConnectorLeader"
         )
         self.assertIsNone(rust.create_primary_pool)
+
+    def test_rust_loader_requires_pinned_optional_symbols(self) -> None:
+        del sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+        ):
+            sys.modules.pop(name, None)
+
+        with self.assertRaises(AttributeError):
+            importlib.import_module("kvbm.trtllm_integration.rust")
 
     def test_manager_tracks_request_lifecycle_and_indices(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")

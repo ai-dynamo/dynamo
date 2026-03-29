@@ -15,12 +15,12 @@ try:
     BlockState = _trtllm_integration.BlockState
     BlockStates = _trtllm_integration.BlockStates
     SlotUpdate = _trtllm_integration.SlotUpdate
-    TrtllmStateManager = getattr(_trtllm_integration, "TrtllmStateManager", None)
+    TrtllmStateManager = _trtllm_integration.TrtllmStateManager
 
     KvConnectorWorker = _trtllm_integration.PyTrtllmKvConnectorWorker
     KvConnectorLeader = _trtllm_integration.PyTrtllmKvConnectorLeader
     SchedulerOutput = _trtllm_integration.SchedulerOutput
-    create_primary_pool = getattr(_trtllm_integration, "create_primary_pool", None)
+    create_primary_pool = _trtllm_integration.create_primary_pool
 
 except ImportError:
     BlockManager = None
