@@ -4,6 +4,36 @@ Last updated: 2026-03-28 UTC
 
 Current run outcome:
 
+- re-read `Agents.md`, the full current `PLANS.md`, and the active
+  TRT-LLM manager/audit seam before changing anything in this run:
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
+- searched the active TRT-LLM integration surface for leftover repo-local
+  cleanup work (`TODO`, `FIXME`, permissive `getattr(...)`, broad exception
+  fallbacks, and pinned transceiver/disaggregation seam references)
+- no new repo-local supported-path contract gap or pending cleanup milestone was
+  exposed by that seam review:
+  - remaining `NotImplementedError` sites are still limited to explicitly
+    unsupported indexer/disaggregation export variants
+  - the strict Rust-loader seam still requires the pinned exported symbols
+  - no additional permissive request-interface drift handling was found in the
+    active manager path
+- re-ran the validated local checks from this sandbox again on 2026-03-28 UTC:
+  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+  - `.venv/bin/python -c 'import kvbm, kvbm._core'`
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+- local validation still passes repo-locally after that seam review
+- phase-7 runtime validation is still blocked only by external TRT-LLM runtime
+  environment prerequisites on this host:
+  - installed TRT-LLM wheel in `.venv` still lacks `_torch/disaggregation`
+  - installed TRT-LLM wheel still expects CUDA major `13`
+  - host/container still exposes only `libcublasLt.so.12*`
+  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
+    `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
+    PMIx during import (`The PMIx server's listener thread failed to start`)
 - re-read the full execution log, repo instructions, the phase-5 validation
   note in `docs/design-docs/kvbm-trtllm-integration.md`, and the current
   TRT-LLM manager/audit code before making further changes
@@ -703,6 +733,15 @@ Implemented so far:
   - confirmed again that no additional supported-path helper or `impl`
     contract gap is exposed repo-locally after the pinned transceiver and
     page-table coverage already in-tree
+- Re-ran another seam review plus full validation stack on 2026-03-28 UTC:
+  - re-read the active TRT-LLM manager/rust-loader/audit files and searched
+    for leftover repo-local cleanup markers or permissive pinned-interface
+    fallbacks
+  - confirmed the remaining `NotImplementedError` sites are still only for
+    explicitly unsupported disaggregation/indexer variants, not an incomplete
+    supported path
+  - confirmed no new repo-local TODO/FIXME or additional pinned API mismatch
+    was exposed in the active manager/audit seam
 - Re-ran the validated local checks again on 2026-03-28 UTC and confirmed the
   repo-local state is still unchanged:
   - Python contract tests still pass
@@ -879,6 +918,19 @@ Implemented so far:
   the process still dies in Open MPI / PMIx initialization before Python can
   finish importing the relevant TRT-LLM modules, so the remaining phase-7
   runtime blocker is still external to this repo.
+- Another full seam review in this run still did not expose repo-local cleanup
+  work beyond the already documented external phase-7 prerequisites:
+  - no new `TODO` / `FIXME` / permissive request-field fallback was found in
+    the active manager/rust-loader/audit path
+  - the remaining unsupported paths are still intentionally fenced by
+    `NotImplementedError` for unsupported disaggregation/indexer variants, not
+    silent fallback behavior
+- The strict runtime audit is still the highest-signal validation step for this
+  sandbox because it proves the blocker chain is environment/package mismatch,
+  not another repo-local manager field gap:
+  1. installed wheel surface mismatch vs pinned checkout
+  2. MPI / PMIx import abort during TRT-LLM import
+  3. CUDA user-space mismatch (`expected 13`, local `libcublasLt.so.12*`)
 - Repo-local signed commits in this sandbox need `--no-verify` right now:
   the configured `pre-commit` hook tries to fetch hook repos from GitHub and
   cannot complete with network access restricted.
@@ -1121,6 +1173,26 @@ Implemented so far:
     - host only exposes `libcublasLt.so.12*`
     - subprocess import of both installed and pinned TRT-LLM module paths still
       aborts in Open MPI / PMIx during import
+- Passed again in the latest 2026-03-28 UTC seam-review validation run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 27 tests
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+- Passed again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+  Notes:
+  - reported `status: blocked`
+  - blocker details were still unchanged:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA major `13`
+    - host only exposes `libcublasLt.so.12*`
+    - subprocess import of both installed and pinned TRT-LLM module paths still
+      aborts in Open MPI / PMIx during import
 
 ## Remaining Work
 
@@ -1180,6 +1252,9 @@ Implemented so far:
   repo-local phase left in this sandbox beyond keeping this handoff current.
   The remaining work is entirely on a validation host/container that satisfies
   the TRT-LLM runtime import prerequisites above.
+- Another seam-review + validation pass in this run reached the same result:
+  there is still no additional executable repo-local milestone left in this
+  sandbox beyond keeping this handoff precise for a runtime-capable host.
 
 ## Exact Next Step
 
