@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:30:09 UTC
+Last updated: 2026-03-29 03:38:51 UTC
 
 Current run outcome:
 
@@ -11,38 +11,35 @@ Current run outcome:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
 - Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
-  permissive fallback behavior, unsupported-path drift, and cleanup markers).
-  No additional executable manager-side milestone was found in this sandbox.
-- Re-ran the full repo-local validation stack on 2026-03-29 03:30 UTC before
-  making any new repo-local change:
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
-    -> pass (`Ran 25 tests`, `OK`)
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
-    -> pass (`Ran 8 tests`, `OK`)
-  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-    -> pass (`Ran 33 tests`, `OK`)
-  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
-  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-    -> pass
-  - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
-- Landed one additional repo-local audit improvement that was justified by the
-  rerun findings:
-  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` now reads the repo's
-    declared TRT-LLM extra pin from `pyproject.toml` and reports version drift
-    explicitly in the blocked findings
-  - added stdlib-only coverage in
-    `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
-- Re-ran the audit validation after that change:
+  permissive fallback behavior, unsupported-path drift, cleanup markers, and
+  stale docs). No new manager/product-code milestone was found, but one
+  repo-local audit/tooling cleanup was still justified.
+- Re-ran the baseline repo-local Python validation before editing:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
     -> pass (`Ran 9 tests`, `OK`)
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+    -> pass (`Ran 25 tests`, `OK`)
+- Landed one additional repo-local phase-7 support improvement:
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` now reads the
+    repo-declared TRT-LLM pin via stdlib `tomllib` instead of a brittle
+    line-based scanner
+  - the audit CLI now exposes `--repo-pyproject`, so the declared pin source
+    is explicit and testable instead of being hardwired
+  - `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py` now covers invalid
+    TOML handling plus the new CLI override
+  - `lib/bindings/kvbm/README.md` now documents the audit command as the
+    required TRT-LLM preflight before runtime smoke validation
+- Re-ran validation after that change:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 10 tests`, `OK`)
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-    -> pass (`Ran 34 tests`, `OK`)
+    -> pass (`Ran 35 tests`, `OK`)
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
     -> exit `1`, report `status: "blocked"`
   - installed package root:
     `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
   - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
-  - repo-declared TRT-LLM extra version is `1.3.0rc8`
+  - repo-declared TRT-LLM extra version remains `1.3.0rc8`
   - installed wheel version remains `1.2.0`
   - installed wheel still exposes `_torch/pyexecutor` but not
     `_torch/disaggregation`
@@ -51,17 +48,10 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-  - the strict audit findings are now exactly:
-    - installed wheel version mismatch vs repo-declared TRT-LLM extra
-      (`1.2.0` installed vs `1.3.0rc8` declared)
-    - installed wheel surface mismatch vs pinned checkout
-    - CUDA major mismatch (`expected 13`, local majors `[12]`)
-    - Open MPI / PMIx listener-startup abort on installed TRT-LLM import
-    - Open MPI / PMIx listener-startup abort on pinned disaggregation import
 - No additional repo-local manager/product-code change is justified in this
-  run beyond that audit tightening and this handoff refresh. The supported path
-  is still green in-repo; the remaining work is phase-7 validation on a
-  runtime-capable host with:
+  run beyond that audit tooling/docs tightening and this handoff refresh. The
+  supported path is still green in-repo; the remaining work is phase-7
+  validation on a runtime-capable host with:
   - a TRT-LLM install/source version aligned with the repo-declared seam
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
@@ -71,7 +61,7 @@ Exact next steps if another run happens on this machine:
 
 - Do not spend another run searching for repo-local supported-path work unless
   the environment changes first; this run's seam review plus validation stack
-  did not expose another executable milestone.
+  still did not expose another executable manager/product-code milestone.
 - Treat phase 7 as externally blocked until at least one of these changes:
   - the installed TRT-LLM version matches the repo-declared `trtllm` extra
     pin (`1.3.0rc8`) or the host intentionally imports from the pinned checkout
@@ -79,8 +69,8 @@ Exact next steps if another run happens on this machine:
   - CUDA 13 user-space libraries are available to the runtime
   - TRT-LLM import no longer aborts in Open MPI / PMIx
 - If the environment does change, re-run this exact validation sequence first:
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
@@ -802,10 +792,19 @@ Implemented so far:
   - `kvbm.trtllm_integration.rust` now falls back only when `kvbm._core`
     itself is unavailable
   - if `kvbm._core` is importable, the dedicated `_trtllm_integration` module
-    is now required instead of being silently treated as optional on
-    `ImportError`
+  is now required instead of being silently treated as optional on
+  `ImportError`
   - added a regression test that confirms missing `_trtllm_integration` now
     fails the import immediately
+- Completed one more repo-local phase-7 tooling/docs cleanup in this run:
+  - switched `trtllm_runtime_audit.py` from a brittle line-based repo-pin scan
+    to stdlib `tomllib` parsing of `pyproject.toml`
+  - added a `--repo-pyproject` CLI override so the audit pin source is
+    explicit/testable instead of hardwired
+  - documented the audit command in `lib/bindings/kvbm/README.md` as the
+    required TRT-LLM preflight before smoke validation
+  - confirmed again that the audit still ends in the same external blocked
+    state after the tooling/docs improvement
 
 ## New Findings
 
@@ -837,6 +836,24 @@ Implemented so far:
   2. CUDA major mismatch (`expected 13`, local `libcublasLt.so.12*`)
   3. Open MPI / PMIx listener-startup abort during subprocess import of both
      installed and pinned TRT-LLM module paths
+- The audit utility still had one repo-local hygiene gap before this run:
+  its repo-pin reader depended on a narrow line-format assumption in
+  `pyproject.toml`, and the CLI could not override that file path directly.
+- That hygiene gap is now fixed:
+  - repo pin parsing uses stdlib TOML decoding
+  - invalid TOML is handled explicitly in unit coverage
+  - the CLI now exposes `--repo-pyproject`
+  - the KVBM README points users at the audit command before TRT-LLM smoke
+    validation
+- The audit output after that cleanup still confirms the same external blockers
+  and no new repo-local manager/API mismatch:
+  1. installed TRT-LLM version mismatch (`1.2.0` vs repo-declared `1.3.0rc8`)
+  2. installed wheel missing `_torch/disaggregation` while the pinned checkout
+     contains it
+  3. installed wheel expects CUDA major `13`, but only `libcublasLt.so.12*`
+     is available here
+  4. installed TRT-LLM import aborts in Open MPI / PMIx
+  5. pinned disaggregation transceiver import aborts in Open MPI / PMIx
 - One more repo-local pinned-interface gap was still present before this run:
   `kvbm.trtllm_integration.rust` could still silently degrade if
   `kvbm._core` imported but the dedicated `_trtllm_integration` module was

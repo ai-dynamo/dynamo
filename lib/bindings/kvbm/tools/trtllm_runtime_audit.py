@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 from typing import Any, Iterable, Optional
 
 
@@ -46,20 +47,18 @@ def _parse_expected_cuda_major(requirements: Iterable[str]) -> Optional[int]:
 
 def _read_repo_declared_trtllm_version(pyproject_path: Path) -> Optional[str]:
     try:
-        text = pyproject_path.read_text(encoding="utf-8")
-    except OSError:
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
         return None
 
-    in_trtllm_group = False
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not in_trtllm_group:
-            if line.startswith("trtllm") and line.endswith("["):
-                in_trtllm_group = True
+    dependencies = data.get("project", {}).get("optional-dependencies", {}).get("trtllm", [])
+    if not isinstance(dependencies, list):
+        return None
+
+    for requirement in dependencies:
+        if not isinstance(requirement, str):
             continue
-        if line == "]":
-            return None
-        match = re.search(r'"tensorrt-llm==([^"]+)"', line)
+        match = re.search(r"\btensorrt-llm==([^\s;]+)", requirement)
         if match is not None:
             return match.group(1)
     return None
@@ -347,6 +346,12 @@ def main() -> int:
         help="Pinned TRT-LLM checkout package root",
     )
     parser.add_argument(
+        "--repo-pyproject",
+        type=Path,
+        default=DEFAULT_REPO_PYPROJECT,
+        help="Repo pyproject.toml used to read the declared tensorrt-llm extra pin",
+    )
+    parser.add_argument(
         "--library-dir",
         action="append",
         type=Path,
@@ -382,7 +387,7 @@ def main() -> int:
 
     report = build_runtime_report(
         pinned_checkout=args.pinned_checkout,
-        repo_pyproject=DEFAULT_REPO_PYPROJECT,
+        repo_pyproject=args.repo_pyproject,
         library_dirs=args.library_dir,
         probe_imports=args.probe_imports,
         python_executable=args.python_executable,

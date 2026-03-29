@@ -137,6 +137,16 @@ DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
   --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
 ```
 
+Before trying the TRT-LLM smoke path, verify that the local wheel, pinned
+checkout, and CUDA user-space match what the KVBM manager path expects:
+
+```bash
+.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py \
+  --json \
+  --probe-imports \
+  --fail-on-blocked
+```
+
 For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
 
 

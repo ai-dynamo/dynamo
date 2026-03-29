@@ -74,6 +74,17 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
 
         self.assertEqual(version, "1.3.0rc8")
 
+    def test_read_repo_declared_trtllm_version_returns_none_for_invalid_toml(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pyproject = Path(temp_dir) / "pyproject.toml"
+            pyproject.write_text("[project.optional-dependencies\n", encoding="utf-8")
+
+            version = module._read_repo_declared_trtllm_version(pyproject)
+
+        self.assertIsNone(version)
+
     def test_build_runtime_report_flags_wheel_surface_and_cuda_mismatch(self) -> None:
         module = _load_module()
 
@@ -265,6 +276,8 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
                     "trtllm_runtime_audit.py",
                     "--json",
                     "--probe-imports",
+                    "--repo-pyproject",
+                    "/custom/pyproject.toml",
                     "--python-executable",
                     "/custom/python",
                     "--probe-timeout-s",
@@ -276,6 +289,7 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
                     exit_code = module.main()
 
         self.assertEqual(exit_code, 1)
+        self.assertEqual(captured["repo_pyproject"], Path("/custom/pyproject.toml"))
         self.assertEqual(captured["python_executable"], "/custom/python")
         self.assertEqual(captured["probe_timeout_s"], 7.5)
         self.assertTrue(captured["probe_imports"])
