@@ -143,6 +143,42 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
         self.assertEqual(probe["status"], "timeout")
         self.assertIsNone(probe["returncode"])
 
+    def test_probe_python_import_timeout_keeps_partial_stderr(self) -> None:
+        module = _load_module()
+
+        def fake_runner(command, **kwargs):
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout=kwargs["timeout"],
+                stderr=b"PMIx server's listener thread failed to start\n",
+            )
+
+        probe = module._probe_python_import(
+            python_executable="/fake/python",
+            module="tensorrt_llm",
+            timeout_s=1.5,
+            runner=fake_runner,
+        )
+
+        self.assertEqual(probe["status"], "timeout")
+        self.assertIn("PMIx server's listener thread failed to start", probe["stderr"])
+        self.assertEqual(
+            module._probe_failure_summary(probe),
+            "Open MPI / PMIx listener startup failed during import",
+        )
+
+    def test_build_runtime_report_uses_requested_python_executable(self) -> None:
+        module = _load_module()
+
+        report = module.build_runtime_report(
+            distribution=None,
+            pinned_checkout=Path("/does/not/exist"),
+            library_dirs=[],
+            python_executable="/custom/python",
+        )
+
+        self.assertEqual(report["python_executable"], "/custom/python")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -130,6 +130,14 @@ def _library_summary(library_dirs: Iterable[Path]) -> dict[str, Any]:
     }
 
 
+def _normalize_subprocess_stream(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace").strip()
+    return str(value).strip()
+
+
 def _probe_python_import(
     *,
     python_executable: str,
@@ -169,12 +177,12 @@ def _probe_python_import(
             "pythonpath": str(python_path) if python_path is not None else None,
             "status": "timeout",
             "returncode": None,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
+            "stdout": _normalize_subprocess_stream(exc.stdout),
+            "stderr": _normalize_subprocess_stream(exc.stderr),
         }
 
-    stdout = result.stdout.strip()
-    stderr = result.stderr.strip()
+    stdout = _normalize_subprocess_stream(result.stdout)
+    stderr = _normalize_subprocess_stream(result.stderr)
     summary = None
     if stdout:
         try:
@@ -274,7 +282,7 @@ def build_runtime_report(
         )
 
     return {
-        "python_executable": sys.executable,
+        "python_executable": python_executable,
         "installed_tensorrt_llm": installed,
         "pinned_checkout": checkout,
         "libraries": libraries,

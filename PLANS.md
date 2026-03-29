@@ -14,19 +14,26 @@ Current run outcome:
 - searched that seam again for remaining repo-local cleanup markers and pinned
   interface drift (`TODO`, `FIXME`, permissive `getattr(...)`, broad fallbacks,
   and transceiver/disaggregation-specific references)
-- no new repo-local supported-path gap was exposed in this run:
+- one repo-local audit gap was exposed and fixed in this run:
+  - `trtllm_runtime_audit.py` now preserves partial subprocess stdout/stderr on
+    timeout/error normalization instead of dropping timeout diagnostics
+  - `build_runtime_report(..., python_executable=...)` now reports the
+    requested probe interpreter instead of incorrectly returning the current
+    process `sys.executable`
+  - added regression coverage for both fixes in
+    `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
+- no additional supported-path manager/API gap was exposed in this run:
   - remaining `NotImplementedError` sites are still only for explicitly
     unsupported indexer/disaggregation export variants
   - the stricter Rust-loader seam still requires the pinned exported symbols
   - no additional permissive request-interface or batch-interface fallback was
     found in the active manager path
 - re-ran the validated local checks from this sandbox on 2026-03-28 UTC:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 6 tests`, `OK`)
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-    -> pass (`Ran 27 tests`, `OK`)
+    -> pass (`Ran 29 tests`, `OK`)
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
-  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-    -> pass
-  - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
     -> `status: "blocked"`
 - the latest strict runtime audit in this sandbox still reports the same
@@ -41,11 +48,12 @@ Current run outcome:
   - installed wheel metadata still expects CUDA major `13`
   - host/container still only exposes `libcublasLt.so.12*`
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
-    `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
-    PMIx during import before the TRT-LLM runtime reaches KVBM-owned transfer
-    setup
-  - the latest probe still reports the same PMIx listener failure signature:
-    `The PMIx server's listener thread failed to start`
+    `tensorrt_llm._torch.disaggregation.transceiver` now both report the same
+    Open MPI / PMIx abort directly in the audit output before the TRT-LLM
+    runtime reaches KVBM-owned transfer setup
+- the latest probe still reports the same PMIx listener failure signature for
+  both import targets:
+  `The PMIx server's listener thread failed to start`
 - current runtime blockers are unchanged and still external to this repo:
   - installed TRT-LLM wheel in `.venv` is `1.2.0` and still lacks
     `_torch/disaggregation`
@@ -54,9 +62,10 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-- no code change was justified by this run; the only repo-local update needed
-  was to refresh this handoff with the exact validated state and next command
-  sequence for a runtime-capable host
+- no additional repo-local manager change was justified by this run beyond the
+  audit/reporting fix above; the remaining repo-local update is to keep this
+  handoff precise with the exact validated state and next command sequence for
+  a runtime-capable host
 
 ## Objective
 
@@ -755,6 +764,19 @@ Implemented so far:
   - the stricter non-importing TRT-LLM audit with subprocess probes still
     reports the same wheel-surface, CUDA-major, and Open MPI / PMIx blockers
     and no new manager/API mismatch
+- Tightened the repo-local TRT-LLM runtime audit after the latest seam review:
+  - timeout probes now preserve partial subprocess stderr/stdout instead of
+    dropping useful blocker details
+  - `build_runtime_report()` now reports the requested probe interpreter
+    correctly
+  - added regression coverage for both audit fixes
+- Re-ran the seam validation again after the audit fix and confirmed the repo
+  still reaches the same external-runtime conclusion:
+  - Python contract tests now pass with 29 tests after the new audit coverage
+  - `cargo check` for `lib/bindings/kvbm` still passes
+  - the strict runtime audit now shows the pinned-checkout transceiver import
+    failing with the same PMIx listener-startup abort as the installed wheel
+    path, not a less-informative timeout summary
 
 ## New Findings
 
@@ -936,6 +958,16 @@ Implemented so far:
   1. installed wheel surface mismatch vs pinned checkout
   2. MPI / PMIx import abort during TRT-LLM import
   3. CUDA user-space mismatch (`expected 13`, local `libcublasLt.so.12*`)
+- The runtime audit itself had two repo-local correctness issues before this
+  run:
+  - timeout probes could discard partial stderr/stdout, obscuring the real
+    blocker signature
+  - `build_runtime_report(..., python_executable=...)` returned
+    `sys.executable` instead of the requested probe interpreter
+- After fixing that audit path, the pinned-checkout transceiver probe now
+  reports the same PMIx listener-startup abort signature as the installed
+  package import path on this machine, which removes the prior ambiguity from
+  timeout-only reporting.
 - Repo-local signed commits in this sandbox need `--no-verify` right now:
   the configured `pre-commit` hook tries to fetch hook repos from GitHub and
   cannot complete with network access restricted.
@@ -1218,6 +1250,22 @@ Implemented so far:
     - host only exposes `libcublasLt.so.12*`
     - subprocess import of both installed and pinned TRT-LLM module paths still
       aborts in Open MPI / PMIx during import
+- Passed after tightening the runtime audit timeout/interpreter reporting:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  Notes:
+  - ran 6 tests
+- Passed after the same audit milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 29 tests
+- Passed after the same audit milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after the same audit milestone:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+  Notes:
+  - reported `status: blocked`
+  - both subprocess import probes now report the same PMIx listener-startup
+    failure directly instead of one falling back to a timeout-only summary
 
 ## Remaining Work
 
@@ -1280,6 +1328,9 @@ Implemented so far:
 - Another seam-review + validation pass in this run reached the same result:
   there is still no additional executable repo-local milestone left in this
   sandbox beyond keeping this handoff precise for a runtime-capable host.
+- The only additional repo-local change justified in this run was improving the
+  runtime audit itself so the external blocker evidence is precise; no further
+  manager-side code change is currently justified in this sandbox.
 
 ## Exact Next Step
 
