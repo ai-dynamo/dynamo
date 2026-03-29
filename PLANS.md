@@ -4,10 +4,10 @@ Last updated: 2026-03-28 UTC
 
 Current run focus:
 
-- tighten the pinned TRT-LLM Python/Rust seam so interface drift fails loudly
-  instead of silently falling back
-- keep the request/batch contract explicit on the Python side
-- re-run Python tests plus Rust/build validation after that cleanup
+- unblock the offline KVBM `maturin` build path without ad hoc cargo env
+  overrides
+- keep the remaining Python-install/runtime blockers explicit and narrow
+- re-run Python tests plus Rust/build validation after the build-path cleanup
 
 ## Objective
 
@@ -555,6 +555,34 @@ Implemented so far:
     is stubbed out in unit tests
   - the supported runtime path is still strict about pinned-interface drift, so
     keeping those tests does not weaken the intended production contract
+- Completed the repo-local offline build-path cleanup for the KVBM binding:
+  - vendored the cached `jiff` crate family into
+    `third_party/cargo-vendor/` and patched Cargo to use those local sources
+    for:
+    - the top-level workspace
+    - `lib/bindings/kvbm`
+    - `lib/bindings/python`
+  - updated lockfiles offline so the build graph now uses:
+    - `jiff 0.2.22`
+    - `jiff-static 0.2.22`
+    - `jiff-tzdb 0.1.5`
+    - `jiff-tzdb-platform 0.1.3`
+    from repo-local vendored sources instead of fetching `jiff-tzdb 0.1.6`
+  - enabled the cached `vendored` feature for `utoipa-swagger-ui` in
+    `lib/llm/Cargo.toml`, removing the previous need for a custom local
+    `SWAGGER_UI_DOWNLOAD_URL=file://...` workaround
+  - set a repo-local cargo `target-dir` in `.cargo/config.toml`, removing the
+    previous dependency on the unwritable `/node-storage/cargo-target`
+    configured in `/root/.cargo/config.toml`
+- Confirmed the remaining `maturin` problem is no longer a Cargo problem:
+  - plain `maturin develop` now reaches Python package installation and fails
+    first on the sandbox-inaccessible default `uv` cache under
+    `/root/.cache/uv`
+  - with `UV_CACHE_DIR=/tmp/uv-cache`, `maturin develop` gets past that cache
+    issue and then fails on Python dependency resolution for `nixl` from PyPI
+    because this environment has no network access
+  - `maturin develop --skip-install` succeeds and writes the built extension to
+    `lib/bindings/kvbm/python/kvbm/_core.abi3.so`
 
 ## New Findings
 
@@ -662,6 +690,28 @@ Implemented so far:
 - The request-facing Python code no longer needs repeated permissive attribute
   probing for the pinned TRT-LLM path; one normalization shim is sufficient and
   keeps the supported interface explicit.
+- The `jiff-tzdb` fetch was a lockfile/source problem, not a compiler problem:
+  once the kvbm-related workspaces were repointed to vendored `jiff 0.2.22`
+  sources and their lockfiles updated offline, `cargo metadata` and
+  `cargo check` for the standalone bindings no longer touched crates.io.
+- `utoipa-swagger-ui` does not need a hand-built local zip in this repo:
+  enabling its `vendored` feature is enough because
+  `utoipa-swagger-ui-vendored 0.1.2` is already cached locally.
+- Plain `maturin develop` is still not fully offline-safe in this sandbox even
+  after the Cargo fixes:
+  - first blocker: default `uv` cache under `/root/.cache/uv` is outside the
+    writable sandbox roots
+  - second blocker: Python dependency resolution still tries to fetch `nixl`
+    from PyPI unless installation is skipped or a local wheel/index is present
+- The built extension itself now loads directly via `importlib` from
+  `lib/bindings/kvbm/python/kvbm/_core.abi3.so`; the remaining import failure
+  on `import kvbm` is due to package-level `import nixl`, not a broken Rust
+  extension.
+- The top-level workspace still has additional offline-cache gaps unrelated to
+  the kvbm binding path; `cargo metadata --manifest-path Cargo.toml` now fails
+  on a different missing cached crate (`proc-macro-crate 3.5.0`), so the
+  current repo-local build fix should be treated as scoped to the kvbm / Python
+  binding execution path, not the entire workspace.
 
 ## Testing Log
 
@@ -765,6 +815,42 @@ Implemented so far:
   - then due network-restricted hook bootstrap (`git fetch` to GitHub failed)
   Result: signed commits for this work need `--no-verify` unless hook assets are
   already available locally.
+- Passed after vendoring the `jiff` crate family and updating the kvbm binding
+  lockfile offline:
+  `cargo metadata --manifest-path lib/bindings/kvbm/Cargo.toml --format-version 1`
+- Passed after the same build-path cleanup:
+  `cargo metadata --manifest-path lib/bindings/python/Cargo.toml --format-version 1`
+- Failed outside the scoped kvbm path after the same cleanup:
+  `cargo metadata --manifest-path Cargo.toml --format-version 1`
+  Reason:
+  - the top-level workspace still wants an uncached `proc-macro-crate 3.5.0`
+    download from crates.io
+- Passed after the offline build-path cleanup:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same cleanup:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Failed after the same cleanup:
+  `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+  Reason:
+  - `uv` cache initialization tried to use `/root/.cache/uv`, which is outside
+    the writable sandbox roots in this environment
+- Failed with the cache redirected:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+  Reason:
+  - Python dependency resolution attempted to fetch `nixl` from PyPI and this
+    environment has no network access
+- Passed with installation skipped:
+  `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml --skip-install`
+  Notes:
+  - built wheel path reported by maturin:
+    `/tmp/.tmpx1x5Ge/kvbm-1.0.0-cp310-abi3-linux_x86_64.whl`
+  - in-place extension written to:
+    `lib/bindings/kvbm/python/kvbm/_core.abi3.so`
+- Passed direct extension smoke check after the same milestone:
+  `importlib.util.spec_from_file_location(... '_core.abi3.so')`
+  Notes:
+  - loaded `kvbm._core` directly
+  - confirmed `_trtllm_integration` is exported from the built extension
 
 ## Remaining Work
 
@@ -788,25 +874,27 @@ Implemented so far:
 - External blocker remains: add a runtime-capable validation path for the Rust
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
-- Local build validation is now narrowed to one remaining environment issue:
-  - make `maturin develop` stop requiring an uncached `jiff-tzdb v0.1.6`
-    download during `cargo metadata`, or vendor/cache that crate for offline
-    use
+- The original Cargo-side `maturin develop` blocker is resolved for the kvbm
+  binding path:
+  - no more `jiff-tzdb v0.1.6` crates.io fetch during kvbm `cargo metadata`
+  - no more local Swagger zip workaround required
+  - no more dependency on the unwritable `/node-storage/cargo-target`
+- Remaining local Python-package/install blockers for a full
+  `maturin develop` are now:
+  - redirect `uv` cache to a writable path, or avoid `uv` for local installs
+  - provide `nixl` from a local wheel/index, or deliberately skip dependency
+    installation when the current run only needs the built extension
 - Additional external blocker now identified for phase 7 runtime validation:
   the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
   direct `KvCacheTransceiverV2` / transfer-worker smoke check can run.
 
 ## Exact Next Step
 
-1. Decide how to unblock `maturin develop` offline for
-   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm`:
-   - either vendor/cache `jiff-tzdb v0.1.6` so `cargo metadata` no longer
-     reaches out to crates.io
-   - or align the lockfile/dependency graph to cached crate versions already
-     present on the machine, then re-run `maturin develop`
-   The direct extension build itself already succeeds once
-   `CARGO_TARGET_DIR=/tmp/kvbm-target` and
-   `SWAGGER_UI_DOWNLOAD_URL=file:///tmp/swagger-ui-offline.zip` are supplied.
+1. If a full local install is still required on this machine, source `nixl`
+   from disk instead of PyPI and re-run:
+   `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+   Otherwise, for extension-only validation, continue using:
+   `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml --skip-install`
 2. Re-run the direct TRT-LLM smoke check on a host or container where importing
    `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
    PMIx. The repo-local adapter already passes the pinned-source
@@ -835,4 +923,9 @@ ImportError: libcublasLt.so.13: cannot open shared object file: No such file or 
   any further reduction should come from future Rust-native transfer/storage
   ownership if phase-7 runtime work reopens the seam.
 - maturin build should be able to unblock codex.
+- Status: partially addressed in this run.
+  - the Cargo/build half is now offline-clean for the kvbm binding path
+  - `maturin develop --skip-install` succeeds and builds the extension in place
+  - a full install still needs a writable `uv` cache plus an available `nixl`
+    package source
 - there is no need for fallback e.g. when the interface breaks. if someone moves the trt-llm commit, and e.g. a typed object from trt-llm side has changed, that is ok. 

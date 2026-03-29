@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build]
+target-dir = "target"
 # tokio-console needs this
 rustflags = ["--cfg", "tokio_unstable"]
 
@@ -18,4 +19,3 @@ rustflags = ["-C", "target-cpu=neoverse-n1", "--cfg", "tokio_unstable"]
 # which breaks Docker builds and bundles a .so into the Python wheel.
 [env]
 PCRE2_SYS_STATIC = "1"
-
