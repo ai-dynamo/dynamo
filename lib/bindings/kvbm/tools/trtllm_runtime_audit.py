@@ -17,6 +17,7 @@ from typing import Any, Iterable, Optional
 
 
 DEFAULT_PINNED_CHECKOUT = Path("/tmp/trtllm-latest/tensorrt_llm")
+DEFAULT_REPO_PYPROJECT = Path(__file__).resolve().parents[4] / "pyproject.toml"
 DEFAULT_LIBRARY_DIR_PATTERNS = (
     "/usr/local/cuda*/targets/*/lib",
     "/usr/local/cuda*/targets/*/lib/stubs",
@@ -40,6 +41,27 @@ def _parse_expected_cuda_major(requirements: Iterable[str]) -> Optional[int]:
         match = re.search(r"cuda-python\s*>=\s*(\d+)", requirement)
         if match is not None:
             return int(match.group(1))
+    return None
+
+
+def _read_repo_declared_trtllm_version(pyproject_path: Path) -> Optional[str]:
+    try:
+        text = pyproject_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    in_trtllm_group = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not in_trtllm_group:
+            if line.startswith("trtllm") and line.endswith("["):
+                in_trtllm_group = True
+            continue
+        if line == "]":
+            return None
+        match = re.search(r'"tensorrt-llm==([^"]+)"', line)
+        if match is not None:
+            return match.group(1)
     return None
 
 
@@ -218,6 +240,7 @@ def build_runtime_report(
     *,
     distribution: Any = None,
     pinned_checkout: Path = DEFAULT_PINNED_CHECKOUT,
+    repo_pyproject: Path = DEFAULT_REPO_PYPROJECT,
     library_dirs: Optional[Iterable[Path]] = None,
     probe_imports: bool = False,
     python_executable: str = sys.executable,
@@ -234,6 +257,7 @@ def build_runtime_report(
     }
     if pinned_checkout.is_dir():
         checkout.update(_package_surface(pinned_checkout))
+    repo_declared_version = _read_repo_declared_trtllm_version(repo_pyproject)
 
     resolved_library_dirs = (
         list(library_dirs)
@@ -263,6 +287,16 @@ def build_runtime_report(
             )
 
     findings = []
+    if (
+        installed["installed"]
+        and repo_declared_version is not None
+        and installed["version"] != repo_declared_version
+    ):
+        findings.append(
+            "installed tensorrt_llm package version "
+            f"{installed['version']} does not match repo-declared trtllm extra "
+            f"version {repo_declared_version}"
+        )
     if installed["installed"] and checkout["has_disaggregation"] and not installed["has_disaggregation"]:
         findings.append(
             "installed tensorrt_llm package does not expose _torch.disaggregation, "
@@ -287,6 +321,7 @@ def build_runtime_report(
     return {
         "python_executable": python_executable,
         "probe_timeout_s": probe_timeout_s,
+        "repo_declared_tensorrt_llm_version": repo_declared_version,
         "installed_tensorrt_llm": installed,
         "pinned_checkout": checkout,
         "libraries": libraries,
@@ -347,6 +382,7 @@ def main() -> int:
 
     report = build_runtime_report(
         pinned_checkout=args.pinned_checkout,
+        repo_pyproject=DEFAULT_REPO_PYPROJECT,
         library_dirs=args.library_dir,
         probe_imports=args.probe_imports,
         python_executable=args.python_executable,
@@ -358,6 +394,10 @@ def main() -> int:
         print(f"status: {report['status']}")
         print(f"python: {report['python_executable']}")
         print(f"probe timeout (s): {report['probe_timeout_s']}")
+        print(
+            "repo-declared tensorrt_llm version: "
+            f"{report['repo_declared_tensorrt_llm_version'] or 'unknown'}"
+        )
         installed = report["installed_tensorrt_llm"]
         print(
             "installed tensorrt_llm: "

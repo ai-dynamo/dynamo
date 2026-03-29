@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:24:02 UTC
+Last updated: 2026-03-29 03:30:09 UTC
 
 Current run outcome:
 
@@ -11,10 +11,10 @@ Current run outcome:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
 - Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
-  permissive fallback behavior, unsupported-path drift, and cleanup markers)
-  and again did not find another executable repo-local milestone in this
-  sandbox.
-- Re-ran the full repo-local validation stack on 2026-03-29 03:24 UTC:
+  permissive fallback behavior, unsupported-path drift, and cleanup markers).
+  No additional executable manager-side milestone was found in this sandbox.
+- Re-ran the full repo-local validation stack on 2026-03-29 03:30 UTC before
+  making any new repo-local change:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 25 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
@@ -25,12 +25,24 @@ Current run outcome:
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
     -> pass
   - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
-- Re-ran the strict runtime gate in the same run:
+- Landed one additional repo-local audit improvement that was justified by the
+  rerun findings:
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` now reads the repo's
+    declared TRT-LLM extra pin from `pyproject.toml` and reports version drift
+    explicitly in the blocked findings
+  - added stdlib-only coverage in
+    `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
+- Re-ran the audit validation after that change:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 9 tests`, `OK`)
+  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+    -> pass (`Ran 34 tests`, `OK`)
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
     -> exit `1`, report `status: "blocked"`
   - installed package root:
     `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
   - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
+  - repo-declared TRT-LLM extra version is `1.3.0rc8`
   - installed wheel version remains `1.2.0`
   - installed wheel still exposes `_torch/pyexecutor` but not
     `_torch/disaggregation`
@@ -39,14 +51,18 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-  - the strict audit findings are still exactly:
+  - the strict audit findings are now exactly:
+    - installed wheel version mismatch vs repo-declared TRT-LLM extra
+      (`1.2.0` installed vs `1.3.0rc8` declared)
     - installed wheel surface mismatch vs pinned checkout
     - CUDA major mismatch (`expected 13`, local majors `[12]`)
     - Open MPI / PMIx listener-startup abort on installed TRT-LLM import
     - Open MPI / PMIx listener-startup abort on pinned disaggregation import
-- No repo-local product-code change was justified in this run beyond
-  refreshing this handoff. The supported path is still green in-repo; the
-  remaining work is phase-7 validation on a runtime-capable host with:
+- No additional repo-local manager/product-code change is justified in this
+  run beyond that audit tightening and this handoff refresh. The supported path
+  is still green in-repo; the remaining work is phase-7 validation on a
+  runtime-capable host with:
+  - a TRT-LLM install/source version aligned with the repo-declared seam
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
   - an MPI/PMIx environment that can import TRT-LLM without aborting
@@ -57,6 +73,8 @@ Exact next steps if another run happens on this machine:
   the environment changes first; this run's seam review plus validation stack
   did not expose another executable milestone.
 - Treat phase 7 as externally blocked until at least one of these changes:
+  - the installed TRT-LLM version matches the repo-declared `trtllm` extra
+    pin (`1.3.0rc8`) or the host intentionally imports from the pinned checkout
   - the installed TRT-LLM wheel/source matches the pinned disaggregation seam
   - CUDA 13 user-space libraries are available to the runtime
   - TRT-LLM import no longer aborts in Open MPI / PMIx
@@ -1515,6 +1533,14 @@ Implemented so far:
   - after MPI is bypassed, the next blocker is missing CUDA 13 user-space
     libraries (`libcublasLt.so.13`) on this machine
 - Another prerequisite blocker is now explicit:
+  the installed `.venv` TensorRT-LLM wheel version is also not the repo's
+  declared `trtllm` extra version:
+  - installed wheel: `1.2.0`
+  - repo-declared extra: `1.3.0rc8`
+  Runtime validation therefore needs either:
+  - an installed wheel that matches the repo-declared seam, or
+  - an intentional source-overlay workflow against the pinned checkout
+- Another prerequisite blocker is now explicit:
   the installed `.venv` TensorRT-LLM wheel does not currently ship the
   `_torch/disaggregation` package tree that the pinned local checkout and phase
   7 runtime validation target. Runtime validation therefore needs either:
@@ -1545,11 +1571,12 @@ Implemented so far:
 - The only additional repo-local change justified in this run was improving the
   runtime audit itself so the external blocker evidence is precise; no further
   manager-side code change is currently justified in this sandbox.
-- This 2026-03-29 03:24 UTC rerun confirmed the same end state without further
-  repo-local code changes:
+- This 2026-03-29 03:30 UTC rerun confirmed the same end state after the audit
+  tightening and without further manager-side code changes:
   - all repo-local supported-path validation gates are still green
   - the only failing gate is still the strict runtime audit
-  - the blocking conditions are unchanged:
+  - the blocking conditions are now reported more precisely as:
+    - installed wheel version mismatch vs repo-declared TRT-LLM extra
     - installed wheel lacks `_torch/disaggregation`
     - installed wheel expects CUDA 13 while the host exposes only CUDA 12
       `libcublasLt`
@@ -1561,6 +1588,9 @@ Implemented so far:
 1. First command on the next runtime-capable host:
    `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
 2. Do not attempt the phase-7 smoke path until that audit reports all of:
+   - installed TRT-LLM version matches the repo-declared `trtllm` extra pin
+     (`1.3.0rc8`), or the host is intentionally importing from
+     `/tmp/trtllm-latest/tensorrt_llm`
    - installed TRT-LLM surface includes `_torch/disaggregation`, or the host is
      intentionally importing from `/tmp/trtllm-latest/tensorrt_llm`
    - available `libcublasLt` major version matches the installed TRT-LLM wheel

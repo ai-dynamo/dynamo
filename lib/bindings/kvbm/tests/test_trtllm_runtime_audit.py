@@ -52,6 +52,28 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
 
         self.assertEqual(major, 13)
 
+    def test_read_repo_declared_trtllm_version_from_pyproject(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pyproject = Path(temp_dir) / "pyproject.toml"
+            pyproject.write_text(
+                "\n".join(
+                    [
+                        "[project.optional-dependencies]",
+                        "trtllm =[",
+                        '    "uvloop",',
+                        '    "tensorrt-llm==1.3.0rc8",',
+                        "]",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            version = module._read_repo_declared_trtllm_version(pyproject)
+
+        self.assertEqual(version, "1.3.0rc8")
+
     def test_build_runtime_report_flags_wheel_surface_and_cuda_mismatch(self) -> None:
         module = _load_module()
 
@@ -67,6 +89,17 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
             lib_dir = root / "libs"
             lib_dir.mkdir()
             (lib_dir / "libcublasLt.so.12").touch()
+            (root / "pyproject.toml").write_text(
+                "\n".join(
+                    [
+                        "[project.optional-dependencies]",
+                        "trtllm =[",
+                        '    "tensorrt-llm==1.3.0rc8",',
+                        "]",
+                    ]
+                ),
+                encoding="utf-8",
+            )
 
             report = module.build_runtime_report(
                 distribution=_FakeDistribution(
@@ -78,16 +111,22 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
                     ],
                 ),
                 pinned_checkout=checkout_root,
+                repo_pyproject=root / "pyproject.toml",
                 library_dirs=[lib_dir],
             )
 
         self.assertEqual(report["status"], "blocked")
+        self.assertEqual(report["repo_declared_tensorrt_llm_version"], "1.3.0rc8")
         self.assertFalse(report["installed_tensorrt_llm"]["has_disaggregation"])
         self.assertTrue(report["pinned_checkout"]["has_disaggregation"])
         self.assertEqual(report["libraries"]["available_majors"], [12])
-        self.assertEqual(len(report["findings"]), 2)
-        self.assertIn("_torch.disaggregation", report["findings"][0])
-        self.assertIn("expects CUDA major 13", report["findings"][1])
+        self.assertEqual(len(report["findings"]), 3)
+        self.assertIn(
+            "does not match repo-declared trtllm extra version 1.3.0rc8",
+            report["findings"][0],
+        )
+        self.assertIn("_torch.disaggregation", report["findings"][1])
+        self.assertIn("expects CUDA major 13", report["findings"][2])
 
     def test_build_runtime_report_records_import_probe_failures(self) -> None:
         module = _load_module()
