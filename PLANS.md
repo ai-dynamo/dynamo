@@ -4,46 +4,29 @@ Last updated: 2026-03-28 UTC
 
 Current run outcome:
 
-- re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
-  again that there is no repo-local `AGENTS.md` in this checkout, then re-read
-  the full current `PLANS.md` plus the active validation seam:
-  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
-  - `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
+- re-read `Agents.md`, `docs/design-docs/kvbm-trtllm-integration.md`, the full
+  current `PLANS.md`, and the active TRT-LLM seam:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
-- re-ran the repo-local validation stack before changing code and confirmed the
-  remaining gap is still runtime-environment validation, not a new repo-local
-  manager API mismatch:
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
+  - searched the active KVBM TRT-LLM path for `TODO` / `FIXME` /
+    permissive pinned-interface drift and did not find another executable
+    repo-local milestone in this sandbox
+- re-ran the current repo-local validation stack on 2026-03-28 UTC and
+  confirmed the supported path is still green:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 24 tests`, `OK`)
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
-    -> pass (`Ran 6 tests`, `OK`)
-  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
-  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
-    -> `status: "blocked"`
-- the only additional repo-local milestone justified in this run was improving
-  the runtime-audit workflow so the remaining phase-7 blocker is easier to
-  validate and script on the next host:
-  - `trtllm_runtime_audit.py` now accepts:
-    - `--python-executable`
-    - `--probe-timeout-s`
-    - `--fail-on-blocked`
-  - `build_runtime_report(...)` now records `probe_timeout_s` in the report
-  - the CLI now returns exit status `1` when `--fail-on-blocked` is used and
-    the audit remains blocked
-  - added stdlib-only regression coverage for the new timeout / CLI controls in
-    `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
-- re-ran the post-change validation stack from this sandbox on 2026-03-28 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
     -> pass (`Ran 8 tests`, `OK`)
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
-    -> pass (`Ran 24 tests`, `OK`)
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
     -> pass (`Ran 32 tests`, `OK`)
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+    -> pass
+  - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
+- re-ran the strict runtime gate and confirmed the blocker chain is unchanged:
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
     -> exit `1`, report `status: "blocked"`
-- the latest strict runtime audit in this sandbox still reports the same
-  external blocker chain with no new repo-local API mismatch:
   - installed package root:
     `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
   - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
@@ -54,9 +37,9 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-- no additional repo-local manager change was justified in this run beyond the
-  audit CLI/reporting improvement above; the remaining work is still on a
-  runtime-capable host with a compatible TRT-LLM package/runtime stack
+- no repo-local code change was justified in this run; the remaining work is
+  still phase-7 validation on a runtime-capable host with a compatible
+  TRT-LLM wheel/source surface plus matching CUDA/MPI user-space
 
 ## Objective
 
@@ -771,6 +754,13 @@ Implemented so far:
 
 ## New Findings
 
+- Another source-of-truth review in this run still did not expose a new
+  executable repo-local milestone in the active TRT-LLM manager/rust-loader/
+  audit seam:
+  - the remaining `NotImplementedError` branches are still only for explicitly
+    unsupported disaggregation/indexer variants
+  - the active pinned-interface checks remain strict where the supported path
+    depends on them
 - Current DLPack export in `lib/bindings/kvbm/src/block_manager/dlpack.rs`
   assumes contiguous tensors only.
 - The pinned TRTLLM v2 control path is close enough to model in Python without
@@ -975,6 +965,32 @@ Implemented so far:
 
 ## Testing Log
 
+- Passed again in the current 2026-03-28 UTC validation refresh:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+  Notes:
+  - ran 24 tests
+- Passed again in the same run:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  Notes:
+  - ran 8 tests
+- Passed again in the same run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 32 tests
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+- Failed as expected again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+  Notes:
+  - exit status is `1` by design when the audit remains blocked
+  - findings were unchanged:
+    - installed wheel surface mismatch vs pinned checkout
+    - CUDA major mismatch (`expected 13`, local `libcublasLt.so.12*`)
+    - Open MPI / PMIx listener-startup abort on both subprocess import probes
 - Passed: `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed: `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml --no-run`
 - Passed: `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
