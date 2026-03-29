@@ -578,11 +578,25 @@ Implemented so far:
   - plain `maturin develop` now reaches Python package installation and fails
     first on the sandbox-inaccessible default `uv` cache under
     `/root/.cache/uv`
-  - with `UV_CACHE_DIR=/tmp/uv-cache`, `maturin develop` gets past that cache
-    issue and then fails on Python dependency resolution for `nixl` from PyPI
-    because this environment has no network access
   - `maturin develop --skip-install` succeeds and writes the built extension to
     `lib/bindings/kvbm/python/kvbm/_core.abi3.so`
+- Completed the local Python install-path cleanup for the KVBM binding:
+  - removed hard `nixl[cu12]==0.10.1` from
+    `lib/bindings/kvbm/pyproject.toml`; `nixl` remains available through the
+    existing `cu12` / `cu13` extras instead of being mandatory for every local
+    editable install
+  - made `kvbm/python/kvbm/__init__.py` preload `nixl` only when the optional
+    Python package is actually installed, instead of raising
+    `ModuleNotFoundError` on every import
+  - with `UV_CACHE_DIR=/tmp/uv-cache`, plain
+    `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml` now
+    completes successfully and installs `kvbm` editable into `.venv`
+- Re-ran the direct `.venv` TRT-LLM runtime smoke import after the editable
+  install fix:
+  - the repo-local `kvbm` package is no longer the blocker
+  - the import still aborts inside Open MPI / PMIx before
+    `kv_extractor.py` / `kv_cache_transceiver.py` can be exercised for real on
+    this machine
 
 ## New Findings
 
@@ -698,20 +712,24 @@ Implemented so far:
   enabling its `vendored` feature is enough because
   `utoipa-swagger-ui-vendored 0.1.2` is already cached locally.
 - Plain `maturin develop` is still not fully offline-safe in this sandbox even
-  after the Cargo fixes:
-  - first blocker: default `uv` cache under `/root/.cache/uv` is outside the
-    writable sandbox roots
-  - second blocker: Python dependency resolution still tries to fetch `nixl`
-    from PyPI unless installation is skipped or a local wheel/index is present
+  after the Cargo and packaging fixes:
+  - remaining blocker is only the sandbox-inaccessible default `uv` cache under
+    `/root/.cache/uv`
+  - redirecting `UV_CACHE_DIR` to a writable path is sufficient on this
+    machine; no further PyPI fetch is needed for the editable install
 - The built extension itself now loads directly via `importlib` from
   `lib/bindings/kvbm/python/kvbm/_core.abi3.so`; the remaining import failure
-  on `import kvbm` is due to package-level `import nixl`, not a broken Rust
-  extension.
+  on `import kvbm` is now resolved by making the `nixl` preload optional.
 - The top-level workspace still has additional offline-cache gaps unrelated to
   the kvbm binding path; `cargo metadata --manifest-path Cargo.toml` now fails
   on a different missing cached crate (`proc-macro-crate 3.5.0`), so the
   current repo-local build fix should be treated as scoped to the kvbm / Python
   binding execution path, not the entire workspace.
+- Re-running the real `.venv` TRT-LLM import after the editable-install fix did
+  not uncover a new manager API gap:
+  the process still dies in Open MPI / PMIx initialization before Python can
+  finish importing the relevant TRT-LLM modules, so the remaining phase-7
+  runtime blocker is still external to this repo.
 
 ## Testing Log
 
@@ -836,9 +854,9 @@ Implemented so far:
     the writable sandbox roots in this environment
 - Failed with the cache redirected:
   `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-  Reason:
-  - Python dependency resolution attempted to fetch `nixl` from PyPI and this
-    environment has no network access
+  Reason at that point in the run:
+  - Python dependency resolution attempted to fetch `nixl` from PyPI because
+    it was still a hard dependency in `lib/bindings/kvbm/pyproject.toml`
 - Passed with installation skipped:
   `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml --skip-install`
   Notes:
@@ -851,6 +869,29 @@ Implemented so far:
   Notes:
   - loaded `kvbm._core` directly
   - confirmed `_trtllm_integration` is exported from the built extension
+- Passed after making `nixl` optional for editable installs:
+  `PYTHONPATH=lib/bindings/kvbm/python .venv/bin/python -c 'import kvbm'`
+- Failed after the same packaging cleanup:
+  `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+  Reason:
+  - still tried to use `/root/.cache/uv`, which is outside the writable
+    sandbox roots in this environment
+- Passed with the writable cache override:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+  Notes:
+  - `kvbm-1.0.0` was installed editable into `.venv`
+- Passed import smoke check after the editable install:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+  Notes:
+  - imports resolved from `lib/bindings/kvbm/python/kvbm`
+  - `_trtllm_integration` remained available from the installed extension
+- Failed again in the real `.venv` TRT-LLM runtime import path after the
+  editable-install fix:
+  `TLLM_DISABLE_MPI=1 .venv/bin/python -c 'import tensorrt_llm._torch.disaggregation.resource.kv_extractor'`
+  Reason:
+  - Open MPI / PMIx aborted during `MPI_Init_thread`
+  - failure occurs before the repo-local manager can be exercised in the real
+    TRT-LLM runtime
 
 ## Remaining Work
 
@@ -879,28 +920,26 @@ Implemented so far:
   - no more `jiff-tzdb v0.1.6` crates.io fetch during kvbm `cargo metadata`
   - no more local Swagger zip workaround required
   - no more dependency on the unwritable `/node-storage/cargo-target`
-- Remaining local Python-package/install blockers for a full
-  `maturin develop` are now:
-  - redirect `uv` cache to a writable path, or avoid `uv` for local installs
-  - provide `nixl` from a local wheel/index, or deliberately skip dependency
-    installation when the current run only needs the built extension
+- The editable-install path is now resolved for this machine too:
+  - use `UV_CACHE_DIR=/tmp/uv-cache` when invoking `maturin develop` inside
+    this sandbox
+  - `nixl` is optional for the base editable install and remains available via
+    `kvbm[cu12]` / `kvbm[cu13]` when needed
 - Additional external blocker now identified for phase 7 runtime validation:
   the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
   direct `KvCacheTransceiverV2` / transfer-worker smoke check can run.
 
 ## Exact Next Step
 
-1. If a full local install is still required on this machine, source `nixl`
-   from disk instead of PyPI and re-run:
-   `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-   Otherwise, for extension-only validation, continue using:
-   `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml --skip-install`
-2. Re-run the direct TRT-LLM smoke check on a host or container where importing
+1. Re-run the direct TRT-LLM smoke check on a host or container where importing
    `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
    PMIx. The repo-local adapter already passes the pinned-source
    `build_page_table_from_manager(manager)` and
    `RankInfo.from_kv_cache_manager(...)` paths, so the next unresolved runtime
    checkpoint is `KvCacheTransceiverV2` / transfer-worker construction.
+2. In this sandbox, keep using the now-validated editable-install command
+   before that runtime smoke check:
+   `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
 3. If that runtime path reports another missing manager field or storage shape,
    extend:
    `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
@@ -923,9 +962,9 @@ ImportError: libcublasLt.so.13: cannot open shared object file: No such file or 
   any further reduction should come from future Rust-native transfer/storage
   ownership if phase-7 runtime work reopens the seam.
 - maturin build should be able to unblock codex.
-- Status: partially addressed in this run.
-  - the Cargo/build half is now offline-clean for the kvbm binding path
-  - `maturin develop --skip-install` succeeds and builds the extension in place
-  - a full install still needs a writable `uv` cache plus an available `nixl`
-    package source
+- Status: addressed for this machine.
+  - Cargo/build is offline-clean for the kvbm binding path
+  - `maturin develop --skip-install` succeeds
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+    succeeds and installs the editable package into `.venv`
 - there is no need for fallback e.g. when the interface breaks. if someone moves the trt-llm commit, and e.g. a typed object from trt-llm side has changed, that is ok. 
