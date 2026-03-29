@@ -1,18 +1,21 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 UTC
+Last updated: 2026-03-28 UTC
 
-Current run focus:
+Current run outcome:
 
-- re-read the full execution log, repo instructions, and current TRT-LLM
-  manager code before making further changes
-- re-run the validated local checks from this sandbox:
+- re-read the full execution log, repo instructions, design doc, and current
+  TRT-LLM manager/audit code before making further changes
+- re-ran the validated local checks from this sandbox:
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
-- only extend the manager if those checks expose a new repo-local contract gap;
-  otherwise keep the handoff precise and machine-specific
+- no new repo-local contract gap was exposed in this run
+- remaining blockers are still machine/runtime-specific:
+  - installed TRT-LLM wheel in `.venv` still lacks `_torch/disaggregation`
+  - installed TRT-LLM wheel still expects CUDA major `13`
+  - this host still exposes only `libcublasLt.so.12*`
 
 ## Objective
 
@@ -667,6 +670,25 @@ Implemented so far:
 - Re-checked the repo-local manager/audit/test surface for additional obvious
   cleanup work and did not find a new executable repo-local milestone beyond
   the already documented phase-7 external-runtime blockers.
+- Re-ran the same source-of-truth review on 2026-03-28 UTC before touching
+  code:
+  - re-read `Agents.md`, `docs/design-docs/kvbm-trtllm-integration.md`, the
+    full current `PLANS.md`, and the active `KvbmKVCacheManager` /
+    `trtllm_runtime_audit.py` code
+  - confirmed the remaining `NotImplementedError` boundaries and
+    `ImportError`-guarded enum imports are still aligned with explicitly
+    unsupported TRT-LLM runtime features, not an unfinished supported-path
+    contract
+- Re-ran the validated local checks again on 2026-03-28 UTC and confirmed the
+  repo-local state is unchanged:
+  - Python contract tests still pass
+  - `cargo check` for `lib/bindings/kvbm` still passes
+  - the editable install path still works with `UV_CACHE_DIR=/tmp/uv-cache`
+  - the non-importing TRT-LLM audit still reports the same external blocker
+    chain and no new manager/API mismatch
+- Confirmed again in this run that there is no additional executable repo-local
+  milestone left in this sandbox beyond keeping this handoff precise for a
+  runtime-capable validation host.
 
 ## New Findings
 
@@ -1047,6 +1069,20 @@ Implemented so far:
     - installed wheel lacks `_torch/disaggregation`
     - installed wheel expects CUDA major `13`
     - host only exposes `libcublasLt.so.12*`
+- Passed again in the 2026-03-28 UTC revalidation run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+  Notes:
+  - reported `status: blocked`
+  - blocker details were still unchanged:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA major `13`
+    - host only exposes `libcublasLt.so.12*`
 
 ## Remaining Work
 
@@ -1095,10 +1131,10 @@ Implemented so far:
   - a source-overlay workflow that imports `/tmp/trtllm-latest/tensorrt_llm`
     with compatible native dependencies on the validation host
 - After re-reading the current repo-local code and re-running the validation
-  stack on 2026-03-29 UTC, there is no additional executable repo-local phase
-  left in this sandbox beyond keeping this handoff current. The remaining work
-  is entirely on a validation host/container that satisfies the TRT-LLM runtime
-  import prerequisites above.
+  stack again on 2026-03-28 UTC, there is still no additional executable
+  repo-local phase left in this sandbox beyond keeping this handoff current.
+  The remaining work is entirely on a validation host/container that satisfies
+  the TRT-LLM runtime import prerequisites above.
 
 ## Exact Next Step
 
