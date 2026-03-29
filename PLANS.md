@@ -1,19 +1,19 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 02:57:18 UTC
+Last updated: 2026-03-29 03:04:04 UTC
 
 Current run outcome:
 
-- Re-read the repo instructions from the user-provided `AGENTS.md` content,
-  the full `PLANS.md`, `docs/design-docs/kvbm-trtllm-integration.md`, and the
-  active TRT-LLM seam:
+- Re-read the user-provided `AGENTS.md` instructions plus the current
+  `PLANS.md`, `docs/design-docs/kvbm-trtllm-integration.md`, and the active
+  TRT-LLM seam:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
-- Re-searched the active KVBM/TRT-LLM seam for repo-local executable cleanup
-  work (`TODO`, `FIXME`, permissive pinned-interface fallbacks, supported-path
-  `NotImplementedError` gaps) and did not find another repo-local milestone in
-  this sandbox.
+- Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
+  permissive fallback behavior, unsupported-path drift in the supported
+  contract) and did not find another executable repo-local milestone in this
+  sandbox.
 - Re-ran the full repo-local validation stack on 2026-03-29 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 25 tests`, `OK`)
@@ -25,7 +25,7 @@ Current run outcome:
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
     -> pass
   - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
-- Re-ran the strict runtime gate:
+- Re-ran the strict runtime gate in the same run:
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
     -> exit `1`, report `status: "blocked"`
   - installed package root:
@@ -39,9 +39,9 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-- No repo-local code change was justified in this run. The supported path is
-  still green in-repo; the remaining work is phase-7 validation on a
-  runtime-capable host with:
+- No repo-local code change was justified in this run beyond refreshing this
+  handoff. The supported path is still green in-repo; the remaining work is
+  phase-7 validation on a runtime-capable host with:
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
   - an MPI/PMIx environment that can import TRT-LLM without aborting
@@ -790,6 +790,22 @@ Implemented so far:
   - no new `TODO` / `FIXME` / permissive fallback was found in the active
     manager, Rust-loader, or runtime-audit seam
   - the remaining `NotImplementedError` branches are still only for explicitly
+    unsupported disaggregation/indexer variants
+- Another full validation refresh in this run reached the same blocker chain
+  without uncovering a new repo-local API mismatch:
+  1. installed TRT-LLM wheel surface mismatch vs the pinned checkout
+  2. CUDA major mismatch (`expected 13`, local `libcublasLt.so.12*`)
+  3. Open MPI / PMIx listener-startup abort during subprocess import of both
+     installed and pinned TRT-LLM module paths
+- The editable install and local import path remain healthy in this sandbox:
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+    still succeeds
+  - `.venv/bin/python -c 'import kvbm, kvbm._core'` still succeeds
+- Another full seam review on 2026-03-29 UTC still did not expose a new
+  repo-local supported-path milestone:
+  - no new `TODO` / `FIXME` / permissive fallback was found in the active
+    manager, Rust-loader, or runtime-audit seam
+  - the remaining `NotImplementedError` branches are still only for explicitly
     unsupported disaggregation/indexer paths
 - The strict runtime gate remains the decisive blocker check on this machine,
   and its blocker chain is still unchanged in the latest run:
@@ -1016,6 +1032,34 @@ Implemented so far:
 
 ## Testing Log
 
+- Passed again in the current 2026-03-29 UTC validation refresh:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+  Notes:
+  - ran 25 tests
+- Passed again in the same run:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  Notes:
+  - ran 8 tests
+- Passed again in the same run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 33 tests
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+- Failed as expected again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+  Notes:
+  - exit status is `1` by design when the audit remains blocked
+  - findings were unchanged:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA major `13`
+    - host only exposes `libcublasLt.so.12*`
+    - subprocess import of both installed and pinned TRT-LLM module paths
+      still aborts in Open MPI / PMIx during import
 - Passed again in the current 2026-03-29 UTC validation refresh:
   `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
   Notes:
