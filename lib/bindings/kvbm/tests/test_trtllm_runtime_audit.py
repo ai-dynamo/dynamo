@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import tempfile
+import types
 import unittest
 
 
@@ -83,6 +85,63 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
         self.assertEqual(len(report["findings"]), 2)
         self.assertIn("_torch.disaggregation", report["findings"][0])
         self.assertIn("expects CUDA major 13", report["findings"][1])
+
+    def test_build_runtime_report_records_import_probe_failures(self) -> None:
+        module = _load_module()
+
+        def fake_runner(command, **kwargs):
+            del kwargs
+            rendered = " ".join(command)
+            if "tensorrt_llm._torch.disaggregation.transceiver" in rendered:
+                return types.SimpleNamespace(
+                    returncode=1,
+                    stdout="",
+                    stderr="*** An error occurred in MPI_Init_thread\nPMIx server's listener thread failed to start",
+                )
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"module": "tensorrt_llm", "file": "/tmp/site-packages/tensorrt_llm/__init__.py"}\n',
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            checkout_root = root / "trtllm-checkout" / "tensorrt_llm"
+            (checkout_root / "_torch" / "disaggregation").mkdir(parents=True)
+
+            report = module.build_runtime_report(
+                distribution=None,
+                pinned_checkout=checkout_root,
+                library_dirs=[],
+                probe_imports=True,
+                python_executable="/fake/python",
+                probe_runner=fake_runner,
+            )
+
+        self.assertEqual(len(report["import_probes"]), 2)
+        self.assertEqual(report["import_probes"][0]["status"], "ok")
+        self.assertEqual(report["import_probes"][1]["status"], "error")
+        self.assertIn(
+            "subprocess import of tensorrt_llm._torch.disaggregation.transceiver failed",
+            report["findings"][0],
+        )
+        self.assertIn("Open MPI / PMIx listener startup failed", report["findings"][0])
+
+    def test_probe_python_import_reports_timeout(self) -> None:
+        module = _load_module()
+
+        def fake_runner(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, timeout=kwargs["timeout"])
+
+        probe = module._probe_python_import(
+            python_executable="/fake/python",
+            module="tensorrt_llm",
+            timeout_s=1.5,
+            runner=fake_runner,
+        )
+
+        self.assertEqual(probe["status"], "timeout")
+        self.assertIsNone(probe["returncode"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import os
 from importlib import metadata
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any, Iterable, Optional
 
@@ -129,11 +130,90 @@ def _library_summary(library_dirs: Iterable[Path]) -> dict[str, Any]:
     }
 
 
+def _probe_python_import(
+    *,
+    python_executable: str,
+    module: str,
+    python_path: Optional[Path] = None,
+    timeout_s: float = 20.0,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    if python_path is not None:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{python_path}{os.pathsep}{existing}" if existing else str(python_path)
+        )
+
+    command = [
+        python_executable,
+        "-c",
+        (
+            "import importlib, json; "
+            f"mod = importlib.import_module({module!r}); "
+            "print(json.dumps({'module': mod.__name__, 'file': getattr(mod, '__file__', None)}))"
+        ),
+    ]
+    try:
+        result = runner(
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "module": module,
+            "pythonpath": str(python_path) if python_path is not None else None,
+            "status": "timeout",
+            "returncode": None,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+        }
+
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    summary = None
+    if stdout:
+        try:
+            summary = json.loads(stdout.splitlines()[-1])
+        except json.JSONDecodeError:
+            summary = None
+
+    return {
+        "module": module,
+        "pythonpath": str(python_path) if python_path is not None else None,
+        "status": "ok" if result.returncode == 0 else "error",
+        "returncode": result.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "summary": summary,
+    }
+
+
+def _probe_failure_summary(probe: dict[str, Any]) -> str:
+    stderr = probe.get("stderr") or ""
+    if "PMIx server's listener thread failed to start" in stderr:
+        return "Open MPI / PMIx listener startup failed during import"
+    if "MPI_Init_thread" in stderr:
+        return "MPI_Init_thread failed during import"
+    if stderr:
+        return stderr.splitlines()[0]
+    if probe.get("status") == "timeout":
+        return "import probe timed out"
+    return "import probe failed"
+
+
 def build_runtime_report(
     *,
     distribution: Any = None,
     pinned_checkout: Path = DEFAULT_PINNED_CHECKOUT,
     library_dirs: Optional[Iterable[Path]] = None,
+    probe_imports: bool = False,
+    python_executable: str = sys.executable,
+    probe_runner: Any = subprocess.run,
 ) -> dict[str, Any]:
     distribution = _resolve_distribution("tensorrt_llm") if distribution is None else distribution
     installed = _distribution_summary(distribution)
@@ -152,6 +232,24 @@ def build_runtime_report(
         else _expand_library_dirs(DEFAULT_LIBRARY_DIR_PATTERNS)
     )
     libraries = _library_summary(resolved_library_dirs)
+    import_probes = []
+    if probe_imports:
+        import_probes.append(
+            _probe_python_import(
+                python_executable=python_executable,
+                module="tensorrt_llm",
+                runner=probe_runner,
+            )
+        )
+        if pinned_checkout.is_dir():
+            import_probes.append(
+                _probe_python_import(
+                    python_executable=python_executable,
+                    module="tensorrt_llm._torch.disaggregation.transceiver",
+                    python_path=pinned_checkout.parent,
+                    runner=probe_runner,
+                )
+            )
 
     findings = []
     if installed["installed"] and checkout["has_disaggregation"] and not installed["has_disaggregation"]:
@@ -167,12 +265,20 @@ def build_runtime_report(
             f"{expected_cuda_major}, but libcublasLt majors "
             f"{libraries['available_majors'] or '[]'} were found"
         )
+    for probe in import_probes:
+        if probe["status"] == "ok":
+            continue
+        findings.append(
+            f"subprocess import of {probe['module']} failed before runtime validation: "
+            f"{_probe_failure_summary(probe)}"
+        )
 
     return {
         "python_executable": sys.executable,
         "installed_tensorrt_llm": installed,
         "pinned_checkout": checkout,
         "libraries": libraries,
+        "import_probes": import_probes,
         "findings": findings,
         "status": "blocked" if findings else "ok",
     }
@@ -181,9 +287,10 @@ def build_runtime_report(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Audit the installed TRT-LLM runtime without importing tensorrt_llm. "
-            "This helps detect package-surface and CUDA-library mismatches before "
-            "running the KVBM TRT-LLM smoke path."
+            "Audit the installed TRT-LLM runtime without importing tensorrt_llm "
+            "into the current process. This helps detect package-surface, CUDA-"
+            "library, and optional subprocess import mismatches before running "
+            "the KVBM TRT-LLM smoke path."
         )
     )
     parser.add_argument(
@@ -203,11 +310,17 @@ def main() -> int:
         action="store_true",
         help="Emit the report as JSON",
     )
+    parser.add_argument(
+        "--probe-imports",
+        action="store_true",
+        help="Run subprocess import probes for installed and pinned TRT-LLM modules",
+    )
     args = parser.parse_args()
 
     report = build_runtime_report(
         pinned_checkout=args.pinned_checkout,
         library_dirs=args.library_dir,
+        probe_imports=args.probe_imports,
     )
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -232,6 +345,13 @@ def main() -> int:
         )
         available = report["libraries"]["available_majors"]
         print(f"libcublasLt majors: {available or '[]'}")
+        if report["import_probes"]:
+            print("import probes:")
+            for probe in report["import_probes"]:
+                print(
+                    f"- {probe['module']}: status={probe['status']} "
+                    f"returncode={probe['returncode']}"
+                )
         if report["findings"]:
             print("findings:")
             for finding in report["findings"]:

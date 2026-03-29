@@ -6,16 +6,25 @@ Current run outcome:
 
 - re-read the full execution log, repo instructions, design doc, and current
   TRT-LLM manager/audit code before making further changes
+- extended `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` with subprocess
+  import probes so the runtime blocker is recorded without importing
+  `tensorrt_llm` into the current Python process
+- added stdlib-only coverage for the new audit probe path in
+  `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
 - re-ran the validated local checks from this sandbox:
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
 - no new repo-local contract gap was exposed in this run
 - remaining blockers are still machine/runtime-specific:
   - installed TRT-LLM wheel in `.venv` still lacks `_torch/disaggregation`
   - installed TRT-LLM wheel still expects CUDA major `13`
   - this host still exposes only `libcublasLt.so.12*`
+  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
+    `tensorrt_llm._torch.disaggregation.transceiver` aborts in Open MPI / PMIx
+    before runtime validation can proceed
 
 ## Objective
 
@@ -1130,6 +1139,13 @@ Implemented so far:
   - a wheel/install matching the pinned checkout surface, or
   - a source-overlay workflow that imports `/tmp/trtllm-latest/tensorrt_llm`
     with compatible native dependencies on the validation host
+- The runtime audit now captures the import blocker directly too:
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+    reports subprocess-import failures for both:
+    - installed `tensorrt_llm`
+    - pinned-checkout `tensorrt_llm._torch.disaggregation.transceiver`
+  - both subprocesses abort on this host in Open MPI / PMIx during import,
+    before Python can reach `KvCacheTransceiverV2` runtime setup
 - After re-reading the current repo-local code and re-running the validation
   stack again on 2026-03-28 UTC, there is still no additional executable
   repo-local phase left in this sandbox beyond keeping this handoff current.
@@ -1138,13 +1154,15 @@ Implemented so far:
 
 ## Exact Next Step
 
-1. Run the new non-importing audit first on the intended validation host:
-   `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
-   Do not attempt the phase-7 smoke path until it reports both:
+1. Run the stricter runtime audit first on the intended validation host:
+   `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+   Do not attempt the phase-7 smoke path until it reports all of:
    - installed TRT-LLM surface includes `_torch/disaggregation`, or the host is
      explicitly using `/tmp/trtllm-latest/tensorrt_llm` as the import root
    - available `libcublasLt` major version matches the installed TRT-LLM wheel
      expectation
+   - subprocess import of the targeted TRT-LLM module path no longer aborts in
+     Open MPI / PMIx during import
 2. Re-run the direct TRT-LLM smoke check on a host or container where importing
    the targeted TRT-LLM disaggregation modules has all of:
    - an MPI environment that either works normally or is intentionally bypassed
