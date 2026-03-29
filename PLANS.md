@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:04:04 UTC
+Last updated: 2026-03-29 03:10:56 UTC
 
 Current run outcome:
 
@@ -11,10 +11,10 @@ Current run outcome:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
 - Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
-  permissive fallback behavior, unsupported-path drift in the supported
-  contract) and did not find another executable repo-local milestone in this
+  permissive fallback behavior, unsupported-path drift, and cleanup markers)
+  and again did not find another executable repo-local milestone in this
   sandbox.
-- Re-ran the full repo-local validation stack on 2026-03-29 UTC:
+- Re-ran the full repo-local validation stack on 2026-03-29 03:10 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 25 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
@@ -39,9 +39,9 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
-- No repo-local code change was justified in this run beyond refreshing this
-  handoff. The supported path is still green in-repo; the remaining work is
-  phase-7 validation on a runtime-capable host with:
+- No repo-local product-code change was justified in this run beyond
+  refreshing this handoff. The supported path is still green in-repo; the
+  remaining work is phase-7 validation on a runtime-capable host with:
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
   - an MPI/PMIx environment that can import TRT-LLM without aborting
@@ -49,8 +49,8 @@ Current run outcome:
 Exact next steps if another run happens on this machine:
 
 - Do not spend another run searching for repo-local supported-path work unless
-  the environment changes first; the current seam review did not expose another
-  executable milestone.
+  the environment changes first; this run's seam review plus validation stack
+  did not expose another executable milestone.
 - Treat phase 7 as externally blocked until at least one of these changes:
   - the installed TRT-LLM wheel/source matches the pinned disaggregation seam
   - CUDA 13 user-space libraries are available to the runtime
