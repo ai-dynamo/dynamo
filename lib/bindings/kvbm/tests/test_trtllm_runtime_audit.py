@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -178,6 +181,65 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
         )
 
         self.assertEqual(report["python_executable"], "/custom/python")
+
+    def test_build_runtime_report_uses_requested_probe_timeout(self) -> None:
+        module = _load_module()
+        observed_timeouts = []
+
+        def fake_runner(command, **kwargs):
+            del command
+            observed_timeouts.append(kwargs["timeout"])
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"module": "ok", "file": "/tmp/mod.py"}\n',
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkout_root = Path(temp_dir) / "trtllm-checkout" / "tensorrt_llm"
+            (checkout_root / "_torch" / "disaggregation").mkdir(parents=True)
+
+            report = module.build_runtime_report(
+                distribution=None,
+                pinned_checkout=checkout_root,
+                library_dirs=[],
+                probe_imports=True,
+                probe_timeout_s=7.5,
+                probe_runner=fake_runner,
+            )
+
+        self.assertEqual(report["probe_timeout_s"], 7.5)
+        self.assertEqual(observed_timeouts, [7.5, 7.5])
+
+    def test_main_supports_cli_overrides_and_fail_on_blocked(self) -> None:
+        module = _load_module()
+        captured = {}
+
+        def fake_build_runtime_report(**kwargs):
+            captured.update(kwargs)
+            return {"status": "blocked"}
+
+        with mock.patch.object(module, "build_runtime_report", side_effect=fake_build_runtime_report):
+            with mock.patch(
+                "sys.argv",
+                [
+                    "trtllm_runtime_audit.py",
+                    "--json",
+                    "--probe-imports",
+                    "--python-executable",
+                    "/custom/python",
+                    "--probe-timeout-s",
+                    "7.5",
+                    "--fail-on-blocked",
+                ],
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = module.main()
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(captured["python_executable"], "/custom/python")
+        self.assertEqual(captured["probe_timeout_s"], 7.5)
+        self.assertTrue(captured["probe_imports"])
 
 
 if __name__ == "__main__":

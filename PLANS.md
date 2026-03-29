@@ -5,6 +5,59 @@ Last updated: 2026-03-28 UTC
 Current run outcome:
 
 - re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
+  again that there is no repo-local `AGENTS.md` in this checkout, then re-read
+  the full current `PLANS.md` plus the active validation seam:
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
+  - `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+- re-ran the repo-local validation stack before changing code and confirmed the
+  remaining gap is still runtime-environment validation, not a new repo-local
+  manager API mismatch:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+    -> pass (`Ran 24 tests`, `OK`)
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 6 tests`, `OK`)
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+    -> `status: "blocked"`
+- the only additional repo-local milestone justified in this run was improving
+  the runtime-audit workflow so the remaining phase-7 blocker is easier to
+  validate and script on the next host:
+  - `trtllm_runtime_audit.py` now accepts:
+    - `--python-executable`
+    - `--probe-timeout-s`
+    - `--fail-on-blocked`
+  - `build_runtime_report(...)` now records `probe_timeout_s` in the report
+  - the CLI now returns exit status `1` when `--fail-on-blocked` is used and
+    the audit remains blocked
+  - added stdlib-only regression coverage for the new timeout / CLI controls in
+    `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
+- re-ran the post-change validation stack from this sandbox on 2026-03-28 UTC:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 8 tests`, `OK`)
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+    -> pass (`Ran 24 tests`, `OK`)
+  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+    -> pass (`Ran 32 tests`, `OK`)
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+    -> exit `1`, report `status: "blocked"`
+- the latest strict runtime audit in this sandbox still reports the same
+  external blocker chain with no new repo-local API mismatch:
+  - installed package root:
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+  - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
+  - installed wheel still exposes `_torch/pyexecutor` but not
+    `_torch/disaggregation`
+  - installed wheel metadata still expects CUDA major `13`
+  - host/container still only exposes `libcublasLt.so.12*`
+  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
+    `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
+    PMIx during import (`The PMIx server's listener thread failed to start`)
+- no additional repo-local manager change was justified in this run beyond the
+  audit CLI/reporting improvement above; the remaining work is still on a
+  runtime-capable host with a compatible TRT-LLM package/runtime stack
+- re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
   again that there is no repo-local `AGENTS.md` in this checkout, then
   re-read the full current `PLANS.md`, the phase-5 helper check in
   `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
@@ -1014,6 +1067,12 @@ Implemented so far:
     blocker signature
   - `build_runtime_report(..., python_executable=...)` returned
     `sys.executable` instead of the requested probe interpreter
+- The runtime audit is now also script-friendly for future validation hosts:
+  - `--fail-on-blocked` can make the audit fail fast in automation
+  - `--probe-timeout-s` can be raised if a future host stalls before emitting
+    useful import diagnostics
+  - `--python-executable` now exposes the already-supported probe interpreter
+    override directly from the CLI
 - After fixing that audit path, the pinned-checkout transceiver probe now
   reports the same PMIx listener-startup abort signature as the installed
   package import path on this machine, which removes the prior ambiguity from
@@ -1334,6 +1393,28 @@ Implemented so far:
   - reported `status: blocked`
   - both subprocess import probes now report the same PMIx listener-startup
     failure directly instead of one falling back to a timeout-only summary
+- Passed after the audit-CLI milestone:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  Notes:
+  - ran 8 tests
+- Passed after the same milestone:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+  Notes:
+  - ran 24 tests
+- Passed after the same milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 32 tests
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Failed as expected after the same milestone:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+  Notes:
+  - exit status is now `1` by design when the audit remains blocked
+  - findings were unchanged:
+    - installed wheel surface mismatch vs pinned checkout
+    - CUDA major mismatch (`expected 13`, local `libcublasLt.so.12*`)
+    - Open MPI / PMIx listener-startup abort on both subprocess import probes
 
 ## Remaining Work
 
@@ -1388,6 +1469,12 @@ Implemented so far:
     - pinned-checkout `tensorrt_llm._torch.disaggregation.transceiver`
   - both subprocesses abort on this host in Open MPI / PMIx during import,
     before Python can reach `KvCacheTransceiverV2` runtime setup
+- The runtime audit CLI is now the preferred phase-7 gate on future hosts:
+  - use `--fail-on-blocked` in scripted/CI validation
+  - use `--probe-timeout-s <seconds>` if a candidate host stalls before
+    emitting useful import diagnostics
+  - use `--python-executable <path>` if the current shell interpreter is not
+    the environment that should be probed
 - After re-reading the current repo-local code and re-running the validation
   stack again on 2026-03-28 UTC, there is still no additional executable
   repo-local phase left in this sandbox beyond keeping this handoff current.
@@ -1403,7 +1490,7 @@ Implemented so far:
 ## Exact Next Step
 
 1. First command on the next runtime-capable host:
-   `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+   `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
 2. Do not attempt the phase-7 smoke path until that audit reports all of:
    - installed TRT-LLM surface includes `_torch/disaggregation`, or the host is
      intentionally importing from `/tmp/trtllm-latest/tensorrt_llm`
@@ -1419,6 +1506,9 @@ Implemented so far:
    - `KvCacheTransceiverV2` construction/send/receive/status/shutdown
    So the next unresolved checkpoint is a real runtime import/transfer host,
    not another known repo-local manager API mismatch.
+   If the audit stalls without printing a useful import failure signature on a
+   future host, re-run Step 1 with a larger timeout:
+   `--probe-timeout-s 60`
 4. In this sandbox, keep using the validated editable-install command before
    any further runtime attempt:
    `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`

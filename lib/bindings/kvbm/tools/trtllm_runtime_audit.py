@@ -221,6 +221,7 @@ def build_runtime_report(
     library_dirs: Optional[Iterable[Path]] = None,
     probe_imports: bool = False,
     python_executable: str = sys.executable,
+    probe_timeout_s: float = 20.0,
     probe_runner: Any = subprocess.run,
 ) -> dict[str, Any]:
     distribution = _resolve_distribution("tensorrt_llm") if distribution is None else distribution
@@ -246,6 +247,7 @@ def build_runtime_report(
             _probe_python_import(
                 python_executable=python_executable,
                 module="tensorrt_llm",
+                timeout_s=probe_timeout_s,
                 runner=probe_runner,
             )
         )
@@ -255,6 +257,7 @@ def build_runtime_report(
                     python_executable=python_executable,
                     module="tensorrt_llm._torch.disaggregation.transceiver",
                     python_path=pinned_checkout.parent,
+                    timeout_s=probe_timeout_s,
                     runner=probe_runner,
                 )
             )
@@ -283,6 +286,7 @@ def build_runtime_report(
 
     return {
         "python_executable": python_executable,
+        "probe_timeout_s": probe_timeout_s,
         "installed_tensorrt_llm": installed,
         "pinned_checkout": checkout,
         "libraries": libraries,
@@ -319,9 +323,25 @@ def main() -> int:
         help="Emit the report as JSON",
     )
     parser.add_argument(
+        "--python-executable",
+        default=sys.executable,
+        help="Python interpreter used for subprocess import probes",
+    )
+    parser.add_argument(
+        "--probe-timeout-s",
+        type=float,
+        default=20.0,
+        help="Timeout in seconds for each subprocess import probe",
+    )
+    parser.add_argument(
         "--probe-imports",
         action="store_true",
         help="Run subprocess import probes for installed and pinned TRT-LLM modules",
+    )
+    parser.add_argument(
+        "--fail-on-blocked",
+        action="store_true",
+        help="Return a non-zero exit status when the audit reports blocked",
     )
     args = parser.parse_args()
 
@@ -329,12 +349,15 @@ def main() -> int:
         pinned_checkout=args.pinned_checkout,
         library_dirs=args.library_dir,
         probe_imports=args.probe_imports,
+        python_executable=args.python_executable,
+        probe_timeout_s=args.probe_timeout_s,
     )
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(f"status: {report['status']}")
         print(f"python: {report['python_executable']}")
+        print(f"probe timeout (s): {report['probe_timeout_s']}")
         installed = report["installed_tensorrt_llm"]
         print(
             "installed tensorrt_llm: "
@@ -364,6 +387,8 @@ def main() -> int:
             print("findings:")
             for finding in report["findings"]:
                 print(f"- {finding}")
+    if args.fail_on_blocked and report["status"] == "blocked":
+        return 1
     return 0
 
 
