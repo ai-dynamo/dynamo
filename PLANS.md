@@ -5,8 +5,8 @@ Last updated: 2026-03-28 UTC
 Current run outcome:
 
 - re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
-  there is no repo-local `AGENTS.md` in this checkout, then re-read the full
-  current `PLANS.md`, the phase-5 helper check in
+  again that there is no repo-local `AGENTS.md` in this checkout, then re-read
+  the full current `PLANS.md`, the phase-5 helper check in
   `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
@@ -44,6 +44,8 @@ Current run outcome:
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import before the TRT-LLM runtime reaches KVBM-owned transfer
     setup
+  - the latest probe still reports the same PMIx listener failure signature:
+    `The PMIx server's listener thread failed to start`
 - current runtime blockers are unchanged and still external to this repo:
   - installed TRT-LLM wheel in `.venv` is `1.2.0` and still lacks
     `_torch/disaggregation`
@@ -1191,6 +1193,26 @@ Implemented so far:
   Notes:
   - reported `status: blocked`
   - blocker details were still unchanged:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA major `13`
+    - host only exposes `libcublasLt.so.12*`
+    - subprocess import of both installed and pinned TRT-LLM module paths still
+      aborts in Open MPI / PMIx during import
+- Passed again in the current 2026-03-28 UTC handoff-refresh run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 27 tests
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+- Passed again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+  Notes:
+  - reported `status: blocked`
+  - findings were unchanged:
     - installed wheel lacks `_torch/disaggregation`
     - installed wheel expects CUDA major `13`
     - host only exposes `libcublasLt.so.12*`
