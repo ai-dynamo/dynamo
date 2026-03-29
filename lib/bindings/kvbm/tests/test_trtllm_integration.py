@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import importlib
 import importlib.util
 import enum
@@ -62,8 +63,10 @@ class TrtllmIntegrationTest(unittest.TestCase):
             if name == "kvbm"
             or name.startswith("kvbm.")
             or name == "nixl"
+            or name == "msgpack"
             or name == "tensorrt_llm"
             or name.startswith("tensorrt_llm.")
+            or name == "torch"
         }
 
         for name in list(self._saved_modules):
@@ -100,8 +103,10 @@ class TrtllmIntegrationTest(unittest.TestCase):
                 name == "kvbm"
                 or name.startswith("kvbm.")
                 or name == "nixl"
+                or name == "msgpack"
                 or name == "tensorrt_llm"
                 or name.startswith("tensorrt_llm.")
+                or name == "torch"
             ):
                 sys.modules.pop(name, None)
         sys.modules.update(self._saved_modules)
@@ -109,6 +114,17 @@ class TrtllmIntegrationTest(unittest.TestCase):
     def _install_pinned_trtllm_disagg_stubs(self):
         tensorrt_llm = types.ModuleType("tensorrt_llm")
         tensorrt_llm.__path__ = [str(TRTLLM_ROOT)]
+        tensorrt_llm.logger = types.SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        )
+
+        class _DisaggregatedParams:
+            def __init__(self, disagg_request_id=None, schedule_style=None) -> None:
+                self.disagg_request_id = disagg_request_id
+                self.schedule_style = schedule_style
+
+        tensorrt_llm.DisaggregatedParams = _DisaggregatedParams
         sys.modules["tensorrt_llm"] = tensorrt_llm
 
         for package_name in (
@@ -236,6 +252,208 @@ class TrtllmIntegrationTest(unittest.TestCase):
             TRTLLM_ROOT / "_torch/disaggregation/native/rank_info.py",
         )
         return page_mod, utils_page_mod, kv_extractor_mod, rank_info_mod
+
+    def _install_pinned_trtllm_transceiver_stubs(self):
+        _, _, kv_extractor_mod, _ = self._install_pinned_trtllm_disagg_stubs()
+
+        torch_mod = types.ModuleType("torch")
+        torch_mod.cuda = types.SimpleNamespace(current_device=lambda: 0)
+        sys.modules["torch"] = torch_mod
+
+        communicator_mod = types.ModuleType("tensorrt_llm._torch.distributed.communicator")
+        communicator_mod.Distributed = type("Distributed", (), {})
+        sys.modules["tensorrt_llm._torch.distributed.communicator"] = communicator_mod
+
+        kv_cache_transceiver_mod = types.ModuleType(
+            "tensorrt_llm._torch.pyexecutor.kv_cache_transceiver"
+        )
+        kv_cache_transceiver_mod.KvCacheTransceiver = type("KvCacheTransceiver", (), {})
+        sys.modules["tensorrt_llm._torch.pyexecutor.kv_cache_transceiver"] = (
+            kv_cache_transceiver_mod
+        )
+
+        llm_request_mod = types.ModuleType("tensorrt_llm._torch.pyexecutor.llm_request")
+        llm_request_mod.LlmRequest = type("LlmRequest", (), {})
+        sys.modules["tensorrt_llm._torch.pyexecutor.llm_request"] = llm_request_mod
+
+        resource_manager = sys.modules["tensorrt_llm._torch.pyexecutor.resource_manager"]
+        resource_manager.KVCacheManagerV2 = type("KVCacheManagerV2", (), {})
+
+        bindings_mod = sys.modules["tensorrt_llm.bindings"]
+        bindings_mod.LlmRequestState = type(
+            "LlmRequestState",
+            (),
+            {
+                "DISAGG_CONTEXT_TRANS_IN_PROGRESS": "ctx_in_progress",
+                "DISAGG_CONTEXT_COMPLETE": "ctx_complete",
+                "DISAGG_GENERATION_TRANS_IN_PROGRESS": "gen_in_progress",
+                "DISAGG_GENERATION_TRANS_COMPLETE": "gen_complete",
+                "DISAGG_TRANS_ERROR": "transfer_error",
+                "DISAGG_CONTEXT_WAIT_SCHEDULER": "ctx_wait",
+                "CONTEXT_INIT": "ctx_init",
+            },
+        )
+
+        executor_mod = types.ModuleType("tensorrt_llm.bindings.executor")
+
+        class _ContextPhaseParams:
+            def __init__(
+                self,
+                *,
+                first_gen_tokens,
+                req_id,
+                opaque_state,
+                draft_tokens,
+                ctx_dp_rank,
+                disagg_info_endpoint,
+            ) -> None:
+                self.first_gen_tokens = first_gen_tokens
+                self.req_id = req_id
+                self.opaque_state = opaque_state
+                self.draft_tokens = draft_tokens
+                self.ctx_dp_rank = ctx_dp_rank
+                self.disagg_info_endpoint = disagg_info_endpoint
+
+        executor_mod.ContextPhaseParams = _ContextPhaseParams
+        sys.modules["tensorrt_llm.bindings.executor"] = executor_mod
+
+        disagg_params_mod = types.ModuleType("tensorrt_llm.disaggregated_params")
+        disagg_params_mod.DisaggScheduleStyle = type(
+            "DisaggScheduleStyle", (), {"GENERATION_FIRST": "generation_first"}
+        )
+        sys.modules["tensorrt_llm.disaggregated_params"] = disagg_params_mod
+
+        llm_args_mod = types.ModuleType("tensorrt_llm.llmapi.llm_args")
+        llm_args_mod.CacheTransceiverConfig = type("CacheTransceiverConfig", (), {})
+        sys.modules["tensorrt_llm.llmapi.llm_args"] = llm_args_mod
+
+        mapping_mod = types.ModuleType("tensorrt_llm.mapping")
+        mapping_mod.Mapping = type("Mapping", (), {})
+        sys.modules["tensorrt_llm.mapping"] = mapping_mod
+
+        base_transfer_mod = _load_module(
+            "tensorrt_llm._torch.disaggregation.base.transfer",
+            TRTLLM_ROOT / "_torch/disaggregation/base/transfer.py",
+        )
+
+        native_transfer_mod = types.ModuleType("tensorrt_llm._torch.disaggregation.native.transfer")
+
+        @dataclass
+        class _TransferWorkerConfig:
+            kv_cache_manager: object
+            device_id: int
+            instance_name: str
+            max_concurrent_sessions: int
+            tx_timeout_s: float
+            rx_timeout_s: float
+
+        class _FakeTxSession:
+            def __init__(self, req) -> None:
+                self.req = req
+                self.sent_slices = []
+                self.sent_aux = False
+                self.closed = False
+                self.disagg_request_id = req.request_id
+
+            def send(self, slice_):
+                self.sent_slices.append(slice_)
+                return object()
+
+            def pack_aux(self, req) -> None:
+                self.req = req
+
+            def send_aux(self) -> None:
+                self.sent_aux = True
+
+            def is_completed(self) -> bool:
+                return True
+
+            def has_failed(self) -> bool:
+                return False
+
+            def wait_complete(self):
+                return base_transfer_mod.WaitResult.COMPLETED
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _FakeRxSession:
+            def __init__(self, req) -> None:
+                self.req = req
+                self.received_slices = []
+                self.closed = False
+                self.disagg_request_id = req.request_id
+
+            def receive(self, slice_):
+                self.received_slices.append(slice_)
+                return object()
+
+            def unpack_aux(self, req) -> None:
+                req.py_first_gen_tokens = []
+                req.py_draft_tokens = []
+
+            def is_completed(self) -> bool:
+                return True
+
+            def has_failed(self) -> bool:
+                return False
+
+            def wait_complete(self, blocking: bool = False):
+                del blocking
+                return base_transfer_mod.WaitResult.COMPLETED
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _TransferWorker:
+            instances = []
+
+            def __init__(self, config: _TransferWorkerConfig) -> None:
+                self.config = config
+                self.page_table = kv_extractor_mod.build_page_table_from_manager(
+                    config.kv_cache_manager
+                )
+                self.rank_info_server_endpoint = "ctx-endpoint"
+                self.sender_endpoint = f"sender-{config.device_id}"
+                self.tx_sessions = []
+                self.rx_sessions = []
+                self.rank_info_calls = []
+                self.shutdown_calls = 0
+                type(self).instances.append(self)
+
+            def populate_instance_and_rank_info(self, *, endpoints, layer_num_per_pp) -> None:
+                self.rank_info_calls.append(
+                    {"endpoints": list(endpoints), "layer_num_per_pp": list(layer_num_per_pp)}
+                )
+
+            def create_tx_session(self, req):
+                session = _FakeTxSession(req)
+                self.tx_sessions.append(session)
+                return session
+
+            def create_rx_session(self, req):
+                session = _FakeRxSession(req)
+                self.rx_sessions.append(session)
+                return session
+
+            def has_all_peer_req_infos_for_send(self, rid: int) -> bool:
+                del rid
+                return True
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+
+        native_transfer_mod.TransferWorkerConfig = _TransferWorkerConfig
+        native_transfer_mod.TransferWorker = _TransferWorker
+        sys.modules["tensorrt_llm._torch.disaggregation.native.transfer"] = (
+            native_transfer_mod
+        )
+
+        transceiver_mod = _load_module(
+            "tensorrt_llm._torch.disaggregation.transceiver",
+            TRTLLM_ROOT / "_torch/disaggregation/transceiver.py",
+        )
+        return transceiver_mod, _TransferWorker
 
     def test_rust_loader_uses_dedicated_trtllm_module(self) -> None:
         rust = importlib.import_module("kvbm.trtllm_integration.rust")
@@ -1281,6 +1499,134 @@ class TrtllmIntegrationTest(unittest.TestCase):
         round_trip = rank_info_mod.RankInfo.from_bytes(rank_info.to_bytes())
         self.assertEqual(round_trip.instance_name, "kvbm-rank")
         self.assertEqual(round_trip.page_table.pool_groups[0].pools[0].num_slots, 8)
+
+    def test_manager_supports_pinned_trtllm_python_transceiver(self) -> None:
+        transceiver_mod, transfer_worker_cls = self._install_pinned_trtllm_transceiver_stubs()
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        class _FakeTensor:
+            def __init__(self, shape: tuple[int, ...], strides: tuple[int, ...], ptr: int) -> None:
+                self.shape = shape
+                self._strides = strides
+                self._ptr = ptr
+
+            def stride(self, dim: int) -> int:
+                return self._strides[dim]
+
+            def element_size(self) -> int:
+                return 2
+
+            def data_ptr(self) -> int:
+                return self._ptr
+
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[4, 5],
+            total_num_kv_heads_per_layer=[8, 8, 8, 8, 6, 6],
+            max_seq_len=128,
+            num_blocks=12,
+            primary_pool=_FakeTensor(
+                shape=(12, 2, 2, 4, 6, 16),
+                strides=(1536, 768, 384, 96, 16, 1),
+                ptr=12288,
+            ),
+            device_id=2,
+            world_size=4,
+            tp_size=2,
+            tp_rank=1,
+            pp_size=2,
+            pp_rank=1,
+        )
+
+        manager.add_dummy_requests([901], token_nums=[12])
+
+        class _Dist:
+            rank = 0
+            tp_size = 2
+
+            def broadcast(self, value, root):
+                del root
+                return value if value is not None else "broadcast-value"
+
+            def allgather(self, value):
+                return [value, value]
+
+            def pp_allgather(self, value):
+                return [value, value]
+
+            def tp_allgather(self, value):
+                return [list(value), list(value)]
+
+        config = types.SimpleNamespace(
+            kv_transfer_timeout_ms=7000,
+            kv_transfer_sender_future_timeout_ms=3000,
+        )
+        transceiver = transceiver_mod.KvCacheTransceiverV2(
+            manager.mapping,
+            _Dist(),
+            manager,
+            config,
+        )
+
+        worker = transfer_worker_cls.instances[-1]
+        self.assertEqual(worker.config.kv_cache_manager, manager)
+        self.assertEqual(worker.config.device_id, 0)
+        self.assertEqual(worker.config.max_concurrent_sessions, manager.max_batch_size * 20000)
+        self.assertEqual(
+            worker.rank_info_calls,
+            [{"endpoints": ["sender-0", "sender-0"], "layer_num_per_pp": [2, 2]}],
+        )
+
+        request = types.SimpleNamespace(
+            request_id=901,
+            py_request_id=901,
+            py_disaggregated_params=None,
+            prompt_len=12,
+            state=None,
+        )
+        transceiver.respond_and_send_async(request)
+        self.assertEqual(request.state, "ctx_in_progress")
+        self.assertEqual(request.context_phase_params.ctx_dp_rank, 0)
+        self.assertEqual(request.context_phase_params.disagg_info_endpoint, "ctx-endpoint")
+        self.assertEqual(
+            worker.tx_sessions[0].sent_slices[0].block_ids_per_layer_groups,
+            [[0, 1, 2]],
+        )
+
+        completed, failed = transceiver.check_context_transfer_status(1, mark_complete=True)
+        self.assertEqual((completed, failed), ([901], []))
+        self.assertEqual(request.state, "ctx_complete")
+
+        transceiver.request_and_receive_async(request)
+        self.assertEqual(request.state, "gen_in_progress")
+        self.assertEqual(
+            worker.rx_sessions[0].received_slices[0].block_ids_per_layer_groups,
+            [[0, 1, 2]],
+        )
+
+        completed, failed = transceiver.check_gen_transfer_status(1)
+        self.assertEqual((completed, failed), ([901], []))
+        self.assertEqual(request.state, "gen_complete")
+        self.assertTrue(transceiver.check_gen_transfer_complete())
+
+        waiting_request = types.SimpleNamespace(
+            request_id=902,
+            py_request_id=902,
+            py_disaggregated_params=None,
+            prompt_len=4,
+            state=None,
+        )
+        transceiver.prepare_context_requests([waiting_request])
+        self.assertEqual(waiting_request.state, "ctx_init")
+        self.assertEqual(
+            transceiver.get_disaggregated_params(),
+            {"ctx_dp_rank": 0, "ctx_info_endpoint": ["ctx-endpoint"]},
+        )
+
+        transceiver.shutdown()
+        self.assertEqual(worker.shutdown_calls, 1)
 
 
 if __name__ == "__main__":

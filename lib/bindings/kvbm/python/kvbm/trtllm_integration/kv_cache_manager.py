@@ -913,8 +913,11 @@ class KvbmKVCacheManager:
         self,
         request_ids: list[int],
         layer_id: int = 0,
+        *,
+        layer_idx: Optional[int] = None,
     ) -> list[list[int]]:
-        del layer_id
+        resolved_layer = layer_idx if layer_idx is not None else layer_id
+        self._resolve_layer_offset(resolved_layer)
         if self._native_state is not None:
             return [list(row) for row in self._native_state.get_batch_cache_indices(request_ids)]
         return [self.get_cache_indices(request_id) for request_id in request_ids]

@@ -546,6 +546,21 @@ Implemented so far:
     surface is intentionally absent in tests
   - added a regression test that confirms missing pinned symbols now fail the
     import immediately instead of silently degrading
+- Completed the remaining repo-local pinned transceiver coverage milestone:
+  - added a stdlib-only regression harness that loads the pinned
+    `KvCacheTransceiverV2` source directly and exercises:
+    - constructor / rank-info exchange
+    - `respond_and_send_async()`
+    - `check_context_transfer_status()`
+    - `request_and_receive_async()`
+    - `check_gen_transfer_status()`
+    - `prepare_context_requests()`
+    - `get_disaggregated_params()`
+    - `shutdown()`
+  - that test surfaced one real pinned-interface mismatch in the manager:
+    `get_batch_cache_indices(..., layer_idx=...)`
+  - fixed the manager surface to accept the pinned `layer_idx` keyword and to
+    validate it against the local layer mapping
 - Investigated the remaining local build path after that cleanup:
   - `maturin develop` is still blocked by `cargo metadata` trying to download
     uncached `jiff-tzdb v0.1.6` from crates.io in this network-restricted
@@ -718,6 +733,15 @@ Implemented so far:
   if `_trtllm_integration` is importable but is missing
   `TrtllmStateManager` or `create_primary_pool`, the import now fails
   immediately instead of silently treating that drift as an optional downgrade.
+- The pinned Python transceiver path was not fully validated before this run:
+  `KvCacheTransceiverV2._get_block_ids()` calls
+  `get_batch_cache_indices(..., layer_idx=...)`, and that keyword mismatch was
+  a real repo-local API gap until fixed here.
+- Once MPI is bypassed artificially in the installed `.venv` TRT-LLM runtime
+  path by injecting a stub `mpi4py` module, the next failure is:
+  `ImportError: libcublasLt.so.13: cannot open shared object file`
+  So the remaining real-runtime blocker is now narrowed from "MPI/PMIx import
+  abort" to a CUDA user-space library mismatch for this host/container.
 - The `jiff-tzdb` fetch was a lockfile/source problem, not a compiler problem:
   once the kvbm-related workspaces were repointed to vendored `jiff 0.2.22`
   sources and their lockfiles updated offline, `cargo metadata` and
@@ -890,6 +914,18 @@ Implemented so far:
   `PYTHONPATH=lib/bindings/kvbm/python .venv/bin/python -c 'import kvbm'`
 - Passed after tightening the remaining Rust-loader symbol contract:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after fixing the pinned transceiver `layer_idx` API mismatch and
+  adding direct `KvCacheTransceiverV2` coverage:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Failed in the real `.venv` TRT-LLM import path after bypassing MPI with a
+  stubbed `mpi4py` module:
+  `.venv/bin/python - <<'PY' ... import tensorrt_llm._torch.disaggregation.transceiver ... PY`
+  Reason:
+  - import advanced past the earlier MPI/PMIx abort
+  - the next blocker is now
+    `ImportError: libcublasLt.so.13: cannot open shared object file`
 - Failed after the same packaging cleanup:
   `maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
   Reason:
@@ -945,17 +981,27 @@ Implemented so far:
   - `nixl` is optional for the base editable install and remains available via
     `kvbm[cu12]` / `kvbm[cu13]` when needed
 - Additional external blocker now identified for phase 7 runtime validation:
-  the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
-  direct `KvCacheTransceiverV2` / transfer-worker smoke check can run.
+  the local `.venv` TRT-LLM import path now has two environment-sensitive
+  layers:
+  - default import path still aborts inside Open MPI / PMIx unless MPI is
+    bypassed
+  - after MPI is bypassed, the next blocker is missing CUDA 13 user-space
+    libraries (`libcublasLt.so.13`) on this machine
 
 ## Exact Next Step
 
 1. Re-run the direct TRT-LLM smoke check on a host or container where importing
-   `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
-   PMIx. The repo-local adapter already passes the pinned-source
-   `build_page_table_from_manager(manager)` and
-   `RankInfo.from_kv_cache_manager(...)` paths, so the next unresolved runtime
-   checkpoint is `KvCacheTransceiverV2` / transfer-worker construction.
+   `.venv` `tensorrt_llm` disaggregation modules has both:
+   - an MPI environment that either works normally or is intentionally bypassed
+     for import-only validation
+   - CUDA user-space libraries matching the installed TRT-LLM wheel, notably
+     `libcublasLt.so.13`
+   The repo-local adapter now passes the pinned-source
+   `build_page_table_from_manager(manager)`,
+   `RankInfo.from_kv_cache_manager(...)`, and
+   `KvCacheTransceiverV2` Python construction/send/receive paths, so the next
+   unresolved checkpoint is a real runtime import/transfer environment rather
+   than another known Python manager API mismatch.
 2. In this sandbox, keep using the now-validated editable-install command
    before that runtime smoke check:
    `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
