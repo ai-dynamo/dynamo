@@ -51,10 +51,6 @@ use dynamo_async_openai::types::responses::{IncludeEnum, Reasoning, Truncation};
 use super::anthropic::types::{AnthropicCreateMessageRequest, ThinkingConfig};
 use super::openai::responses::NvCreateResponse;
 
-// ---------------------------------------------------------------------------
-// API context — preserves API-specific fields that don't fit NvCreateChatCompletionRequest
-// ---------------------------------------------------------------------------
-
 /// Identifies which API surface originated the request and carries
 /// fields specific to that API that cannot be represented in the
 /// OpenAI Chat Completions format.
@@ -150,10 +146,6 @@ pub struct CacheBreakpoint {
     pub cache_control: CacheControl,
 }
 
-// ---------------------------------------------------------------------------
-// UnifiedRequest
-// ---------------------------------------------------------------------------
-
 /// API-agnostic request wrapper that preserves the full context from any
 /// API surface while remaining compatible with the existing preprocessor.
 #[derive(Debug, Clone)]
@@ -166,10 +158,6 @@ pub struct UnifiedRequest {
     /// that were dropped during conversion to `NvCreateChatCompletionRequest`.
     pub api_context: ApiContext,
 }
-
-// ---------------------------------------------------------------------------
-// Constructors — TryFrom for each API surface
-// ---------------------------------------------------------------------------
 
 impl From<NvCreateChatCompletionRequest> for UnifiedRequest {
     fn from(req: NvCreateChatCompletionRequest) -> Self {
@@ -227,10 +215,6 @@ impl TryFrom<NvCreateResponse> for UnifiedRequest {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers for extracting Anthropic-specific context
-// ---------------------------------------------------------------------------
 
 /// Walk the Anthropic message array and collect per-block cache_control
 /// annotations with their (message_index, block_index) positions.
@@ -293,9 +277,7 @@ fn extract_disable_parallel_tool_use(req: &AnthropicCreateMessageRequest) -> boo
     }
 }
 
-// ---------------------------------------------------------------------------
 // Trait implementations — delegate to inner NvCreateChatCompletionRequest
-// ---------------------------------------------------------------------------
 
 impl NvExtProvider for UnifiedRequest {
     fn nvext(&self) -> Option<&NvExt> {
@@ -447,10 +429,6 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
     fn get_common_ignore_eos(&self) -> Option<bool> {
         self.inner.common.ignore_eos
     }
-
-    fn get_ignore_eos(&self) -> Option<bool> {
-        self.inner.common.ignore_eos
-    }
 }
 
 impl OpenAIOutputOptionsProvider for UnifiedRequest {
@@ -523,10 +501,6 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Convenience accessors
-// ---------------------------------------------------------------------------
-
 impl UnifiedRequest {
     /// Returns the Anthropic context if this request originated from the
     /// Anthropic Messages API.
@@ -553,10 +527,6 @@ impl UnifiedRequest {
         self.inner
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
