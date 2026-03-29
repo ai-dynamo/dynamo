@@ -47,7 +47,6 @@ var dnsLabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
 type CheckpointOptions struct {
 	ManifestPath   string
 	Namespace      string
-	Service        string
 	CheckpointHash string
 	Timeout        time.Duration
 }
@@ -55,7 +54,6 @@ type CheckpointOptions struct {
 type RestoreOptions struct {
 	ManifestPath   string
 	Namespace      string
-	Service        string
 	CheckpointHash string
 	Timeout        time.Duration
 }
@@ -173,7 +171,7 @@ func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error)
 		return nil, err
 	}
 
-	worker, err := loadWorker(opts.ManifestPath, opts.Service)
+	worker, err := loadWorker(opts.ManifestPath)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +219,7 @@ func RunRestore(ctx context.Context, opts RestoreOptions) (*Result, error) {
 		return nil, err
 	}
 
-	worker, err := loadWorker(opts.ManifestPath, opts.Service)
+	worker, err := loadWorker(opts.ManifestPath)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +388,7 @@ func snapshotStorageFromDaemonSet(daemonSet *appsv1.DaemonSet) (snapshotStorage,
 	return snapshotStorage{}, false
 }
 
-func loadWorker(manifestPath string, requestedService string) (selectedWorker, error) {
+func loadWorker(manifestPath string) (selectedWorker, error) {
 	content, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return selectedWorker{}, fmt.Errorf("read manifest %s: %w", manifestPath, err)
@@ -415,13 +413,10 @@ func loadWorker(manifestPath string, requestedService string) (selectedWorker, e
 		return selectedWorker{}, fmt.Errorf("manifest %s has no worker services", manifestPath)
 	}
 
-	serviceName := strings.TrimSpace(requestedService)
-	if serviceName == "" {
-		if len(workerNames) > 1 {
-			return selectedWorker{}, fmt.Errorf("manifest %s has multiple worker services; pass --service (%s)", manifestPath, strings.Join(workerNames, ", "))
-		}
-		serviceName = workerNames[0]
+	if len(workerNames) > 1 {
+		return selectedWorker{}, fmt.Errorf("manifest %s has multiple worker services (%s); snapshotctl requires exactly one worker service", manifestPath, strings.Join(workerNames, ", "))
 	}
+	serviceName := workerNames[0]
 
 	service, ok := manifest.Spec.Services[serviceName]
 	if !ok {

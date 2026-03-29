@@ -42,7 +42,6 @@ func runCheckpoint(args []string) error {
 
 	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang DynamoGraphDeployment manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
-	service := flags.String("service", "", "Worker service name from the DGD manifest")
 	checkpointHash := flags.String("checkpoint-hash", "", "Explicit checkpoint hash; defaults to a generated value")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
@@ -56,7 +55,6 @@ func runCheckpoint(args []string) error {
 	result, err := manual.RunCheckpoint(context.Background(), manual.CheckpointOptions{
 		ManifestPath:   *manifest,
 		Namespace:      *namespace,
-		Service:        *service,
 		CheckpointHash: *checkpointHash,
 		Timeout:        *timeout,
 	})
@@ -81,7 +79,6 @@ func runRestore(args []string) error {
 
 	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang DynamoGraphDeployment manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
-	service := flags.String("service", "", "Worker service name from the DGD manifest")
 	checkpointHash := flags.String("checkpoint-hash", "", "Checkpoint hash to restore")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
 
@@ -95,7 +92,6 @@ func runRestore(args []string) error {
 	result, err := manual.RunRestore(context.Background(), manual.RestoreOptions{
 		ManifestPath:   *manifest,
 		Namespace:      *namespace,
-		Service:        *service,
 		CheckpointHash: *checkpointHash,
 		Timeout:        *timeout,
 	})
@@ -123,7 +119,7 @@ Subcommands:
   restore
 
 Examples:
-  snapshotctl checkpoint --manifest examples/backends/vllm/deploy/agg.yaml --service VllmDecodeWorker
+  snapshotctl checkpoint --manifest examples/backends/vllm/deploy/agg.yaml
   snapshotctl restore --manifest examples/backends/sglang/deploy/agg.yaml --checkpoint-hash manual-snapshot-123
 `)
 }
