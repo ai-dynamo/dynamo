@@ -28,7 +28,7 @@ nccl = ["dep:cudarc", "cudarc/nccl"]  # Enable NCCL collective operations
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 xpu = []  # Level-Zero backend (placeholder for Phase 7)
-hpu = []  # Synapse backend (placeholder for Phase 3)
+hpu = ["dep:synapse"]  # Synapse backend (Phase 3)
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
@@ -116,6 +116,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 aligned-vec = { version = "0.6.4", optional = true }
 nixl-sys = { version = "=0.10.1", optional = true }
 cudarc = { workspace = true, optional = true }
+synapse = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
 # media (zlib compression for NIXL metadata)
