@@ -43,7 +43,6 @@ func runCheckpoint(args []string) error {
 	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang DynamoGraphDeployment manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	service := flags.String("service", "", "Worker service name from the DGD manifest")
-	snapshotPVC := flags.String("snapshot-pvc", "", "PVC name mounted at /checkpoints")
 	checkpointHash := flags.String("checkpoint-hash", "", "Explicit checkpoint hash; defaults to a generated value")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
@@ -58,7 +57,6 @@ func runCheckpoint(args []string) error {
 		ManifestPath:   *manifest,
 		Namespace:      *namespace,
 		Service:        *service,
-		SnapshotPVC:    *snapshotPVC,
 		CheckpointHash: *checkpointHash,
 		Timeout:        *timeout,
 	})
@@ -84,7 +82,6 @@ func runRestore(args []string) error {
 	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang DynamoGraphDeployment manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	service := flags.String("service", "", "Worker service name from the DGD manifest")
-	snapshotPVC := flags.String("snapshot-pvc", "", "PVC name mounted at /checkpoints")
 	checkpointHash := flags.String("checkpoint-hash", "", "Checkpoint hash to restore")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
 
@@ -99,7 +96,6 @@ func runRestore(args []string) error {
 		ManifestPath:   *manifest,
 		Namespace:      *namespace,
 		Service:        *service,
-		SnapshotPVC:    *snapshotPVC,
 		CheckpointHash: *checkpointHash,
 		Timeout:        *timeout,
 	})
@@ -127,7 +123,7 @@ Subcommands:
   restore
 
 Examples:
-  snapshotctl checkpoint --manifest examples/backends/vllm/deploy/agg.yaml --service VllmDecodeWorker --snapshot-pvc snapshot-pvc
-  snapshotctl restore --manifest examples/backends/sglang/deploy/agg.yaml --snapshot-pvc snapshot-pvc --checkpoint-hash manual-snapshot-123
+  snapshotctl checkpoint --manifest examples/backends/vllm/deploy/agg.yaml --service VllmDecodeWorker
+  snapshotctl restore --manifest examples/backends/sglang/deploy/agg.yaml --checkpoint-hash manual-snapshot-123
 `)
 }

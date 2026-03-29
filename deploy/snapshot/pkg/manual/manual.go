@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -47,7 +48,6 @@ type CheckpointOptions struct {
 	ManifestPath   string
 	Namespace      string
 	Service        string
-	SnapshotPVC    string
 	CheckpointHash string
 	Timeout        time.Duration
 }
@@ -56,7 +56,6 @@ type RestoreOptions struct {
 	ManifestPath   string
 	Namespace      string
 	Service        string
-	SnapshotPVC    string
 	CheckpointHash string
 	Timeout        time.Duration
 }
@@ -155,13 +154,18 @@ type runSpec struct {
 	SeccompLocalhostProfile string
 	CudaCheckpointLaunchJob bool
 	Worker                  selectedWorker
-	SnapshotPVC             string
+	SnapshotStorage         snapshotStorage
 	ServiceAccountName      string
 	RoleName                string
 	RoleBindingName         string
 	CheckpointJobName       string
 	CheckpointPodLabel      string
 	RestorePodName          string
+}
+
+type snapshotStorage struct {
+	PVCName  string
+	BasePath string
 }
 
 func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error) {
@@ -179,7 +183,12 @@ func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error)
 		return nil, err
 	}
 
-	spec := buildRunSpec(resolveNamespace(opts.Namespace, worker.ManifestNamespace, defaultNamespace), opts.CheckpointHash, worker, opts.SnapshotPVC)
+	namespace := resolveNamespace(opts.Namespace, worker.ManifestNamespace, defaultNamespace)
+	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
+	if err != nil {
+		return nil, err
+	}
+	spec := buildRunSpec(namespace, opts.CheckpointHash, worker, storage)
 
 	if err := ensureSupportResources(ctx, clientset, spec); err != nil {
 		return nil, err
@@ -222,7 +231,12 @@ func RunRestore(ctx context.Context, opts RestoreOptions) (*Result, error) {
 		return nil, err
 	}
 
-	spec := buildRunSpec(resolveNamespace(opts.Namespace, worker.ManifestNamespace, defaultNamespace), opts.CheckpointHash, worker, opts.SnapshotPVC)
+	namespace := resolveNamespace(opts.Namespace, worker.ManifestNamespace, defaultNamespace)
+	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
+	if err != nil {
+		return nil, err
+	}
+	spec := buildRunSpec(namespace, opts.CheckpointHash, worker, storage)
 
 	if err := ensureSupportResources(ctx, clientset, spec); err != nil {
 		return nil, err
@@ -259,9 +273,6 @@ func validateCheckpointOptions(opts CheckpointOptions) error {
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		missing = append(missing, "--manifest")
 	}
-	if strings.TrimSpace(opts.SnapshotPVC) == "" {
-		missing = append(missing, "--snapshot-pvc")
-	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required flags: %s", strings.Join(missing, ", "))
 	}
@@ -275,9 +286,6 @@ func validateRestoreOptions(opts RestoreOptions) error {
 	var missing []string
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		missing = append(missing, "--manifest")
-	}
-	if strings.TrimSpace(opts.SnapshotPVC) == "" {
-		missing = append(missing, "--snapshot-pvc")
 	}
 	if strings.TrimSpace(opts.CheckpointHash) == "" {
 		missing = append(missing, "--checkpoint-hash")
@@ -312,6 +320,74 @@ func loadClientset() (kubernetes.Interface, string, error) {
 		return nil, "", fmt.Errorf("create kubernetes client: %w", err)
 	}
 	return clientset, namespace, nil
+}
+
+func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotStorage, error) {
+	daemonSets, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=snapshot",
+	})
+	if err != nil {
+		return snapshotStorage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
+	}
+	if len(daemonSets.Items) == 0 {
+		return snapshotStorage{}, fmt.Errorf("no snapshot-agent daemonset found in namespace %s", namespace)
+	}
+
+	slices.SortFunc(daemonSets.Items, func(a, b appsv1.DaemonSet) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	for _, daemonSet := range daemonSets.Items {
+		storage, ok := snapshotStorageFromDaemonSet(&daemonSet)
+		if ok {
+			return storage, nil
+		}
+	}
+
+	names := make([]string, 0, len(daemonSets.Items))
+	for _, daemonSet := range daemonSets.Items {
+		names = append(names, daemonSet.Name)
+	}
+	return snapshotStorage{}, fmt.Errorf("snapshot-agent daemonset in %s does not mount a PVC-backed checkpoint volume (%s)", namespace, strings.Join(names, ", "))
+}
+
+func snapshotStorageFromDaemonSet(daemonSet *appsv1.DaemonSet) (snapshotStorage, bool) {
+	if daemonSet == nil {
+		return snapshotStorage{}, false
+	}
+
+	mountPaths := map[string]string{}
+	for _, container := range daemonSet.Spec.Template.Spec.Containers {
+		if container.Name != "agent" {
+			continue
+		}
+		for _, mount := range container.VolumeMounts {
+			if strings.TrimSpace(mount.MountPath) == "" {
+				continue
+			}
+			mountPaths[mount.Name] = mount.MountPath
+		}
+	}
+
+	for _, volume := range daemonSet.Spec.Template.Spec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		basePath, ok := mountPaths[volume.Name]
+		if !ok || strings.TrimSpace(basePath) == "" {
+			continue
+		}
+		claimName := strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName)
+		if claimName == "" {
+			continue
+		}
+		return snapshotStorage{
+			PVCName:  claimName,
+			BasePath: strings.TrimRight(basePath, "/"),
+		}, true
+	}
+
+	return snapshotStorage{}, false
 }
 
 func loadWorker(manifestPath string, requestedService string) (selectedWorker, error) {
@@ -541,12 +617,7 @@ func shortNameSuffix(value string) string {
 	return strings.Trim(sanitized[len(sanitized)-12:], "-")
 }
 
-func buildRunSpec(
-	namespace string,
-	checkpointHash string,
-	worker selectedWorker,
-	snapshotPVC string,
-) runSpec {
+func buildRunSpec(namespace string, checkpointHash string, worker selectedWorker, storage snapshotStorage) runSpec {
 	if strings.TrimSpace(checkpointHash) == "" {
 		checkpointHash = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointHashPrefix, time.Now().UTC().UnixNano())
 	}
@@ -561,7 +632,7 @@ func buildRunSpec(
 		SeccompLocalhostProfile: defaultSeccompLocalhostProfile,
 		CudaCheckpointLaunchJob: shouldUseCudaCheckpointLaunchJob(worker.Args),
 		Worker:                  worker,
-		SnapshotPVC:             snapshotPVC,
+		SnapshotStorage:         storage,
 		ServiceAccountName:      sanitizeName(resourcePrefix + "-snapshot-sa"),
 		RoleName:                sanitizeName(resourcePrefix + "-snapshot-role"),
 		RoleBindingName:         sanitizeName(resourcePrefix + "-snapshot-binding"),
@@ -576,7 +647,7 @@ func (s runSpec) dynNamespace() string {
 }
 
 func (s runSpec) checkpointLocation() string {
-	return "/checkpoints/" + s.CheckpointHash
+	return strings.TrimRight(s.SnapshotStorage.BasePath, "/") + "/" + s.CheckpointHash
 }
 
 func (s runSpec) tritonCacheDir() string {
@@ -618,7 +689,7 @@ func (s runSpec) sharedEnvVars() []corev1.EnvVar {
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 		}},
 		{Name: "DYN_CHECKPOINT_HASH", Value: s.CheckpointHash},
-		{Name: "DYN_CHECKPOINT_PATH", Value: "/checkpoints"},
+		{Name: "DYN_CHECKPOINT_PATH", Value: s.SnapshotStorage.BasePath},
 		{Name: "DYN_CHECKPOINT_LOCATION", Value: s.checkpointLocation()},
 		{Name: "DYN_CHECKPOINT_STORAGE_TYPE", Value: "pvc"},
 		{Name: "HF_HOME", Value: "/home/dynamo/.cache/huggingface"},
@@ -669,7 +740,7 @@ func (s runSpec) sharedVolumes() []corev1.Volume {
 			Name: "checkpoint-storage",
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: s.SnapshotPVC,
+					ClaimName: s.SnapshotStorage.PVCName,
 				},
 			},
 		},
@@ -705,7 +776,7 @@ func (s runSpec) sharedVolumes() []corev1.Volume {
 
 func (s runSpec) sharedVolumeMounts() []corev1.VolumeMount {
 	volumeMounts := []corev1.VolumeMount{
-		{Name: "checkpoint-storage", MountPath: "/checkpoints"},
+		{Name: "checkpoint-storage", MountPath: s.SnapshotStorage.BasePath},
 		{Name: "shared-memory", MountPath: "/dev/shm"},
 		{Name: "podinfo", MountPath: "/etc/podinfo", ReadOnly: true},
 	}
