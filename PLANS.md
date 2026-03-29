@@ -4,10 +4,12 @@ Last updated: 2026-03-28 UTC
 
 Current run focus:
 
-- unblock the offline KVBM `maturin` build path without ad hoc cargo env
-  overrides
-- keep the remaining Python-install/runtime blockers explicit and narrow
-- re-run Python tests plus Rust/build validation after the build-path cleanup
+- validate the real TRT-LLM disaggregation/runtime path on an MPI-capable host
+  or container
+- extend the manager only if that runtime path exposes a new missing field or
+  storage-shape contract
+- in this sandbox, keep using the verified editable-install command:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
 
 ## Objective
 
