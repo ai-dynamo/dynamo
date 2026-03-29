@@ -4,7 +4,9 @@ Last updated: 2026-03-28 UTC
 
 Current run outcome:
 
-- re-read `Agents.md`, the full current `PLANS.md`, the phase-5 helper check in
+- re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
+  there is no repo-local `AGENTS.md` in this checkout, then re-read the full
+  current `PLANS.md`, the phase-5 helper check in
   `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
@@ -63,7 +65,8 @@ external dependency that cannot be resolved from this machine.
 
 ## Constraints And Environment Findings
 
-- Local repo instructions were read from `Agents.md`.
+- Repo instructions were read from the user-provided `AGENTS.md` content; this
+  checkout itself does not contain a repo-local `AGENTS.md` file.
 - The design source of truth is
   `docs/design-docs/kvbm-trtllm-integration.md`.
 - Local TensorRT-LLM checkout exists at `/tmp/trtllm-latest`.
@@ -1288,16 +1291,12 @@ Implemented so far:
    - `get_disagg_life_cycles()`
    - `get_layer_grouping()`
    - `_get_window_size_to_layers()`
-- `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv` has torch and
-  a TensorRT-LLM wheel installed, but that wheel is currently mismatched with
-  the pinned checkout surface and host CUDA libraries. Known host issue:
-  `ImportError: libcublasLt.so.13: cannot open shared object file`.
-- In this sandbox, the next run should not spend time reworking the manager
-  until Step 1 shows a runtime-capable host. The highest-signal first command
-  remains:
-  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
-  Then only proceed to the real TRT-LLM disaggregation smoke path if the audit
-  no longer reports a wheel-surface mismatch or CUDA major-version mismatch.
+6. In this sandbox, do not spend more time reworking the manager until Step 1
+   is clean on a runtime-capable host:
+   - the installed `.venv` TRT-LLM wheel is still mismatched with the pinned
+     checkout surface
+   - the host still lacks the CUDA 13 user-space library expected by that
+     wheel (`libcublasLt.so.13`)
 
 # Wishes:
 - minimize python interface.
