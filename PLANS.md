@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:17:29 UTC
+Last updated: 2026-03-29 03:24:02 UTC
 
 Current run outcome:
 
@@ -14,7 +14,7 @@ Current run outcome:
   permissive fallback behavior, unsupported-path drift, and cleanup markers)
   and again did not find another executable repo-local milestone in this
   sandbox.
-- Re-ran the full repo-local validation stack on 2026-03-29 03:17 UTC:
+- Re-ran the full repo-local validation stack on 2026-03-29 03:24 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 25 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
@@ -39,6 +39,11 @@ Current run outcome:
   - subprocess import of both installed `tensorrt_llm` and pinned-checkout
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
+  - the strict audit findings are still exactly:
+    - installed wheel surface mismatch vs pinned checkout
+    - CUDA major mismatch (`expected 13`, local majors `[12]`)
+    - Open MPI / PMIx listener-startup abort on installed TRT-LLM import
+    - Open MPI / PMIx listener-startup abort on pinned disaggregation import
 - No repo-local product-code change was justified in this run beyond
   refreshing this handoff. The supported path is still green in-repo; the
   remaining work is phase-7 validation on a runtime-capable host with:
@@ -1530,7 +1535,7 @@ Implemented so far:
   - use `--python-executable <path>` if the current shell interpreter is not
     the environment that should be probed
 - After re-reading the current repo-local code and re-running the validation
-  stack again on 2026-03-28 UTC, there is still no additional executable
+  stack again on 2026-03-29 UTC, there is still no additional executable
   repo-local phase left in this sandbox beyond keeping this handoff current.
   The remaining work is entirely on a validation host/container that satisfies
   the TRT-LLM runtime import prerequisites above.
@@ -1540,6 +1545,16 @@ Implemented so far:
 - The only additional repo-local change justified in this run was improving the
   runtime audit itself so the external blocker evidence is precise; no further
   manager-side code change is currently justified in this sandbox.
+- This 2026-03-29 03:24 UTC rerun confirmed the same end state without further
+  repo-local code changes:
+  - all repo-local supported-path validation gates are still green
+  - the only failing gate is still the strict runtime audit
+  - the blocking conditions are unchanged:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA 13 while the host exposes only CUDA 12
+      `libcublasLt`
+    - both installed and pinned-checkout TRT-LLM imports still abort in Open
+      MPI / PMIx before disaggregation runtime setup
 
 ## Exact Next Step
 
