@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:46:30 UTC
+Last updated: 2026-03-29 03:54:41 UTC
 
 Current run outcome:
 
@@ -12,52 +12,38 @@ Current run outcome:
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
 - Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
   permissive fallback behavior, unsupported-path drift, cleanup markers, and
-  stale docs). No new manager/product-code milestone was found, but one
-  repo-local manager cleanup was still justified.
-- Re-ran the baseline repo-local Python validation before editing:
+  stale docs). No new executable repo-local manager/product-code milestone was
+  found in this sandbox.
+- Re-ran the full repo-local validation stack on 2026-03-29 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
     -> pass (`Ran 10 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 26 tests`, `OK`)
-- Landed one additional repo-local seam cleanup:
-  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
-    now validates and caches the primary-pool layer-export path once at
-    construction time instead of probing `hasattr(...)` / `TypeError` fallbacks
-    every time `get_buffers()` is called
-  - the supported primary-pool export seam remains explicit and narrow:
-    - `get_layer_view(layer_idx, *, kv_layout=...)`
-    - `layer_view(layer_idx, *, kv_layout=...)`
-    - `layer_view(layer_idx)` with manager-side reshaping
-  - shutdown now clears the cached export adapter together with the owned pool
-  - `lib/bindings/kvbm/tests/test_trtllm_integration.py` now covers the
-    explicit `layer_view(..., kv_layout=...)` contract too
-- Re-ran validation after that change:
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
-    -> pass (`Ran 26 tests`, `OK`)
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
-    -> pass (`Ran 10 tests`, `OK`)
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
     -> pass (`Ran 36 tests`, `OK`)
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
     -> pass
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+    -> pass
+  - `.venv/bin/python -c 'import kvbm, kvbm._core'`
+    -> pass
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
     -> exit `1`, report `status: "blocked"`
-  - installed package root:
-    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+- installed package root:
+  `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
   - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
   - repo-declared TRT-LLM extra version remains `1.3.0rc8`
   - installed wheel version remains `1.2.0`
-  - installed wheel still exposes `_torch/pyexecutor` but not
-    `_torch/disaggregation`
-  - installed wheel metadata still expects CUDA major `13`
-  - host/container still only exposes `libcublasLt.so.12*`
-  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
-    `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
-    PMIx during import (`The PMIx server's listener thread failed to start`)
+- installed wheel still exposes `_torch/pyexecutor` but not
+  `_torch/disaggregation`
+- installed wheel metadata still expects CUDA major `13`
+- host/container still only exposes `libcublasLt.so.12*`
+- subprocess import of both installed `tensorrt_llm` and pinned-checkout
+  `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
+  PMIx during import (`The PMIx server's listener thread failed to start`)
 - No additional repo-local manager/product-code change is justified in this
-  run beyond this seam cleanup and this handoff refresh. The supported path is
-  still green in-repo; the remaining work is phase-7 validation on a
-  runtime-capable host with:
+  run beyond this handoff refresh. The supported path is still green in-repo;
+  the remaining work is phase-7 validation on a runtime-capable host with:
   - a TRT-LLM install/source version aligned with the repo-declared seam
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
