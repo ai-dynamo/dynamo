@@ -5,6 +5,56 @@ Last updated: 2026-03-28 UTC
 Current run outcome:
 
 - re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
+  again that there is no repo-local `AGENTS.md` in this checkout, then
+  re-read the full current `PLANS.md`, the phase-5 helper check in
+  `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
+  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
+- searched that seam again for remaining repo-local cleanup markers and
+  permissive pinned-interface fallbacks
+- one additional repo-local supported-path contract gap was exposed and fixed
+  in this run:
+  - `KvbmKVCacheManager.shutdown()` no longer treats the native helper
+    `shutdown()` surface as optional when a Rust-backed state helper is active
+  - added regression coverage in
+    `lib/bindings/kvbm/tests/test_trtllm_integration.py` so native helper
+    interface drift now fails loudly during shutdown instead of silently
+    degrading
+- no additional supported-path manager/API gap was exposed in this run beyond
+  that shutdown-contract tightening:
+  - remaining `NotImplementedError` sites are still only for explicitly
+    unsupported indexer/disaggregation export variants
+  - the stricter Rust-loader seam still requires the pinned exported symbols
+  - the remaining TRT-LLM import/runtime blockers are still external to this
+    repo
+- re-ran the validated local checks from this sandbox on 2026-03-28 UTC after
+  the shutdown-contract fix:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+    -> pass (`Ran 24 tests`, `OK`)
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+    -> pass (`Ran 6 tests`, `OK`)
+  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+    -> pass (`Ran 30 tests`, `OK`)
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+    -> `status: "blocked"`
+- the latest strict runtime audit in this sandbox still reports the same
+  external blocker chain with no new repo-local API mismatch:
+  - installed package root:
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+  - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
+  - installed package still exposes `_torch/pyexecutor` but not
+    `_torch/disaggregation`
+  - pinned checkout still exposes both `_torch/pyexecutor` and
+    `_torch/disaggregation`
+  - installed wheel metadata still expects CUDA major `13`
+  - host/container still only exposes `libcublasLt.so.12*`
+  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
+    `tensorrt_llm._torch.disaggregation.transceiver` still report the same
+    Open MPI / PMIx abort before the TRT-LLM runtime reaches KVBM-owned
+    transfer setup
+- re-read the user-provided `AGENTS.md` instructions for this repo, confirmed
   again that there is no repo-local `AGENTS.md` in this checkout, then re-read
   the full current `PLANS.md`, the phase-5 helper check in
   `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
@@ -968,6 +1018,10 @@ Implemented so far:
   reports the same PMIx listener-startup abort signature as the installed
   package import path on this machine, which removes the prior ambiguity from
   timeout-only reporting.
+- One remaining repo-local supported-path contract was still permissive before
+  this run: `KvbmKVCacheManager.shutdown()` silently skipped native teardown if
+  the Rust-backed helper existed but did not expose `shutdown()`. That is now
+  fixed so pinned helper drift fails loudly during teardown too.
 - Repo-local signed commits in this sandbox need `--no-verify` right now:
   the configured `pre-commit` hook tries to fetch hook repos from GitHub and
   cannot complete with network access restricted.
@@ -1254,6 +1308,20 @@ Implemented so far:
   `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
   Notes:
   - ran 6 tests
+- Passed after tightening the native shutdown contract:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+  Notes:
+  - ran 24 tests
+- Passed after the same shutdown-contract milestone:
+  `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+  Notes:
+  - ran 6 tests
+- Passed after the same shutdown-contract milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  Notes:
+  - ran 30 tests
+- Passed after the same shutdown-contract milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Passed after the same audit milestone:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
   Notes:

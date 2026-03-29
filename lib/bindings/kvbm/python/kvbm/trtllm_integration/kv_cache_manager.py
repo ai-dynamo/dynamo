@@ -1146,7 +1146,7 @@ class KvbmKVCacheManager:
         del kv_cache_block_id
 
     def shutdown(self) -> None:
-        if self._native_state is not None and hasattr(self._native_state, "shutdown"):
+        if self._native_state is not None:
             self._native_state.shutdown()
         self._request_state.clear()
         self._free_block_ids = list(range(self.num_blocks))

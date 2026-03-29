@@ -1058,6 +1058,37 @@ class TrtllmIntegrationTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             manager.get_unique_primary_pool()
 
+    def test_manager_shutdown_requires_native_helper_shutdown(self) -> None:
+        class _NativeState:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def get_num_free_blocks(self) -> int:
+                return self.kwargs["num_blocks"]
+
+        sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager = _NativeState
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[0],
+            total_num_kv_heads_per_layer=[8],
+            max_seq_len=32,
+            num_blocks=8,
+            primary_pool=object(),
+        )
+
+        with self.assertRaises(AttributeError):
+            manager.shutdown()
+
     def test_manager_derives_rank_local_standard_geometry(self) -> None:
         calls = []
 
