@@ -115,20 +115,27 @@ class _RequestSnapshot:
 
     @classmethod
     def from_request(cls, request: Any) -> "_RequestSnapshot":
-        try:
-            context_chunk_size = request.context_chunk_size
-        except AttributeError:
-            context_chunk_size = request.context_remaining_length
-
-        draft_tokens = request.py_draft_tokens
         return cls(
             request_id=int(request.py_request_id),
             is_first_context_chunk=bool(request.is_first_context_chunk),
             context_current_position=int(request.context_current_position),
-            context_chunk_size=int(context_chunk_size),
+            context_chunk_size=int(request.context_chunk_size),
             max_beam_num_tokens=int(request.max_beam_num_tokens),
             py_rewind_len=int(request.py_rewind_len),
-            draft_token_length=len(draft_tokens or ()),
+            draft_token_length=len(request.py_draft_tokens or ()),
+        )
+
+
+@dataclass(frozen=True)
+class _ScheduledBatchSnapshot:
+    context_requests: tuple[Any, ...]
+    generation_requests: tuple[Any, ...]
+
+    @classmethod
+    def from_batch(cls, scheduled_batch: Any) -> "_ScheduledBatchSnapshot":
+        return cls(
+            context_requests=tuple(scheduled_batch.context_requests),
+            generation_requests=tuple(scheduled_batch.generation_requests),
         )
 
 
@@ -317,7 +324,7 @@ class KvbmKVCacheManager:
 
         self.kv_factor = 1 if self.is_mla else 2
         self.layer_buffers = dict(layer_buffers or {})
-        self.layer_offsets = layer_offsets or {
+        self.layer_offsets = dict(layer_offsets) if layer_offsets is not None else {
             layer_idx: offset for offset, layer_idx in enumerate(self.pp_layers)
         }
         self.local_layers = {offset: layer_idx for layer_idx, offset in self.layer_offsets.items()}
@@ -325,15 +332,24 @@ class KvbmKVCacheManager:
             self._local_num_kv_heads(self.total_num_kv_heads_per_layer[layer_idx])
             for layer_idx in self.pp_layers
         ]
-        self.primary_pool = primary_pool or self._maybe_create_native_primary_pool()
+        self.primary_pool = (
+            primary_pool if primary_pool is not None else self._maybe_create_native_primary_pool()
+        )
         self._native_state = self._maybe_create_native_state()
-        self.kv_cache_pool_mapping = kv_cache_pool_mapping or [
+        self.kv_cache_pool_mapping = kv_cache_pool_mapping if kv_cache_pool_mapping is not None else [
             [0, local_layer_idx] for local_layer_idx in range(self.num_local_layers)
         ]
-        self.kv_cache_pool_pointers = kv_cache_pool_pointers or [
+        self.kv_cache_pool_pointers = (
+            kv_cache_pool_pointers
+            if kv_cache_pool_pointers is not None
+            else [
             [0, 0] for _ in range(self.num_pools)
-        ]
-        self.host_kv_cache_block_offsets = host_kv_cache_block_offsets or [
+            ]
+        )
+        self.host_kv_cache_block_offsets = (
+            host_kv_cache_block_offsets
+            if host_kv_cache_block_offsets is not None
+            else [
             [
                 [
                     [BAD_PAGE_INDEX for _ in range(self.max_blocks_per_seq)]
@@ -342,7 +358,8 @@ class KvbmKVCacheManager:
                 for _ in range((self.max_num_sequences + 1) * self.max_beam_width)
             ]
             for _ in range(self.num_pools)
-        ]
+            ]
+        )
 
         self.impl = _ImplCompat(self)
         self._request_state: dict[int, _RequestState] = {}
@@ -504,7 +521,7 @@ class KvbmKVCacheManager:
         return 0
 
     def _maybe_create_native_primary_pool(self) -> Any:
-        create_primary_pool = getattr(rust_bindings, "create_primary_pool", None)
+        create_primary_pool = rust_bindings.create_primary_pool
         if create_primary_pool is None or self.num_blocks == 0:
             return None
 
@@ -513,42 +530,36 @@ class KvbmKVCacheManager:
         if num_kv_heads is None or dtype_name is None:
             return None
 
-        try:
-            return create_primary_pool(
-                num_blocks=self.num_blocks,
-                num_layers=self.num_local_layers,
-                kv_factor=self.kv_factor,
-                page_size=self.tokens_per_block,
-                inner_dim=num_kv_heads * self.head_dim,
-                dtype=dtype_name,
-                device_id=self.device_id,
-            )
-        except Exception:
-            return None
+        return create_primary_pool(
+            num_blocks=self.num_blocks,
+            num_layers=self.num_local_layers,
+            kv_factor=self.kv_factor,
+            page_size=self.tokens_per_block,
+            inner_dim=num_kv_heads * self.head_dim,
+            dtype=dtype_name,
+            device_id=self.device_id,
+        )
 
     def _maybe_create_native_state(self) -> Any:
-        state_cls = getattr(rust_bindings, "TrtllmStateManager", None)
+        state_cls = rust_bindings.TrtllmStateManager
         if state_cls is None:
             return None
-        try:
-            return state_cls(
-                tokens_per_block=self.tokens_per_block,
-                max_seq_len=self.max_seq_len,
-                num_blocks=self.num_blocks,
-                max_blocks_per_seq=self.max_blocks_per_seq,
-                max_num_sequences=self.max_num_sequences,
-                max_beam_width=self.max_beam_width,
-                device_id=self.device_id,
-                world_size=self.world_size,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                pp_size=self.pp_size,
-                pp_rank=self.pp_rank,
-                kv_factor=self.kv_factor,
-                cache_mode=self.cache_mode,
-            )
-        except Exception:
-            return None
+        return state_cls(
+            tokens_per_block=self.tokens_per_block,
+            max_seq_len=self.max_seq_len,
+            num_blocks=self.num_blocks,
+            max_blocks_per_seq=self.max_blocks_per_seq,
+            max_num_sequences=self.max_num_sequences,
+            max_beam_width=self.max_beam_width,
+            device_id=self.device_id,
+            world_size=self.world_size,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            pp_size=self.pp_size,
+            pp_rank=self.pp_rank,
+            kv_factor=self.kv_factor,
+            cache_mode=self.cache_mode,
+        )
 
     def _torch_from_dlpack(self, value: Any) -> Any:
         if not hasattr(value, "__dlpack__"):
@@ -769,7 +780,9 @@ class KvbmKVCacheManager:
         self._request_state_for(request.request_id).active = False
 
     def prepare_resources(self, scheduled_batch: Any) -> None:
-        for request in getattr(scheduled_batch, "context_requests", ()):
+        batch = _ScheduledBatchSnapshot.from_batch(scheduled_batch)
+
+        for request in batch.context_requests:
             request_state = _RequestSnapshot.from_request(request)
             if not self.prepare_context(request):
                 raise RuntimeError(
@@ -780,7 +793,7 @@ class KvbmKVCacheManager:
                     f"failed to resize context for request {request_state.request_id}"
                 )
 
-        for request in getattr(scheduled_batch, "generation_requests", ()):
+        for request in batch.generation_requests:
             request_state = _RequestSnapshot.from_request(request)
             if not self.try_allocate_generation(request):
                 raise RuntimeError(
@@ -795,8 +808,9 @@ class KvbmKVCacheManager:
     ) -> None:
         del attn_metadata
         del kv_cache_dtype_byte_size
+        batch = _ScheduledBatchSnapshot.from_batch(scheduled_batch)
 
-        for request in getattr(scheduled_batch, "context_requests", ()):
+        for request in batch.context_requests:
             request_state = _RequestSnapshot.from_request(request)
             request_id = request_state.request_id
             if self._native_state is not None:
@@ -834,7 +848,7 @@ class KvbmKVCacheManager:
             state.committed_tokens = state.history_length
             self._write_host_block_offsets(request_id)
 
-        for request in getattr(scheduled_batch, "generation_requests", ()):
+        for request in batch.generation_requests:
             request_state = _RequestSnapshot.from_request(request)
             request_id = request_state.request_id
             if self._native_state is not None:

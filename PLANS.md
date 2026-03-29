@@ -2,6 +2,13 @@
 
 Last updated: 2026-03-28 UTC
 
+Current run focus:
+
+- tighten the pinned TRT-LLM Python/Rust seam so interface drift fails loudly
+  instead of silently falling back
+- keep the request/batch contract explicit on the Python side
+- re-run Python tests plus Rust/build validation after that cleanup
+
 ## Objective
 
 Implement the KVBM-backed TensorRT-LLM KV manager path described in
@@ -505,7 +512,7 @@ Implemented so far:
 - Hardened the phase-7 Python surface after re-reading the pinned TRT-LLM
   helpers:
   - normalized request access through `_RequestSnapshot` instead of scattered
-    fallback lookups
+  fallback lookups
   - added explicit compatibility shims for window-size grouping and PP-rank
     predicates
   - validated the adapter against the pinned TRT-LLM `kv_extractor.py` and
@@ -514,6 +521,21 @@ Implemented so far:
   `FullyContiguous` can provide a clean primary-pool slab, but the current
   DLPack helper only exports contiguous shapes, while TRTLLM also needs
   per-layer views that are not naturally contiguous in that layout.
+- Began a follow-up cleanup pass for the pinned TRT-LLM seam:
+  - remove permissive Python-side fallback behavior where interface drift
+    should be treated as an error
+  - keep `PLANS.md` as the compact source of truth while finishing the
+    remaining repo-local cleanup and validation work
+- Completed the first repo-local cleanup pass for the pinned TRT-LLM seam:
+  - `_RequestSnapshot` now requires the pinned TRT-LLM request fields directly
+    instead of falling back to older attribute names
+  - batch handling now requires explicit `context_requests` and
+    `generation_requests` fields instead of silently defaulting to empty tuples
+  - Rust helper construction now fails loudly if helper wiring is present but
+    broken, instead of swallowing the exception and silently downgrading to the
+    Python fallback path
+  - TRT-LLM Rust-loader wiring now treats required exported symbols as required
+    attributes rather than permissive `getattr(...)` lookups
 
 ## New Findings
 
@@ -670,6 +692,10 @@ Implemented so far:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed after the pinned-interface cleanup milestone:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed after the same cleanup milestone:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
 - Failed in the repo `.venv` direct TRT-LLM smoke path before page-table
   validation completed:
   `TLLM_DISABLE_MPI=1 .venv/bin/python ... build_page_table_from_manager(manager)`
@@ -719,19 +745,32 @@ Implemented so far:
 - External blocker remains: add a runtime-capable validation path for the Rust
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
+- Repo-local cleanup still in progress for the pinned TRT-LLM seam:
+  - run `maturin`/build validation after the seam cleanup and record the exact
+    outcome here
+  - decide whether any remaining Python fallback-only tests should be retired
+    now that interface drift is treated as an error for the supported path
 - Additional external blocker now identified for phase 7 runtime validation:
   the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
   direct `KvCacheTransceiverV2` / transfer-worker smoke check can run.
 
 ## Exact Next Step
 
-1. Re-run the direct TRT-LLM smoke check on a host or container where importing
+1. Run:
+   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+   - `maturin develop --uv` from
+     `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm`
+   and record exact pass/fail details here. The first two already pass after
+   the pinned-interface cleanup; `maturin` validation is the remaining local
+   checkpoint for this run.
+2. Re-run the direct TRT-LLM smoke check on a host or container where importing
    `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
    PMIx. The repo-local adapter already passes the pinned-source
    `build_page_table_from_manager(manager)` and
    `RankInfo.from_kv_cache_manager(...)` paths, so the next unresolved runtime
    checkpoint is `KvCacheTransceiverV2` / transfer-worker construction.
-2. If that runtime path reports another missing manager field or storage shape,
+3. If that runtime path reports another missing manager field or storage shape,
    extend:
    `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
    specifically:

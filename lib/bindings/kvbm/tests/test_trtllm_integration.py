@@ -353,6 +353,31 @@ class TrtllmIntegrationTest(unittest.TestCase):
         self.assertEqual(manager.kv_cache_pool_pointers, [[10, 0], [20, 0]])
         self.assertEqual(manager.kv_cache_pool_mapping, [[0, 0], [0, 1]])
 
+    def test_manager_requires_pinned_request_fields(self) -> None:
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[0],
+            total_num_kv_heads_per_layer=[8],
+            max_seq_len=16,
+            num_blocks=4,
+        )
+
+        request = types.SimpleNamespace(
+            py_request_id=7,
+            is_first_context_chunk=True,
+            context_current_position=0,
+            context_remaining_length=4,
+            max_beam_num_tokens=1,
+            py_rewind_len=0,
+            py_draft_tokens=[],
+        )
+
+        with self.assertRaises(AttributeError):
+            manager.prepare_context(request)
+
     def test_manager_export_resolution_and_impl_compat(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")
 
@@ -630,6 +655,57 @@ class TrtllmIntegrationTest(unittest.TestCase):
             [0, 1, -1, -1],
         )
         self.assertEqual(manager.get_kv_cache_stats().allocated_bytes, 4096)
+
+    def test_manager_surfaces_native_helper_construction_errors(self) -> None:
+        def _create_primary_pool(**kwargs):
+            del kwargs
+            raise RuntimeError("bad primary pool wiring")
+
+        class _NativeState:
+            def __init__(self, **kwargs) -> None:
+                del kwargs
+                raise RuntimeError("bad state wiring")
+
+        sys.modules["kvbm._core"]._trtllm_integration.create_primary_pool = _create_primary_pool
+        sys.modules["kvbm._core"]._trtllm_integration.TrtllmStateManager = _NativeState
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        with self.assertRaisesRegex(RuntimeError, "bad primary pool wiring"):
+            integration.KvbmKVCacheManager(
+                tokens_per_block=4,
+                dtype="float16",
+                head_dim=16,
+                pp_layers=[0],
+                total_num_kv_heads_per_layer=[8],
+                max_seq_len=32,
+                num_blocks=8,
+            )
+
+        sys.modules["kvbm._core"]._trtllm_integration.create_primary_pool = None
+        for name in (
+            "kvbm.trtllm_integration",
+            "kvbm.trtllm_integration.rust",
+            "kvbm.trtllm_integration.kv_cache_manager",
+        ):
+            sys.modules.pop(name, None)
+
+        integration = importlib.import_module("kvbm.trtllm_integration")
+        with self.assertRaisesRegex(RuntimeError, "bad state wiring"):
+            integration.KvbmKVCacheManager(
+                tokens_per_block=4,
+                dtype="float16",
+                head_dim=16,
+                pp_layers=[0],
+                total_num_kv_heads_per_layer=[8],
+                max_seq_len=32,
+                num_blocks=8,
+            )
 
     def test_manager_reuses_slots_after_free_in_fallback_path(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")

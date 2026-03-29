@@ -10,22 +10,19 @@ try:
     from kvbm._core import _trtllm_integration
 
     # Runtime - dynamically loaded classes from Rust extension
-    KvbmRequest = getattr(_trtllm_integration, "KvbmRequest")
-    KvbmBlockList = getattr(_trtllm_integration, "KvbmBlockList")
-    BlockState = getattr(_trtllm_integration, "BlockState")
-    BlockStates = getattr(_trtllm_integration, "BlockStates")
-    SlotUpdate = getattr(_trtllm_integration, "SlotUpdate")
+    KvbmRequest = _trtllm_integration.KvbmRequest
+    KvbmBlockList = _trtllm_integration.KvbmBlockList
+    BlockState = _trtllm_integration.BlockState
+    BlockStates = _trtllm_integration.BlockStates
+    SlotUpdate = _trtllm_integration.SlotUpdate
     TrtllmStateManager = getattr(_trtllm_integration, "TrtllmStateManager", None)
 
-    KvConnectorWorker = getattr(_trtllm_integration, "PyTrtllmKvConnectorWorker")
-    KvConnectorLeader = getattr(_trtllm_integration, "PyTrtllmKvConnectorLeader")
-    SchedulerOutput = getattr(_trtllm_integration, "SchedulerOutput")
+    KvConnectorWorker = _trtllm_integration.PyTrtllmKvConnectorWorker
+    KvConnectorLeader = _trtllm_integration.PyTrtllmKvConnectorLeader
+    SchedulerOutput = _trtllm_integration.SchedulerOutput
     create_primary_pool = getattr(_trtllm_integration, "create_primary_pool", None)
 
 except ImportError:
-    print(
-        "Failed to import Dynamo KVBM. TensorRT-LLM integration will not be available."
-    )
     BlockManager = None
     KvbmRequest = None
     KvbmBlockList = None
