@@ -27,6 +27,21 @@ Current run outcome:
   - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
     -> `status: "blocked"`
+- the latest strict runtime audit in this sandbox still reports the same
+  external blocker chain with no new repo-local API mismatch:
+  - installed package root:
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+  - pinned checkout root: `/tmp/trtllm-latest/tensorrt_llm`
+  - installed package still exposes `_torch/pyexecutor` but not
+    `_torch/disaggregation`
+  - pinned checkout still exposes both `_torch/pyexecutor` and
+    `_torch/disaggregation`
+  - installed wheel metadata still expects CUDA major `13`
+  - host/container still only exposes `libcublasLt.so.12*`
+  - subprocess import of both installed `tensorrt_llm` and pinned-checkout
+    `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
+    PMIx during import before the TRT-LLM runtime reaches KVBM-owned transfer
+    setup
 - current runtime blockers are unchanged and still external to this repo:
   - installed TRT-LLM wheel in `.venv` is `1.2.0` and still lacks
     `_torch/disaggregation`
