@@ -4,20 +4,18 @@ Last updated: 2026-03-28 UTC
 
 Current run outcome:
 
-- re-read the full execution log, repo instructions, design doc, and current
+- re-read the full execution log, repo instructions, the phase-5 validation
+  note in `docs/design-docs/kvbm-trtllm-integration.md`, and the current
   TRT-LLM manager/audit code before making further changes
-- extended `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` with subprocess
-  import probes so the runtime blocker is recorded without importing
-  `tensorrt_llm` into the current Python process
-- added stdlib-only coverage for the new audit probe path in
-  `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`
-- re-ran the validated local checks from this sandbox:
+- re-ran the validated local checks from this sandbox on 2026-03-28 UTC:
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
 - no new repo-local contract gap was exposed in this run
+- the design-doc phase-5 helper-validation reminder is still satisfied:
+  - no additional supported-path `impl` consumer or helper-class API mismatch
+    was found after re-reading the pinned seam and re-running the audit/tests
 - remaining blockers are still machine/runtime-specific:
   - installed TRT-LLM wheel in `.venv` still lacks `_torch/disaggregation`
   - installed TRT-LLM wheel still expects CUDA major `13`
@@ -698,6 +696,21 @@ Implemented so far:
 - Confirmed again in this run that there is no additional executable repo-local
   milestone left in this sandbox beyond keeping this handoff precise for a
   runtime-capable validation host.
+- Re-ran the same source-of-truth review again on 2026-03-28 UTC:
+  - re-read `Agents.md`, the phase-5 helper-validation note in
+    `docs/design-docs/kvbm-trtllm-integration.md`, the current `PLANS.md`, and
+    the active `KvbmKVCacheManager` / `trtllm_runtime_audit.py` code
+  - confirmed again that no additional supported-path helper or `impl`
+    contract gap is exposed repo-locally after the pinned transceiver and
+    page-table coverage already in-tree
+- Re-ran the validated local checks again on 2026-03-28 UTC and confirmed the
+  repo-local state is still unchanged:
+  - Python contract tests still pass
+  - `cargo check` for `lib/bindings/kvbm` still passes
+  - the editable install path still works with `UV_CACHE_DIR=/tmp/uv-cache`
+  - the stricter non-importing TRT-LLM audit with subprocess probes still
+    reports the same wheel-surface, CUDA-major, and Open MPI / PMIx blockers
+    and no new manager/API mismatch
 
 ## New Findings
 
@@ -1092,6 +1105,22 @@ Implemented so far:
     - installed wheel lacks `_torch/disaggregation`
     - installed wheel expects CUDA major `13`
     - host only exposes `libcublasLt.so.12*`
+- Passed again in the current 2026-03-28 UTC validation run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
+  Notes:
+  - reported `status: blocked`
+  - blocker details were still unchanged:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA major `13`
+    - host only exposes `libcublasLt.so.12*`
+    - subprocess import of both installed and pinned TRT-LLM module paths still
+      aborts in Open MPI / PMIx during import
 
 ## Remaining Work
 
@@ -1198,7 +1227,7 @@ Implemented so far:
 - In this sandbox, the next run should not spend time reworking the manager
   until Step 1 shows a runtime-capable host. The highest-signal first command
   remains:
-  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports`
   Then only proceed to the real TRT-LLM disaggregation smoke path if the audit
   no longer reports a wheel-surface mismatch or CUDA major-version mismatch.
 
