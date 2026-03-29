@@ -230,14 +230,36 @@ env:
 >
 > **You MUST use the configuration below** — do not copy the standard InfiniBand settings.
 
-> **Note: NIXL is migrating from UCX to libfabric for AWS**
-> The Dynamo team is transitioning NIXL to use **libfabric** instead of UCX for AWS EFA deployments. This change is driven by:
+> **NIXL with libfabric for AWS EFA**
+> NIXL supports **libfabric** as the recommended backend for AWS EFA deployments. This provides:
 > - **Better topology awareness**: libfabric provides hierarchical topology awareness similar to NCCL
 > - **Native EFA support**: libfabric is the recommended communication layer for AWS EFA
+> - **GDRCopy integration**: Enables efficient GPU Direct RDMA operations
 >
-> **Current status**: UCX over EFA works but is not recommended for production. Published AWS examples are functional but not performant. Check with the Dynamo team for libfabric availability timeline.
+> See the [AWS EFA with NIXL documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start-nixl.html) for complete setup instructions.
 
-**Required AWS EFA Configuration** (Ubuntu 24.04 + Kernel ≥6.8):
+**Recommended AWS EFA Configuration (libfabric)**:
+
+Requirements:
+- EFA version 1.47.0 or later
+- NIXL version 1.0.0 or later
+- Libfabric (installed via EFA installer at `/opt/amazon/efa`)
+
+Configure vLLM with the NIXL libfabric backend:
+
+```bash
+vllm serve <your-model> \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+```
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `kv_connector` | `NixlConnector` | Enables NIXL for KV-cache transfer |
+| `kv_role` | `kv_both` | Symmetric functionality (producer and consumer) |
+| `kv_buffer_device` | `cuda` | Uses GPU memory for KV-cache buffer |
+| `backends` | `["LIBFABRIC"]` | Routes NIXL traffic over EFA |
+
+**Legacy UCX Configuration** (if libfabric is not available):
 
 ```yaml
 env:
@@ -248,16 +270,6 @@ env:
   - name: UCX_RNDV_THRESH
     value: "8192"                  # Avoid CUDA zero-copy for large transfers
 ```
-
-**Why these settings are mandatory**:
-- `UCX_RNDV_SCHEME=auto` prevents UCX from forcing zero-copy RDMA on CUDA buffers
-- `UCX_RNDV_THRESH=8192` ensures large KV cache transfers use host-staging instead of GPU-direct (which fails)
-- Using `get_zcopy` or threshold `0` will cause `remote invalid RD request` errors and worker crashes
-
-**Known Limitations**:
-- GPU Direct RDMA is non-functional on AWS EFA with Ubuntu 24.04 + kernel ≥6.8
-- Expect 3x performance degradation compared to InfiniBand (host-staged transfers)
-- For optimal disaggregated performance, consider clusters with InfiniBand/RoCE, or wait for libfabric support on AWS
 
 ---
 
@@ -505,10 +517,11 @@ kubectl logs <worker-pod> | grep -i "transport\|UCX\|TCP"
 
 **Root Cause**: GPU Direct RDMA not functional on kernel ≥6.8 with EFA
 
-**Current Status**: This is a known limitation. Options:
+**Solution**: Use libfabric instead of UCX for AWS EFA deployments. Libfabric with GDRCopy provides efficient GPU Direct RDMA operations on AWS. See the [AWS EFA Configuration](#aws-efa-configuration) section for setup instructions.
+
+**Alternative options** (if libfabric is not available):
 1. Use kernel before 6.8 (Ubuntu 22.04 with kernel 5.15)
 2. Accept host-staging performance penalty
-3. Wait for AWS to update EFA DMA-BUF support
 
 ### Problem: Intermittent transfer failures
 
