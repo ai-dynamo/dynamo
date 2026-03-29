@@ -83,12 +83,6 @@ pub enum SequenceError {
 
     #[error("Request {request_id} not found")]
     RequestNotFound { request_id: String },
-
-    #[error("Failed to publish event: {0}")]
-    PublishFailed(#[from] anyhow::Error),
-
-    #[error("Synchronous mutation requires replica_sync=false")]
-    SyncMutationRequiresNoReplicaSync,
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
@@ -147,7 +141,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     request_to_lora: DashMap<RequestId, String>,
     block_size: usize,
     router_id: u64,
-    publisher: P,
+    publisher: Arc<P>,
     replica_sync: bool,
     worker_type: &'static str,
 }
@@ -172,10 +166,27 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             request_to_lora: DashMap::new(),
             block_size,
             router_id,
-            publisher,
+            publisher: Arc::new(publisher),
             replica_sync,
             worker_type,
         }
+    }
+
+    fn spawn_publish_event(&self, event: ActiveSequenceEvent) {
+        if !self.replica_sync {
+            return;
+        }
+
+        let publisher = Arc::clone(&self.publisher);
+        tokio::spawn(async move {
+            if let Err(e) = publisher.publish_event(&event).await {
+                tracing::error!(
+                    request_id = %event.request_id,
+                    worker = ?event.worker,
+                    "failed to publish active sequence event: {e}"
+                );
+            }
+        });
     }
 
     /// Spawn a background task that subscribes to replica-sync events from peer routers
@@ -370,13 +381,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    fn ensure_sync_mutation_allowed(&self) -> Result<(), SequenceError> {
-        if self.replica_sync {
-            return Err(SequenceError::SyncMutationRequiresNoReplicaSync);
-        }
-        Ok(())
-    }
-
     fn add_request_local(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         let SequenceRequest {
             request_id,
@@ -433,29 +437,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        if self.replica_sync {
-            let event = ActiveSequenceEvent {
-                request_id: req.request_id.clone(),
-                worker: req.worker,
-                data: ActiveSequenceEventData::AddRequest {
-                    token_sequence: req.token_sequence.clone(),
-                    isl: req.isl,
-                    overlap: req.overlap,
-                    track_prefill_tokens: req.track_prefill_tokens,
-                    expected_output_tokens: req.expected_output_tokens,
-                },
-                router_id: self.router_id,
-                lora_name: req.lora_name.clone(),
-            };
-            self.publisher.publish_event(&event).await?;
-        }
-
-        self.add_request_local(req)
-    }
-
-    pub fn add_request_sync(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        self.ensure_sync_mutation_allowed()?;
+    pub fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        self.spawn_publish_event(ActiveSequenceEvent {
+            request_id: req.request_id.clone(),
+            worker: req.worker,
+            data: ActiveSequenceEventData::AddRequest {
+                token_sequence: req.token_sequence.clone(),
+                isl: req.isl,
+                overlap: req.overlap,
+                track_prefill_tokens: req.track_prefill_tokens,
+                expected_output_tokens: req.expected_output_tokens,
+            },
+            router_id: self.router_id,
+            lora_name: req.lora_name.clone(),
+        });
         self.add_request_local(req)
     }
 
@@ -495,7 +490,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    async fn mutate_request_worker(
+    fn mutate_request_worker(
         &self,
         request_id: &RequestId,
         event_data: ActiveSequenceEventData,
@@ -510,21 +505,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 request_id: request_id.clone(),
             })?;
 
-        if self.replica_sync {
-            let lora_name = self
-                .request_to_lora
-                .get(request_id)
-                .map(|entry| entry.value().clone());
-
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: event_data,
-                router_id: self.router_id,
-                lora_name,
-            };
-            self.publisher.publish_event(&event).await?;
-        }
+        let lora_name = self
+            .request_to_lora
+            .get(request_id)
+            .map(|entry| entry.value().clone());
+        self.spawn_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: event_data,
+            router_id: self.router_id,
+            lora_name,
+        });
 
         self.mutate_request_worker_local(request_id, mutate_fn, remove_mapping)
     }
@@ -537,7 +528,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// This also performs the underlying prefill-complete cleanup via
     /// [`ActiveSequences::free`], so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
-    pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+    pub fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
         if !self.request_to_worker.contains_key(request_id) {
             tracing::debug!("Request {request_id} not found, already freed (idempotent)");
             return Ok(());
@@ -551,47 +542,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             },
             true,
         )
-        .await
-    }
-
-    pub fn free_sync(&self, request_id: &RequestId) -> Result<(), SequenceError> {
-        self.ensure_sync_mutation_allowed()?;
-        if !self.request_to_worker.contains_key(request_id) {
-            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
-            return Ok(());
-        }
-        self.mutate_request_worker_local(
-            request_id,
-            |seqs, rid| {
-                seqs.free(rid);
-            },
-            true,
-        )
     }
 
     /// Mark prefill as completed for a request.
     ///
     /// Note: Calling this multiple times for the same request is allowed and will be a no-op
     /// after the first call (idempotent).
-    pub async fn mark_prefill_completed(
-        &self,
-        request_id: &RequestId,
-    ) -> Result<(), SequenceError> {
+    pub fn mark_prefill_completed(&self, request_id: &RequestId) -> Result<(), SequenceError> {
         self.mutate_request_worker(
             request_id,
             ActiveSequenceEventData::MarkPrefillCompleted,
-            |seqs, rid| {
-                seqs.mark_prefill_completed(rid);
-            },
-            false,
-        )
-        .await
-    }
-
-    pub fn mark_prefill_completed_sync(&self, request_id: &RequestId) -> Result<(), SequenceError> {
-        self.ensure_sync_mutation_allowed()?;
-        self.mutate_request_worker_local(
-            request_id,
             |seqs, rid| {
                 seqs.mark_prefill_completed(rid);
             },
@@ -895,7 +855,6 @@ mod tests {
                 worker,
                 lora_name: None,
             })
-            .await
             .unwrap();
 
         assert_eq!(sequences.active_tokens().get(&worker).copied(), Some(0));

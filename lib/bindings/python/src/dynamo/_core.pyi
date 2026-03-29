@@ -1179,7 +1179,6 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_enable_cache_control: bool = False,
-        min_initial_workers: int = 1,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """
@@ -1213,9 +1212,6 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
             router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
                 cache_control service mesh endpoint (default: False).
-            min_initial_workers: Minimum number of discovered workers required before
-                router startup continues (default: 1). Ignored when
-                skip_initial_worker_wait is enabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
