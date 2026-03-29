@@ -646,14 +646,18 @@ fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
 
             match (next_open, next_close) {
                 (Some(start), Some(end)) if start < end => {
+                    // Matched pair: <open>...<close>
                     input.replace_range(start..end + close.len(), "");
                 }
+                (_, Some(end)) if strip_prefix_for_dangling_close => {
+                    // Dangling close before any open (or open comes after close):
+                    // strip everything up to and including the close tag.
+                    input.replace_range(0..end + close.len(), "");
+                }
                 (Some(start), _) => {
+                    // Open without matching close: truncate at open position.
                     input.truncate(start);
                     break;
-                }
-                (_, Some(end)) if strip_prefix_for_dangling_close => {
-                    input.replace_range(0..end + close.len(), "");
                 }
                 _ => break,
             }
@@ -1403,6 +1407,13 @@ thinking
         let text = "private reasoning</think>Visible answer.";
         let stripped = strip_tool_call_text(text);
         assert_eq!(stripped, "Visible answer.");
+    }
+
+    #[test]
+    fn test_strip_tool_call_text_dangling_close_then_matched_pair() {
+        let text = "thinking</think>visible<think>hidden</think>answer";
+        let stripped = strip_tool_call_text(text);
+        assert_eq!(stripped, "visibleanswer");
     }
 
     #[test]

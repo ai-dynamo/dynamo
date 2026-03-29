@@ -153,10 +153,29 @@ impl ResponseStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
         visible_text: &str,
     ) {
-        let Some(delta) = visible_text.strip_prefix(&self.accumulated_text) else {
+        if visible_text == self.accumulated_text {
             return;
+        }
+
+        // Normally visible_text extends accumulated_text, but retroactive stripping
+        // (e.g. a dangling </think> completing across chunks) can invalidate the
+        // prefix assumption. Fall back to longest common prefix so we don't
+        // permanently lose all subsequent text.
+        let delta = if let Some(suffix) = visible_text.strip_prefix(&self.accumulated_text) {
+            suffix
+        } else {
+            let common_byte_len: usize = self
+                .accumulated_text
+                .chars()
+                .zip(visible_text.chars())
+                .take_while(|(a, b)| a == b)
+                .map(|(c, _)| c.len_utf8())
+                .sum();
+            &visible_text[common_byte_len..]
         };
+
         if delta.is_empty() {
+            self.accumulated_text = visible_text.to_string();
             return;
         }
 
@@ -1096,6 +1115,38 @@ mod tests {
             "visible text delta should still be emitted: {types:?}"
         );
         assert_eq!(conv.accumulated_text, "Visible answer.");
+    }
+
+    #[test]
+    fn test_multi_chunk_dangling_think_close_does_not_drop_subsequent_text() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        // Chunk 1: thinking text arrives without tags — appears visible initially
+        let events1 = conv.process_chunk(&text_chunk("private reasoning"));
+        let types1 = event_types(&events1);
+        assert!(
+            types1.contains(&"response.output_text.delta".to_string()),
+            "chunk 1 should emit visible delta: {types1:?}"
+        );
+
+        // Chunk 2: </think> completes — retroactively hides chunk 1's text
+        let events2 = conv.process_chunk(&text_chunk("</think>Visible answer."));
+        let types2 = event_types(&events2);
+        assert!(
+            types2.contains(&"response.output_text.delta".to_string()),
+            "chunk 2 must still emit visible text after </think>: {types2:?}"
+        );
+        assert_eq!(conv.accumulated_text, "Visible answer.");
+
+        // Chunk 3: subsequent text must not be permanently dropped
+        let events3 = conv.process_chunk(&text_chunk(" More text."));
+        let types3 = event_types(&events3);
+        assert!(
+            types3.contains(&"response.output_text.delta".to_string()),
+            "chunk 3 must not be dropped: {types3:?}"
+        );
+        assert_eq!(conv.accumulated_text, "Visible answer. More text.");
     }
 
     #[test]
