@@ -550,6 +550,11 @@ Implemented so far:
   - with a minimal local Swagger zip at `/tmp/swagger-ui-offline.zip`, direct
     `cargo build --manifest-path lib/bindings/kvbm/Cargo.toml` completed
     successfully on this machine
+- Decided to keep the remaining fallback-only Python tests for now:
+  - they still provide stdlib-only regression coverage when the Rust extension
+    is stubbed out in unit tests
+  - the supported runtime path is still strict about pinned-interface drift, so
+    keeping those tests does not weaken the intended production contract
 
 ## New Findings
 
@@ -783,9 +788,6 @@ Implemented so far:
 - External blocker remains: add a runtime-capable validation path for the Rust
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
-- Repo-local cleanup still in progress for the pinned TRT-LLM seam:
-  - decide whether any remaining Python fallback-only tests should be retired
-    now that interface drift is treated as an error for the supported path
 - Local build validation is now narrowed to one remaining environment issue:
   - make `maturin develop` stop requiring an uncached `jiff-tzdb v0.1.6`
     download during `cargo metadata`, or vendor/cache that crate for offline
