@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:54:41 UTC
+Last updated: 2026-03-29 04:02:25 UTC
 
 Current run outcome:
 
@@ -12,8 +12,22 @@ Current run outcome:
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
 - Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
   permissive fallback behavior, unsupported-path drift, cleanup markers, and
-  stale docs). No new executable repo-local manager/product-code milestone was
-  found in this sandbox.
+  stale docs). That review exposed one remaining repo-local cleanup worth
+  landing in this sandbox:
+  - `KvbmKVCacheManager._resolve_primary_pool_exports()` still re-probed
+    optional primary-pool layer-export shapes at runtime via `getattr(...)`
+    plus `inspect.signature(...)`
+  - that was looser than the now-explicit pinned TRT-LLM/KVBM seam and kept a
+    Python fallback path alive after the surrounding request/rust-loader
+    surfaces had already been tightened
+- Completed that remaining repo-local cleanup:
+  - the manager now accepts only the pinned primary-pool layer export seam
+    `primary_pool.layer_view(layer_idx)`
+  - the manager owns the `NHD` / `HND` reshaping itself on top of that fixed
+    export instead of dynamically probing for `kv_layout`-aware methods or the
+    legacy `get_layer_view(...)` symbol
+  - unit coverage was updated to lock the stricter contract in place and to
+    fail loudly when only the legacy symbol is present
 - Re-ran the full repo-local validation stack on 2026-03-29 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
     -> pass (`Ran 10 tests`, `OK`)
@@ -41,9 +55,10 @@ Current run outcome:
 - subprocess import of both installed `tensorrt_llm` and pinned-checkout
   `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
   PMIx during import (`The PMIx server's listener thread failed to start`)
-- No additional repo-local manager/product-code change is justified in this
-  run beyond this handoff refresh. The supported path is still green in-repo;
-  the remaining work is phase-7 validation on a runtime-capable host with:
+- After that seam tightening plus revalidation, no additional repo-local
+  manager/product-code change is justified in this sandbox. The supported path
+  is still green in-repo; the remaining work is phase-7 validation on a
+  runtime-capable host with:
   - a TRT-LLM install/source version aligned with the repo-declared seam
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
@@ -1592,6 +1607,27 @@ Implemented so far:
       `libcublasLt`
     - both installed and pinned-checkout TRT-LLM imports still abort in Open
       MPI / PMIx before disaggregation runtime setup
+- This 2026-03-29 04:02 UTC rerun completed that last repo-local seam cleanup:
+  - `KvbmKVCacheManager` no longer probes `get_layer_view(...)` or
+    `layer_view(..., kv_layout=...)` dynamically
+  - the only supported primary-pool layer export seam is now
+    `primary_pool.layer_view(layer_idx)`
+  - `get_buffers(..., kv_layout=...)` still keeps the TRT-LLM-facing `NHD` /
+    `HND` surface by reshaping the exported tensor inside the manager
+  - validation stayed green after the cleanup:
+    - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+      -> pass (`Ran 26 tests`, `OK`)
+    - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
+      -> pass (`Ran 10 tests`, `OK`)
+    - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+      -> pass (`Ran 36 tests`, `OK`)
+    - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml` -> pass
+    - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+      -> pass
+    - `.venv/bin/python -c 'import kvbm, kvbm._core'` -> pass
+    - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
+      -> exit `1`, still blocked by the same TRT-LLM wheel/CUDA/MPI runtime
+         prerequisites
 
 ## Exact Next Step
 
@@ -1637,6 +1673,9 @@ Implemented so far:
      checkout surface
    - the host still lacks the CUDA 13 user-space library expected by that
      wheel (`libcublasLt.so.13`)
+   - the last remaining repo-local permissive primary-pool export seam is now
+     already tightened, so another repo-local cleanup pass is unlikely to find
+     useful work unless the runtime environment changes first
 
 # Wishes:
 - minimize python interface.

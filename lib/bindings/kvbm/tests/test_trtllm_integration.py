@@ -624,8 +624,8 @@ class TrtllmIntegrationTest(unittest.TestCase):
         integration = importlib.import_module("kvbm.trtllm_integration")
 
         class _PrimaryPool:
-            def get_layer_view(self, layer_idx: int, *, kv_layout: str) -> str:
-                return f"layer={layer_idx},layout={kv_layout}"
+            def layer_view(self, layer_idx: int) -> str:
+                return f"layer={layer_idx}"
 
         manager = integration.KvbmKVCacheManager(
             tokens_per_block=4,
@@ -642,16 +642,16 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
         self.assertEqual(manager.get_buffers(4), "local-layer-1")
         self.assertEqual(manager.impl.get_primary_pool_data(4), "local-layer-1")
-        self.assertEqual(manager.get_buffers(2), "layer=0,layout=NHD")
-        self.assertEqual(manager.get_buffers(0, kv_layout="HND"), "layer=0,layout=HND")
+        self.assertEqual(manager.get_buffers(2), "layer=0")
+        self.assertEqual(manager.get_buffers(0, kv_layout="HND"), "layer=0")
         with self.assertRaises(ValueError):
             manager.get_buffers(2, kv_layout="BAD")
 
-    def test_manager_supports_primary_pool_layer_view_with_explicit_kv_layout(self) -> None:
+    def test_manager_requires_primary_pool_layer_view_symbol(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")
 
         class _PrimaryPool:
-            def layer_view(self, layer_idx: int, *, kv_layout: str) -> str:
+            def get_layer_view(self, layer_idx: int, *, kv_layout: str) -> str:
                 return f"layer={layer_idx},layout={kv_layout}"
 
         manager = integration.KvbmKVCacheManager(
@@ -665,8 +665,8 @@ class TrtllmIntegrationTest(unittest.TestCase):
             primary_pool=_PrimaryPool(),
         )
 
-        self.assertEqual(manager.get_buffers(1), "layer=0,layout=NHD")
-        self.assertEqual(manager.get_buffers(1, kv_layout="HND"), "layer=0,layout=HND")
+        with self.assertRaises(NotImplementedError):
+            manager.get_buffers(1)
 
     def test_manager_can_seed_dummy_requests(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")

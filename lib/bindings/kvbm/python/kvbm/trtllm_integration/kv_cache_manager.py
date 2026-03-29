@@ -12,7 +12,6 @@ where the full TRT-LLM runtime is not installed yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import inspect
 import math
 from typing import Any, Callable, Iterable, Optional
 
@@ -607,44 +606,13 @@ class KvbmKVCacheManager:
 
         return tensor.unflatten(-1, (num_kv_heads, self.head_dim))
 
-    def _supports_kv_layout_argument(self, method: Callable[..., Any]) -> bool:
-        try:
-            parameters = inspect.signature(method).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        return any(
-            parameter.name == "kv_layout"
-            and parameter.kind
-            in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            )
-            for parameter in parameters
-        )
-
     def _resolve_primary_pool_exports(self, primary_pool: Any) -> _PrimaryPoolExports:
         if primary_pool is None:
             return _PrimaryPoolExports()
 
-        get_layer_view = getattr(primary_pool, "get_layer_view", None)
-        if callable(get_layer_view):
-            return _PrimaryPoolExports(
-                layer_view=lambda layer_offset, kv_layout: get_layer_view(
-                    layer_offset, kv_layout=kv_layout
-                )
-            )
-
         layer_view = getattr(primary_pool, "layer_view", None)
         if not callable(layer_view):
             return _PrimaryPoolExports()
-        if self._supports_kv_layout_argument(layer_view):
-            return _PrimaryPoolExports(
-                layer_view=lambda layer_offset, kv_layout: self._reshape_layer_export(
-                    layer_view(layer_offset, kv_layout=kv_layout),
-                    layer_offset,
-                    kv_layout,
-                )
-            )
         return _PrimaryPoolExports(
             layer_view=lambda layer_offset, kv_layout: self._reshape_layer_export(
                 layer_view(layer_offset),
