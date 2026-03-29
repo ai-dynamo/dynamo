@@ -737,7 +737,7 @@ func (s runSpec) podSpecBase() corev1.PodSpec {
 		RestartPolicy:      corev1.RestartPolicyNever,
 		ServiceAccountName: s.ServiceAccountName,
 		SecurityContext:    s.podSecurityContext(),
-		Tolerations:        append(gpuTolerations(), s.Worker.Tolerations...),
+		Tolerations:        append([]corev1.Toleration(nil), s.Worker.Tolerations...),
 	}
 	if s.Worker.RuntimeClass != "" {
 		spec.RuntimeClassName = stringPtr(s.Worker.RuntimeClass)
@@ -1190,16 +1190,6 @@ func envFromSecretRefs(secretName string) []corev1.EnvFromSource {
 			SecretRef: &corev1.SecretEnvSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
 			},
-		},
-	}
-}
-
-func gpuTolerations() []corev1.Toleration {
-	return []corev1.Toleration{
-		{
-			Key:      "nvidia.com/gpu",
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoSchedule,
 		},
 	}
 }
