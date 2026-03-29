@@ -252,7 +252,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 		},
 	}
 	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
-	assert.Equal(t, []string{"cuda-checkpoint", "--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
+	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
+	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {

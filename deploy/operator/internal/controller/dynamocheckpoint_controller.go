@@ -45,6 +45,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	snapshotkube "github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/kube"
 )
 
 const (
@@ -589,7 +590,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			},
 		)
 		if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok && gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0 {
-			mainContainer.Command = append([]string{"cuda-checkpoint", "--launch-job"}, mainContainer.Command...)
+			mainContainer.Command, mainContainer.Args = snapshotkube.WrapWithCudaCheckpointLaunchJob(mainContainer.Command, mainContainer.Args)
 		}
 
 		// Override probes for checkpoint mode
@@ -633,13 +634,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 
 	// Apply seccomp profile to block io_uring syscalls
 	// CRIU doesn't support io_uring memory mappings, so we must block these syscalls
-	if podTemplate.Spec.SecurityContext == nil {
-		podTemplate.Spec.SecurityContext = &corev1.PodSecurityContext{}
-	}
-	podTemplate.Spec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
-		Type:             corev1.SeccompProfileTypeLocalhost,
-		LocalhostProfile: ptr.To(consts.SeccompProfilePath),
-	}
+	snapshotkube.InjectLocalhostSeccompProfile(&podTemplate.Spec, consts.SeccompProfilePath)
 
 	// Build the Job
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds

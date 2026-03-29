@@ -23,8 +23,8 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotkube "github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/kube"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 func ApplyCheckpointSourcePodMetadata(
@@ -34,75 +34,28 @@ func ApplyCheckpointSourcePodMetadata(
 	location string,
 	storageType nvidiacomv1alpha1.DynamoCheckpointStorageType,
 ) {
-	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
-	delete(labels, commonconsts.KubeLabelCheckpointHash)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointLocation)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointStorageType)
-
-	labels[commonconsts.KubeLabelIsCheckpointSource] = commonconsts.KubeLabelValueTrue
-	if hash != "" {
-		labels[commonconsts.KubeLabelCheckpointHash] = hash
-	}
-	if location != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointLocation] = location
-	}
-	if storageType != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointStorageType] = string(storageType)
-	}
+	snapshotkube.ApplyCheckpointSourceMetadata(labels, annotations, hash, location, string(storageType))
 }
 
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
-	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
-	delete(labels, commonconsts.KubeLabelCheckpointHash)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointLocation)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointStorageType)
-
-	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
-		return
+	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
+	hash := ""
+	location := ""
+	storageType := ""
+	if enabled {
+		hash = checkpointInfo.Hash
+		location = checkpointInfo.Location
+		storageType = string(checkpointInfo.StorageType)
 	}
-
-	labels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
-	if checkpointInfo.Hash != "" {
-		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
-	}
-	if checkpointInfo.Location != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointLocation] = checkpointInfo.Location
-	}
-	if checkpointInfo.StorageType != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointStorageType] = string(checkpointInfo.StorageType)
-	}
+	snapshotkube.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
 }
 
 func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == commonconsts.CheckpointVolumeName {
-			return
-		}
-	}
-
-	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-		Name: commonconsts.CheckpointVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: pvcName,
-				ReadOnly:  false,
-			},
-		},
-	})
+	snapshotkube.InjectCheckpointVolume(podSpec, pvcName)
 }
 
 func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == commonconsts.CheckpointVolumeName {
-			return
-		}
-	}
-
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      commonconsts.CheckpointVolumeName,
-		MountPath: basePath,
-		ReadOnly:  false,
-	})
+	snapshotkube.InjectCheckpointVolumeMount(container, basePath)
 }
 
 func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
@@ -226,13 +179,7 @@ func InjectCheckpointIntoPodSpec(
 		mainContainer.Args = nil
 	}
 
-	if podSpec.SecurityContext == nil {
-		podSpec.SecurityContext = &corev1.PodSecurityContext{}
-	}
-	podSpec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
-		Type:             corev1.SeccompProfileTypeLocalhost,
-		LocalhostProfile: ptr.To(commonconsts.SeccompProfilePath),
-	}
+	snapshotkube.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
 
 	storageType := configv1alpha1.CheckpointStorageTypePVC
 	var storageConfig *configv1alpha1.CheckpointStorageConfiguration

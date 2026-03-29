@@ -40,9 +40,10 @@ func runCheckpoint(args []string) error {
 	flags := flag.NewFlagSet("checkpoint", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
-	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang worker Pod manifest")
+	manifest := flags.String("manifest", "", "Path to a worker Pod manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	checkpointHash := flags.String("checkpoint-hash", "", "Explicit checkpoint hash; defaults to a generated value")
+	disableCudaCheckpointJobFile := flags.Bool("disable-cuda-checkpoint-job-file", false, "Preserve the manifest command instead of wrapping it with cuda-checkpoint --launch-job")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
 	if err := flags.Parse(args); err != nil {
@@ -53,10 +54,11 @@ func runCheckpoint(args []string) error {
 	}
 
 	result, err := manual.RunCheckpoint(context.Background(), manual.CheckpointOptions{
-		ManifestPath:   *manifest,
-		Namespace:      *namespace,
-		CheckpointHash: *checkpointHash,
-		Timeout:        *timeout,
+		ManifestPath:                 *manifest,
+		Namespace:                    *namespace,
+		CheckpointHash:               *checkpointHash,
+		DisableCudaCheckpointJobFile: *disableCudaCheckpointJobFile,
+		Timeout:                      *timeout,
 	})
 	if err != nil {
 		return err
@@ -65,7 +67,6 @@ func runCheckpoint(args []string) error {
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
 	fmt.Printf("name=%s\n", result.Name)
-	fmt.Printf("backend=%s\n", result.Backend)
 	fmt.Printf("checkpoint_job=%s\n", result.CheckpointJob)
 	fmt.Printf("checkpoint_hash=%s\n", result.CheckpointHash)
 	fmt.Printf("checkpoint_location=%s\n", result.CheckpointLocation)
@@ -76,7 +77,7 @@ func runRestore(args []string) error {
 	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
-	manifest := flags.String("manifest", "", "Path to a vLLM or SGLang worker Pod manifest")
+	manifest := flags.String("manifest", "", "Path to a worker Pod manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	checkpointHash := flags.String("checkpoint-hash", "", "Checkpoint hash to restore")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
@@ -101,8 +102,6 @@ func runRestore(args []string) error {
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
 	fmt.Printf("name=%s\n", result.Name)
-	fmt.Printf("backend=%s\n", result.Backend)
-	fmt.Printf("restore_service=%s\n", result.RestoreService)
 	fmt.Printf("restore_pod=%s\n", result.RestorePod)
 	fmt.Printf("checkpoint_hash=%s\n", result.CheckpointHash)
 	fmt.Printf("checkpoint_location=%s\n", result.CheckpointLocation)

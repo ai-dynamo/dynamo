@@ -28,18 +28,19 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/executor"
+	snapshotkube "github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/kube"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
 )
 
 const (
-	kubeLabelIsCheckpointSource         = "nvidia.com/snapshot-is-checkpoint-source"
-	kubeLabelCheckpointHash             = "nvidia.com/snapshot-checkpoint-hash"
-	kubeLabelIsRestoreTarget            = "nvidia.com/snapshot-is-restore-target"
-	kubeAnnotationCheckpointLocation    = "nvidia.com/snapshot-checkpoint-location"
-	kubeAnnotationCheckpointStorageType = "nvidia.com/snapshot-checkpoint-storage-type"
-	kubeAnnotationCheckpointStatus      = "nvidia.com/snapshot-checkpoint-status"
-	kubeAnnotationRestoreStatus         = "nvidia.com/snapshot-restore-status"
-	kubeAnnotationRestoreContainerID    = "nvidia.com/snapshot-restore-container-id"
+	kubeLabelIsCheckpointSource         = snapshotkube.CheckpointSourceLabel
+	kubeLabelCheckpointHash             = snapshotkube.CheckpointHashLabel
+	kubeLabelIsRestoreTarget            = snapshotkube.RestoreTargetLabel
+	kubeAnnotationCheckpointLocation    = snapshotkube.CheckpointLocationAnnotation
+	kubeAnnotationCheckpointStorageType = snapshotkube.CheckpointStorageAnnotation
+	kubeAnnotationCheckpointStatus      = snapshotkube.CheckpointStatusAnnotation
+	kubeAnnotationRestoreStatus         = snapshotkube.RestoreStatusAnnotation
+	kubeAnnotationRestoreContainerID    = snapshotkube.RestoreContainerIDAnnotation
 )
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles
