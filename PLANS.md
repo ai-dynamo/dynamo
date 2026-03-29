@@ -1,17 +1,18 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-28 UTC
+Last updated: 2026-03-29 UTC
 
 Current run focus:
 
-- validate the real TRT-LLM disaggregation/runtime path on an MPI-capable host
-  or container
-- verify that the installed TRT-LLM wheel matches the pinned local checkout
-  before spending more time on runtime smoke tests
-- extend the manager only if that runtime path exposes a new missing field or
-  storage-shape contract
-- in this sandbox, keep using the verified editable-install command:
-  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- re-read the full execution log, repo instructions, and current TRT-LLM
+  manager code before making further changes
+- re-run the validated local checks from this sandbox:
+  - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+  - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+  - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+- only extend the manager if those checks expose a new repo-local contract gap;
+  otherwise keep the handoff precise and machine-specific
 
 ## Objective
 
@@ -643,6 +644,29 @@ Implemented so far:
     wheel metadata expects CUDA major `13`
   - phase-7 runtime validation is therefore blocked by environment/package
     mismatch before any additional repo-local manager API work
+- Re-read `Agents.md`, the full current `PLANS.md`, and the active
+  `KvbmKVCacheManager` / audit code before making further edits in this run.
+- Re-ran the repo-local validation stack on 2026-03-29 UTC and confirmed no
+  new repo-local regression:
+  - Python contract tests still pass
+  - `cargo check` for `lib/bindings/kvbm` still passes
+  - the editable install path still works with
+    `UV_CACHE_DIR=/tmp/uv-cache`
+  - `import kvbm, kvbm._core` still resolves from the repo-local editable
+    package in `.venv`
+- Re-ran the non-importing TRT-LLM audit against the real repo `.venv` and
+  confirmed the blocker chain is unchanged:
+  - installed wheel root:
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+  - installed wheel version: `1.2.0`
+  - installed wheel still lacks `_torch/disaggregation`
+  - pinned checkout at `/tmp/trtllm-latest/tensorrt_llm` still contains
+    `_torch/disaggregation`
+  - installed wheel still expects CUDA major `13`
+  - host/container still exposes only `libcublasLt.so.12*`
+- Re-checked the repo-local manager/audit/test surface for additional obvious
+  cleanup work and did not find a new executable repo-local milestone beyond
+  the already documented phase-7 external-runtime blockers.
 
 ## New Findings
 
@@ -1002,6 +1026,27 @@ Implemented so far:
   - reported `status: blocked`
   - found installed wheel surface mismatch vs pinned checkout
   - found CUDA major-version mismatch (`expected 13`, found `12`)
+- Passed again in the 2026-03-29 UTC revalidation run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed again in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed again in the same run:
+  `.venv/bin/python -c 'import kvbm, kvbm._core'`
+  Notes:
+  - `kvbm` resolved from
+    `lib/bindings/kvbm/python/kvbm/__init__.py`
+  - the native extension resolved from
+    `lib/bindings/kvbm/python/kvbm/_core.abi3.so`
+- Passed again in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+  Notes:
+  - reported `status: blocked`
+  - blocker details were unchanged from the prior run:
+    - installed wheel lacks `_torch/disaggregation`
+    - installed wheel expects CUDA major `13`
+    - host only exposes `libcublasLt.so.12*`
 
 ## Remaining Work
 
@@ -1049,6 +1094,11 @@ Implemented so far:
   - a wheel/install matching the pinned checkout surface, or
   - a source-overlay workflow that imports `/tmp/trtllm-latest/tensorrt_llm`
     with compatible native dependencies on the validation host
+- After re-reading the current repo-local code and re-running the validation
+  stack on 2026-03-29 UTC, there is no additional executable repo-local phase
+  left in this sandbox beyond keeping this handoff current. The remaining work
+  is entirely on a validation host/container that satisfies the TRT-LLM runtime
+  import prerequisites above.
 
 ## Exact Next Step
 
@@ -1091,6 +1141,12 @@ Implemented so far:
   a TensorRT-LLM wheel installed, but that wheel is currently mismatched with
   the pinned checkout surface and host CUDA libraries. Known host issue:
   `ImportError: libcublasLt.so.13: cannot open shared object file`.
+- In this sandbox, the next run should not spend time reworking the manager
+  until Step 1 shows a runtime-capable host. The highest-signal first command
+  remains:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+  Then only proceed to the real TRT-LLM disaggregation smoke path if the audit
+  no longer reports a wheel-surface mismatch or CUDA major-version mismatch.
 
 # Wishes:
 - minimize python interface.
