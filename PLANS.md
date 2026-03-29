@@ -1,12 +1,12 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:10:56 UTC
+Last updated: 2026-03-29 03:17:29 UTC
 
 Current run outcome:
 
-- Re-read the user-provided `AGENTS.md` instructions plus the current
-  `PLANS.md`, `docs/design-docs/kvbm-trtllm-integration.md`, and the active
-  TRT-LLM seam:
+- Re-read the repo-local execution instructions in `Agents.md`, the
+  user-provided `AGENTS.md` instructions, the current `PLANS.md`,
+  `docs/design-docs/kvbm-trtllm-integration.md`, and the active TRT-LLM seam:
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/rust.py`
   - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
   - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py`
@@ -14,7 +14,7 @@ Current run outcome:
   permissive fallback behavior, unsupported-path drift, and cleanup markers)
   and again did not find another executable repo-local milestone in this
   sandbox.
-- Re-ran the full repo-local validation stack on 2026-03-29 03:10 UTC:
+- Re-ran the full repo-local validation stack on 2026-03-29 03:17 UTC:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
     -> pass (`Ran 25 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
@@ -73,8 +73,9 @@ external dependency that cannot be resolved from this machine.
 
 ## Constraints And Environment Findings
 
-- Repo instructions were read from the user-provided `AGENTS.md` content; this
-  checkout itself does not contain a repo-local `AGENTS.md` file.
+- Repo instructions were read from both:
+  - the user-provided `AGENTS.md` content for this run
+  - the repo-local mixed-case `Agents.md` execution-plan file at repo root
 - The design source of truth is
   `docs/design-docs/kvbm-trtllm-integration.md`.
 - Local TensorRT-LLM checkout exists at `/tmp/trtllm-latest`.
