@@ -536,6 +536,20 @@ Implemented so far:
     Python fallback path
   - TRT-LLM Rust-loader wiring now treats required exported symbols as required
     attributes rather than permissive `getattr(...)` lookups
+- Investigated the remaining local build path after that cleanup:
+  - `maturin develop` is still blocked by `cargo metadata` trying to download
+    uncached `jiff-tzdb v0.1.6` from crates.io in this network-restricted
+    environment
+  - a direct `cargo build` of `lib/bindings/kvbm` also had two environment
+    blockers at first:
+    - default target dir `/node-storage/cargo-target` was not writable
+    - `utoipa-swagger-ui` tried to download Swagger UI assets from GitHub
+  - both direct-build blockers have repo-local workarounds now:
+    - `CARGO_TARGET_DIR=/tmp/kvbm-target`
+    - `SWAGGER_UI_DOWNLOAD_URL=file:///tmp/swagger-ui-offline.zip`
+  - with a minimal local Swagger zip at `/tmp/swagger-ui-offline.zip`, direct
+    `cargo build --manifest-path lib/bindings/kvbm/Cargo.toml` completed
+    successfully on this machine
 
 ## New Findings
 
@@ -696,6 +710,30 @@ Implemented so far:
   `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
 - Passed after the same cleanup milestone:
   `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Failed after the same cleanup milestone:
+  `maturin develop --uv`
+  Reason:
+  - `cargo metadata` attempted to download `jiff-tzdb v0.1.6` from
+    `static.crates.io`
+  - network access is restricted in this environment, so the missing crate
+    could not be fetched
+- Failed similarly without `--uv`:
+  `maturin develop`
+  Reason:
+  - same `jiff-tzdb v0.1.6` crates.io download attempt during `cargo metadata`
+- Failed once in direct build validation before applying env workarounds:
+  `cargo build --manifest-path lib/bindings/kvbm/Cargo.toml`
+  Reason:
+  - default target dir under `/node-storage/cargo-target` was not writable from
+    this sandbox
+- Passed with local build workarounds:
+  `CARGO_TARGET_DIR=/tmp/kvbm-target SWAGGER_UI_DOWNLOAD_URL=file:///tmp/swagger-ui-offline.zip cargo build --manifest-path lib/bindings/kvbm/Cargo.toml`
+  Notes:
+  - `/tmp/swagger-ui-offline.zip` was created locally with a minimal
+    `swagger-ui-5.17.14/dist/` tree so `utoipa-swagger-ui` did not need to
+    download assets from GitHub
+  - this proves the extension itself can build locally once the target-dir and
+    Swagger-download environment issues are handled
 - Failed in the repo `.venv` direct TRT-LLM smoke path before page-table
   validation completed:
   `TLLM_DISABLE_MPI=1 .venv/bin/python ... build_page_table_from_manager(manager)`
@@ -746,24 +784,27 @@ Implemented so far:
   test binary once the local PyO3/Python link environment is fixed; until then
   rely on `cargo check` plus Python contract tests on this machine.
 - Repo-local cleanup still in progress for the pinned TRT-LLM seam:
-  - run `maturin`/build validation after the seam cleanup and record the exact
-    outcome here
   - decide whether any remaining Python fallback-only tests should be retired
     now that interface drift is treated as an error for the supported path
+- Local build validation is now narrowed to one remaining environment issue:
+  - make `maturin develop` stop requiring an uncached `jiff-tzdb v0.1.6`
+    download during `cargo metadata`, or vendor/cache that crate for offline
+    use
 - Additional external blocker now identified for phase 7 runtime validation:
   the local `.venv` TRT-LLM import path aborts inside Open MPI / PMIx before the
   direct `KvCacheTransceiverV2` / transfer-worker smoke check can run.
 
 ## Exact Next Step
 
-1. Run:
-   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-   - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
-   - `maturin develop --uv` from
-     `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm`
-   and record exact pass/fail details here. The first two already pass after
-   the pinned-interface cleanup; `maturin` validation is the remaining local
-   checkpoint for this run.
+1. Decide how to unblock `maturin develop` offline for
+   `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm`:
+   - either vendor/cache `jiff-tzdb v0.1.6` so `cargo metadata` no longer
+     reaches out to crates.io
+   - or align the lockfile/dependency graph to cached crate versions already
+     present on the machine, then re-run `maturin develop`
+   The direct extension build itself already succeeds once
+   `CARGO_TARGET_DIR=/tmp/kvbm-target` and
+   `SWAGGER_UI_DOWNLOAD_URL=file:///tmp/swagger-ui-offline.zip` are supplied.
 2. Re-run the direct TRT-LLM smoke check on a host or container where importing
    `.venv` `tensorrt_llm` disaggregation modules does not abort in Open MPI /
    PMIx. The repo-local adapter already passes the pinned-source
