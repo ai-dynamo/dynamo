@@ -1099,14 +1099,6 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, spec
 			if ctx.Err() != nil {
 				return "", fmt.Errorf("wait for checkpoint job %s/%s: %w", spec.Namespace, spec.CheckpointJobName, ctx.Err())
 			}
-			if isTransientKubeError(err) {
-				select {
-				case <-ctx.Done():
-					return "", fmt.Errorf("wait for checkpoint job %s/%s: %w", spec.Namespace, spec.CheckpointJobName, ctx.Err())
-				case <-ticker.C:
-					continue
-				}
-			}
 			return "", fmt.Errorf("get checkpoint job %s/%s: %w", spec.Namespace, spec.CheckpointJobName, err)
 		}
 
@@ -1138,14 +1130,6 @@ func waitForRestore(ctx context.Context, clientset kubernetes.Interface, spec ru
 			if ctx.Err() != nil {
 				return "", fmt.Errorf("wait for restore pod %s/%s: %w", spec.Namespace, spec.RestorePodName, ctx.Err())
 			}
-			if isTransientKubeError(err) {
-				select {
-				case <-ctx.Done():
-					return "", fmt.Errorf("wait for restore pod %s/%s: %w", spec.Namespace, spec.RestorePodName, ctx.Err())
-				case <-ticker.C:
-					continue
-				}
-			}
 			return "", fmt.Errorf("get restore pod %s/%s: %w", spec.Namespace, spec.RestorePodName, err)
 		}
 
@@ -1166,32 +1150,6 @@ func waitForRestore(ctx context.Context, clientset kubernetes.Interface, spec ru
 		case <-ticker.C:
 		}
 	}
-}
-
-func isTransientKubeError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) {
-		return true
-	}
-
-	message := err.Error()
-	for _, pattern := range []string{
-		"unexpected EOF",
-		"EOF",
-		"connection reset",
-		"connection refused",
-		"i/o timeout",
-		"TLS handshake timeout",
-		"context deadline exceeded",
-		"Teleport proxy failed to connect",
-	} {
-		if strings.Contains(message, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 func checkpointPodSummary(ctx context.Context, clientset kubernetes.Interface, spec runSpec) string {
