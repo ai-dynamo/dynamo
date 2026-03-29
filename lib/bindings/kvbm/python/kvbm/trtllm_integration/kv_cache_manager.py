@@ -12,8 +12,9 @@ where the full TRT-LLM runtime is not installed yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 import math
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from . import rust as rust_bindings
 
@@ -101,6 +102,11 @@ class _FakeCacheTierConfig:
 class _FakeInitConfig:
     tokens_per_block: int
     cache_tiers: list[_FakeCacheTierConfig]
+
+
+@dataclass(frozen=True)
+class _PrimaryPoolExports:
+    layer_view: Optional[Callable[[int, str], Any]] = None
 
 
 @dataclass(frozen=True)
@@ -335,6 +341,7 @@ class KvbmKVCacheManager:
         self.primary_pool = (
             primary_pool if primary_pool is not None else self._maybe_create_native_primary_pool()
         )
+        self._primary_pool_exports = self._resolve_primary_pool_exports(self.primary_pool)
         self._native_state = self._maybe_create_native_state()
         self.kv_cache_pool_mapping = kv_cache_pool_mapping if kv_cache_pool_mapping is not None else [
             [0, local_layer_idx] for local_layer_idx in range(self.num_local_layers)
@@ -599,6 +606,52 @@ class KvbmKVCacheManager:
             return tensor
 
         return tensor.unflatten(-1, (num_kv_heads, self.head_dim))
+
+    def _supports_kv_layout_argument(self, method: Callable[..., Any]) -> bool:
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == "kv_layout"
+            and parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            for parameter in parameters
+        )
+
+    def _resolve_primary_pool_exports(self, primary_pool: Any) -> _PrimaryPoolExports:
+        if primary_pool is None:
+            return _PrimaryPoolExports()
+
+        get_layer_view = getattr(primary_pool, "get_layer_view", None)
+        if callable(get_layer_view):
+            return _PrimaryPoolExports(
+                layer_view=lambda layer_offset, kv_layout: get_layer_view(
+                    layer_offset, kv_layout=kv_layout
+                )
+            )
+
+        layer_view = getattr(primary_pool, "layer_view", None)
+        if not callable(layer_view):
+            return _PrimaryPoolExports()
+        if self._supports_kv_layout_argument(layer_view):
+            return _PrimaryPoolExports(
+                layer_view=lambda layer_offset, kv_layout: self._reshape_layer_export(
+                    layer_view(layer_offset, kv_layout=kv_layout),
+                    layer_offset,
+                    kv_layout,
+                )
+            )
+        return _PrimaryPoolExports(
+            layer_view=lambda layer_offset, kv_layout: self._reshape_layer_export(
+                layer_view(layer_offset),
+                layer_offset,
+                kv_layout,
+            )
+        )
 
     def _request_state_for(self, request_id: int) -> _RequestState:
         state = self._request_state.get(request_id)
@@ -946,15 +999,9 @@ class KvbmKVCacheManager:
             return self.layer_buffers[layer_idx]
         if layer_offset in self.layer_buffers:
             return self.layer_buffers[layer_offset]
-        if self.primary_pool is not None:
-            if hasattr(self.primary_pool, "get_layer_view"):
-                return self.primary_pool.get_layer_view(layer_offset, kv_layout=kv_layout)
-            if hasattr(self.primary_pool, "layer_view"):
-                try:
-                    export = self.primary_pool.layer_view(layer_offset, kv_layout=kv_layout)
-                except TypeError:
-                    export = self.primary_pool.layer_view(layer_offset)
-                return self._reshape_layer_export(export, layer_offset, kv_layout)
+        layer_view = self._primary_pool_exports.layer_view
+        if layer_view is not None:
+            return layer_view(layer_offset, kv_layout)
         raise self._missing_export("get_buffers")
 
     def get_unique_primary_pool(self) -> Any:
@@ -1156,4 +1203,5 @@ class KvbmKVCacheManager:
         self._reset_host_block_offsets()
         self.layer_buffers.clear()
         self.primary_pool = None
+        self._primary_pool_exports = _PrimaryPoolExports()
         self._disagg_metadata = None

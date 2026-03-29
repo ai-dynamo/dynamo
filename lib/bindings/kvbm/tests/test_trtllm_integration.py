@@ -647,6 +647,27 @@ class TrtllmIntegrationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             manager.get_buffers(2, kv_layout="BAD")
 
+    def test_manager_supports_primary_pool_layer_view_with_explicit_kv_layout(self) -> None:
+        integration = importlib.import_module("kvbm.trtllm_integration")
+
+        class _PrimaryPool:
+            def layer_view(self, layer_idx: int, *, kv_layout: str) -> str:
+                return f"layer={layer_idx},layout={kv_layout}"
+
+        manager = integration.KvbmKVCacheManager(
+            tokens_per_block=4,
+            dtype="float16",
+            head_dim=16,
+            pp_layers=[1],
+            total_num_kv_heads_per_layer=[8, 8],
+            max_seq_len=32,
+            num_blocks=8,
+            primary_pool=_PrimaryPool(),
+        )
+
+        self.assertEqual(manager.get_buffers(1), "layer=0,layout=NHD")
+        self.assertEqual(manager.get_buffers(1, kv_layout="HND"), "layer=0,layout=HND")
+
     def test_manager_can_seed_dummy_requests(self) -> None:
         integration = importlib.import_module("kvbm.trtllm_integration")
         manager = integration.KvbmKVCacheManager(

@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-29 03:38:51 UTC
+Last updated: 2026-03-29 03:46:30 UTC
 
 Current run outcome:
 
@@ -13,27 +13,33 @@ Current run outcome:
 - Re-searched the active seam for repo-local follow-up work (`TODO`, `FIXME`,
   permissive fallback behavior, unsupported-path drift, cleanup markers, and
   stale docs). No new manager/product-code milestone was found, but one
-  repo-local audit/tooling cleanup was still justified.
+  repo-local manager cleanup was still justified.
 - Re-ran the baseline repo-local Python validation before editing:
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
-    -> pass (`Ran 9 tests`, `OK`)
+    -> pass (`Ran 10 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
-    -> pass (`Ran 25 tests`, `OK`)
-- Landed one additional repo-local phase-7 support improvement:
-  - `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` now reads the
-    repo-declared TRT-LLM pin via stdlib `tomllib` instead of a brittle
-    line-based scanner
-  - the audit CLI now exposes `--repo-pyproject`, so the declared pin source
-    is explicit and testable instead of being hardwired
-  - `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py` now covers invalid
-    TOML handling plus the new CLI override
-  - `lib/bindings/kvbm/README.md` now documents the audit command as the
-    required TRT-LLM preflight before runtime smoke validation
+    -> pass (`Ran 26 tests`, `OK`)
+- Landed one additional repo-local seam cleanup:
+  - `lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
+    now validates and caches the primary-pool layer-export path once at
+    construction time instead of probing `hasattr(...)` / `TypeError` fallbacks
+    every time `get_buffers()` is called
+  - the supported primary-pool export seam remains explicit and narrow:
+    - `get_layer_view(layer_idx, *, kv_layout=...)`
+    - `layer_view(layer_idx, *, kv_layout=...)`
+    - `layer_view(layer_idx)` with manager-side reshaping
+  - shutdown now clears the cached export adapter together with the owned pool
+  - `lib/bindings/kvbm/tests/test_trtllm_integration.py` now covers the
+    explicit `layer_view(..., kv_layout=...)` contract too
 - Re-ran validation after that change:
+  - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_integration`
+    -> pass (`Ran 26 tests`, `OK`)
   - `python3 -m unittest lib.bindings.kvbm.tests.test_trtllm_runtime_audit`
     -> pass (`Ran 10 tests`, `OK`)
   - `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
-    -> pass (`Ran 35 tests`, `OK`)
+    -> pass (`Ran 36 tests`, `OK`)
+  - `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+    -> pass
   - `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json --probe-imports --fail-on-blocked`
     -> exit `1`, report `status: "blocked"`
   - installed package root:
@@ -49,9 +55,9 @@ Current run outcome:
     `tensorrt_llm._torch.disaggregation.transceiver` still aborts in Open MPI /
     PMIx during import (`The PMIx server's listener thread failed to start`)
 - No additional repo-local manager/product-code change is justified in this
-  run beyond that audit tooling/docs tightening and this handoff refresh. The
-  supported path is still green in-repo; the remaining work is phase-7
-  validation on a runtime-capable host with:
+  run beyond this seam cleanup and this handoff refresh. The supported path is
+  still green in-repo; the remaining work is phase-7 validation on a
+  runtime-capable host with:
   - a TRT-LLM install/source version aligned with the repo-declared seam
   - a TRT-LLM install/source surface that includes `_torch/disaggregation`
   - matching CUDA major user-space
@@ -1585,11 +1591,12 @@ Implemented so far:
 - Another seam-review + validation pass in this run reached the same result:
   there is still no additional executable repo-local milestone left in this
   sandbox beyond keeping this handoff precise for a runtime-capable host.
-- The only additional repo-local change justified in this run was improving the
-  runtime audit itself so the external blocker evidence is precise; no further
+- The only additional repo-local change justified in this run was tightening
+  the Python primary-pool export seam so the supported TRT-LLM path no longer
+  keeps re-probing optional layer-export methods at runtime; no further
   manager-side code change is currently justified in this sandbox.
-- This 2026-03-29 03:30 UTC rerun confirmed the same end state after the audit
-  tightening and without further manager-side code changes:
+- This 2026-03-29 03:46 UTC rerun confirmed the same end state after that seam
+  tightening:
   - all repo-local supported-path validation gates are still green
   - the only failing gate is still the strict runtime audit
   - the blocking conditions are now reported more precisely as:
