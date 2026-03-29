@@ -586,6 +586,13 @@ impl ResponseStreamConverter {
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
 
+        // Capture message state before finishing (finish clears the fields)
+        let pending_message = if self.message_started {
+            Some((self.message_item_id.clone(), self.accumulated_text.clone()))
+        } else {
+            None
+        };
+
         // Close text message if it was started
         if self.message_started {
             self.finish_message_if_started(&mut events);
@@ -633,13 +640,13 @@ impl ResponseStreamConverter {
             events.push(make_sse_event(&item_done));
         }
 
-        // Build the final output vector from accumulated state
+        // Build the final output vector from captured state
         let mut output = Vec::new();
-        if self.message_started {
+        if let Some((msg_id, text)) = pending_message {
             output.push(OutputItem::Message(OutputMessage {
-                id: Some(self.message_item_id.clone()),
+                id: Some(msg_id),
                 content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                    text: self.accumulated_text.clone(),
+                    text,
                     annotations: vec![],
                     logprobs: Some(vec![]),
                 })],
@@ -1048,6 +1055,33 @@ mod tests {
             tool_types.contains(&"response.output_item.done".to_string()),
             "output_item.done inline after text: {tool_types:?}"
         );
+    }
+
+    #[test]
+    fn test_text_only_response_completed_includes_output() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+        let _ = conv.process_chunk(&text_chunk("Hello world"));
+        let end_events = conv.emit_end_events();
+        let end_types = event_types(&end_events);
+
+        assert!(
+            end_types.contains(&"response.completed".to_string()),
+            "should contain response.completed: {end_types:?}"
+        );
+
+        // Verify the response.completed event includes the text in output
+        for event in &end_events {
+            let serialized = format!("{:?}", event.as_ref().unwrap());
+            if serialized.contains("response.completed") {
+                assert!(
+                    serialized.contains("Hello world"),
+                    "response.completed output should contain the accumulated text"
+                );
+                return;
+            }
+        }
+        panic!("response.completed event not found in end events");
     }
 
     #[test]

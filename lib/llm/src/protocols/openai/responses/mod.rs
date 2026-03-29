@@ -755,6 +755,11 @@ pub fn chat_completion_to_response(
 
     if let Some(choice) = choice {
         // Handle structured tool calls
+        let has_structured_tool_calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tc| !tc.is_empty());
         if let Some(tool_calls) = choice.message.tool_calls {
             for tc in &tool_calls {
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
@@ -810,11 +815,16 @@ pub fn chat_completion_to_response(
         }
 
         // Handle text content -- also parse <tool_call> blocks from models
-        // that emit tool calls as text (e.g. Qwen3)
+        // that emit tool calls as text (e.g. Qwen3).
+        // Skip raw parsing when structured tool_calls already exist to avoid duplicates.
         if let Some(content_text) = content_text
             && !content_text.is_empty()
         {
-            let parsed_calls = parse_tool_call_text(&content_text);
+            let parsed_calls = if has_structured_tool_calls {
+                Vec::new()
+            } else {
+                parse_tool_call_text(&content_text)
+            };
             let remaining = strip_tool_call_text(&content_text);
             if !parsed_calls.is_empty() {
                 for (name, arguments) in parsed_calls {
