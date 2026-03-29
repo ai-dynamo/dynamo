@@ -6,6 +6,8 @@ Current run focus:
 
 - validate the real TRT-LLM disaggregation/runtime path on an MPI-capable host
   or container
+- verify that the installed TRT-LLM wheel matches the pinned local checkout
+  before spending more time on runtime smoke tests
 - extend the manager only if that runtime path exposes a new missing field or
   storage-shape contract
 - in this sandbox, keep using the verified editable-install command:
@@ -364,6 +366,14 @@ Current blockers identified from the pinned TRT-LLM disaggregation surface:
   rank-info builders, but actual `.venv` TRT-LLM disaggregation imports still
   abort in Open MPI / PMIx before `KvCacheTransceiverV2` setup can be exercised
   on this machine.
+- The installed `.venv` TensorRT-LLM wheel is not the same Python surface as
+  the pinned local checkout:
+  - installed wheel: `tensorrt_llm 1.2.0`
+  - installed package has `_torch/pyexecutor` but no `_torch/disaggregation`
+  - pinned checkout at `/tmp/trtllm-latest/tensorrt_llm` has both
+    `_torch/pyexecutor` and `_torch/disaggregation`
+  This means the remaining phase-7 runtime validation cannot succeed against
+  the current `.venv` wheel as-is, even before CUDA/MPI issues are resolved.
 - The current adapter still models only one GPU-resident life cycle / pool
   group for the supported path; if real transfer-worker startup demands richer
   storage-tier detail, that mapping work remains to be done.
@@ -622,6 +632,17 @@ Implemented so far:
   - the import still aborts inside Open MPI / PMIx before
     `kv_extractor.py` / `kv_cache_transceiver.py` can be exercised for real on
     this machine
+- Added a repo-local non-importing TRT-LLM runtime audit utility in
+  `lib/bindings/kvbm/tools/trtllm_runtime_audit.py` plus stdlib-only coverage
+  in `lib/bindings/kvbm/tests/test_trtllm_runtime_audit.py`.
+- Ran that audit against the actual repo `.venv` and confirmed:
+  - installed wheel version is `tensorrt_llm 1.2.0`
+  - installed wheel exposes `_torch/pyexecutor` but not `_torch/disaggregation`
+  - pinned checkout still exposes the targeted disaggregation modules
+  - available local `libcublasLt` major version is `12`, while the installed
+    wheel metadata expects CUDA major `13`
+  - phase-7 runtime validation is therefore blocked by environment/package
+    mismatch before any additional repo-local manager API work
 
 ## New Findings
 
@@ -758,6 +779,28 @@ Implemented so far:
 - The built extension itself now loads directly via `importlib` from
   `lib/bindings/kvbm/python/kvbm/_core.abi3.so`; the remaining import failure
   on `import kvbm` is now resolved by making the `nixl` preload optional.
+- Importing `tensorrt_llm` is not a safe way to inspect the installed runtime
+  on this host because it immediately pulls in MPI/CUDA-sensitive modules.
+  The new audit helper avoids that by using package metadata plus filesystem
+  inspection only.
+- The repo `.venv` does not currently contain the TRT-LLM Python surface that
+  phase 7 targets from the pinned checkout:
+  - installed wheel root:
+    `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv/lib/python3.12/site-packages/tensorrt_llm`
+  - pinned checkout root:
+    `/tmp/trtllm-latest/tensorrt_llm`
+  - installed wheel lacks `_torch/disaggregation`
+  - pinned checkout contains `_torch/disaggregation`
+- The local CUDA user-space stack on this machine is CUDA 12.8-oriented for
+  `libcublasLt`, while the installed TRT-LLM wheel metadata expects CUDA 13:
+  - installed wheel metadata includes `cuda-python>=13` and
+    `nvidia-nccl-cu13<=2.28.9,>=2.27.7`
+  - audit found only `libcublasLt.so.12*` under the usual CUDA library paths
+- Because of that version skew, phase-7 runtime validation on this machine now
+  has three distinct blockers, in order:
+  1. wrong installed TRT-LLM wheel surface for the targeted disaggregation API
+  2. MPI / PMIx import startup on the installed wheel path
+  3. CUDA 13 user-space library mismatch (`libcublasLt.so.13` absent)
 - The top-level workspace still has additional offline-cache gaps unrelated to
   the kvbm binding path; `cargo metadata --manifest-path Cargo.toml` now fails
   on a different missing cached crate (`proc-macro-crate 3.5.0`), so the
@@ -947,6 +990,18 @@ Implemented so far:
   - Open MPI / PMIx aborted during `MPI_Init_thread`
   - failure occurs before the repo-local manager can be exercised in the real
     TRT-LLM runtime
+- Passed in the current cleanup/audit run:
+  `python3 -m unittest discover -s lib/bindings/kvbm/tests -p 'test_*.py'`
+- Passed in the same run:
+  `cargo check --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed in the same run:
+  `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
+- Passed in the same run:
+  `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+  Notes:
+  - reported `status: blocked`
+  - found installed wheel surface mismatch vs pinned checkout
+  - found CUDA major-version mismatch (`expected 13`, found `12`)
 
 ## Remaining Work
 
@@ -987,25 +1042,42 @@ Implemented so far:
     bypassed
   - after MPI is bypassed, the next blocker is missing CUDA 13 user-space
     libraries (`libcublasLt.so.13`) on this machine
+- Another prerequisite blocker is now explicit:
+  the installed `.venv` TensorRT-LLM wheel does not currently ship the
+  `_torch/disaggregation` package tree that the pinned local checkout and phase
+  7 runtime validation target. Runtime validation therefore needs either:
+  - a wheel/install matching the pinned checkout surface, or
+  - a source-overlay workflow that imports `/tmp/trtllm-latest/tensorrt_llm`
+    with compatible native dependencies on the validation host
 
 ## Exact Next Step
 
-1. Re-run the direct TRT-LLM smoke check on a host or container where importing
-   `.venv` `tensorrt_llm` disaggregation modules has both:
+1. Run the new non-importing audit first on the intended validation host:
+   `.venv/bin/python lib/bindings/kvbm/tools/trtllm_runtime_audit.py --json`
+   Do not attempt the phase-7 smoke path until it reports both:
+   - installed TRT-LLM surface includes `_torch/disaggregation`, or the host is
+     explicitly using `/tmp/trtllm-latest/tensorrt_llm` as the import root
+   - available `libcublasLt` major version matches the installed TRT-LLM wheel
+     expectation
+2. Re-run the direct TRT-LLM smoke check on a host or container where importing
+   the targeted TRT-LLM disaggregation modules has all of:
    - an MPI environment that either works normally or is intentionally bypassed
      for import-only validation
-   - CUDA user-space libraries matching the installed TRT-LLM wheel, notably
-     `libcublasLt.so.13`
+   - CUDA user-space libraries matching the targeted TRT-LLM wheel/source build
+   - a TRT-LLM Python surface that actually contains
+     `_torch.disaggregation.resource.kv_extractor`,
+     `_torch.disaggregation.native.rank_info`, and
+     `_torch.disaggregation.transceiver`
    The repo-local adapter now passes the pinned-source
    `build_page_table_from_manager(manager)`,
    `RankInfo.from_kv_cache_manager(...)`, and
    `KvCacheTransceiverV2` Python construction/send/receive paths, so the next
    unresolved checkpoint is a real runtime import/transfer environment rather
    than another known Python manager API mismatch.
-2. In this sandbox, keep using the now-validated editable-install command
+3. In this sandbox, keep using the now-validated editable-install command
    before that runtime smoke check:
    `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
-3. If that runtime path reports another missing manager field or storage shape,
+4. If that runtime path reports another missing manager field or storage shape,
    extend:
    `/workspace/model-performance/michaelfeil1209/mfdynamo/lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py`
    specifically:
@@ -1015,8 +1087,10 @@ Implemented so far:
    - `get_disagg_life_cycles()`
    - `get_layer_grouping()`
    - `_get_window_size_to_layers()`
-- /workspace/model-performance/michaelfeil1209/mfdynamo/.venv has a installation of torch and tensorrt_llm active, can be patched.
-ImportError: libcublasLt.so.13: cannot open shared object file: No such file or directory known issue. 
+- `/workspace/model-performance/michaelfeil1209/mfdynamo/.venv` has torch and
+  a TensorRT-LLM wheel installed, but that wheel is currently mismatched with
+  the pinned checkout surface and host CUDA libraries. Known host issue:
+  `ImportError: libcublasLt.so.13: cannot open shared object file`.
 
 # Wishes:
 - minimize python interface.
