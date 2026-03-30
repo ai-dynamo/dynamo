@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -683,6 +683,30 @@ pub enum DiscoveryEvent {
 /// Stream type for discovery events
 pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + Send>>;
 
+fn extract_model_display_name(card_json: &serde_json::Value) -> Result<String> {
+    card_json
+        .get("display_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("failed to deserialize model display_name from card_json"))
+}
+
+fn find_conflicting_model_name(
+    instances: &[DiscoveryInstance],
+    requested_name: &str,
+) -> Result<Option<String>> {
+    for instance in instances {
+        if let DiscoveryInstance::Model { card_json, .. } = instance {
+            let existing_name = extract_model_display_name(card_json)?;
+            if existing_name != requested_name {
+                return Ok(Some(existing_name));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 /// Discovery trait for service discovery across different backends
 #[async_trait]
 pub trait Discovery: Send + Sync {
@@ -691,7 +715,62 @@ pub trait Discovery: Send + Sync {
     fn instance_id(&self) -> u64;
 
     /// Registers an object in the discovery plane with the instance id
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
+    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+        let (namespace, component, endpoint, requested_name) = match &spec {
+            DiscoverySpec::Model {
+                namespace,
+                component,
+                endpoint,
+                card_json,
+                ..
+            } => (
+                namespace.clone(),
+                component.clone(),
+                endpoint.clone(),
+                extract_model_display_name(card_json)?,
+            ),
+            _ => return self.register_internal(spec).await,
+        };
+
+        let query = DiscoveryQuery::EndpointModels {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+        };
+
+        if let Some(conflicting_name) =
+            find_conflicting_model_name(&self.list(query.clone()).await?, &requested_name)?
+        {
+            anyhow::bail!(
+                "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
+            );
+        }
+
+        let instance = self.register_internal(spec).await?;
+
+        if let Some(conflicting_name) =
+            find_conflicting_model_name(&self.list(query).await?, &requested_name)?
+        {
+            if let Err(unregister_err) = self.unregister(instance.clone()).await {
+                return Err(anyhow::anyhow!(
+                    "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
+                ))
+                .context(format!(
+                    "failed to roll back conflicting model registration for instance {instance_id}: {unregister_err}",
+                    instance_id = instance.instance_id()
+                ));
+            }
+
+            anyhow::bail!(
+                "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
+            );
+        }
+
+        Ok(instance)
+    }
+
+    /// Backend-specific raw registration implementation.
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
 
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;

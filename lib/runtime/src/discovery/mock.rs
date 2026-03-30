@@ -157,7 +157,7 @@ impl Discovery for MockDiscovery {
         self.instance_id
     }
 
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.with_instance_id(self.instance_id);
 
         self.registry
@@ -241,6 +241,23 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
+    fn model_spec(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        model_name: &str,
+    ) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            card_json: serde_json::json!({
+                "display_name": model_name,
+            }),
+            model_suffix: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
@@ -300,5 +317,73 @@ mod tests {
             }
             _ => panic!("Expected Removed event for instance-1"),
         }
+    }
+
+    #[tokio::test]
+    async fn register_allows_same_model_name_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+        let spec = model_spec("ns", "comp", "generate", "model-a");
+
+        discovery1.register(spec.clone()).await.unwrap();
+        discovery2.register(spec).await.unwrap();
+
+        let instances = discovery1
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_different_model_name_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+
+        discovery1
+            .register(model_spec("ns", "comp", "generate", "model-a"))
+            .await
+            .unwrap();
+
+        let err = discovery2
+            .register(model_spec("ns", "comp", "generate", "model-b"))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "Cannot register model 'model-b' on endpoint 'ns/comp/generate': a different model 'model-a' is already registered there"
+        ));
+
+        let instances = discovery1
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_allows_different_model_names_on_different_endpoints() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+
+        discovery1
+            .register(model_spec("ns", "comp", "generate-a", "model-a"))
+            .await
+            .unwrap();
+        discovery2
+            .register(model_spec("ns", "comp", "generate-b", "model-b"))
+            .await
+            .unwrap();
     }
 }
