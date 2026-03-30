@@ -2167,6 +2167,7 @@ _Appears in:_
 | `certProvisionMode` _[CertProvisionMode](#certprovisionmode)_ | CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external) | auto |  |
 | `secretName` _string_ | SecretName is the name of the Kubernetes Secret holding webhook TLS certificates | webhook-server-cert |  |
 | `serviceName` _string_ | ServiceName is the name of the Kubernetes Service fronting the webhook server.<br />Used to generate certificate SANs. Set by the Helm chart. |  |  |
+| `allowedDGDReplicasModifiers` _string array_ | AllowedDGDReplicasModifiers lists service account names that are authorized to<br />modify DGD replicas when scaling adapter is enabled. Populated by the Helm chart<br />with the actual SA names to avoid fragile suffix-based matching. |  |  |
 
 
 # Operator Default Values Injection
