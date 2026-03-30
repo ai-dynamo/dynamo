@@ -163,6 +163,14 @@ pub struct RequestTracker {
 
     /// Router scheduler queue depth at routing time (how many requests were pending)
     router_queue_depth: OnceLock<usize>,
+
+    /// When the prefill result arrived at the router (disaggregated, original path only).
+    /// Set in execute_prefill() after the first output is received from the prefill worker.
+    prefill_complete_time: OnceLock<Instant>,
+
+    /// When the decode request was dispatched (disaggregated, original path only).
+    /// Set in PrefillRouter::generate() just before calling next.generate() for decode.
+    decode_dispatch_time: OnceLock<Instant>,
 }
 
 impl RequestTracker {
@@ -197,6 +205,8 @@ impl RequestTracker {
             detokenize_total_ns: AtomicU64::new(0),
             detokenize_count: AtomicU64::new(0),
             router_queue_depth: OnceLock::new(),
+            prefill_complete_time: OnceLock::new(),
+            decode_dispatch_time: OnceLock::new(),
         }
     }
 
@@ -396,6 +406,27 @@ impl RequestTracker {
         self.router_queue_depth.get().copied()
     }
 
+    /// Record when the prefill result was received by the router.
+    /// Returns true if this was the first call (OnceLock first-write-wins).
+    pub fn record_prefill_complete(&self) -> bool {
+        self.prefill_complete_time.set(Instant::now()).is_ok()
+    }
+
+    /// Record when the decode request was dispatched from the router.
+    /// Returns true if this was the first call (OnceLock first-write-wins).
+    pub fn record_decode_dispatch(&self) -> bool {
+        self.decode_dispatch_time.set(Instant::now()).is_ok()
+    }
+
+    /// Time between prefill completion and decode dispatch in seconds.
+    /// Only meaningful in disaggregated serving (original path, not bootstrap).
+    /// Returns None if either timestamp was not recorded.
+    pub fn kv_transfer_latency_secs(&self) -> Option<f64> {
+        let complete = *self.prefill_complete_time.get()?;
+        let dispatch = *self.decode_dispatch_time.get()?;
+        Some(dispatch.saturating_duration_since(complete).as_secs_f64())
+    }
+
     /// Get worker ID information if any worker IDs have been recorded.
     pub fn get_worker_info(&self) -> Option<WorkerIdInfo> {
         let prefill = self.prefill_worker_id();
@@ -501,6 +532,7 @@ impl RequestTracker {
             total_time_ms: self.total_time_ms(),
             kv_hit_rate: self.kv_hit_rate(),
             router_queue_depth: self.router_queue_depth(),
+            kv_transfer_latency_ms: self.kv_transfer_latency_secs().map(|s| s * 1000.0),
         }
     }
 }
@@ -543,6 +575,10 @@ pub struct TimingInfo {
     /// Number of requests pending in the router scheduler queue at routing time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub router_queue_depth: Option<usize>,
+
+    /// Time between prefill completion and decode dispatch in milliseconds (disaggregated only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_latency_ms: Option<f64>,
 }
 
 #[cfg(test)]
@@ -717,6 +753,101 @@ mod tests {
         assert!(
             itl_val > 0.0,
             "ITL gauge should be positive after observe, got {itl_val}"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_latency() {
+        let tracker = RequestTracker::new();
+        // Before any timestamps: returns None
+        assert!(tracker.kv_transfer_latency_secs().is_none());
+
+        tracker.record_prefill_complete();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_decode_dispatch();
+
+        let latency = tracker.kv_transfer_latency_secs().unwrap();
+        assert!(
+            latency >= 0.005,
+            "latency should be at least 5ms, got {latency}"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_latency_none_without_dispatch() {
+        let tracker = RequestTracker::new();
+        tracker.record_prefill_complete();
+        assert!(
+            tracker.kv_transfer_latency_secs().is_none(),
+            "Should return None when decode_dispatch_time is not set"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_latency_none_without_prefill_complete() {
+        let tracker = RequestTracker::new();
+        tracker.record_decode_dispatch();
+        assert!(
+            tracker.kv_transfer_latency_secs().is_none(),
+            "Should return None when prefill_complete_time is not set"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_latency_oncelock_first_write_wins() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.record_prefill_complete()); // first call returns true
+        assert!(!tracker.record_prefill_complete()); // second call returns false (OnceLock)
+        assert!(tracker.record_decode_dispatch());
+        assert!(!tracker.record_decode_dispatch());
+    }
+
+    #[test]
+    fn test_timing_info_includes_kv_transfer_latency() {
+        let tracker = RequestTracker::new();
+        tracker.record_prefill_complete();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_decode_dispatch();
+
+        let info = tracker.get_timing_info();
+        let latency_ms = info.kv_transfer_latency_ms.expect("should be Some");
+        assert!(
+            latency_ms >= 5.0,
+            "latency should be at least 5ms, got {latency_ms}"
+        );
+    }
+
+    #[test]
+    fn test_timing_info_kv_transfer_latency_none_in_aggregated() {
+        let tracker = RequestTracker::new();
+        // No record_prefill_complete / record_decode_dispatch called
+        let info = tracker.get_timing_info();
+        assert!(
+            info.kv_transfer_latency_ms.is_none(),
+            "Should be None in aggregated mode (no timestamps recorded)"
+        );
+    }
+
+    #[test]
+    fn test_timing_info_kv_transfer_latency_serialization() {
+        let tracker = RequestTracker::new();
+        // When not set, the field should be omitted from JSON (skip_serializing_if)
+        let info = tracker.get_timing_info();
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            !json.contains("kv_transfer_latency_ms"),
+            "None field should be omitted from JSON, got: {json}"
+        );
+
+        // When set, it should appear
+        let tracker2 = RequestTracker::new();
+        tracker2.record_prefill_complete();
+        tracker2.record_decode_dispatch();
+        let info2 = tracker2.get_timing_info();
+        let json2 = serde_json::to_string(&info2).unwrap();
+        assert!(
+            json2.contains("kv_transfer_latency_ms"),
+            "Set field should appear in JSON, got: {json2}"
         );
     }
 }

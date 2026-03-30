@@ -163,6 +163,12 @@ impl RequestGuard {
         if let Some(ref tracker) = self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
+            // Observe KV transfer latency (only populated in disaggregated original path)
+            if let Some(latency) = tracker.kv_transfer_latency_secs() {
+                self.request_metrics
+                    .kv_transfer_latency_seconds
+                    .observe(latency);
+            }
         }
         self.request_metrics
             .output_sequence_tokens

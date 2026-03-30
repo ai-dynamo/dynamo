@@ -1409,7 +1409,7 @@ def _test_router_decisions_disagg(
                         assert (
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
-                        verify_response_timing(timing_info)
+                        verify_response_timing(timing_info, disagg=True)
 
                     # Small delay between requests
                     await asyncio.sleep(1)
