@@ -31,6 +31,18 @@ pub trait DeviceContextOps: Send + Sync + Debug {
         Ok(())  // Default: no-op
     }
 
+    /// Disable automatic event tracking (CUDA-specific optimization)
+    ///
+    /// For backends like cudarc that add automatic event tracking for safety,
+    /// this disables that overhead when managing events manually.
+    /// Other backends (HPU, XPU) that don't have wrapper-level tracking can use the default no-op.
+    ///
+    /// # Safety
+    /// Only safe when caller manually manages event synchronization.
+    unsafe fn disable_event_tracking(&self) -> Result<()> {
+        Ok(())  // Default: no-op
+    }
+
     /// Get raw context handle for interop (optional)
     fn raw_handle(&self) -> Option<u64> {
         None

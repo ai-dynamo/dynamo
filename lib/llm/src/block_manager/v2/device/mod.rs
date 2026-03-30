@@ -92,7 +92,7 @@ impl FromStr for DeviceBackend {
 pub struct DeviceContext {
     backend: DeviceBackend,
     device_id: u32,
-    ops: Box<dyn DeviceContextOps>,
+    pub ops: Box<dyn DeviceContextOps>,
 }
 
 impl DeviceContext {
@@ -165,7 +165,7 @@ impl std::fmt::Debug for DeviceContext {
 /// Device stream wrapper
 pub struct DeviceStream {
     backend: DeviceBackend,
-    ops: Box<dyn DeviceStreamOps>,
+    pub ops: Box<dyn DeviceStreamOps>,
 }
 
 impl DeviceStream {
@@ -212,7 +212,7 @@ impl std::fmt::Debug for DeviceStream {
 /// Device event wrapper
 pub struct DeviceEvent {
     backend: DeviceBackend,
-    ops: Box<dyn DeviceEventOps>,
+    pub ops: Box<dyn DeviceEventOps>,
 }
 
 impl DeviceEvent {

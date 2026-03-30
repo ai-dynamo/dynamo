@@ -92,6 +92,12 @@ impl DeviceContextOps for CudaContext {
         Ok(())
     }
 
+    unsafe fn disable_event_tracking(&self) -> Result<()> {
+        // Disable cudarc's automatic event tracking for manual event management
+        self.context.disable_event_tracking();
+        Ok(())
+    }
+
     fn raw_handle(&self) -> Option<u64> {
         // Return the raw CUDA device ID
         Some(self.context.cu_device() as u64)
@@ -100,8 +106,16 @@ impl DeviceContextOps for CudaContext {
 
 /// CUDA stream wrapper
 #[derive(Debug)]
-struct CudaStreamWrapper {
+pub struct CudaStreamWrapper {
     stream: Arc<cudarc::driver::CudaStream>,
+}
+
+impl CudaStreamWrapper {
+    /// Get the underlying CUDA stream (temporary for Phase 4)
+    /// TODO: Remove in Phase 5 when executor is generalized
+    pub fn inner(&self) -> &Arc<cudarc::driver::CudaStream> {
+        &self.stream
+    }
 }
 
 impl DeviceStreamOps for CudaStreamWrapper {

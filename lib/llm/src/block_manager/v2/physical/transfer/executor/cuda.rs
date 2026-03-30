@@ -2,17 +2,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! CUDA executor for GPU memory transfers.
+//!
+//! NOTE: This file is TEMPORARY and will be replaced by device.rs in Phase 5.
+//! Contains CUDA-specific code that will be generalized.
 
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
+use crate::block_manager::v2::device::{DeviceStream, cuda::CudaStreamWrapper};
 use crate::block_manager::v2::kernels::OperationalCopyBackend;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use cudarc::driver::result as cuda_result;
 use std::ops::Range;
+use std::sync::Arc;
 
 // #[cfg(test)]
 // mod cuda_kernel_tests;
+
+/// Temporary helper to extract CUDA stream (Phase 4 compatibility)
+/// TODO: Remove in Phase 5 when this file is replaced by device.rs
+fn unwrap_cuda_stream(stream: &DeviceStream) -> Result<Arc<cudarc::driver::CudaStream>> {
+    // Quick hack for Phase 4: downcast via raw pointer
+    // This will be removed when cuda.rs is replaced by device.rs in Phase 5
+    unsafe {
+        let trait_ptr = &*stream.ops as *const dyn crate::block_manager::v2::device::DeviceStreamOps;
+        let concrete_ptr = trait_ptr as *const CudaStreamWrapper;
+        Ok((*concrete_ptr).inner().clone())
+    }
+}
 
 /// Execute a CUDA transfer between host and device memory.
 ///
@@ -60,10 +77,14 @@ pub fn execute_cuda_transfer(
     let layers = layer_range.unwrap_or(0..src_layout.num_layers());
 
     // Get appropriate CUDA stream based on transfer direction
-    let stream = match strategy {
+    let device_stream = match strategy {
         TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => ctx.d2h_stream(),
         _ => ctx.h2d_stream(), // H2D and D2D use h2d_stream
     };
+
+    // Unwrap CUDA stream (temporary Phase 4 compatibility)
+    let stream_arc = unwrap_cuda_stream(device_stream.as_ref())?;
+    let stream = stream_arc.as_ref();
 
     // Perform CUDA transfers based on strategy
     match strategy {
@@ -75,7 +96,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers.clone(),
-                stream.as_ref(),
+                stream,
                 backend,
             ) {
                 // Fallback to memcpy-based path
@@ -86,7 +107,7 @@ pub fn execute_cuda_transfer(
                     src_block_ids,
                     dst_block_ids,
                     layers,
-                    stream.as_ref(),
+                    stream,
                 )?;
             }
         }
@@ -98,7 +119,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers.clone(),
-                stream.as_ref(),
+                stream,
                 backend,
             ) {
                 // Fallback to memcpy-based path
@@ -109,7 +130,7 @@ pub fn execute_cuda_transfer(
                     src_block_ids,
                     dst_block_ids,
                     layers,
-                    stream.as_ref(),
+                    stream,
                 )?;
             }
         }
@@ -122,7 +143,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers.clone(),
-                stream.as_ref(),
+                stream,
                 backend,
             ) {
                 // Fallback to memcpy-based path
@@ -133,7 +154,7 @@ pub fn execute_cuda_transfer(
                     src_block_ids,
                     dst_block_ids,
                     layers,
-                    stream.as_ref(),
+                    stream,
                 )?;
             }
         }
@@ -144,7 +165,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers,
-                stream.as_ref(),
+                stream,
             )?;
             // Synchronize immediately for blocking transfer
             stream.synchronize()?;
@@ -156,7 +177,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers,
-                stream.as_ref(),
+                stream,
             )?;
             // Synchronize immediately for blocking transfer
             stream.synchronize()?;
@@ -173,8 +194,8 @@ pub fn execute_cuda_transfer(
             | TransferStrategy::CudaAsyncD2H
             | TransferStrategy::CudaAsyncD2D
     ) {
-        let event = stream.record_event(None)?;
-        Ok(ctx.register_cuda_event(event))
+        let event = device_stream.record_event()?;
+        Ok(ctx.register_device_event(event))
     } else {
         // Blocking transfers are already synchronized
         Ok(TransferCompleteNotification::completed())
