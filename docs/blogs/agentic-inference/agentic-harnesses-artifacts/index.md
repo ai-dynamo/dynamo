@@ -6,7 +6,7 @@ All experiments ran on 2026-03-19 against:
 
 - **Model**: `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` (120B MoE, 12B active, NVFP4 quantization)
 - **Node**: 8× B200 GPU, **aggregated serving** (no prefill/decode disaggregation)
-- **Framework**: SGLang backend via Dynamo frontend with `--enable-anthropic-api` and `--dyn-reasoning-parser nemotron_nas`
+- **Framework**: SGLang backend via Dynamo frontend with `--enable-anthropic-api` and `--dyn-reasoning-parser nemotron_deci`
 - **Access**: SSH tunnel from macOS laptop to compute node port 8000, forwarded to `localhost:8000`
 - **Anthropic baseline**: Claude Code v2.1.79 (Sonnet 4.6) → cc-proxy `anthropic-only` mode → `api.anthropic.com`
 

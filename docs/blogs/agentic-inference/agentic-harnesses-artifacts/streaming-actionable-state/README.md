@@ -27,7 +27,7 @@ The "feature on" behavior (not yet measured on this deployment) would emit:
 |------|-------|--------|
 | `--enable-streaming-tool-dispatch` / `DYN_ENABLE_STREAMING_TOOL_DISPATCH` | **off** | No `event: tool_call_dispatch` events |
 | `--enable-streaming-reasoning-dispatch` / `DYN_ENABLE_STREAMING_REASONING_DISPATCH` | **off** | No `event: reasoning_dispatch` events |
-| `--dyn-reasoning-parser` | `nemotron_nas` | Reasoning tokens parsed from `<think>` blocks |
+| `--dyn-reasoning-parser` | `nemotron_deci` | Reasoning tokens parsed from `<think>` blocks |
 
 ## Workload
 
