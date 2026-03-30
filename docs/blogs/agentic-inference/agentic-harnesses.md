@@ -60,15 +60,14 @@ The Anthropic-facing frontend configuration used in these experiments looked lik
 python -m dynamo.frontend \
   --http-port 8000 \
   --enable-anthropic-api \
-  --strip-anthropic-preamble \
-  --dyn-reasoning-parser nemotron_deci
+  --strip-anthropic-preamble
 ```
 
 All experiments in the artifact set ran against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. That caveat matters. Some of the strongest results below are correctness results with clear systems implications; others are quantitative. We try to distinguish those cleanly.
 
 ## The DGD Settings That Actually Matter
 
-One thing that became obvious while doing this work is that the speedups do not come from "serving the right model" alone. A harness-friendly deployment needs a specific set of frontend and worker settings turned on together. The reference DGD we used for this is [`nemotron3-nvfp4-vllm-b200.yaml`](configs/dgd/nemotron3-nvfp4-vllm-b200.yaml).
+One thing that became obvious while doing this work is that the speedups do not come from "serving the right model" alone. A harness-friendly deployment needs a specific set of frontend and worker settings turned on together.
 
 On the frontend side, the key settings are:
 
@@ -83,8 +82,6 @@ On the worker side, the important settings in this deployment are:
 - The model-specific runtime settings that make the chosen backend viable at all for this workload. In our vLLM deployment that included expert parallelism, FP8 KV cache, and the speculative decoding configuration used for Nemotron-3.
 
 It is worth being explicit about what is not part of this story. Secrets such as `HF_TOKEN` obviously need to be provided in your own environment, but they are not what unlocks the harness-side wins. The harness-relevant switches are the API mode, preamble stripping, streaming dispatch, and the correct parser and scheduler configuration.
-
-TODO: once the final post is closer to done, add a compact "minimum DGD knobs" snippet derived from this config and cross-reference the relevant PRs for each setting.
 
 ## Prompt Stability Is Cache Work
 
@@ -125,8 +122,6 @@ Anthropic is the baseline for how the harness is meant to behave. Dynamo's resul
 Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Strip it before tokenization, and the system prompt becomes shareable again across requests and even across sessions that would otherwise differ only in that header.
 
 ![Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168-169ms TTFT; a varying prefix jumps to ~912ms.](./agentic-harnesses-cache-effect-clean.png)
-
-TODO: add Dynamo-side cache hit or cache-read/cache-write accounting for the "header kept" vs "header removed before tokenization" comparison once those measurements land.
 
 ## Reasoning Fidelity Is KV Correctness
 
