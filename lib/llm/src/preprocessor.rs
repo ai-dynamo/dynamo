@@ -27,6 +27,12 @@ use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use std::time::{Duration, Instant};
+
+use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::metrics::frontend_perf::{
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
+    TOKENIZE_SECONDS,
+};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -240,11 +246,17 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let _nvtx_preprocess = range!("preprocess_request");
-        let t_total = Instant::now();
+        let preprocess_start = Instant::now();
+        let t_total = preprocess_start;
         let mut builder = self.builder(request)?;
-        let formatted_prompt = self
-            .apply_template(request)
-            .with_context(|| "Failed to apply prompt template")?;
+
+        let template_start = Instant::now();
+        let formatted_prompt = {
+            let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            self.apply_template(request)
+                .with_context(|| "Failed to apply prompt template")?
+        };
+        TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
         // Check if the chat template injected a reasoning start token at the end
         // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
@@ -256,11 +268,13 @@ impl OpenAIPreprocessor {
 
         let t_tokenize = Instant::now();
         let (annotations, base_token_ids) = {
-            let _nvtx = range!("tokenize");
+            let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
                 .with_context(|| "Failed to gather tokens")?
         };
-        let tokenize_ms = t_tokenize.elapsed().as_secs_f64() * 1000.0;
+        let tokenize_elapsed = t_tokenize.elapsed();
+        TOKENIZE_SECONDS.observe(tokenize_elapsed.as_secs_f64());
+        let tokenize_ms = tokenize_elapsed.as_secs_f64() * 1000.0;
 
         let t_media = Instant::now();
         let decoded_images = {
@@ -304,6 +318,10 @@ impl OpenAIPreprocessor {
             n_images = decoded_images.len(),
             "preprocess_request: timing"
         );
+
+        STAGE_DURATION_SECONDS
+            .with_label_values(&["preprocess"])
+            .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
     }
@@ -354,13 +372,18 @@ impl OpenAIPreprocessor {
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
+            builder.request_timestamp_ms(nvext.request_timestamp_ms);
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
                 expected_output_tokens: hints.and_then(|h| h.osl),
-                priority_jump: hints.and_then(|h| h.latency_sensitivity),
+                priority_jump: hints.and_then(|h| {
+                    h.priority
+                        .map(|priority| priority.max(0) as f64)
+                        .or(h.latency_sensitivity)
+                }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
                 cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
@@ -950,6 +973,15 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
+                    // Flush per-request detokenize accumulators to global Prometheus counters
+                    // (once per request instead of per-token).
+                    if let Some(t) = tracker.as_ref() {
+                        if let Some(total) = t.detokenize_total_latency() {
+                            DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                        }
+                        DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                    }
+
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
                         // Only set event if not already set to avoid overriding existing events (like errors)
                         if response.event.is_none() {
@@ -1014,6 +1046,15 @@ impl OpenAIPreprocessor {
                                 .and_then(|t| t.detokenize_total_latency()),
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
+
+                        // Flush per-request detokenize accumulators to global Prometheus counters
+                        // (once per request instead of per-token).
+                        if let Some(t) = tracker.as_ref() {
+                            if let Some(total) = t.detokenize_total_latency() {
+                                DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                            }
+                            DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                        }
 
                         // Create annotation string
                         let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
@@ -1256,7 +1297,7 @@ impl OpenAIPreprocessor {
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
-                        for choice in data.choices.iter_mut() {
+                        for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
                             if let Some(
                                 dynamo_async_openai::types::ChatCompletionMessageContent::Text(

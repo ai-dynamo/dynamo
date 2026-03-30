@@ -16,12 +16,17 @@ with different resolutions and quality settings without restarting.
 One request at a time (asyncio.Lock — VideoGenerator is not re-entrant).
 
 Usage:
-  python worker.py [--model MODEL] [--num-gpus N] [--disable-optimizations]
+  python worker.py [--model MODEL] [--num-gpus N] [--enable-optimizations]
+                   [--attention-backend ATTENTION_BACKEND]
 
 Options:
   --model          HuggingFace model path
                    (default: FastVideo/LTX2-Distilled-Diffusers)
   --num-gpus       Number of GPUs (default: 1)
+  --enable-optimizations
+                   Enable FP4 quantization (if available) and torch.compile
+  --attention-backend
+                   Attention backend (default: TORCH_SDPA)
 
 Request format (sent to /v1/videos):
   prompt:   text description of the desired video
@@ -46,10 +51,11 @@ import tempfile
 import time
 import uuid
 
+import torch
 import uvloop
 from fastvideo import VideoGenerator
 from fastvideo.configs.pipelines.base import PipelineConfig
-from fastvideo.layers.quantization.fp4_config import FP4Config
+from fastvideo.platforms.interface import AttentionBackendEnum
 from pydantic import BaseModel, Field
 
 from dynamo.llm import ModelInput, ModelType, register_llm  # type: ignore[attr-defined]
@@ -58,6 +64,14 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "FastVideo/LTX2-Distilled-Diffusers"
+DEFAULT_ATTENTION_BACKEND = "TORCH_SDPA"
+# FastVideo exposes NO_ATTENTION in the enum, but it is not a selectable
+# inference backend for this worker's FASTVIDEO_ATTENTION_BACKEND override.
+ATTENTION_BACKEND_CHOICES = tuple(
+    backend_name
+    for backend_name in AttentionBackendEnum.__members__
+    if backend_name != "NO_ATTENTION"
+)
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
@@ -133,14 +147,14 @@ class FastVideoBackend:
     def __init__(self, args: argparse.Namespace) -> None:
         self.model_name: str = args.model
         self.num_gpus: int = args.num_gpus
-        self.disable_optimizations: bool = args.disable_optimizations
+        self.enable_optimizations: bool = args.enable_optimizations
+        self.attention_backend: str = args.attention_backend
 
         # One request at a time — VideoGenerator is not re-entrant
         self._generate_lock = asyncio.Lock()
         self.generator: VideoGenerator | None = None
 
-        attn_backend = "TORCH_SDPA" if self.disable_optimizations else "FLASH_ATTN"
-        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = attn_backend
+        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = self.attention_backend
         os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
         os.environ["FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT"] = "0"
 
@@ -150,33 +164,56 @@ class FastVideoBackend:
 
         def _load():
             pipeline_config = PipelineConfig.from_pretrained(self.model_name)
-            if not self.disable_optimizations:
-                logger.info(
-                    "Using FP4 quantization for VideoGenerator model=%s",
-                    self.model_name,
-                )
-                pipeline_config.dit_config.quant_config = FP4Config()
+            optimization_kwargs = {}
+            if self.enable_optimizations:
+                major, minor = torch.cuda.get_device_capability()
+                if major < 10:
+                    logger.warning(
+                        "FP4 quantization is only supported on NVIDIA Blackwell GPUs (compute capability 10.0+). Detected compute capability: %d.%d. Continuing without FP4 optimizations.",
+                        major,
+                        minor,
+                    )
+                else:
+                    logger.info(
+                        "Using FP4 quantization for VideoGenerator model=%s",
+                        self.model_name,
+                    )
+                    try:
+                        from fastvideo.layers.quantization.fp4_config import FP4Config
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "FastVideo optimizations require "
+                            "fastvideo.layers.quantization.fp4_config, but this "
+                            "FastVideo build does not provide it. Re-run "
+                            "worker.py without --enable-optimizations or install a "
+                            "FastVideo version that includes fp4_config."
+                        ) from exc
+                    pipeline_config.dit_config.quant_config = FP4Config()
+
+                optimization_kwargs = {
+                    "ltx2_refine_enabled": True,
+                    "ltx2_refine_lora_path": "",  # disable refine lora for distilled model
+                    "ltx2_refine_num_inference_steps": 2,
+                    "ltx2_refine_guidance_scale": 1.0,
+                    "ltx2_refine_add_noise": True,
+                    "enable_torch_compile": True,
+                    "enable_torch_compile_text_encoder": True,
+                    "torch_compile_kwargs": {
+                        "backend": "inductor",
+                        "fullgraph": True,
+                        "mode": "max-autotune-no-cudagraphs",
+                    },
+                    "dit_cpu_offload": False,
+                    "vae_cpu_offload": False,
+                    "text_encoder_cpu_offload": False,
+                    "ltx2_vae_tiling": False,
+                }
 
             return VideoGenerator.from_pretrained(
                 self.model_name,
                 num_gpus=self.num_gpus,
-                ltx2_refine_enabled=True,
-                ltx2_refine_lora_path="",  # disable refine lora for distilled model
-                ltx2_refine_num_inference_steps=2,
-                ltx2_refine_guidance_scale=1.0,
-                ltx2_refine_add_noise=True,
                 pipeline_config=pipeline_config,
-                enable_torch_compile=not self.disable_optimizations,
-                enable_torch_compile_text_encoder=not self.disable_optimizations,
-                torch_compile_kwargs={
-                    "backend": "inductor",
-                    "fullgraph": True,
-                    "mode": "max-autotune-no-cudagraphs",
-                },
-                dit_cpu_offload=False,
-                vae_cpu_offload=False,
-                text_encoder_cpu_offload=False,
-                ltx2_vae_tiling=False,
+                **optimization_kwargs,
             )
 
         self.generator = await loop.run_in_executor(None, _load)
@@ -402,10 +439,21 @@ def _parse_args() -> argparse.Namespace:
         help="Number of GPUs (default: 1)",
     )
     parser.add_argument(
-        "--disable-optimizations",
+        "--enable-optimizations",
         action="store_true",
-        dest="disable_optimizations",
-        help="Disable FP4 quantization, torch.compile, and use TORCH_SDPA attention",
+        dest="enable_optimizations",
+        help="Enable FP4 quantization (if available) and torch.compile",
+    )
+    parser.add_argument(
+        "--attention-backend",
+        choices=ATTENTION_BACKEND_CHOICES,
+        default=DEFAULT_ATTENTION_BACKEND,
+        dest="attention_backend",
+        help=(
+            "Attention backend to set via FASTVIDEO_ATTENTION_BACKEND "
+            f"(choices: {', '.join(ATTENTION_BACKEND_CHOICES)}; "
+            f"default: {DEFAULT_ATTENTION_BACKEND})"
+        ),
     )
     return parser.parse_args()
 

@@ -17,7 +17,11 @@ except ImportError:
 
 from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
 
 async def _fetch_model_config(

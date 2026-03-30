@@ -5,12 +5,12 @@
 # Disaggregated prefill/decode on a SINGLE GPU.
 # Per-worker VRAM is estimated from model parameters below. Override individual
 # knobs (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS) via env vars, or set
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE to bypass the calculation entirely.
+# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to bypass the calculation entirely.
 #
 # NOTE — trtllm fraction semantics differ from vllm/sglang:
 #   vllm/sglang:  fraction of TOTAL VRAM  (weights + KV + activations all inside)
 #   trtllm:       fraction of FREE  VRAM  (KV cache only, after model load)
-# gpu_worker_fraction("trtllm") handles this — see gpu_utils.sh / gpu_utils.md.
+# build_gpu_mem_args handles this — see gpu_utils.sh / gpu_utils.md.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-seq-len 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~8.0 GiB per worker (~16.0 GiB total)
@@ -30,17 +30,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$MAX_SEQ_LEN" "$MAX_CONCURRENT_SEQS" trtllm
-
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction trtllm)
-fi
+GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --max-model-len "$MAX_SEQ_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2)
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -89,9 +79,7 @@ OVERRIDE_ARGS=(--override-engine-args "{${OVERRIDE_PAIRS}}")
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
-    "Max seq len: $MAX_SEQ_LEN" \
-    "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)" \
-    "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
+    "Workers:     2 (prefill + decode, fraction is per worker)"
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

@@ -103,6 +103,7 @@ class VllmProcessor:
         self.reasoning_parser_class = reasoning_parser_class
         self.block_size = block_size
         self.mm_image_token_id = mm_image_token_id
+        self.exclude_tools_when_tool_choice_none = True
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -157,6 +158,7 @@ class VllmProcessor:
                 tokenizer=self.tokenizer,
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
+                exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
             )
         logger.info(
             "[timing] preprocess_chat_request took %.1f ms",
@@ -622,6 +624,9 @@ class EngineFactory:
             reasoning_parser_class,
             block_size=block_size,
             mm_image_token_id=mm_image_token_id,
+        )
+        gen.exclude_tools_when_tool_choice_none = (
+            self.config.exclude_tools_when_tool_choice_none
         )
 
         return PythonAsyncEngine(gen.generator, loop)

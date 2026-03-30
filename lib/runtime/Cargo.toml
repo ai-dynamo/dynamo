@@ -19,6 +19,9 @@ testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
+# NVTX timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_ENABLE_RUST_NVTX).
+# Overhead: feature off = zero; feature on, env off = ~1ns AtomicBool load; feature on, env on = ~50ns/annotation.
+nvtx = ["dep:cudarc"]
 
 [dependencies]
 # Use workspace dependencies where available
@@ -65,6 +68,8 @@ uuid = { workspace = true }
 url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
+
+cudarc = { workspace = true, features = ["nvtx"], optional = true }
 
 arc-swap = { version = "1" }
 async-once-cell = { version = "0.5.4" }

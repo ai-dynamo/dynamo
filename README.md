@@ -104,7 +104,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -118,7 +118,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.0.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -126,7 +126,7 @@ Also available: [`tensorrtllm-runtime:1.0.0`](https://docs.nvidia.com/dynamo/res
 pip install "ai-dynamo[sglang]"   # or [vllm] or [trtllm]
 ```
 
-Then start the frontend and a worker as shown above. See the [full installation guide](https://docs.nvidia.com/dynamo/getting-started/quickstart) for system dependencies and backend-specific notes.
+Then start the frontend and a worker as shown above. See the [full installation guide](docs/getting-started/local-installation.md) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 
@@ -159,7 +159,7 @@ See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS
 
 ## Building from Source
 
-For contributors who want to build and develop locally. See the [full build guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide#building-from-source) for details.
+For contributors who want to build and develop locally. See the [full build guide](docs/getting-started/building-from-source.md) for details.
 
 ```bash
 # Install system deps (Ubuntu 24.04)
@@ -190,7 +190,7 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 
 ## Latest News
 
-- [03/15] [Dynamo 1.0 is here — production-ready with strong community adoption](https://developer.nvidia.com/blog/nvidia-dynamo-1-production-ready/)
+- [03/15] [Dynamo 1.0 is here — production-ready with strong community adoption](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/)
 - [03/15] [NVIDIA Blackwell Ultra sets new inference records in MLPerf](https://developer.nvidia.com/blog/nvidia-blackwell-ultra-sets-new-inference-records-in-mlperf-debut/)
 - [03/15] [NVIDIA Blackwell leads on SemiAnalysis InferenceMax benchmarks](https://developer.nvidia.com/blog/nvidia-blackwell-leads-on-new-semianalysis-inferencemax-benchmarks/)
 - [12/05] [Moonshot AI's Kimi K2 achieves 10x inference speedup with Dynamo on GB200](https://quantumzeitgeist.com/kimi-k2-nvidia-ai-ai-breakthrough/)
@@ -200,6 +200,42 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 <details>
 <summary>Older news</summary>
 
+Dynamo provides comprehensive benchmarking tools:
+
+- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
+- **[SLA-Driven Deployments](docs/components/planner/planner-guide.md)** – Optimize deployments to meet SLA requirements
+
+## Frontend OpenAPI Specification
+
+The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To generate without running the server:
+
+```bash
+cargo run -p dynamo-llm --bin generate-frontend-openapi
+```
+
+This writes to `docs/reference/api/openapi.json`.
+
+## Service Discovery and Messaging
+
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/kubernetes/service-discovery.md)) handle service discovery. External services are optional for most deployments:
+
+| Deployment | etcd | NATS | Notes |
+|------------|------|------|-------|
+| **Local Development** | ❌ Not required | ❌ Not required | Pass `--discovery-backend file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
+
+> **Note:** KV-Aware Routing requires NATS for prefix caching coordination.
+
+For Slurm or other distributed deployments (and KV-aware routing):
+
+- [etcd](https://etcd.io/) can be run directly as `./etcd`.
+- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
+
+To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
+
+## More News
+
+- [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
 - [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
 - [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)

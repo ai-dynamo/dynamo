@@ -33,6 +33,8 @@ dynamo-operator:
         basePath: /checkpoints
 ```
 
+The snapshot-agent no longer reads `basePath` from its ConfigMap, but the operator still uses its configured PVC base path when it annotates checkpoint and restore pods. That path must match `storage.pvc.basePath` here so the mounted checkpoint location is valid inside the agent pod.
+
 Cross-node restore requires a shared `ReadWriteMany` storage class. The chart defaults to `storage.pvc.accessMode=ReadWriteMany`.
 
 For better restore times, use a fast `ReadWriteMany` StorageClass for the checkpoint PVC.
@@ -81,7 +83,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.accessMode` | Access mode for the checkpoint PVC | `ReadWriteMany` |
-| `storage.pvc.basePath` | Checkpoint root inside the PVC | `/checkpoints` |
+| `storage.pvc.basePath` | PVC mount path inside the snapshot-agent pod | `/checkpoints` |
 | `daemonset.image.repository` | Snapshot agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot agent image tag | `1.0.0` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
