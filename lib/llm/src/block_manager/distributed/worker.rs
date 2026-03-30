@@ -55,6 +55,7 @@ pub fn load_and_validate_tensors(
     device_id: usize,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
     let mut shape = None;
+    let mut expected_bspb: Option<usize> = None;
 
     let mut device_tensors = Vec::with_capacity(tensors.len());
     let allocator = DeviceAllocator::new(device_id)?;
@@ -67,18 +68,35 @@ pub fn load_and_validate_tensors(
         tracing::debug!("stride is monotonically decreasing for NHD layout");
         tracing::debug!("stride is NOT monotonically decreasing for HND layout");
 
-        // Check that all layer tensors have the same shape.
-        // TODO: We eventually need to support the weirder models with heterogenous layers.
-        if let Some(shape) = shape.as_ref() {
-            if *shape != tensor.shape() {
+        if shape.is_none() {
+            shape = Some(tensor.shape());
+        }
+
+        // Validate uniform byte-size-per-block across all layers.
+        // Hybrid models (e.g. Nemotron) have heterogeneous tensor shapes
+        // between attention and Mamba/SSM layers, but HMA mode guarantees
+        // uniform byte-size-per-block.
+        let t_shape = tensor.shape();
+        if t_shape.is_empty() || t_shape[0] == 0 {
+            return Err(anyhow::anyhow!(
+                "Tensor has invalid shape (empty or zero first dim): {:?}",
+                t_shape
+            ));
+        }
+        let bspb = tensor.size_bytes() / t_shape[0];
+        if let Some(expected) = expected_bspb {
+            if bspb != expected {
                 return Err(anyhow::anyhow!(
-                    "All tensors must have the same shape! Got {:?} and {:?}",
-                    *shape,
-                    tensor.shape()
+                    "All tensors must have the same byte-size-per-block! \
+                     Expected {} but got {} (shapes: {:?} vs {:?})",
+                    expected,
+                    bspb,
+                    shape.as_ref().unwrap(),
+                    t_shape
                 ));
             }
         } else {
-            shape = Some(tensor.shape());
+            expected_bspb = Some(bspb);
         }
 
         // Build the storage object from the tensor.
