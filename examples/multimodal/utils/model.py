@@ -31,6 +31,27 @@ class SupportedModels:
     QWEN_2_AUDIO_7B = "Qwen/Qwen2-Audio-7B-Instruct"
 
 
+def _normalize_model_name(model: str) -> str:
+    # Normalize identifiers so model IDs and resolved local paths compare consistently.
+    return model.lower().replace("_", "-")
+
+
+def _matches_model(model: str, supported_model: str) -> bool:
+    normalized_model = _normalize_model_name(model)
+    normalized_supported_model = _normalize_model_name(supported_model)
+
+    if normalized_model == normalized_supported_model:
+        return True
+
+    # vLLM may resolve the configured model ID to a Hugging Face cache path like
+    # .../models--org--name/snapshots/<sha>, so match both raw IDs and path fragments.
+    supported_path_fragment = normalized_supported_model.replace("/", "--")
+    return (
+        normalized_supported_model in normalized_model
+        or supported_path_fragment in normalized_model
+    )
+
+
 def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
@@ -50,12 +71,12 @@ def construct_mm_data(
     audio_embeds: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor | Dict[str, Any]]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
-    if model == SupportedModels.QWEN_2_AUDIO_7B:
+    if _matches_model(model, SupportedModels.QWEN_2_AUDIO_7B):
         audio_embeds = audio_embeds.to(torch.bfloat16)
         assert audio_embeds.ndim == 2, "Audio embeddings must be 2D"
         return {"audio": [audio_embeds]}
     # Handle video models
-    if model == SupportedModels.LLAVA_NEXT_VIDEO_7B:
+    if _matches_model(model, SupportedModels.LLAVA_NEXT_VIDEO_7B):
         if video_numpy is None:
             raise ValueError("No video frames provided.")
         return {"video": video_numpy}
@@ -67,7 +88,7 @@ def construct_mm_data(
     image_embeds = image_embeds.to(embeddings_dtype)
 
     # Model-specific image handling
-    if model == SupportedModels.QWEN_2_5_VL_7B:
+    if _matches_model(model, SupportedModels.QWEN_2_5_VL_7B):
         return _construct_qwen_image_data(image_embeds, image_grid_thw)
     else:
         # Default image handling for other models (e.g., LLAVA_1_5_7B)

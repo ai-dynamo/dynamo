@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.llm import ModelInput, ModelType, register_model
@@ -99,12 +100,15 @@ class Processor(ProcessMixIn):
         self.encode_worker_client = encode_worker_client
         self.prompt_template = args.prompt_template
         self.engine_args = engine_args
-        self.model_config = self.engine_args.create_model_config()
+        self.vllm_config = self.engine_args.create_engine_config(
+            usage_context=UsageContext.OPENAI_API_SERVER
+        )
+        self.model_config = self.vllm_config.model_config
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.tokenizer = self._create_tokenizer(self.engine_args)
-        self.chat_processor = ChatProcessor(self.tokenizer, self.model_config)
+        self.chat_processor = ChatProcessor(self.tokenizer, self.vllm_config)
         self.completions_processor = CompletionsProcessor(
-            self.tokenizer, self.model_config
+            self.tokenizer, self.vllm_config
         )
 
     def cleanup(self):

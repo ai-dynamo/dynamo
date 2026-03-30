@@ -134,6 +134,22 @@ class VllmEncodeWorker:
     def cleanup(self):
         pass
 
+    def _prepare_audio_tensor_for_rdma(
+        self, audio_embeddings: torch.Tensor, request_id: str
+    ) -> torch.Tensor:
+        tensor_for_descriptor = audio_embeddings.detach().to(device="cpu").contiguous()
+
+        logger.debug(
+            "Req %s: Preparing audio embeddings tensor (shape: %s, dtype: %s, device: %s, contiguous: %s) for RDMA.",
+            request_id,
+            tuple(tensor_for_descriptor.shape),
+            tensor_for_descriptor.dtype,
+            tensor_for_descriptor.device,
+            tensor_for_descriptor.is_contiguous(),
+        )
+
+        return tensor_for_descriptor
+
     async def generate(
         self, request: vLLMMultimodalRequest
     ) -> AsyncIterator[MyRequestOutput]:
@@ -167,30 +183,69 @@ class VllmEncodeWorker:
             )
             with torch.no_grad():
                 audio_embeddings = self.get_audio_embeddings(audio_features)
-            descriptor = connect.Descriptor(audio_embeddings)
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
-                # Clear the audio URL as hint that the audio is passed as embeddings.
-                request.multimodal_input.audio_url = None
-                request.embeddings_shape = tuple(audio_embeddings.shape)
-                logger.debug(f"Request: {request.model_dump_json()}")
-
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
+            # Prefer direct device-memory registration when the runtime/NIXL backend
+            # supports it, and fall back to a CPU staging buffer otherwise.
+            tensors_for_transfer = [("device", audio_embeddings)]
+            tensors_for_transfer.append(
+                (
+                    "cpu",
+                    self._prepare_audio_tensor_for_rdma(audio_embeddings, request_id),
                 )
+            )
 
-                await readable.wait_for_completion()
+            last_error = None
+            for tensor_location, tensor_for_descriptor in tensors_for_transfer:
+                request_to_send = request.model_copy(deep=True)
+                try:
+                    descriptor = connect.Descriptor(tensor_for_descriptor)
+                    with await self._connector.create_readable(descriptor) as readable:
+                        request_to_send.serialized_request = readable.metadata()
+                        # Clear the audio URL as hint that the audio is passed as embeddings.
+                        request_to_send.multimodal_input.audio_url = None
+                        request_to_send.embeddings_shape = tuple(
+                            tensor_for_descriptor.shape
+                        )
+                        logger.debug(
+                            "Request %s using %s tensor for transfer: %s",
+                            request_id,
+                            tensor_location,
+                            request_to_send.model_dump_json(),
+                        )
 
-                async for response in response_generator:
-                    output = MyRequestOutput.model_validate_json(response.data())
-                    yield MyRequestOutput(
-                        request_id=output.request_id,
-                        prompt=output.prompt,
-                        prompt_token_ids=output.prompt_token_ids,
-                        prompt_logprobs=output.prompt_logprobs,
-                        outputs=output.outputs,
-                        finished=output.finished,
-                    ).model_dump_json()
+                        response_generator = await self.pd_worker_client.round_robin(
+                            request_to_send.model_dump_json()
+                        )
+
+                        await readable.wait_for_completion()
+
+                        async for response in response_generator:
+                            output = MyRequestOutput.model_validate_json(
+                                response.data()
+                            )
+                            yield MyRequestOutput(
+                                request_id=output.request_id,
+                                prompt=output.prompt,
+                                prompt_token_ids=output.prompt_token_ids,
+                                prompt_logprobs=output.prompt_logprobs,
+                                outputs=output.outputs,
+                                finished=output.finished,
+                            ).model_dump_json()
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if tensor_location == "device":
+                        # Some environments cannot register device memory with NIXL,
+                        # so retry with a host buffer before failing the request.
+                        logger.warning(
+                            "Request %s: direct audio embedding transfer failed (%s). Falling back to CPU buffer.",
+                            request_id,
+                            exc,
+                        )
+                        continue
+                    raise
+
+            if last_error is not None:
+                raise last_error
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")

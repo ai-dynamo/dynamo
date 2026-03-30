@@ -101,7 +101,6 @@ class ProcessMixIn(ProcessMixInRequired):
 
         sampling_params = request.to_sampling_params(
             default_max_tokens,
-            self.model_config.logits_processor_pattern,
             self.default_sampling_params,
         )
         return (

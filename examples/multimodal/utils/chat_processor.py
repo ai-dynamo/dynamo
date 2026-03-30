@@ -17,7 +17,7 @@ import json
 import time
 from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_checkable
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -39,9 +39,9 @@ class StubEngineClient:
     Provides the minimal attributes required by OpenAIServingModels.
     """
 
-    def __init__(self, model_config: ModelConfig):
-        self.model_config = model_config
-        self.renderer = renderer_from_config(model_config)
+    def __init__(self, vllm_config: VllmConfig):
+        self.model_config = vllm_config.model_config
+        self.renderer = renderer_from_config(vllm_config)
         self.input_processor = None
         self.io_processor = None
 
@@ -94,7 +94,6 @@ class ProcessMixIn(ProcessMixInRequired):
 
         sampling_params = request.to_sampling_params(
             default_max_tokens,
-            self.model_config.logits_processor_pattern,
             self.default_sampling_params,
         )
         return (
@@ -127,15 +126,17 @@ class PreprocessResult:
 
 
 class ChatProcessor:
-    def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig):
+    def __init__(self, tokenizer: AnyTokenizer, vllm_config: VllmConfig):
         self.tokenizer = tokenizer
-        self.model_config = model_config
+        self.model_config = vllm_config.model_config
         # Create stub engine client and models for preprocessing-only usage
-        stub_engine = StubEngineClient(model_config)
+        stub_engine = StubEngineClient(vllm_config)
         serving_models = OpenAIServingModels(
             engine_client=stub_engine,
             base_model_paths=[
-                BaseModelPath(name=model_config.model, model_path=model_config.model)
+                BaseModelPath(
+                    name=self.model_config.model, model_path=self.model_config.model
+                )
             ],
         )
         self.openai_serving = OpenAIServingChat(
@@ -274,15 +275,17 @@ class ChatProcessor:
 
 
 class CompletionsProcessor:
-    def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig):
+    def __init__(self, tokenizer: AnyTokenizer, vllm_config: VllmConfig):
         self.tokenizer = tokenizer
-        self.model_config = model_config
+        self.model_config = vllm_config.model_config
         # Create stub engine client and models for preprocessing-only usage
-        stub_engine = StubEngineClient(model_config)
+        stub_engine = StubEngineClient(vllm_config)
         serving_models = OpenAIServingModels(
             engine_client=stub_engine,
             base_model_paths=[
-                BaseModelPath(name=model_config.model, model_path=model_config.model)
+                BaseModelPath(
+                    name=self.model_config.model, model_path=self.model_config.model
+                )
             ],
         )
         self.openai_serving = OpenAIServingCompletion(

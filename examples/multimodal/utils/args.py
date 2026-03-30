@@ -9,6 +9,8 @@ import socket
 import sys
 from typing import Callable, List, Optional, Tuple
 
+import torch
+
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -213,26 +215,50 @@ def overwrite_args(config):
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
-    defaults = {
-        # vLLM 0.13+ renamed 'task' to 'runner'
-        "runner": "generate",
-        "skip_tokenizer_init": False,
-        "enable_log_requests": False,
-        "enable_prefix_caching": True,
-        # KV routing relies on logging KV metrics
-        "disable_log_stats": False,
-        # Enable multimodal embeddings input
-        "enable_mm_embeds": True,
-        # Always setting up kv transfer for disagg
-        "kv_transfer_config": KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
-        ),
-        "kv_events_config": KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-            endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-        ),
-    }
+    if torch.xpu.is_available():
+        defaults = {
+            # vLLM 0.13+ renamed 'task' to 'runner'
+            "runner": "generate",
+            "skip_tokenizer_init": False,
+            "enable_log_requests": False,
+            "enable_prefix_caching": True,
+            # XPU requires block size >= 64
+            "block_size": 64,
+            # KV routing relies on logging KV metrics
+            "disable_log_stats": False,
+            # Enable multimodal embeddings input
+            "enable_mm_embeds": True,
+            # Always setting up kv transfer for disagg
+            "kv_transfer_config": KVTransferConfig(
+                kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="xpu"
+            ),
+            "kv_events_config": KVEventsConfig(
+                enable_kv_cache_events=True,
+                publisher="zmq",
+                endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+            ),
+        }
+    else:
+        defaults = {
+            # vLLM 0.13+ renamed 'task' to 'runner'
+            "runner": "generate",
+            "skip_tokenizer_init": False,
+            "enable_log_requests": False,
+            "enable_prefix_caching": True,
+            # KV routing relies on logging KV metrics
+            "disable_log_stats": False,
+            # Enable multimodal embeddings input
+            "enable_mm_embeds": True,
+            # Always setting up kv transfer for disagg
+            "kv_transfer_config": KVTransferConfig(
+                kv_connector="NixlConnector", kv_role="kv_both"
+            ),
+            "kv_events_config": KVEventsConfig(
+                enable_kv_cache_events=True,
+                publisher="zmq",
+                endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+            ),
+        }
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
