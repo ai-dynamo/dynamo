@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO: Either remove or trim down this Dockerfile once new FastVideo version is released with FP4Config support and doesn't require custom flash-attention patch.
+
 # Shared runtime image for Dynamo frontend and FastVideo workers.
 FROM nvidia/cuda:13.1.1-devel-ubuntu24.04
 
@@ -40,6 +42,7 @@ RUN export FLASH_ATTN_CUDA_ARCHS=$(echo "${TORCH_CUDA_ARCH_LIST}" | sed 's/ /;/g
  && uv pip install ./flash_attn/cute \
  && rm -rf ../flash-attention
 
+ # TODO: Consider to install Dynamo from source here (COPY source into container before installing) to make it easier to test changes to Dynamo together with FastVideo, instead of relying on pip install from PyPI. This is especially important if we need to iterate on the FastVideo PR that adds FP4Config support and might require changes to Dynamo as well.
 # Install Dynamo with /v1/videos support.
 RUN uv pip install ai-dynamo==1.0.0
 
@@ -51,6 +54,7 @@ RUN echo "Building FastVideo for TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" \
  && git clone --recurse-submodules https://github.com/hao-ai-lab/FastVideo.git /tmp/FastVideo \
  && uv pip install --no-build-isolation /tmp/FastVideo
 
+ # TODO: We should make these configurable as args in backend once we have new FastVideo release (currently they are not consumed in FastVideo upstream)
 ENV FASTVIDEO_VIDEO_CODEC=libx264
 ENV FASTVIDEO_X264_PRESET=ultrafast
 

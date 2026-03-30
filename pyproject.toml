@@ -66,19 +66,10 @@ sglang = [
 ]
 
 # TODO: Need to find a way to define flash_attn properly (hopefully new code from FastVideo will simplify this and doesn't need custom patch from https://github.com/RandNMR73/flash-attention/tree/fa4-compile
-# TODO: Cleanup those dependencies
+# TODO: Pin to new released version with FP4Config once released: https://github.com/hao-ai-lab/FastVideo/issues/1171
 fastvideo = [
     "uvloop",
-    # FastVideo is currently installed from the upstream Git repository.
-    # We intentionally leave torch/torchvision out here because the correct
-    # wheel index is CUDA-environment-specific. See examples/diffusers/Dockerfile
-    # for a known-good container installation flow.
-    "flashinfer-python",
-    "setuptools_scm",
-    "scikit-build-core",
-    "cmake",
-    "ninja",
-    "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git",
+    "fastvideo==0.1.7",
 ]
 
 mocker = [
