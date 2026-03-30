@@ -20,6 +20,7 @@ use core::time::Duration;
 use indicatif::ProgressIterator;
 use std::time::Instant;
 
+use dynamo_llm::block_manager::v2::device::DeviceBackend;
 use dynamo_llm::block_manager::v2::physical::{
     layout::LayoutConfig,
     transfer::{
@@ -59,6 +60,18 @@ struct Args {
     /// Amount of iterations
     #[clap(long, default_value_t = 100)]
     iterations: usize,
+
+    /// Device backend to use (cuda, hpu, or ze)
+    #[clap(long, default_value = "cuda")]
+    backend: String,
+
+    /// Device ID
+    #[clap(long, default_value_t = 0)]
+    device_id: u32,
+
+    /// NIXL backends (comma-separated, e.g., "POSIX,GDS_MT" or "POSIX")
+    #[clap(long, default_value = "POSIX")]
+    nixl_backends: String,
 }
 
 struct DummyBounceBufferSpec {
@@ -112,7 +125,31 @@ fn get_bandwidth_gbs(latencies: Vec<Duration>, args: &Args) -> f64 {
 }
 
 async fn benchmark(args: &Args) -> Result<()> {
-    let agent = NixlAgent::require_backends("test_agent", &["POSIX", "GDS_MT"])?;
+    // Parse device backend
+    let device_backend = match args.backend.to_lowercase().as_str() {
+        #[cfg(feature = "cuda")]
+        "cuda" => DeviceBackend::Cuda,
+        #[cfg(feature = "hpu")]
+        "hpu" => DeviceBackend::Hpu,
+        #[cfg(feature = "xpu")]
+        "ze" => DeviceBackend::Ze,
+        _ => {
+            let available = vec![
+                #[cfg(feature = "cuda")]
+                "cuda",
+                #[cfg(feature = "hpu")]
+                "hpu",
+                #[cfg(feature = "xpu")]
+                "ze",
+            ];
+            anyhow::bail!("Invalid backend: {}. Available: {}", args.backend, available.join(", "))
+        }
+    };
+
+    // Parse NIXL backends
+    let nixl_backends: Vec<&str> = args.nixl_backends.split(',').map(|s| s.trim()).collect();
+    let agent = NixlAgent::require_backends("test_agent", &nixl_backends)?;
+
     let src_dst_config = LayoutConfig::builder()
         .num_blocks(args.num_blocks)
         .num_layers(args.num_layers)
@@ -142,8 +179,9 @@ async fn benchmark(args: &Args) -> Result<()> {
 
     let ctx = TransportManager::builder()
         .worker_id(0)
+        .device_backend(device_backend)
+        .device_id(args.device_id)
         .nixl_agent(agent)
-        .cuda_device_id(0)
         .build()?;
 
     let bounce_buffer_spec: Arc<dyn BounceBufferSpec> = Arc::new(DummyBounceBufferSpec {
