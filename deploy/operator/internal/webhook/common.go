@@ -122,31 +122,28 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 	return false
 }
 
-// allowedDGDReplicasModifiers holds full Kubernetes usernames
-// (system:serviceaccount:<namespace>:<name>) that are authorized to modify DGD
-// replicas. Populated from OperatorConfiguration and the operator's own runtime
-// identity at startup. This replaces the previous suffix-based matching which was
-// fragile when the Helm fullname helper collapsed the release/chart name (#7656).
-var allowedDGDReplicasModifiers []string
+// operatorPrincipal holds the full Kubernetes username
+// (system:serviceaccount:<namespace>:<name>) of the operator's own service account.
+// Set at startup from the Downward API. This replaces the previous suffix-based
+// matching which was fragile when the Helm fullname helper collapsed the
+// release/chart name (#7656).
+var operatorPrincipal string
 
-// SetAllowedDGDReplicasModifiers configures the full SA usernames authorized to
-// modify DGD replicas. This should be called from main.go before starting the
-// webhook server.
-func SetAllowedDGDReplicasModifiers(principals []string) {
-	allowedDGDReplicasModifiers = principals
+// SetOperatorPrincipal configures the operator's own SA principal.
+// This should be called from main.go before starting the webhook server.
+func SetOperatorPrincipal(principal string) {
+	operatorPrincipal = principal
 }
 
 // CanModifyDGDReplicas checks if the request comes from a service account authorized
 // to modify DGD replicas when scaling adapter is enabled.
 //
 // Authorization is checked in two ways:
-//  1. Full principal match against the config-provided allow-list, which stores
-//     entries like "system:serviceaccount:<ns>:<name>". The Helm chart populates
-//     this with the operator controller-manager SA, and the operator's own runtime
-//     identity is auto-detected from the mounted JWT as a fallback (#7656).
+//  1. Exact match against the operator's own principal, auto-detected at startup
+//     via the Kubernetes Downward API (POD_NAMESPACE + POD_SERVICE_ACCOUNT).
 //  2. Name-only match for the planner SA, which the operator creates in every DGD
 //     namespace with a well-known constant name. Because the namespace is only known
-//     at runtime, it cannot be enumerated in the static config.
+//     at runtime, it cannot be enumerated statically.
 func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
 	username := userInfo.Username
 
@@ -154,24 +151,18 @@ func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
 		return false
 	}
 
-	// Full principal match against config-provided allow-list
-	for _, allowed := range allowedDGDReplicasModifiers {
-		if username == allowed {
-			webhookCommonLog.V(1).Info("allowing DGD replicas modification",
-				"username", username,
-				"matchedPrincipal", allowed)
-			return true
-		}
+	if operatorPrincipal != "" && username == operatorPrincipal {
+		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+			"username", username,
+			"matchType", "operatorPrincipal")
+		return true
 	}
 
-	// Name-only match for the planner SA, which the operator creates in every DGD
-	// namespace with a well-known constant name. Because the namespace is only known
-	// at runtime, it cannot be enumerated in the static config.
 	parts := strings.Split(username, ":")
 	if len(parts) == 4 && parts[3] == consts.PlannerServiceAccountName {
 		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
 			"username", username,
-			"matchedWellKnownSA", consts.PlannerServiceAccountName)
+			"matchType", "plannerSA")
 		return true
 	}
 

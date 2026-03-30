@@ -31,8 +31,6 @@ data:
         certProvisionMode: {{ if or .Values.webhook.certManager.enabled .Values.webhook.certificateSecret.external }}"manual"{{ else }}"auto"{{ end }}
         secretName: {{ .Values.webhook.certificateSecret.name | quote }}
         serviceName: {{ include "dynamo-operator.fullname" . }}-webhook-service
-        allowedDGDReplicasModifiers:
-          - system:serviceaccount:{{ .Release.Namespace }}:{{ include "dynamo-operator.fullname" . }}-controller-manager
     leaderElection:
       enabled: true
       id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}
