@@ -601,39 +601,44 @@ if [ $# -eq 0 ]; then set -- sleep infinity; fi
 
 log "Starting (hash=$HASH, nnodes=$NNODES)"
 
-LEASE_GRANT=$($ETCDCTL lease grant $LEASE_TTL 2>/dev/null)
+LEASE_GRANT=$($ETCDCTL lease grant $LEASE_TTL)
+log "DEBUG: lease grant output: $LEASE_GRANT"
 LEASE_ID=$(echo "$LEASE_GRANT" | awk '/lease/{print $2}')
 if [ -z "$LEASE_ID" ]; then
-    log "ERROR: Failed to create lease"
+    log "ERROR: Failed to create lease (output was: $LEASE_GRANT)"
     exit 1
 fi
 log "Lease created: $LEASE_ID (TTL=${LEASE_TTL}s)"
 
-$ETCDCTL put "leaders/$GROUP" "$HASH" --lease="$LEASE_ID" >/dev/null 2>&1
-log "Published leader key"
+PUT_OUT=$($ETCDCTL put "leaders/$GROUP" "$HASH" --lease="$LEASE_ID" 2>&1)
+log "Published leader key (put result: $PUT_OUT)"
 
-# Monitored keepalive: log if it dies
+# Monitored keepalive
 (
-    $ETCDCTL lease keep-alive "$LEASE_ID" >/dev/null 2>&1
+    log "DEBUG: keepalive starting for lease $LEASE_ID"
+    $ETCDCTL lease keep-alive "$LEASE_ID"
     EXIT_CODE=$?
-    echo "[$(date +%H:%M:%S.%3N)] [leader/$GROUP] !!! KEEPALIVE DIED (exit=$EXIT_CODE) !!!"
+    log "!!! KEEPALIVE DIED (exit=$EXIT_CODE) !!!"
 ) &
 KEEPALIVE_PID=$!
 log "Keepalive PID: $KEEPALIVE_PID"
 
 cleanup() {
-    log "Cleanup: killing all"
+    log "Cleanup: killing all (pids: keepalive=$KEEPALIVE_PID engine=${ENGINE_PID:-none} watch_leader=${WATCH_LEADER_PID:-none} watch_workers=${WATCH_WORKERS_PID:-none})"
     kill -9 $KEEPALIVE_PID 2>/dev/null
     [ -n "$ENGINE_PID" ] && kill -9 $ENGINE_PID 2>/dev/null
-    $ETCDCTL lease revoke "$LEASE_ID" >/dev/null 2>&1
+    [ -n "$WATCH_LEADER_PID" ] && kill -9 $WATCH_LEADER_PID 2>/dev/null
+    [ -n "$WATCH_WORKERS_PID" ] && kill -9 $WATCH_WORKERS_PID 2>/dev/null
+    REVOKE_OUT=$($ETCDCTL lease revoke "$LEASE_ID" 2>&1)
+    log "Cleanup: lease revoke result: $REVOKE_OUT"
     wait 2>/dev/null
 }
 trap cleanup EXIT
 
+# Formation: polling OK here, no engine running yet
 log "Waiting for $((NNODES - 1)) worker(s) to join..."
 DEADLINE=$(($(date +%s) + FORMATION_TIMEOUT))
 while true; do
-    # Check keepalive still alive
     if ! kill -0 $KEEPALIVE_PID 2>/dev/null; then
         log "!!! KEEPALIVE PROCESS DEAD (during formation) !!!"
         exit 1
@@ -641,7 +646,7 @@ while true; do
 
     ALL_PRESENT=true
     for rank in $(seq 1 $((NNODES - 1))); do
-        VAL=$($ETCDCTL get "groups/$GROUP/$HASH/rank-$rank" --print-value-only 2>/dev/null)
+        VAL=$($ETCDCTL get "groups/$GROUP/$HASH/rank-$rank" --print-value-only 2>&1)
         if [ -z "$VAL" ]; then
             ALL_PRESENT=false
             break
@@ -660,7 +665,7 @@ done
 
 declare -A WORKER_UUIDS
 for rank in $(seq 1 $((NNODES - 1))); do
-    WORKER_UUIDS[$rank]=$($ETCDCTL get "groups/$GROUP/$HASH/rank-$rank" --print-value-only 2>/dev/null)
+    WORKER_UUIDS[$rank]=$($ETCDCTL get "groups/$GROUP/$HASH/rank-$rank" --print-value-only 2>&1)
     log "Recorded rank-$rank: ${WORKER_UUIDS[$rank]}"
 done
 
@@ -671,15 +676,46 @@ if ! flock -n /shared/failover.lock -c "exit 0" 2>/dev/null; then
     log "Delay complete"
 fi
 
-$ETCDCTL put "groups/$GROUP/$HASH/start" "go" --lease="$LEASE_ID" >/dev/null 2>&1
-log "Sent go signal"
+PUT_OUT=$($ETCDCTL put "groups/$GROUP/$HASH/start" "go" --lease="$LEASE_ID" 2>&1)
+log "Sent go signal (put result: $PUT_OUT)"
 
+# Start watches BEFORE engine (persistent streams, no polling)
+(
+    log "DEBUG: starting leader key watch on leaders/$GROUP"
+    $ETCDCTL watch "leaders/$GROUP" 2>&1 | while IFS= read -r line; do
+        log "DEBUG: leader watch event: [$line]"
+        if [ "$line" = "DELETE" ]; then
+            log "WATCH: own leader key deleted (lease expired?)"
+            exit 0
+        fi
+    done
+    log "DEBUG: leader watch stream ended (pipe closed or etcdctl exited)"
+) &
+WATCH_LEADER_PID=$!
+log "Leader key watch PID: $WATCH_LEADER_PID"
+
+(
+    log "DEBUG: starting worker watch on groups/$GROUP/$HASH/ (prefix)"
+    $ETCDCTL watch --prefix "groups/$GROUP/$HASH/" 2>&1 | while IFS= read -r line; do
+        log "DEBUG: worker watch event: [$line]"
+        if [ "$line" = "DELETE" ]; then
+            log "WATCH: worker key deleted under groups/$GROUP/$HASH/"
+            exit 0
+        fi
+    done
+    log "DEBUG: worker watch stream ended (pipe closed or etcdctl exited)"
+) &
+WATCH_WORKERS_PID=$!
+log "Worker keys watch PID: $WATCH_WORKERS_PID"
+
+# Start engine
 log "Starting engine: $*"
 "$@" &
 ENGINE_PID=$!
 log "Engine PID: $ENGINE_PID"
 
-log "Monitoring workers..."
+# Monitor via local PID checks only (no etcdctl get calls)
+log "Monitoring (watch-based, no polling)..."
 while true; do
     if ! kill -0 $ENGINE_PID 2>/dev/null; then
         log "Engine died, exiting ($(ts))"
@@ -687,27 +723,20 @@ while true; do
     fi
 
     if ! kill -0 $KEEPALIVE_PID 2>/dev/null; then
-        log "!!! KEEPALIVE PROCESS DEAD (during monitoring) !!!"
+        log "!!! KEEPALIVE PROCESS DEAD (during monitoring) ($(ts)) !!!"
         exit 1
     fi
 
-    MY_KEY=$($ETCDCTL get "leaders/$GROUP" --print-value-only 2>/dev/null)
-    if [ "$MY_KEY" != "$HASH" ]; then
-        log "DETECTED: own leader key lost (lease expired?) ($(ts))"
+    if ! kill -0 $WATCH_LEADER_PID 2>/dev/null; then
+        log "DETECTED: leader watch exited (key deleted or stream lost) ($(ts))"
         exit 1
     fi
 
-    for rank in $(seq 1 $((NNODES - 1))); do
-        CURRENT=$($ETCDCTL get "groups/$GROUP/$HASH/rank-$rank" --print-value-only 2>/dev/null)
-        if [ -z "$CURRENT" ]; then
-            log "DETECTED: rank-$rank disappeared ($(ts))"
-            exit 1
-        fi
-        if [ "$CURRENT" != "${WORKER_UUIDS[$rank]}" ]; then
-            log "DETECTED: rank-$rank UUID changed ($(ts))"
-            exit 1
-        fi
-    done
+    if ! kill -0 $WATCH_WORKERS_PID 2>/dev/null; then
+        log "DETECTED: worker watch exited (key deleted or stream lost) ($(ts))"
+        exit 1
+    fi
+
     sleep 1
 done
 `
@@ -729,50 +758,57 @@ if [ $# -eq 0 ]; then set -- sleep infinity; fi
 
 log "Starting (uuid=$MY_UUID)"
 
+# Wait for leader (polling OK, no engine running yet)
 log "Waiting for leader..."
 while true; do
-    HASH=$($ETCDCTL get "leaders/$GROUP" --print-value-only 2>/dev/null)
+    HASH=$($ETCDCTL get "leaders/$GROUP" --print-value-only 2>&1)
     [ -n "$HASH" ] && break
     sleep 0.5
 done
 log "Found leader (hash=$HASH)"
 
-LEASE_GRANT=$($ETCDCTL lease grant $LEASE_TTL 2>/dev/null)
+LEASE_GRANT=$($ETCDCTL lease grant $LEASE_TTL)
+log "DEBUG: lease grant output: $LEASE_GRANT"
 LEASE_ID=$(echo "$LEASE_GRANT" | awk '/lease/{print $2}')
 if [ -z "$LEASE_ID" ]; then
-    log "ERROR: Failed to create lease"
+    log "ERROR: Failed to create lease (output was: $LEASE_GRANT)"
     exit 1
 fi
+log "Lease created: $LEASE_ID (TTL=${LEASE_TTL}s)"
 
-$ETCDCTL put "groups/$GROUP/$HASH/rank-$NODE_RANK" "$MY_UUID" --lease="$LEASE_ID" >/dev/null 2>&1
-log "Registered under leader hash"
+PUT_OUT=$($ETCDCTL put "groups/$GROUP/$HASH/rank-$NODE_RANK" "$MY_UUID" --lease="$LEASE_ID" 2>&1)
+log "Registered under leader hash (put result: $PUT_OUT)"
 
 (
-    $ETCDCTL lease keep-alive "$LEASE_ID" >/dev/null 2>&1
+    log "DEBUG: keepalive starting for lease $LEASE_ID"
+    $ETCDCTL lease keep-alive "$LEASE_ID"
     EXIT_CODE=$?
-    echo "[$(date +%H:%M:%S.%3N)] [worker/$GROUP/rank-$NODE_RANK] !!! KEEPALIVE DIED (exit=$EXIT_CODE) !!!"
+    log "!!! KEEPALIVE DIED (exit=$EXIT_CODE) !!!"
 ) &
 KEEPALIVE_PID=$!
 log "Keepalive PID: $KEEPALIVE_PID"
 
 cleanup() {
-    log "Cleanup: killing all"
+    log "Cleanup: killing all (pids: keepalive=$KEEPALIVE_PID engine=${ENGINE_PID:-none} watch_leader=${WATCH_LEADER_PID:-none})"
     kill -9 $KEEPALIVE_PID 2>/dev/null
     [ -n "$ENGINE_PID" ] && kill -9 $ENGINE_PID 2>/dev/null
-    $ETCDCTL lease revoke "$LEASE_ID" >/dev/null 2>&1
+    [ -n "$WATCH_LEADER_PID" ] && kill -9 $WATCH_LEADER_PID 2>/dev/null
+    REVOKE_OUT=$($ETCDCTL lease revoke "$LEASE_ID" 2>&1)
+    log "Cleanup: lease revoke result: $REVOKE_OUT"
     wait 2>/dev/null
 }
 trap cleanup EXIT
 
+# Wait for go signal (polling OK, no engine running yet)
 log "Waiting for go signal..."
 while true; do
-    GO=$($ETCDCTL get "groups/$GROUP/$HASH/start" --print-value-only 2>/dev/null)
+    GO=$($ETCDCTL get "groups/$GROUP/$HASH/start" --print-value-only 2>&1)
     if [ "$GO" = "go" ]; then
         log "Go signal received"
         break
     fi
 
-    CURRENT=$($ETCDCTL get "leaders/$GROUP" --print-value-only 2>/dev/null)
+    CURRENT=$($ETCDCTL get "leaders/$GROUP" --print-value-only 2>&1)
     if [ -z "$CURRENT" ]; then
         log "DETECTED: Leader disappeared while waiting for go ($(ts))"
         exit 1
@@ -790,12 +826,29 @@ while true; do
     sleep 0.5
 done
 
+# Start watch BEFORE engine (persistent stream, no polling)
+(
+    log "DEBUG: starting leader watch on leaders/$GROUP"
+    $ETCDCTL watch "leaders/$GROUP" 2>&1 | while IFS= read -r line; do
+        log "DEBUG: leader watch event: [$line]"
+        if [ "$line" = "DELETE" ]; then
+            log "WATCH: leader key deleted"
+            exit 0
+        fi
+    done
+    log "DEBUG: leader watch stream ended (pipe closed or etcdctl exited)"
+) &
+WATCH_LEADER_PID=$!
+log "Leader watch PID: $WATCH_LEADER_PID"
+
+# Start engine
 log "Starting engine: $*"
 "$@" &
 ENGINE_PID=$!
 log "Engine PID: $ENGINE_PID"
 
-log "Monitoring leader..."
+# Monitor via local PID checks only (no etcdctl get calls)
+log "Monitoring (watch-based, no polling)..."
 while true; do
     if ! kill -0 $ENGINE_PID 2>/dev/null; then
         log "Engine died, exiting ($(ts))"
@@ -803,19 +856,15 @@ while true; do
     fi
 
     if ! kill -0 $KEEPALIVE_PID 2>/dev/null; then
-        log "!!! KEEPALIVE PROCESS DEAD (during monitoring) !!!"
+        log "!!! KEEPALIVE PROCESS DEAD (during monitoring) ($(ts)) !!!"
         exit 1
     fi
 
-    CURRENT=$($ETCDCTL get "leaders/$GROUP" --print-value-only 2>/dev/null)
-    if [ -z "$CURRENT" ]; then
-        log "DETECTED: Leader disappeared ($(ts))"
+    if ! kill -0 $WATCH_LEADER_PID 2>/dev/null; then
+        log "DETECTED: leader watch exited (key deleted or stream lost) ($(ts))"
         exit 1
     fi
-    if [ "$CURRENT" != "$HASH" ]; then
-        log "DETECTED: Leader hash changed ($(ts))"
-        exit 1
-    fi
+
     sleep 1
 done
 `
