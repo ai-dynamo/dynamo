@@ -159,6 +159,19 @@ def _normalize_subprocess_stream(value: Any) -> str:
     return str(value).strip()
 
 
+def _parse_probe_summary(stdout: str) -> Optional[dict[str, Any]]:
+    if not stdout:
+        return None
+    for line in reversed(stdout.splitlines()):
+        try:
+            summary = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(summary, dict):
+            return summary
+    return None
+
+
 def _probe_python_import(
     *,
     python_executable: str,
@@ -178,9 +191,12 @@ def _probe_python_import(
         python_executable,
         "-c",
         (
-            "import importlib, json; "
+            "import importlib, json, os, sys; "
             f"mod = importlib.import_module({module!r}); "
-            "print(json.dumps({'module': mod.__name__, 'file': getattr(mod, '__file__', None)}))"
+            "print(json.dumps({'module': mod.__name__, 'file': getattr(mod, '__file__', None)})); "
+            "sys.stdout.flush(); "
+            "sys.stderr.flush(); "
+            "os._exit(0)"
         ),
     ]
     try:
@@ -193,23 +209,22 @@ def _probe_python_import(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        stdout = _normalize_subprocess_stream(exc.stdout)
+        stderr = _normalize_subprocess_stream(exc.stderr)
+        summary = _parse_probe_summary(stdout)
         return {
             "module": module,
             "pythonpath": str(python_path) if python_path is not None else None,
             "status": "timeout",
             "returncode": None,
-            "stdout": _normalize_subprocess_stream(exc.stdout),
-            "stderr": _normalize_subprocess_stream(exc.stderr),
+            "stdout": stdout,
+            "stderr": stderr,
+            "summary": summary,
         }
 
     stdout = _normalize_subprocess_stream(result.stdout)
     stderr = _normalize_subprocess_stream(result.stderr)
-    summary = None
-    if stdout:
-        try:
-            summary = json.loads(stdout.splitlines()[-1])
-        except json.JSONDecodeError:
-            summary = None
+    summary = _parse_probe_summary(stdout)
 
     return {
         "module": module,
@@ -220,6 +235,54 @@ def _probe_python_import(
         "stderr": stderr,
         "summary": summary,
     }
+
+
+def _build_probe_targets(
+    *,
+    installed: dict[str, Any],
+    pinned_checkout: Path,
+    probe_imports: bool,
+) -> list[dict[str, Any]]:
+    if not probe_imports:
+        return []
+
+    targets = []
+    if installed["installed"]:
+        targets.append(
+            {
+                "module": "tensorrt_llm",
+                "python_path": None,
+            }
+        )
+        if installed["has_disaggregation"]:
+            targets.append(
+                {
+                    "module": "tensorrt_llm._torch.disaggregation.transceiver",
+                    "python_path": None,
+                }
+            )
+    elif pinned_checkout.is_dir():
+        targets.append(
+            {
+                "module": "tensorrt_llm",
+                "python_path": pinned_checkout.parent,
+            }
+        )
+
+    installed_root = installed.get("package_root")
+    checkout_root = str(pinned_checkout) if pinned_checkout.is_dir() else None
+    if (
+        pinned_checkout.is_dir()
+        and (pinned_checkout / "_torch" / "disaggregation").is_dir()
+        and checkout_root != installed_root
+    ):
+        targets.append(
+            {
+                "module": "tensorrt_llm._torch.disaggregation.transceiver",
+                "python_path": pinned_checkout.parent,
+            }
+        )
+    return targets
 
 
 def _probe_failure_summary(probe: dict[str, Any]) -> str:
@@ -264,26 +327,20 @@ def build_runtime_report(
         else _expand_library_dirs(DEFAULT_LIBRARY_DIR_PATTERNS)
     )
     libraries = _library_summary(resolved_library_dirs)
-    import_probes = []
-    if probe_imports:
-        import_probes.append(
-            _probe_python_import(
-                python_executable=python_executable,
-                module="tensorrt_llm",
-                timeout_s=probe_timeout_s,
-                runner=probe_runner,
-            )
+    import_probes = [
+        _probe_python_import(
+            python_executable=python_executable,
+            module=target["module"],
+            python_path=target["python_path"],
+            timeout_s=probe_timeout_s,
+            runner=probe_runner,
         )
-        if pinned_checkout.is_dir():
-            import_probes.append(
-                _probe_python_import(
-                    python_executable=python_executable,
-                    module="tensorrt_llm._torch.disaggregation.transceiver",
-                    python_path=pinned_checkout.parent,
-                    timeout_s=probe_timeout_s,
-                    runner=probe_runner,
-                )
-            )
+        for target in _build_probe_targets(
+            installed=installed,
+            pinned_checkout=pinned_checkout,
+            probe_imports=probe_imports,
+        )
+    ]
 
     findings = []
     if (

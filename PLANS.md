@@ -1692,3 +1692,16 @@ Implemented so far:
   - `UV_CACHE_DIR=/tmp/uv-cache maturin develop --manifest-path lib/bindings/kvbm/Cargo.toml`
     succeeds and installs the editable package into `.venv`
 - there is no need for fallback e.g. when the interface breaks. if someone moves the trt-llm commit, and e.g. a typed object from trt-llm side has changed, that is ok. 
+- [patch.crates-io]
+jiff = { path = "third_party/cargo-vendor/jiff-0.2.22" }
+jiff-static = { path = "third_party/cargo-vendor/jiff-static-0.2.22" }
+jiff-tzdb = { path = "third_party/cargo-vendor/jiff-tzdb-0.1.5" }
+jiff-tzdb-platform = { path = "third_party/cargo-vendor/jiff-tzdb-platform-0.1.3" } should be removed, and i dont want the cargo vendor. Thanks.
+
+- trt lib/bindings/kvbm/python/kvbm/trtllm_integration/kv_cache_manager.py is a bit long, especially for python. Best to move more things to rust, if possible.
+ let block_data = block.block_data_mut();
+                    let mut layer_view_mut =
+                        block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
+                    (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+                block::BlockType::DeviceOwned(block) => { some of them seem  a bit long.

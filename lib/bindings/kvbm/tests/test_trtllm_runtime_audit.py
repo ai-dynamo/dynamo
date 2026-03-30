@@ -159,12 +159,30 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            installed_root = root / "site-packages" / "tensorrt_llm"
+            installed_root.mkdir(parents=True)
+            (root / "pyproject.toml").write_text(
+                "\n".join(
+                    [
+                        "[project.optional-dependencies]",
+                        "trtllm =[",
+                        '    "tensorrt-llm==1.3.0rc8",',
+                        "]",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             checkout_root = root / "trtllm-checkout" / "tensorrt_llm"
             (checkout_root / "_torch" / "disaggregation").mkdir(parents=True)
 
             report = module.build_runtime_report(
-                distribution=None,
+                distribution=_FakeDistribution(
+                    installed_root,
+                    version="1.3.0rc8",
+                    requires=[],
+                ),
                 pinned_checkout=checkout_root,
+                repo_pyproject=root / "pyproject.toml",
                 library_dirs=[],
                 probe_imports=True,
                 python_executable="/fake/python",
@@ -175,10 +193,65 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
         self.assertEqual(report["import_probes"][0]["status"], "ok")
         self.assertEqual(report["import_probes"][1]["status"], "error")
         self.assertIn(
-            "subprocess import of tensorrt_llm._torch.disaggregation.transceiver failed",
+            "installed tensorrt_llm package does not expose _torch.disaggregation",
             report["findings"][0],
         )
-        self.assertIn("Open MPI / PMIx listener startup failed", report["findings"][0])
+        self.assertIn(
+            "subprocess import of tensorrt_llm._torch.disaggregation.transceiver failed",
+            report["findings"][1],
+        )
+        self.assertIn("Open MPI / PMIx listener startup failed", report["findings"][1])
+
+    def test_probe_python_import_command_exits_immediately_after_summary(self) -> None:
+        module = _load_module()
+        observed = {}
+
+        def fake_runner(command, **kwargs):
+            del kwargs
+            observed["command"] = command
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"module": "tensorrt_llm", "file": "/tmp/mod.py"}\n',
+                stderr="",
+            )
+
+        probe = module._probe_python_import(
+            python_executable="/fake/python",
+            module="tensorrt_llm",
+            runner=fake_runner,
+        )
+
+        self.assertEqual(probe["status"], "ok")
+        self.assertIn("os._exit(0)", observed["command"][2])
+
+    def test_build_probe_targets_prefers_installed_disaggregation_surface(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkout_root = Path(temp_dir) / "trtllm-checkout" / "tensorrt_llm"
+            (checkout_root / "_torch" / "disaggregation").mkdir(parents=True)
+
+            targets = module._build_probe_targets(
+                installed={
+                    "installed": True,
+                    "package_root": "/usr/local/lib/python3.12/dist-packages/tensorrt_llm",
+                    "has_disaggregation": True,
+                },
+                pinned_checkout=checkout_root,
+                probe_imports=True,
+            )
+
+        self.assertEqual(
+            [(target["module"], target["python_path"]) for target in targets],
+            [
+                ("tensorrt_llm", None),
+                ("tensorrt_llm._torch.disaggregation.transceiver", None),
+                (
+                    "tensorrt_llm._torch.disaggregation.transceiver",
+                    checkout_root.parent,
+                ),
+            ],
+        )
 
     def test_probe_python_import_reports_timeout(self) -> None:
         module = _load_module()
@@ -246,11 +319,18 @@ class TrtllmRuntimeAuditTests(unittest.TestCase):
             )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            checkout_root = Path(temp_dir) / "trtllm-checkout" / "tensorrt_llm"
+            root = Path(temp_dir)
+            installed_root = root / "site-packages" / "tensorrt_llm"
+            installed_root.mkdir(parents=True)
+            checkout_root = root / "trtllm-checkout" / "tensorrt_llm"
             (checkout_root / "_torch" / "disaggregation").mkdir(parents=True)
 
             report = module.build_runtime_report(
-                distribution=None,
+                distribution=_FakeDistribution(
+                    installed_root,
+                    version="1.3.0rc9",
+                    requires=[],
+                ),
                 pinned_checkout=checkout_root,
                 library_dirs=[],
                 probe_imports=True,

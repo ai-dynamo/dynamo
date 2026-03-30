@@ -16,9 +16,15 @@ import unittest
 
 
 PYTHON_ROOT = Path(__file__).resolve().parents[1] / "python"
-TRTLLM_ROOT = Path("/tmp/trtllm-latest/tensorrt_llm")
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
+
+
+def _resolve_trtllm_root() -> Path:
+    return Path("/tmp/trtllm-latest/tensorrt_llm")
+
+
+TRTLLM_ROOT = _resolve_trtllm_root()
 
 
 def _load_module(name: str, path: Path):
@@ -56,6 +62,12 @@ class _StubBatch:
 
 
 class TrtllmIntegrationTest(unittest.TestCase):
+    def _require_trtllm_source_file(self, relative_path: str) -> Path:
+        path = TRTLLM_ROOT / relative_path
+        if not path.exists():
+            self.skipTest(f"TRT-LLM source file is unavailable in this environment: {path}")
+        return path
+
     def setUp(self) -> None:
         self._saved_modules = {
             name: module
@@ -237,19 +249,19 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
         page_mod = _load_module(
             "tensorrt_llm._torch.disaggregation.resource.page",
-            TRTLLM_ROOT / "_torch/disaggregation/resource/page.py",
+            self._require_trtllm_source_file("_torch/disaggregation/resource/page.py"),
         )
         utils_page_mod = _load_module(
             "tensorrt_llm._torch.disaggregation.resource.utils",
-            TRTLLM_ROOT / "_torch/disaggregation/resource/utils.py",
+            self._require_trtllm_source_file("_torch/disaggregation/resource/utils.py"),
         )
         kv_extractor_mod = _load_module(
             "tensorrt_llm._torch.disaggregation.resource.kv_extractor",
-            TRTLLM_ROOT / "_torch/disaggregation/resource/kv_extractor.py",
+            self._require_trtllm_source_file("_torch/disaggregation/resource/kv_extractor.py"),
         )
         rank_info_mod = _load_module(
             "tensorrt_llm._torch.disaggregation.native.rank_info",
-            TRTLLM_ROOT / "_torch/disaggregation/native/rank_info.py",
+            self._require_trtllm_source_file("_torch/disaggregation/native/rank_info.py"),
         )
         return page_mod, utils_page_mod, kv_extractor_mod, rank_info_mod
 
@@ -451,7 +463,7 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
         transceiver_mod = _load_module(
             "tensorrt_llm._torch.disaggregation.transceiver",
-            TRTLLM_ROOT / "_torch/disaggregation/transceiver.py",
+            self._require_trtllm_source_file("_torch/disaggregation/transceiver.py"),
         )
         return transceiver_mod, _TransferWorker
 
@@ -1504,6 +1516,8 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
     def test_manager_supports_pinned_trtllm_rank_info_builder(self) -> None:
         _, _, _, rank_info_mod = self._install_pinned_trtllm_disagg_stubs()
+        if not hasattr(rank_info_mod.RankInfo, "from_kv_cache_manager"):
+            self.skipTest("available TRT-LLM rank_info source does not provide RankInfo.from_kv_cache_manager")
         integration = importlib.import_module("kvbm.trtllm_integration")
 
         class _FakeTensor:
@@ -1565,6 +1579,8 @@ class TrtllmIntegrationTest(unittest.TestCase):
 
     def test_manager_supports_pinned_trtllm_python_transceiver(self) -> None:
         transceiver_mod, transfer_worker_cls = self._install_pinned_trtllm_transceiver_stubs()
+        if not hasattr(transceiver_mod, "KvCacheTransceiverV2"):
+            self.skipTest("available TRT-LLM transceiver source does not provide KvCacheTransceiverV2")
         integration = importlib.import_module("kvbm.trtllm_integration")
 
         class _FakeTensor:

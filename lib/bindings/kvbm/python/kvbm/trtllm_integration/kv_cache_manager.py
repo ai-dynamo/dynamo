@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import sys
 from typing import Any, Callable, Iterable, Optional
 
 from . import rust as rust_bindings
@@ -432,13 +433,11 @@ class KvbmKVCacheManager:
 
         role_key = "key"
         role_value = "value"
-        try:
-            from tensorrt_llm._torch.pyexecutor.resource_manager import Role
-        except ImportError:
-            pass
-        else:
-            role_key = Role.KEY
-            role_value = Role.VALUE
+        resource_manager_mod = sys.modules.get("tensorrt_llm._torch.pyexecutor.resource_manager")
+        role_enum = getattr(resource_manager_mod, "Role", None)
+        if role_enum is not None:
+            role_key = role_enum.KEY
+            role_value = role_enum.VALUE
 
         buffer_attr = {}
         for local_layer_id in range(self.num_local_layers):
@@ -468,12 +467,10 @@ class KvbmKVCacheManager:
         )
 
         cache_tier = "gpu_mem"
-        try:
-            from tensorrt_llm.runtime.kv_cache_manager_v2 import CacheTier
-        except ImportError:
-            pass
-        else:
-            cache_tier = CacheTier.GPU_MEM
+        kv_cache_manager_v2_mod = sys.modules.get("tensorrt_llm.runtime.kv_cache_manager_v2")
+        cache_tier_enum = getattr(kv_cache_manager_v2_mod, "CacheTier", None)
+        if cache_tier_enum is not None:
+            cache_tier = cache_tier_enum.GPU_MEM
 
         return {
             "storage": _FakeStorage(pool_group=pool_group, buffer_attr=buffer_attr),
