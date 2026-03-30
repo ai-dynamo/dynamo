@@ -233,6 +233,7 @@ undeploy: kustomize kubectl ## Undeploy controller from the K8s cluster specifie
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 GPU_OPERATOR_NAMESPACE ?= gpu-operator
+GPU_OPERATOR_EXTRA_HELM_ARGS ?=
 
 .PHONY: install-gpu-operator
 install-gpu-operator: helm ## Install NVIDIA GPU Operator if not already present.
@@ -244,9 +245,14 @@ install-gpu-operator: helm ## Install NVIDIA GPU Operator if not already present
 		$(HELM) repo update nvidia; \
 		$(HELM) upgrade --install gpu-operator nvidia/gpu-operator \
 			--namespace $(GPU_OPERATOR_NAMESPACE) --create-namespace \
+			$(GPU_OPERATOR_EXTRA_HELM_ARGS) \
 			--wait --timeout=600s; \
 		echo "GPU Operator installed successfully."; \
 	fi
+
+.PHONY: install-gpu-operator-no-driver
+install-gpu-operator-no-driver: ## Install NVIDIA GPU Operator, skipping driver install (for AKS, etc. that provide their own).
+	$(MAKE) install-gpu-operator GPU_OPERATOR_EXTRA_HELM_ARGS="--set driver.enabled=false --set toolkit.enabled=false --set operator.runtimeClass=nvidia-container-runtime"
 
 ##@ Cleanup
 
@@ -389,7 +395,7 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 kubectl: $(KUBECTL) ## Download kubectl locally if necessary.
 $(KUBECTL):
 	mkdir -p $(LOCALBIN)
-	rm -f "$(LOCALBIN)/kubectl-*"
+	rm -f $(LOCALBIN)/kubectl-*
 	curl --retry $(CURL_RETRIES) -fsL \
 		https://dl.k8s.io/release/$(KUBECTL_VERSION)/bin/$(GOOS)/$(GOARCH)/kubectl \
 		-o $(KUBECTL)
@@ -400,7 +406,7 @@ $(KUBECTL):
 helm: $(HELM) ## Download helm locally if necessary.
 $(HELM):
 	mkdir -p $(LOCALBIN)
-	rm -f "$(LOCALBIN)/helm-*"
+	rm -f $(LOCALBIN)/helm-*
 	curl --retry $(CURL_RETRIES) -fsSL https://get.helm.sh/helm-$(HELM_VERSION)-$(GOOS)-$(GOARCH).tar.gz \
 		| tar xzf - --strip-components=1 -C $(LOCALBIN) $(GOOS)-$(GOARCH)/helm
 	mv $(LOCALBIN)/helm $(HELM)
@@ -411,7 +417,7 @@ $(HELM):
 yq: $(YQ) ## Download yq locally if necessary.
 $(YQ):
 	mkdir -p $(LOCALBIN)
-	rm -f "$(LOCALBIN)/yq-*"
+	rm -f $(LOCALBIN)/yq-*
 	curl --retry $(CURL_RETRIES) -fsL \
 		https://github.com/mikefarah/yq/releases/download/$(YQ_VERSION)/yq_$(GOOS)_$(GOARCH) \
 		-o $(YQ)
