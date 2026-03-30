@@ -227,7 +227,7 @@ GET /v1/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 HTTP/1.1 404 Not Found
 ```
 
-That is not a glamorous incompatibility, but it is exactly the kind that makes a backend feel brittle to a harness. The same section of captures shows a second class of issue: `message_start` reports `input_tokens: 0` even when the final response later contains the real count. Those details sit well below "generate the next token," but they are still part of whether the harness can reason correctly about the backend.
+That is not the kind of bug that makes a conference talk, but it is exactly the kind that makes a backend feel brittle to a harness. The same section of captures shows a second class of issue: `message_start` reports `input_tokens: 0` even when the final response later contains the real count. Those details sit well below "generate the next token," but they are still part of whether the harness can reason correctly about the backend.
 
 ## Responses and Codex Fidelity
 
