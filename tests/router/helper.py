@@ -118,9 +118,7 @@ def verify_response_worker_ids(
     )
 
 
-def verify_response_timing(
-    timing_info: dict[str, Any], disagg: bool = False
-) -> None:
+def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) -> None:
     """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0).
 
     Args:
@@ -147,9 +145,7 @@ def verify_response_timing(
             f"Expected kv_transfer_latency_ms > 0 in disaggregated mode, "
             f"got: {kv_transfer_latency_ms}"
         )
-        logger.info(
-            f"✓ Verified kv_transfer_latency_ms={kv_transfer_latency_ms:.2f}"
-        )
+        logger.info(f"✓ Verified kv_transfer_latency_ms={kv_transfer_latency_ms:.2f}")
 
 
 ########################################################
