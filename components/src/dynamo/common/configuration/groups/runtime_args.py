@@ -28,6 +28,7 @@ class DynamoRuntimeConfig(ConfigBase):
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    exclude_tools_when_tool_choice_none: bool = True
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -140,6 +141,19 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
+        )
+        # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
+        # Both definitions are needed: this one controls the Rust-native chat
+        # template path (oai.rs), while the frontend copy controls the Python
+        # processors (vllm_processor / sglang_processor) which parse arguments
+        # independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help="Exclude tool definitions from the chat template when tool_choice='none'. "
+            "Prevents models from generating raw XML tool calls in the content field.",
         )
         add_argument(
             g,
