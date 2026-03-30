@@ -38,10 +38,15 @@ print(''.join('diff --git ' + c for c in filtered))
 PATCH
 )
 
+CONTAINER_MOUNTS="\
+/home/scratch.qiwa_ent/:/home/qiwa,\
+/home/scratch.qiwa_ent/workspace/dynamo:/workspace,\
+/home/scratch.qiwa_ent/huggingface:/huggingface"
+
 srun \
   --overlap \
   --container-image "$IMAGE" \
-  --container-mounts "$WORKSPACE:$WORKSPACE" \
+  --container-mounts "$CONTAINER_MOUNTS" \
   --jobid "$SLURM_JOB_ID" \
   -A "$ACCOUNT" \
-  bash -c "$PATCH_SCRIPT && cd $WORKSPACE && python -m benchmarks.multimodal.sweep --config $CONFIG"
+  bash -c "$PATCH_SCRIPT && cd /workspace && python -m benchmarks.multimodal.sweep --config $CONFIG"

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dry-run for 150-OSL sweep (new datasets): 1 dataset × 1 config × 1 request_rate = 1 run
+
+model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+request_rates: [4]
+osl: 150
+request_count: 1000
+warmup_count: 5
+port: 8000
+timeout: 900
+output_dir: benchmarks/multimodal/sweep/results/vllm_serve_slurm_150osl_dryrun
+
+env:
+  ENABLE_ENCODER_CACHE: "0"
+
+input_files:
+  - benchmarks/multimodal/jsonl/1000req_2img_1000pool_400word_http.jsonl
+
+configs:
+  - label: cache-off
+    workflow: examples/backends/vllm/launch/vllm_serve_embedding_cache.sh
+    extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "0"]

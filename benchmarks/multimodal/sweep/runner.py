@@ -105,6 +105,13 @@ def run_request_rate_sweep(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for request_rate in sorted(request_rates):
+        artifact_dir = output_dir / f"request_rate{request_rate}"
+        if (artifact_dir / "profile_export_aiperf.json").exists():
+            print(
+                f"  SKIP request_rate={request_rate} (results exist in {artifact_dir})",
+                flush=True,
+            )
+            continue
         run_aiperf_single(
             model=model,
             port=port,
@@ -113,7 +120,7 @@ def run_request_rate_sweep(
             warmup_count=warmup_count,
             input_file=input_file,
             osl=osl,
-            artifact_dir=output_dir / f"request_rate{request_rate}",
+            artifact_dir=artifact_dir,
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)
