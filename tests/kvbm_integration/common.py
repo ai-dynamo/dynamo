@@ -578,6 +578,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         model,
         "--max-model-len",
         "8000",  # Required to fit on L4 GPU with smaller models
+        "--trust-remote-code",
     ]
 
     # GPU blocks override
