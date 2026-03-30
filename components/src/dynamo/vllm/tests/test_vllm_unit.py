@@ -5,16 +5,21 @@
 
 import json
 import re
+import socket
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
+    _is_routable,
     _uses_dynamo_connector,
     _uses_nixl_connector,
+    ensure_side_channel_host,
+    get_host_ip,
     parse_args,
 )
 from dynamo.vllm.constants import DisaggregationMode
@@ -332,6 +337,14 @@ def test_disaggregation_mode_default(mock_vllm_cli):
     assert config.is_decode_worker is False
 
 
+def test_kv_events_disabled_by_default_without_explicit_config(mock_vllm_cli):
+    """Test that vLLM no longer auto-creates kv_events_config."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert config.engine_args.kv_events_config is None
+    assert config.use_kv_events is False
+
+
 def test_disaggregation_mode_prefill(mock_vllm_cli):
     """Test --disaggregation-mode prefill sets correct state."""
     mock_vllm_cli(
@@ -414,3 +427,134 @@ def test_explicit_default_mode_with_legacy_flag_raises(mock_vllm_cli):
     )
     with pytest.raises(ValueError, match="Cannot combine"):
         parse_args()
+
+
+# --- _is_routable tests (pure logic, no mocking) ---
+
+
+class TestIsRoutable:
+    def test_accepts_private_ipv4(self):
+        assert _is_routable("10.0.0.5") is True
+        assert _is_routable("192.168.1.1") is True
+
+    def test_accepts_private_ipv6(self):
+        assert _is_routable("fd00::1") is True
+
+    def test_rejects_loopback_v4(self):
+        assert _is_routable("127.0.0.1") is False
+
+    def test_rejects_loopback_v6(self):
+        assert _is_routable("::1") is False
+
+    def test_rejects_link_local_v4(self):
+        assert _is_routable("169.254.1.1") is False
+
+    def test_rejects_link_local_v6(self):
+        assert _is_routable("fe80::1") is False
+
+    def test_rejects_unspecified(self):
+        assert _is_routable("0.0.0.0") is False
+        assert _is_routable("::") is False
+
+    def test_rejects_multicast(self):
+        assert _is_routable("224.0.0.1") is False
+
+    def test_rejects_invalid(self):
+        assert _is_routable("not-an-ip") is False
+
+
+# --- get_host_ip tests (mock socket module functions) ---
+
+
+class TestGetHostIp:
+    def test_hostname_resolution_success(self):
+        """getaddrinfo returns routable IPv4 → returns it."""
+        with patch(
+            "dynamo.vllm.args._try_hostname_resolution", return_value="10.0.0.5"
+        ):
+            result = get_host_ip()
+        assert result == "10.0.0.5"
+
+    def test_hostname_loopback_falls_through_to_udp(self):
+        """getaddrinfo returns 127.0.0.1, UDP returns 10.0.0.5 → returns 10.0.0.5."""
+        with (
+            patch(
+                "dynamo.vllm.args._try_hostname_resolution", return_value="127.0.0.1"
+            ),
+            patch("dynamo.vllm.args._try_udp_connect") as mock_udp,
+        ):
+            mock_udp.side_effect = lambda family, target: (
+                "10.0.0.5" if family == socket.AF_INET else None
+            )
+            result = get_host_ip()
+        assert result == "10.0.0.5"
+
+    def test_hostname_link_local_falls_through_to_udp(self):
+        """getaddrinfo returns 169.254.1.1, UDP returns 10.0.0.5 → returns 10.0.0.5."""
+        with (
+            patch(
+                "dynamo.vllm.args._try_hostname_resolution", return_value="169.254.1.1"
+            ),
+            patch("dynamo.vllm.args._try_udp_connect") as mock_udp,
+        ):
+            mock_udp.side_effect = lambda family, target: (
+                "10.0.0.5" if family == socket.AF_INET else None
+            )
+            result = get_host_ip()
+        assert result == "10.0.0.5"
+
+    def test_ipv6_fallback(self):
+        """IPv4 strategies fail, IPv6 UDP returns fd00::1 → returns fd00::1."""
+        with (
+            patch("dynamo.vllm.args._try_hostname_resolution", return_value=None),
+            patch("dynamo.vllm.args._try_udp_connect") as mock_udp,
+        ):
+            mock_udp.side_effect = lambda family, target: (
+                "fd00::1" if family == socket.AF_INET6 else None
+            )
+            result = get_host_ip()
+        assert result == "fd00::1"
+
+    def test_all_fail_raises_runtime_error(self):
+        """All strategies fail → RuntimeError with VLLM_NIXL_SIDE_CHANNEL_HOST in message."""
+        with (
+            patch("dynamo.vllm.args._try_hostname_resolution", return_value=None),
+            patch("dynamo.vllm.args._try_udp_connect", return_value=None),
+        ):
+            with pytest.raises(RuntimeError, match="VLLM_NIXL_SIDE_CHANNEL_HOST"):
+                get_host_ip()
+
+
+# --- ensure_side_channel_host tests ---
+
+
+class TestEnsureSideChannelHost:
+    def test_preserves_existing_env_var(self, monkeypatch):
+        """Pre-set env var → verify not overwritten."""
+        monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "192.168.99.99")
+        with patch("dynamo.vllm.args.get_host_ip") as mock_get:
+            ensure_side_channel_host()
+            mock_get.assert_not_called()
+        import os
+
+        assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "192.168.99.99"
+
+    def test_sets_env_var_on_successful_detection(self, monkeypatch):
+        """No env var set, successful detection populates the side-channel host."""
+        monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
+        with patch("dynamo.vllm.args.get_host_ip", return_value="10.0.0.5"):
+            ensure_side_channel_host()
+
+        import os
+
+        assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.5"
+
+    def test_raises_when_detection_fails_and_no_env(self, monkeypatch):
+        """All strategies fail, no env var → RuntimeError."""
+        monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
+        with patch(
+            "dynamo.vllm.args.get_host_ip",
+            side_effect=RuntimeError("Unable to determine"),
+        ):
+            with pytest.raises(RuntimeError, match="Unable to determine"):
+                ensure_side_channel_host()

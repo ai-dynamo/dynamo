@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,13 +16,17 @@ import (
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
-const nvidiaGPUResource = "nvidia.com/gpu"
+const (
+	nvidiaGPUResource  = "nvidia.com/gpu"
+	nvidiaGPUDRADriver = "gpu.nvidia.com"
+)
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
-// GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
-// All nvidia.com/gpu device entries are accumulated in case the kubelet splits them
-// across multiple entries (observed in some runtimes with multi-GPU pods).
+var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+// GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
+// PodResources (nvidia.com/gpu entries in GetDevices()).
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -56,9 +61,37 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 					uuids = append(uuids, device.GetDeviceIds()...)
 				}
 			}
+
 		}
 	}
 
+	return uuids, nil
+}
+
+// GetGPUUUIDsViaNvidiaSmi discovers GPU UUIDs by running nvidia-smi inside the
+// container's mount namespace. This is the fallback path when the kubelet
+// PodResources API does not report GPU devices (e.g. when GPUs are allocated
+// via DRA instead of the NVIDIA device plugin).
+func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
+	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
+	cmd := exec.CommandContext(
+		ctx,
+		"nsenter",
+		fmt.Sprintf("--mount=%s", mountPath),
+		"--",
+		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
+	}
+	var uuids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			uuids = append(uuids, line)
+		}
+	}
 	return uuids, nil
 }
 
@@ -93,13 +126,14 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 // When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
 // unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
 // Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
-func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
+func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
 	}
 	if len(sourceUUIDs) == 0 {
 		return "", fmt.Errorf("GPU UUID list is empty")
 	}
+	log.V(1).Info("BuildDeviceMap inputs", "source_uuids", sourceUUIDs, "target_uuids", targetUUIDs)
 
 	targetSet := make(map[string]bool, len(targetUUIDs))
 	for _, t := range targetUUIDs {
@@ -139,24 +173,18 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 }
 
 // LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
-// On partial failure, already-checkpointed PIDs are restored+unlocked.
+// On failure, the caller is expected to fail the operation and terminate the workload.
 func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
-	locked := make([]int, 0, len(cudaPIDs))
 	for _, pid := range cudaPIDs {
 		if err := lock(ctx, pid, log); err != nil {
-			bulkUnlock(context.Background(), locked, log)
-			return fmt.Errorf("cuda lock failed for PID %d: %w", pid, err)
+			return err
 		}
-		locked = append(locked, pid)
 	}
 
-	checkpointed := make([]int, 0, len(cudaPIDs))
 	for _, pid := range cudaPIDs {
 		if err := checkpoint(ctx, pid, log); err != nil {
-			recoverCheckpointed(context.Background(), checkpointed, locked, log)
-			return fmt.Errorf("cuda checkpoint failed for PID %d: %w", pid, err)
+			return err
 		}
-		checkpointed = append(checkpointed, pid)
 	}
 
 	return nil
@@ -166,7 +194,7 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			return fmt.Errorf("cuda restore failed for PID %d: %w", pid, err)
+			return err
 		}
 	}
 	for _, pid := range cudaPIDs {
@@ -176,43 +204,8 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap 
 				log.Info("cuda-checkpoint unlock returned error but process is already running", "pid", pid)
 				continue
 			}
-			return fmt.Errorf("failed to unlock CUDA process %d: %w", pid, err)
+			return err
 		}
 	}
 	return nil
-}
-
-// bulkUnlock unlocks a list of CUDA PIDs (best-effort).
-func bulkUnlock(ctx context.Context, pids []int, log logr.Logger) {
-	for _, pid := range pids {
-		if err := unlock(ctx, pid, log); err != nil {
-			log.Error(err, "Failed to unlock CUDA process", "pid", pid)
-		}
-	}
-}
-
-// recoverCheckpointed is best-effort cleanup when checkpoint fails partway.
-// Checkpointed PIDs need restore+unlock; locked-only PIDs just need unlock.
-func recoverCheckpointed(ctx context.Context, checkpointed, locked []int, log logr.Logger) {
-	checkpointedSet := make(map[int]struct{}, len(checkpointed))
-	for _, pid := range checkpointed {
-		checkpointedSet[pid] = struct{}{}
-	}
-	for _, pid := range checkpointed {
-		if err := restoreProcess(ctx, pid, "", log); err != nil {
-			log.Error(err, "Failed to restore CUDA process during cleanup", "pid", pid)
-			continue
-		}
-		if err := unlock(ctx, pid, log); err != nil {
-			log.Error(err, "Failed to unlock CUDA process after restore during cleanup", "pid", pid)
-		}
-	}
-	for _, pid := range locked {
-		if _, ok := checkpointedSet[pid]; ok {
-			continue
-		}
-		if err := unlock(ctx, pid, log); err != nil {
-			log.Error(err, "Failed to unlock CUDA process during cleanup", "pid", pid)
-		}
-	}
 }

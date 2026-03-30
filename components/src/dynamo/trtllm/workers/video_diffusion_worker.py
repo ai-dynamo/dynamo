@@ -61,6 +61,9 @@ async def init_video_diffusion_worker(
         else []
     )
 
+    if not config.endpoint:
+        raise ValueError("endpoint must be configured for video diffusion worker")
+
     # Build DiffusionConfig from the main Config
     diffusion_config = DiffusionConfig(
         namespace=config.namespace,

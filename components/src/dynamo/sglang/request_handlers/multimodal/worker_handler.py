@@ -256,7 +256,7 @@ async def _build_mm_items(
     return mm_items, embeddings, tensor_id
 
 
-class MultimodalWorkerHandler(BaseWorkerHandler):
+class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
     Multimodal worker handler for LLM inference with multimodal data.
     Handles both aggregated and disaggregated modes.
@@ -490,7 +490,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         logger.info("Multimodal worker engine shutdown")
 
 
-class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
+class MultimodalPrefillWorkerHandler(
+    BaseWorkerHandler[DisaggSglangMultimodalRequest, str]
+):
     """
     Multimodal prefill worker handler for disaggregated inference
     Processes multimodal inputs and coordinates with decode worker.

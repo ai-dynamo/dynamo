@@ -1655,6 +1655,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
+												Ports: []corev1.ContainerPort{
+													{Name: commonconsts.DynamoMetricsPortName, ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort), Protocol: corev1.ProtocolTCP},
+													{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+												},
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -1679,6 +1683,17 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromInt(8080),
 														},
 													},
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													PeriodSeconds:    10,
+													TimeoutSeconds:   5,
+													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -1716,6 +1731,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 													},
 													{
 														Name:  "MODEL_EXPRESS_URL",
@@ -1773,13 +1792,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: commonconsts.DefaultSharedMemoryMountPath,
-													},
-												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoMetricsPortName,
-														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 											},
@@ -2632,6 +2644,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
+												Ports: []corev1.ContainerPort{
+													{Name: commonconsts.DynamoMetricsPortName, ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort), Protocol: corev1.ProtocolTCP},
+													{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+												},
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -2656,6 +2672,17 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromInt(8080),
 														},
 													},
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													PeriodSeconds:    10,
+													TimeoutSeconds:   5,
+													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2693,6 +2720,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 													},
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",
@@ -2742,13 +2773,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: commonconsts.DefaultSharedMemoryMountPath,
-													},
-												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoMetricsPortName,
-														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 											},
@@ -3618,6 +3642,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
+												Ports: []corev1.ContainerPort{
+													{Name: commonconsts.DynamoMetricsPortName, ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort), Protocol: corev1.ProtocolTCP},
+													{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+												},
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -3643,12 +3671,16 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoMetricsPortName,
-														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
 													},
+													PeriodSeconds:    10,
+													TimeoutSeconds:   5,
+													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3686,6 +3718,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 													},
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",
@@ -7479,4 +7515,181 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 	// Controller labels must always be present
 	assert.Equal(t, "frontend", dcd.Spec.Labels[commonconsts.KubeLabelDynamoComponent])
 	assert.Equal(t, dgd.Name, dcd.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+}
+
+func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+
+	tests := []struct {
+		name              string
+		deployment        *v1alpha1.DynamoGraphDeployment
+		wantPCSTemplateTC *grovev1alpha1.TopologyConstraint
+		wantCliqueTC      map[string]*grovev1alpha1.TopologyConstraint // clique name -> expected TC
+		wantPCSGTC        map[string]*grovev1alpha1.TopologyConstraint // pcsg name -> expected TC
+		wantPCSGCount     int
+	}{
+		{
+			name: "no topology constraints - PCS has no TC, cliques have no TC",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC:      map[string]*grovev1alpha1.TopologyConstraint{"worker": nil},
+			wantPCSGCount:     0,
+		},
+		{
+			name: "single-node service with topology constraints - TC on PCS template and clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+						PackDomain:      v1alpha1.TopologyDomain("zone"),
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
+				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+			},
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+			},
+			wantPCSGCount: 0,
+		},
+		{
+			name: "multinode service with topology constraints - TC on PCS template and PCSG, not clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+						PackDomain:      v1alpha1.TopologyDomain("zone"),
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							Multinode: &v1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("block"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
+				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+			},
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker-ldr": nil,
+				"worker-wkr": nil,
+			},
+			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
+			},
+			wantPCSGCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pcs, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				tt.deployment,
+				operatorConfig,
+				&controller_common.RuntimeConfig{},
+				secretsRetriever,
+				&RestartState{},
+				nil,
+				nil,
+			)
+			assert.NoError(t, err)
+			assert.NotNil(t, pcs)
+
+			// Verify PCS template-level TopologyConstraint
+			if tt.wantPCSTemplateTC == nil {
+				assert.Nil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be nil")
+			} else {
+				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
+				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+			}
+
+			// Verify clique-level TopologyConstraints (exhaustive)
+			assert.Equal(t, len(tt.wantCliqueTC), len(pcs.Spec.Template.Cliques), "clique count mismatch")
+			actualCliqueNames := make(map[string]struct{}, len(pcs.Spec.Template.Cliques))
+			for _, clique := range pcs.Spec.Template.Cliques {
+				actualCliqueNames[clique.Name] = struct{}{}
+				expectedTC, ok := tt.wantCliqueTC[clique.Name]
+				if !ok {
+					t.Errorf("unexpected clique %q in PCS", clique.Name)
+					continue
+				}
+				if expectedTC == nil {
+					assert.Nil(t, clique.TopologyConstraint, "clique %q: expected nil TopologyConstraint", clique.Name)
+				} else {
+					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
+					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+				}
+			}
+			for expectedName := range tt.wantCliqueTC {
+				if _, found := actualCliqueNames[expectedName]; !found {
+					t.Errorf("expected clique %q not found in PCS", expectedName)
+				}
+			}
+
+			// Verify PCSG-level TopologyConstraints (exhaustive)
+			assert.Equal(t, tt.wantPCSGCount, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs), "PCSG count mismatch")
+			actualPCSGNames := make(map[string]struct{}, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs))
+			for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+				actualPCSGNames[pcsg.Name] = struct{}{}
+				if tt.wantPCSGTC != nil {
+					expectedTC, ok := tt.wantPCSGTC[pcsg.Name]
+					if !ok {
+						t.Errorf("unexpected PCSG %q in PCS", pcsg.Name)
+						continue
+					}
+					if expectedTC == nil {
+						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
+					} else {
+						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
+						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+					}
+				}
+			}
+			for expectedName := range tt.wantPCSGTC {
+				if _, found := actualPCSGNames[expectedName]; !found {
+					t.Errorf("expected PCSG %q not found in PCS", expectedName)
+				}
+			}
+		})
+	}
 }
