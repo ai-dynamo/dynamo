@@ -60,6 +60,19 @@ impl ModelRuntimeConfig {
         self.inner.enable_local_indexer = enable_local_indexer;
     }
 
+    #[setter]
+    fn set_exclude_tools_when_tool_choice_none(
+        &mut self,
+        exclude_tools_when_tool_choice_none: bool,
+    ) {
+        self.inner.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none;
+    }
+
+    #[setter]
+    fn set_enable_eagle(&mut self, enable_eagle: bool) {
+        self.inner.enable_eagle = enable_eagle;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
@@ -120,6 +133,11 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn exclude_tools_when_tool_choice_none(&self) -> bool {
+        self.inner.exclude_tools_when_tool_choice_none
+    }
+
+    #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
         for (key, value) in self.inner.runtime_data.clone() {
@@ -158,5 +176,10 @@ impl ModelRuntimeConfig {
             .disaggregated_endpoint
             .as_ref()
             .and_then(|e| e.bootstrap_port)
+    }
+
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
 }

@@ -14,7 +14,7 @@ from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import get_model
-from aiconfigurator.sdk.perf_database import get_database
+from aiconfigurator.sdk.perf_database import get_database, get_supported_databases
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,14 @@ class AicSession:
         )
 
         database = get_database(system=system, backend=backend_name, version=version)
+        if database is None:
+            supported = get_supported_databases().get(system, {}).get(backend_name, [])
+            supported_versions = ", ".join(supported) if supported else "<none>"
+            raise RuntimeError(
+                "AIC perf database not found for "
+                f"system={system!r}, backend={backend_name!r}, version={version!r}. "
+                f"Supported versions for this system/backend: {supported_versions}"
+            )
         model_config = config.ModelConfig(tp_size=tp_size)
         model = get_model(
             model_path=model_path,
