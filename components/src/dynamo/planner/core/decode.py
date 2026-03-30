@@ -6,7 +6,7 @@ import math
 from typing import Optional
 
 from dynamo.planner import SubComponentType
-from dynamo.planner.utils.planner_core import BasePlanner
+from dynamo.planner.core.base import BasePlanner
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()

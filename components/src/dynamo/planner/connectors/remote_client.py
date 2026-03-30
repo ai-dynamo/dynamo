@@ -7,8 +7,8 @@ import asyncio
 import logging
 
 from dynamo._core import Client
-from dynamo.planner.defaults import SubComponentType
-from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse
+from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse
 from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)

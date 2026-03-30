@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for load predictor classes in dynamo.planner.utils.load_predictor."""
+"""Unit tests for load predictor classes in dynamo.planner.core.load.predictors."""
 
 import math
 from datetime import datetime, timedelta
@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from dynamo.planner.utils.load_predictor import (
+from dynamo.planner.core.load.predictors import (
     ConstantPredictor,
     KalmanPredictor,
     ProphetPredictor,
@@ -175,7 +175,7 @@ class TestProphetPredictorTimestamp:
         mock_model.predict.side_effect = fake_predict
 
         with patch(
-            "dynamo.planner.utils.load_predictor.Prophet",
+            "dynamo.planner.core.load.predictors.Prophet",
             return_value=mock_model,
         ):
             predictor.predict_next()
@@ -212,7 +212,7 @@ class TestProphetPredictorTimestamp:
         mock_model.predict.side_effect = fake_predict
 
         with patch(
-            "dynamo.planner.utils.load_predictor.Prophet",
+            "dynamo.planner.core.load.predictors.Prophet",
             return_value=mock_model,
         ):
             predictor.predict_next()
@@ -248,7 +248,7 @@ class TestProphetPredictorTimestamp:
         mock_model.predict.side_effect = fake_predict
 
         with patch(
-            "dynamo.planner.utils.load_predictor.Prophet",
+            "dynamo.planner.core.load.predictors.Prophet",
             return_value=mock_model,
         ):
             predictor.predict_next()
@@ -283,7 +283,7 @@ class TestProphetPredictorTimestamp:
         mock_model.predict.return_value = self._mock_forecast_df(-5.0)
 
         with patch(
-            "dynamo.planner.utils.load_predictor.Prophet",
+            "dynamo.planner.core.load.predictors.Prophet",
             return_value=mock_model,
         ):
             result = predictor.predict_next()
@@ -301,7 +301,7 @@ class TestProphetPredictorTimestamp:
         mock_model.predict.return_value = self._mock_forecast_df(-100.0)
 
         with patch(
-            "dynamo.planner.utils.load_predictor.Prophet",
+            "dynamo.planner.core.load.predictors.Prophet",
             return_value=mock_model,
         ):
             result = predictor.predict_next()
@@ -395,7 +395,7 @@ class TestProphetPredictorMultipleStepSizes:
         mock_model.predict.side_effect = fake_predict
 
         with patch(
-            "dynamo.planner.utils.load_predictor.Prophet",
+            "dynamo.planner.core.load.predictors.Prophet",
             return_value=mock_model,
         ):
             predictor.predict_next()

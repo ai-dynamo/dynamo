@@ -7,8 +7,8 @@ from typing import Optional
 
 from dynamo._core import VirtualConnectorCoordinator
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.planner_connector import PlannerConnector
-from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
+from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.errors import EmptyTargetReplicasError
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
