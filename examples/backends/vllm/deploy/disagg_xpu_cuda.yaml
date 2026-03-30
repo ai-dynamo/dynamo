@@ -79,10 +79,11 @@ spec:
       componentType: worker
       subComponentType: prefill
       replicas: 1
-      requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
+      resources:
+        requests:
+            custom:
+              # Increase this value for larger models
+              ephemeral-storage: "2Gi"
       extraPodSpec:
         resourceClaims:
           - name: xpu-resource
