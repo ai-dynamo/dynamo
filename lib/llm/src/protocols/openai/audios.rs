@@ -68,6 +68,7 @@ pub struct NvAudiosResponse {
 }
 
 impl NvAudiosResponse {
+    /// Returns an empty response with default values.
     pub fn empty() -> Self {
         Self {
             audio_b64: String::new(),

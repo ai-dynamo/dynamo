@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
+/// Provides access to the optional NVIDIA extensions on a request.
 pub trait NvExtProvider {
+    /// Returns a reference to the NVIDIA extensions, if present.
     fn nvext(&self) -> Option<&NvExt>;
 }
 
@@ -69,6 +71,7 @@ impl Default for NvExt {
 }
 
 impl NvExt {
+    /// Creates a new [`NvExtBuilder`].
     pub fn builder() -> NvExtBuilder {
         NvExtBuilder::default()
     }
@@ -79,6 +82,7 @@ fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
 }
 
 impl NvExtBuilder {
+    /// Appends an annotation to the builder's annotation list.
     pub fn add_annotation(&mut self, annotation: impl Into<String>) -> &mut Self {
         self.annotations
             .get_or_insert_with(|| Some(vec![]))

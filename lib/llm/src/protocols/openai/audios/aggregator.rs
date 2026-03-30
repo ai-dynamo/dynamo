@@ -22,6 +22,7 @@ impl Default for DeltaAggregator {
 }
 
 impl DeltaAggregator {
+    /// Creates a new empty aggregator.
     pub fn new() -> Self {
         DeltaAggregator {
             response: None,
