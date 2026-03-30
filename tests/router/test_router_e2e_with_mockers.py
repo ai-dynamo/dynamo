@@ -728,6 +728,7 @@ def test_mocker_router(
             num_requests=NUM_REQUESTS,
             request_plane=request_plane,
             router_mode=router_mode,
+            min_initial_workers=mockers.num_workers,
         )
 
 
@@ -801,7 +802,7 @@ def test_mocker_kv_router_overload_503(
     logger.info("Starting mocker KV router overload test for 503 status")
     # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
-        "speedup_ratio": 10,
+        "speedup_ratio": 0.01,
         "block_size": 4,  # Smaller block size
         "num_gpu_blocks": 64,  # Limited GPU blocks to exhaust quickly
         "durable_kv_events": durable_kv_events,
