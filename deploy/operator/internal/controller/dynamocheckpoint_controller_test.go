@@ -143,7 +143,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	job := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	podSpec := job.Spec.Template.Spec
 	main := podSpec.Containers[0]
 
@@ -241,7 +242,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
 	ckpt.Spec.Job.BackoffLimit = &backoff //nolint:staticcheck // Compatibility test: deprecated field must remain ignored by checkpoint Jobs.
 	ckpt.Spec.Job.TTLSecondsAfterFinished = &ttl
-	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(600), *job.Spec.TTLSecondsAfterFinished)
@@ -251,7 +253,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 		},
 	}
-	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
 }
@@ -275,7 +278,8 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
-	job := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	foundCustomShmVolume := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == consts.KubeValueNameSharedMemory {

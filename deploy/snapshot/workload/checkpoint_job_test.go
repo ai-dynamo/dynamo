@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewCheckpointJob(t *testing.T) {
-	job := NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      map[string]string{"existing": "label"},
 			Annotations: map[string]string{"existing": "annotation"},
@@ -17,8 +17,10 @@ func TestNewCheckpointJob(t *testing.T) {
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
-				Name:  "main",
-				Image: "test:latest",
+				Name:    "main",
+				Image:   "test:latest",
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "Qwen"},
 			}},
 		},
 	}, CheckpointJobOptions{
@@ -29,7 +31,12 @@ func TestNewCheckpointJob(t *testing.T) {
 		StorageType:           StorageTypePVC,
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
+		SeccompProfile:        DefaultSeccompLocalhostProfile,
+		WrapLaunchJob:         true,
 	})
+	if err != nil {
+		t.Fatalf("expected checkpoint job, got error: %v", err)
+	}
 
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
@@ -45,6 +52,21 @@ func TestNewCheckpointJob(t *testing.T) {
 	}
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", job.Spec.Template.Spec.RestartPolicy)
+	}
+	if job.Spec.Template.Spec.SecurityContext == nil || job.Spec.Template.Spec.SecurityContext.SeccompProfile == nil {
+		t.Fatalf("expected seccomp profile to be injected: %#v", job.Spec.Template.Spec.SecurityContext)
+	}
+	if len(job.Spec.Template.Spec.Containers[0].Command) != 1 || job.Spec.Template.Spec.Containers[0].Command[0] != "cuda-checkpoint" {
+		t.Fatalf("expected cuda-checkpoint wrapper command: %#v", job.Spec.Template.Spec.Containers[0].Command)
+	}
+	expectedArgs := []string{"--launch-job", "python3", "-m", "dynamo.vllm", "--model", "Qwen"}
+	if len(job.Spec.Template.Spec.Containers[0].Args) != len(expectedArgs) {
+		t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, job.Spec.Template.Spec.Containers[0].Args)
+	}
+	for i := range expectedArgs {
+		if job.Spec.Template.Spec.Containers[0].Args[i] != expectedArgs[i] {
+			t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, job.Spec.Template.Spec.Containers[0].Args)
+		}
 	}
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 {
 		t.Fatalf("expected backoffLimit 0, got %#v", job.Spec.BackoffLimit)

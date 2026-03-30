@@ -72,35 +72,24 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	}
 	checkpointLocation := strings.TrimRight(storage.BasePath, "/") + "/" + checkpointHash
 	checkpointJobName := pod.Name + "-checkpoint"
-
-	podSpec := *pod.Spec.DeepCopy()
-	snapshotworkload.InjectLocalhostSeccompProfile(&podSpec, snapshotworkload.DefaultSeccompLocalhostProfile)
-	snapshotworkload.InjectCheckpointVolume(&podSpec, storage.PVCName)
-	container := *pod.Spec.Containers[0].DeepCopy()
-	snapshotworkload.InjectCheckpointVolumeMount(&container, storage.BasePath)
-	if !opts.DisableCudaCheckpointJobFile {
-		if len(container.Command) == 0 {
-			return nil, fmt.Errorf(
-				"manifest must set container.command when launch-job wrapping is enabled; use --disable-cuda-checkpoint-job-file to preserve the image entrypoint",
-			)
-		}
-		container.Command, container.Args = snapshotworkload.WrapWithCudaCheckpointLaunchJob(container.Command, container.Args)
-	}
-	podSpec.Containers = []corev1.Container{container}
-
-	job := snapshotworkload.NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := snapshotworkload.NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
 			Annotations: pod.Annotations,
 		},
-		Spec: podSpec,
+		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotworkload.CheckpointJobOptions{
-		Namespace:   namespace,
-		Name:        checkpointJobName,
-		SnapshotID:  checkpointHash,
-		Location:    checkpointLocation,
-		StorageType: snapshotworkload.StorageTypePVC,
+		Namespace:      namespace,
+		Name:           checkpointJobName,
+		SnapshotID:     checkpointHash,
+		Location:       checkpointLocation,
+		StorageType:    snapshotworkload.StorageTypePVC,
+		SeccompProfile: snapshotworkload.DefaultSeccompLocalhostProfile,
+		WrapLaunchJob:  !opts.DisableCudaCheckpointJobFile,
 	})
+	if err != nil {
+		return nil, err
+	}
 	_, err = clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("checkpoint job %s/%s already exists", namespace, checkpointJobName)
@@ -149,15 +138,6 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	checkpointHash := strings.TrimSpace(opts.CheckpointHash)
 	checkpointLocation := strings.TrimRight(storage.BasePath, "/") + "/" + checkpointHash
 
-	podSpec := *pod.Spec.DeepCopy()
-	snapshotworkload.InjectLocalhostSeccompProfile(&podSpec, snapshotworkload.DefaultSeccompLocalhostProfile)
-	snapshotworkload.InjectCheckpointVolume(&podSpec, storage.PVCName)
-	container := *pod.Spec.Containers[0].DeepCopy()
-	snapshotworkload.InjectCheckpointVolumeMount(&container, storage.BasePath)
-	snapshotworkload.InjectRestoreTUN(&podSpec, &container)
-	snapshotworkload.SetRestorePlaceholderCommand(&container)
-	podSpec.Containers = []corev1.Container{container}
-
 	restorePod := snapshotworkload.NewRestorePod(&corev1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -165,8 +145,16 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			Labels:      pod.Labels,
 			Annotations: pod.Annotations,
 		},
-		Spec: podSpec,
-	}, namespace, checkpointHash, checkpointLocation, snapshotworkload.StorageTypePVC)
+		Spec: *pod.Spec.DeepCopy(),
+	}, snapshotworkload.RestorePodOptions{
+		Namespace:      namespace,
+		SnapshotID:     checkpointHash,
+		Location:       checkpointLocation,
+		StorageType:    snapshotworkload.StorageTypePVC,
+		CheckpointPVC:  storage.PVCName,
+		CheckpointPath: storage.BasePath,
+		SeccompProfile: snapshotworkload.DefaultSeccompLocalhostProfile,
+	})
 	_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)

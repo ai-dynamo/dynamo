@@ -230,8 +230,8 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 
 	// Use SyncResource to create/update the checkpoint Job
 	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
-		job := r.buildCheckpointJob(ckpt, jobName)
-		return job, false, nil
+		job, err := r.buildCheckpointJob(ckpt, jobName)
+		return job, false, err
 	})
 	if err != nil {
 		logger.Error(err, "Failed to sync checkpoint Job")
@@ -467,7 +467,7 @@ func (r *CheckpointReconciler) buildCheckpointWorkerDefaultEnv(
 	return defaultContainer.Env
 }
 
-func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, jobName string) *batchv1.Job {
+func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, jobName string) (*batchv1.Job, error) {
 	// Use the pod template from the spec
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
 	hash := ckpt.Status.IdentityHash
@@ -586,9 +586,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 				Value: r.Config.Checkpoint.ReadyForCheckpointFilePath,
 			},
 		)
-		if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok && gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0 {
-			mainContainer.Command, mainContainer.Args = snapshotworkload.WrapWithCudaCheckpointLaunchJob(mainContainer.Command, mainContainer.Args)
-		}
 
 		// Override probes for checkpoint mode
 		// Checkpoint jobs need different probe behavior than regular worker pods:
@@ -626,10 +623,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 	}
 
-	// Apply seccomp profile to block io_uring syscalls
-	// CRIU doesn't support io_uring memory mappings, so we must block these syscalls
-	snapshotworkload.InjectLocalhostSeccompProfile(&podTemplate.Spec, consts.SeccompProfilePath)
-
 	// Build the Job
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
@@ -643,6 +636,13 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		ttlSeconds = &defaultTTL
 	}
 
+	wrapLaunchJob := false
+	if len(podTemplate.Spec.Containers) != 0 {
+		if gpus, ok := podTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
+			wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
+		}
+	}
+
 	return snapshotworkload.NewCheckpointJob(podTemplate, snapshotworkload.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		Name:                  jobName,
@@ -651,6 +651,8 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		StorageType:           string(storageType),
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: ttlSeconds,
+		SeccompProfile:        consts.SeccompProfilePath,
+		WrapLaunchJob:         wrapLaunchJob,
 	})
 }
 

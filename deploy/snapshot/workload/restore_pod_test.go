@@ -17,11 +17,21 @@ func TestNewRestorePod(t *testing.T) {
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
-				Name:  "main",
-				Image: "test:latest",
+				Name:    "main",
+				Image:   "test:latest",
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "Qwen"},
 			}},
 		},
-	}, "test-ns", "hash", "/checkpoints/hash", StorageTypePVC)
+	}, RestorePodOptions{
+		Namespace:      "test-ns",
+		SnapshotID:     "hash",
+		Location:       "/checkpoints/hash",
+		StorageType:    StorageTypePVC,
+		CheckpointPVC:  "snapshot-pvc",
+		CheckpointPath: "/checkpoints",
+		SeccompProfile: DefaultSeccompLocalhostProfile,
+	})
 
 	if restorePod.Name != "worker" || restorePod.Namespace != "test-ns" {
 		t.Fatalf("unexpected restore pod identity: %#v", restorePod.ObjectMeta)
@@ -37,5 +47,20 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if restorePod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)
+	}
+	if len(restorePod.Spec.Containers[0].Command) != 2 || restorePod.Spec.Containers[0].Command[0] != "sleep" || restorePod.Spec.Containers[0].Command[1] != "infinity" {
+		t.Fatalf("expected placeholder command, got %#v", restorePod.Spec.Containers[0].Command)
+	}
+	if restorePod.Spec.Containers[0].Args != nil {
+		t.Fatalf("expected restore args to be cleared: %#v", restorePod.Spec.Containers[0].Args)
+	}
+	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
+		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
+	}
+	if len(restorePod.Spec.Volumes) != 2 {
+		t.Fatalf("expected checkpoint and tun volumes, got %#v", restorePod.Spec.Volumes)
+	}
+	if len(restorePod.Spec.Containers[0].VolumeMounts) != 2 {
+		t.Fatalf("expected checkpoint and tun mounts, got %#v", restorePod.Spec.Containers[0].VolumeMounts)
 	}
 }

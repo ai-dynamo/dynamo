@@ -15,7 +15,7 @@ const (
 	StorageTypePVC                 = "pvc"
 )
 
-func ApplyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, hash string, location string, storageType string) {
+func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, hash string, location string, storageType string) {
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointHashLabel)
 	delete(annotations, CheckpointLocationAnnotation)

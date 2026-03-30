@@ -12,7 +12,7 @@ func TestApplyCheckpointSourceMetadata(t *testing.T) {
 		CheckpointStorageAnnotation:  "old",
 	}
 
-	ApplyCheckpointSourceMetadata(labels, annotations, "hash", "/checkpoints/hash", StorageTypePVC)
+	applyCheckpointSourceMetadata(labels, annotations, "hash", "/checkpoints/hash", StorageTypePVC)
 
 	if labels[CheckpointSourceLabel] != "true" {
 		t.Fatalf("expected checkpoint source label, got %#v", labels)
