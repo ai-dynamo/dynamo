@@ -33,7 +33,7 @@ jobs:
       - name: Export builder name
         id: export-builder-name
         run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT    
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
       - name: Create and bootstrap fresh K8s builder
         uses: ./.github/actions/bootstrap-buildkit
         with:
