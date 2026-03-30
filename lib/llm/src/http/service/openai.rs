@@ -991,7 +991,7 @@ fn streaming_tool_dispatch_events(
     };
 
     let mut events = vec![];
-    for choice in &data.choices {
+    for choice in &data.inner.choices {
         let Some(tool_calls) = &choice.delta.tool_calls else {
             continue;
         };
@@ -1034,7 +1034,7 @@ fn accumulate_reasoning_dispatch(
     };
 
     let mut events = vec![];
-    for choice in &data.choices {
+    for choice in &data.inner.choices {
         let buffer = buffers.entry(choice.index).or_default();
         let has_reasoning = choice
             .delta
@@ -2892,15 +2892,17 @@ mod tests {
 
         // Create a normal data event
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: Some(CreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![],
-                created: 0,
-                model: "test-model".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                service_tier: None,
-                usage: None,
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![],
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    service_tier: None,
+                    usage: None,
+                },
                 nvext: None,
             }),
             id: Some("msg-1".to_string()),
@@ -3162,15 +3164,17 @@ mod tests {
     fn make_stream_response(
         choices: Vec<ChatChoiceStream>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
-        let response = CreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices,
-            created: 0,
-            model: "test-model".to_string(),
-            system_fingerprint: None,
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+        let response = NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices,
+                created: 0,
+                model: "test-model".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
             nvext: None,
         };
         Annotated {
