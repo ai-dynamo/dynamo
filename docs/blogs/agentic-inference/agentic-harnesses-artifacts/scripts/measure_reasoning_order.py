@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Compare TTFT for segmented vs flattened reasoning reconstruction.
 
@@ -82,7 +84,9 @@ def make_warmup_request(model: str, reasoning_content) -> dict:
     }
 
 
-def make_followup_request(model: str, reasoning_content, prev_response_reasoning: str) -> dict:
+def make_followup_request(
+    model: str, reasoning_content, prev_response_reasoning: str
+) -> dict:
     """Second turn: extends the conversation — TTFT depends on cache reuse of prefix."""
     return {
         "model": model,
@@ -173,7 +177,11 @@ def measure_ttft(url: str, body: dict) -> float:
             choices = data.get("choices", [])
             if choices:
                 delta = choices[0].get("delta", {})
-                if delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls"):
+                if (
+                    delta.get("content")
+                    or delta.get("reasoning_content")
+                    or delta.get("tool_calls")
+                ):
                     ttft = (time.monotonic() - t0) * 1000
                     resp.close()
                     return ttft
@@ -196,8 +204,7 @@ def run_experiment(url: str, model: str, n_runs: int):
         time.sleep(0.3)
 
         followup = make_followup_request(
-            model, SEGMENTED,
-            "We need to compute 84 + 16 = 100. Use calculator.\n"
+            model, SEGMENTED, "We need to compute 84 + 16 = 100. Use calculator.\n"
         )
         ttft_followup_seg = measure_ttft(url, followup)
         time.sleep(0.3)
@@ -208,8 +215,7 @@ def run_experiment(url: str, model: str, n_runs: int):
         time.sleep(0.3)
 
         followup = make_followup_request(
-            model, FLATTENED,
-            "We need to compute 84 + 16 = 100. Use calculator.\n"
+            model, FLATTENED, "We need to compute 84 + 16 = 100. Use calculator.\n"
         )
         ttft_followup_flat = measure_ttft(url, followup)
         time.sleep(0.5)
@@ -222,7 +228,10 @@ def run_experiment(url: str, model: str, n_runs: int):
             "followup_flattened_ms": round(ttft_followup_flat, 2),
         }
         results.append(row)
-        print(f"  seg: {ttft_warmup_seg:.1f}/{ttft_followup_seg:.1f}ms  flat: {ttft_warmup_flat:.1f}/{ttft_followup_flat:.1f}ms", file=sys.stderr)
+        print(
+            f"  seg: {ttft_warmup_seg:.1f}/{ttft_followup_seg:.1f}ms  flat: {ttft_warmup_flat:.1f}/{ttft_followup_flat:.1f}ms",
+            file=sys.stderr,
+        )
 
     return results
 
@@ -243,8 +252,13 @@ def main():
             for r in results:
                 f.write(json.dumps(r) + "\n")
 
-    fieldnames = ["run", "warmup_segmented_ms", "followup_segmented_ms",
-                  "warmup_flattened_ms", "followup_flattened_ms"]
+    fieldnames = [
+        "run",
+        "warmup_segmented_ms",
+        "followup_segmented_ms",
+        "warmup_flattened_ms",
+        "followup_flattened_ms",
+    ]
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
     writer = csv.DictWriter(out, fieldnames=fieldnames)
     writer.writeheader()

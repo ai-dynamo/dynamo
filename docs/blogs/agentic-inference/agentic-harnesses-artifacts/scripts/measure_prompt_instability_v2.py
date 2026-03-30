@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Measure the impact of unstable preambles on prefix cache reuse (v2).
 
@@ -26,7 +28,6 @@ import time
 import uuid
 
 import requests
-
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Claude Code, an interactive CLI tool that helps users with "
@@ -144,12 +145,20 @@ def main():
         "--system-prompt-file",
         default=None,
         help="Path to a text file containing the system prompt. "
-             "If not provided, uses a short default prompt.",
+        "If not provided, uses a short default prompt.",
     )
-    parser.add_argument("--sequential", type=int, default=8,
-                        help="Sequential requests per condition (default: 8)")
-    parser.add_argument("--rounds", type=int, default=3,
-                        help="Rounds of the full experiment (default: 3)")
+    parser.add_argument(
+        "--sequential",
+        type=int,
+        default=8,
+        help="Sequential requests per condition (default: 8)",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=3,
+        help="Rounds of the full experiment (default: 3)",
+    )
     parser.add_argument("--output", default="-", help="CSV output path (- for stdout)")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL output path")
     args = parser.parse_args()
@@ -171,7 +180,9 @@ def main():
         print("  [stable] warming up...", file=sys.stderr)
         warmup(args.url, args.model, system_prompt)
         print("  [stable] measuring...", file=sys.stderr)
-        stable = run_condition(args.url, args.model, "stable", system_prompt, args.sequential)
+        stable = run_condition(
+            args.url, args.model, "stable", system_prompt, args.sequential
+        )
 
         time.sleep(1)
 
@@ -179,7 +190,9 @@ def main():
         print("  [varying] warming up...", file=sys.stderr)
         warmup(args.url, args.model, make_billing_header() + system_prompt)
         print("  [varying] measuring...", file=sys.stderr)
-        varying = run_condition(args.url, args.model, "varying", system_prompt, args.sequential)
+        varying = run_condition(
+            args.url, args.model, "varying", system_prompt, args.sequential
+        )
 
         time.sleep(1)
 
@@ -187,7 +200,9 @@ def main():
         print("  [stripped] warming up...", file=sys.stderr)
         warmup(args.url, args.model, make_billing_header() + system_prompt)
         print("  [stripped] measuring...", file=sys.stderr)
-        stripped = run_condition(args.url, args.model, "stripped", system_prompt, args.sequential)
+        stripped = run_condition(
+            args.url, args.model, "stripped", system_prompt, args.sequential
+        )
 
         # Collect rows
         for i in range(args.sequential):
@@ -207,8 +222,10 @@ def main():
         s_avg = sum(t for t, _ in stable) / len(stable)
         v_avg = sum(t for t, _ in varying) / len(varying)
         x_avg = sum(t for t, _ in stripped) / len(stripped)
-        print(f"  Avg TTFT  stable={s_avg:.1f}ms  varying={v_avg:.1f}ms  stripped={x_avg:.1f}ms",
-              file=sys.stderr)
+        print(
+            f"  Avg TTFT  stable={s_avg:.1f}ms  varying={v_avg:.1f}ms  stripped={x_avg:.1f}ms",
+            file=sys.stderr,
+        )
 
     # --- Output ---
     if args.jsonl:
@@ -217,10 +234,14 @@ def main():
                 f.write(json.dumps(row) + "\n")
 
     fieldnames = [
-        "round", "request_index",
-        "stable_ttft_ms", "stable_total_ms",
-        "varying_ttft_ms", "varying_total_ms",
-        "stripped_ttft_ms", "stripped_total_ms",
+        "round",
+        "request_index",
+        "stable_ttft_ms",
+        "stable_total_ms",
+        "varying_ttft_ms",
+        "varying_total_ms",
+        "stripped_ttft_ms",
+        "stripped_total_ms",
     ]
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
     writer = csv.DictWriter(out, fieldnames=fieldnames)

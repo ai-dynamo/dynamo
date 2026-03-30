@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Measure SSE event timing from a streaming chat completion with tool calls.
 
@@ -117,7 +119,11 @@ def measure_one_run(url: str, model: str) -> dict:
 
         # First token
         if milestones["first_token_ms"] is None:
-            has_content = delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")
+            has_content = (
+                delta.get("content")
+                or delta.get("reasoning_content")
+                or delta.get("tool_calls")
+            )
             if has_content:
                 milestones["first_token_ms"] = now
 
@@ -166,7 +172,9 @@ def measure_one_run(url: str, model: str) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8000")
-    parser.add_argument("--model", default="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4")
+    parser.add_argument(
+        "--model", default="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+    )
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--output", default="-", help="Output CSV path (- for stdout)")
     parser.add_argument("--jsonl", default=None, help="Output JSONL path for raw data")
@@ -178,7 +186,10 @@ def main():
         m = measure_one_run(args.url, args.model)
         m["run"] = i + 1
         results.append(m)
-        print(f"  TTFT={m['first_token_ms']:.1f}ms  tool_complete={m.get('tool_call_complete_ms', 'N/A')}  done={m['done_ms']:.1f}ms", file=sys.stderr)
+        print(
+            f"  TTFT={m['first_token_ms']:.1f}ms  tool_complete={m.get('tool_call_complete_ms', 'N/A')}  done={m['done_ms']:.1f}ms",
+            file=sys.stderr,
+        )
         if i < args.runs - 1:
             time.sleep(0.5)
 
@@ -191,8 +202,14 @@ def main():
 
     # Write CSV
     fieldnames = [
-        "run", "first_token_ms", "first_reasoning_ms", "reasoning_end_ms",
-        "tool_call_complete_ms", "finish_reason_ms", "done_ms", "server_total_time_ms",
+        "run",
+        "first_token_ms",
+        "first_reasoning_ms",
+        "reasoning_end_ms",
+        "tool_call_complete_ms",
+        "finish_reason_ms",
+        "done_ms",
+        "server_total_time_ms",
     ]
     extra = ["tool_dispatch_event_ms", "reasoning_dispatch_first_ms"]
     for e in extra:
