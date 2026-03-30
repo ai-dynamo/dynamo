@@ -47,9 +47,12 @@ func main() {
 	}
 
 	if err := (&requestcontroller.Reconciler{
-		Client:                       manager.GetClient(),
-		Scheme:                       manager.GetScheme(),
-		DisableCudaCheckpointJobFile: parseBoolEnv("DISABLE_CUDA_CHECKPOINT_JOB_FILE"),
+		Client: manager.GetClient(),
+		Scheme: manager.GetScheme(),
+		DisableCudaCheckpointJobFile: func() bool {
+			value := strings.TrimSpace(os.Getenv("DISABLE_CUDA_CHECKPOINT_JOB_FILE"))
+			return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+		}(),
 	}).SetupWithManager(manager); err != nil {
 		rootLog.Error(err, "Failed to register SnapshotRequest controller")
 		os.Exit(1)
@@ -59,9 +62,4 @@ func main() {
 		rootLog.Error(err, "Snapshot controller exited with error")
 		os.Exit(1)
 	}
-}
-
-func parseBoolEnv(name string) bool {
-	value := strings.TrimSpace(os.Getenv(name))
-	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
 }

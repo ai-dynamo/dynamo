@@ -304,7 +304,9 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		}
 		now := metav1.Now()
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
-		ckpt.Status.JobName = firstNonEmpty(request.Status.JobName, ckpt.Status.JobName)
+		if strings.TrimSpace(request.Status.JobName) != "" {
+			ckpt.Status.JobName = request.Status.JobName
+		}
 		ckpt.Status.CreatedAt = &now
 		ckpt.Status.Message = ""
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
@@ -321,7 +323,9 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", "Checkpoint creation completed successfully")
 		return ctrl.Result{}, nil
 	default:
-		ckpt.Status.JobName = firstNonEmpty(request.Status.JobName, ckpt.Status.JobName)
+		if strings.TrimSpace(request.Status.JobName) != "" {
+			ckpt.Status.JobName = request.Status.JobName
+		}
 		if ckpt.Status.Location == "" {
 			ckpt.Status.Location = request.Status.Location
 		}
@@ -540,15 +544,6 @@ func (r *CheckpointReconciler) buildCheckpointRequest(ckpt *nvidiacomv1alpha1.Dy
 			TTLSecondsAfterFinished: ttlSecondsAfterFinished,
 		},
 	}, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 // SetupWithManager sets up the controller with the Manager.

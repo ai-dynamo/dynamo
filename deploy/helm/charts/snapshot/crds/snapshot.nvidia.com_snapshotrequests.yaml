@@ -54,13 +54,8 @@ spec:
                 podTemplate:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
-                targetPodRef:
-                  type: object
-                  properties:
-                    name:
-                      type: string
-                  required:
-                    - name
+                targetPodName:
+                  type: string
                 activeDeadlineSeconds:
                   type: integer
                   format: int64

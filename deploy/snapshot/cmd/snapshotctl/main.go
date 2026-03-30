@@ -45,9 +45,9 @@ func run(args []string) error {
 
 	switch args[0] {
 	case "checkpoint":
-		return runCheckpoint(args[1:])
+		return runRequestCommand("checkpoint", args[1:])
 	case "restore":
-		return runRestore(args[1:])
+		return runRequestCommand("restore", args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -56,14 +56,14 @@ func run(args []string) error {
 	}
 }
 
-func runCheckpoint(args []string) error {
-	flags := flag.NewFlagSet("checkpoint", flag.ContinueOnError)
+func runRequestCommand(subcommand string, args []string) error {
+	flags := flag.NewFlagSet(subcommand, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
 	manifestPath := flags.String("manifest", "", "Path to a worker Pod manifest")
 	namespaceOverride := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
-	snapshotID := flags.String("checkpoint-hash", "", "Snapshot identifier; defaults to a generated value")
-	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
+	snapshotID := flags.String("checkpoint-hash", "", "Snapshot identifier")
+	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for completion")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -71,73 +71,19 @@ func runCheckpoint(args []string) error {
 	if len(flags.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
+	if *timeout <= 0 {
+		return fmt.Errorf("--timeout must be greater than zero")
+	}
+	requireID := subcommand == "restore"
 	if strings.TrimSpace(*manifestPath) == "" {
+		if requireID {
+			return fmt.Errorf("missing required flags: --manifest, --checkpoint-hash")
+		}
 		return fmt.Errorf("missing required flags: --manifest")
 	}
-	if *timeout <= 0 {
-		return fmt.Errorf("--timeout must be greater than zero")
-	}
-
-	kubeClient, currentNamespace, err := loadKubeClient()
-	if err != nil {
-		return err
-	}
-	manifest, err := loadPodManifest(*manifestPath)
-	if err != nil {
-		return err
-	}
-	namespace := resolveNamespace(*namespaceOverride, manifest.Namespace, currentNamespace)
-	if strings.TrimSpace(*snapshotID) == "" {
-		*snapshotID = fmt.Sprintf("%s-%d", defaultGeneratedSnapshotIDPrefix, time.Now().UTC().UnixNano())
-	}
-
-	request := &snapshotv1alpha1.SnapshotRequest{
-		ObjectMeta: metav1ObjectMetaForRequest("checkpoint", namespace, manifest.Name, *snapshotID),
-		Spec: snapshotv1alpha1.SnapshotRequestSpec{
-			Phase:       snapshotv1alpha1.SnapshotRequestPhaseCheckpoint,
-			SnapshotID:  *snapshotID,
-			PodTemplate: manifest.Template.DeepCopy(),
-		},
-	}
-	if err := kubeClient.Create(context.Background(), request); err != nil {
-		return fmt.Errorf("create SnapshotRequest %s/%s: %w", request.Namespace, request.Name, err)
-	}
-
-	request, err = waitForSnapshotRequest(kubeClient, request.Namespace, request.Name, *timeout)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("status=%s\n", request.Status.State)
-	fmt.Printf("namespace=%s\n", request.Namespace)
-	fmt.Printf("name=%s\n", request.Name)
-	fmt.Printf("checkpoint_job=%s\n", request.Status.JobName)
-	fmt.Printf("checkpoint_hash=%s\n", request.Spec.SnapshotID)
-	fmt.Printf("checkpoint_location=%s\n", request.Status.Location)
-	return nil
-}
-
-func runRestore(args []string) error {
-	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-
-	manifestPath := flags.String("manifest", "", "Path to a worker Pod manifest")
-	namespaceOverride := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
-	snapshotID := flags.String("checkpoint-hash", "", "Snapshot identifier to restore")
-	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
-
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if len(flags.Args()) != 0 {
-		return fmt.Errorf("unexpected arguments: %v", flags.Args())
-	}
-	if strings.TrimSpace(*manifestPath) == "" || strings.TrimSpace(*snapshotID) == "" {
+	if requireID && strings.TrimSpace(*snapshotID) == "" {
 		return fmt.Errorf("missing required flags: --manifest, --checkpoint-hash")
 	}
-	if *timeout <= 0 {
-		return fmt.Errorf("--timeout must be greater than zero")
-	}
 
 	kubeClient, currentNamespace, err := loadKubeClient()
 	if err != nil {
@@ -147,12 +93,28 @@ func runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	namespace := resolveNamespace(*namespaceOverride, manifest.Namespace, currentNamespace)
+	namespace := strings.TrimSpace(*namespaceOverride)
+	if namespace == "" {
+		namespace = strings.TrimSpace(manifest.Namespace)
+	}
+	if namespace == "" {
+		namespace = strings.TrimSpace(currentNamespace)
+	}
+	if namespace == "" {
+		namespace = corev1.NamespaceDefault
+	}
+	if subcommand == "checkpoint" && strings.TrimSpace(*snapshotID) == "" {
+		*snapshotID = fmt.Sprintf("%s-%d", defaultGeneratedSnapshotIDPrefix, time.Now().UTC().UnixNano())
+	}
+	phase := snapshotv1alpha1.SnapshotRequestPhaseCheckpoint
+	if subcommand == "restore" {
+		phase = snapshotv1alpha1.SnapshotRequestPhaseRestore
+	}
 
 	request := &snapshotv1alpha1.SnapshotRequest{
-		ObjectMeta: metav1ObjectMetaForRequest("restore", namespace, manifest.Name, *snapshotID),
+		ObjectMeta: metav1ObjectMetaForRequest(subcommand, namespace, manifest.Name, *snapshotID),
 		Spec: snapshotv1alpha1.SnapshotRequestSpec{
-			Phase:       snapshotv1alpha1.SnapshotRequestPhaseRestore,
+			Phase:       phase,
 			SnapshotID:  *snapshotID,
 			PodTemplate: manifest.Template.DeepCopy(),
 		},
@@ -169,7 +131,11 @@ func runRestore(args []string) error {
 	fmt.Printf("status=%s\n", request.Status.State)
 	fmt.Printf("namespace=%s\n", request.Namespace)
 	fmt.Printf("name=%s\n", request.Name)
-	fmt.Printf("restore_pod=%s\n", request.Status.PodName)
+	if subcommand == "checkpoint" {
+		fmt.Printf("checkpoint_job=%s\n", request.Status.JobName)
+	} else {
+		fmt.Printf("restore_pod=%s\n", request.Status.PodName)
+	}
 	fmt.Printf("checkpoint_hash=%s\n", request.Spec.SnapshotID)
 	fmt.Printf("checkpoint_location=%s\n", request.Status.Location)
 	return nil
@@ -231,8 +197,12 @@ func loadPodManifest(manifestPath string) (podManifest, error) {
 		return podManifest{}, fmt.Errorf("manifest %s: worker container image is required", manifestPath)
 	}
 
+	name := strings.TrimSpace(pod.Name)
+	if name == "" {
+		name = "snapshot-worker"
+	}
 	return podManifest{
-		Name:      sanitizeName(firstNonEmpty(pod.Name, "snapshot-worker")),
+		Name:      sanitizeName(name),
 		Namespace: strings.TrimSpace(pod.Namespace),
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: pod.ObjectMeta,
@@ -271,19 +241,6 @@ func waitForSnapshotRequest(kubeClient ctrlclient.Client, namespace string, name
 	}
 }
 
-func resolveNamespace(explicitNamespace string, manifestNamespace string, currentNamespace string) string {
-	if namespace := strings.TrimSpace(explicitNamespace); namespace != "" {
-		return namespace
-	}
-	if namespace := strings.TrimSpace(manifestNamespace); namespace != "" {
-		return namespace
-	}
-	if namespace := strings.TrimSpace(currentNamespace); namespace != "" {
-		return namespace
-	}
-	return corev1.NamespaceDefault
-}
-
 func sanitizeName(value string) string {
 	value = strings.ToLower(value)
 	value = dnsLabelPattern.ReplaceAllString(value, "-")
@@ -298,15 +255,6 @@ func sanitizeName(value string) string {
 		}
 	}
 	return value
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func metav1ObjectMetaForRequest(phase string, namespace string, manifestName string, snapshotID string) metav1.ObjectMeta {

@@ -3,6 +3,7 @@ package requestcontroller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -44,13 +45,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, req.NamespacedName, request); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if request.Status.ObservedGeneration == request.Generation && isTerminalState(request.Status.State) {
+	if request.Status.ObservedGeneration == request.Generation &&
+		(request.Status.State == snapshotv1alpha1.SnapshotRequestStateSucceeded || request.Status.State == snapshotv1alpha1.SnapshotRequestStateFailed) {
 		return ctrl.Result{}, nil
 	}
 
 	storage, err := snapshotkube.DiscoverSnapshotStorage(ctx, r.Client, request.Namespace)
 	if err != nil {
-		return ctrl.Result{}, r.setFailed(ctx, request, err.Error())
+		return ctrl.Result{}, r.fail(ctx, request, err.Error())
 	}
 
 	switch request.Spec.Phase {
@@ -60,23 +62,31 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.reconcileRestore(ctx, request, storage)
 	default:
 		logger.Info("Rejecting SnapshotRequest with unknown phase", "name", request.Name, "phase", request.Spec.Phase)
-		return ctrl.Result{}, r.setFailed(ctx, request, fmt.Sprintf("unknown phase %q", request.Spec.Phase))
+		return ctrl.Result{}, r.fail(ctx, request, fmt.Sprintf("unknown phase %q", request.Spec.Phase))
 	}
 }
 
 func (r *Reconciler) reconcileCheckpoint(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, storage snapshotkube.SnapshotStorage) (ctrl.Result, error) {
 	if request.Spec.PodTemplate == nil {
-		return ctrl.Result{}, r.setFailed(ctx, request, "checkpoint requests require spec.podTemplate")
+		return ctrl.Result{}, r.fail(ctx, request, "checkpoint requests require spec.podTemplate")
 	}
 
 	jobName := childName(request.Name, "checkpoint")
 	location := storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
+	setCheckpointState := func(state snapshotv1alpha1.SnapshotRequestState, message string) error {
+		return r.updateStatus(ctx, request, state, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
+			status.JobName = jobName
+			status.Location = location
+			status.StorageType = snapshotkube.StorageTypePVC
+			status.Message = message
+		})
+	}
 	job := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: jobName}, job)
 	if apierrors.IsNotFound(err) {
 		job, err = r.buildCheckpointJob(request, storage, jobName)
 		if err != nil {
-			return ctrl.Result{}, r.setFailed(ctx, request, err.Error())
+			return ctrl.Result{}, r.fail(ctx, request, err.Error())
 		}
 		if err := controllerutil.SetControllerReference(request, job, r.Scheme); err != nil {
 			return ctrl.Result{}, err
@@ -84,12 +94,7 @@ func (r *Reconciler) reconcileCheckpoint(ctx context.Context, request *snapshotv
 		if err := r.Create(ctx, job); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: requeueDelay}, r.setRunning(ctx, request, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
-			status.JobName = jobName
-			status.Location = location
-			status.StorageType = snapshotkube.StorageTypePVC
-			status.Message = "checkpoint job created"
-		})
+		return ctrl.Result{RequeueAfter: requeueDelay}, setCheckpointState(snapshotv1alpha1.SnapshotRequestStateRunning, "checkpoint job created")
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -97,54 +102,48 @@ func (r *Reconciler) reconcileCheckpoint(ctx context.Context, request *snapshotv
 
 	status := strings.TrimSpace(job.Annotations[snapshotkube.CheckpointStatusAnnotation])
 	if status == "failed" {
-		return ctrl.Result{}, r.setFailed(ctx, request, "snapshot-agent reported checkpoint failure")
+		return ctrl.Result{}, r.fail(ctx, request, "snapshot-agent reported checkpoint failure")
 	}
 	if jobCompleted(job) {
 		if status == "completed" {
-			return ctrl.Result{}, r.setSucceeded(ctx, request, func(reqStatus *snapshotv1alpha1.SnapshotRequestStatus) {
-				reqStatus.JobName = jobName
-				reqStatus.Location = location
-				reqStatus.StorageType = snapshotkube.StorageTypePVC
-				reqStatus.Message = ""
-			})
+			return ctrl.Result{}, setCheckpointState(snapshotv1alpha1.SnapshotRequestStateSucceeded, "")
 		}
-		return ctrl.Result{RequeueAfter: requeueDelay}, r.setRunning(ctx, request, func(reqStatus *snapshotv1alpha1.SnapshotRequestStatus) {
-			reqStatus.JobName = jobName
-			reqStatus.Location = location
-			reqStatus.StorageType = snapshotkube.StorageTypePVC
-			reqStatus.Message = "waiting for snapshot-agent checkpoint completion"
-		})
+		return ctrl.Result{RequeueAfter: requeueDelay}, setCheckpointState(snapshotv1alpha1.SnapshotRequestStateRunning, "waiting for snapshot-agent checkpoint completion")
 	}
 	if jobFailed(job) {
-		return ctrl.Result{}, r.setFailed(ctx, request, "checkpoint job failed")
+		return ctrl.Result{}, r.fail(ctx, request, "checkpoint job failed")
 	}
 
-	return ctrl.Result{RequeueAfter: requeueDelay}, r.setRunning(ctx, request, func(reqStatus *snapshotv1alpha1.SnapshotRequestStatus) {
-		reqStatus.JobName = jobName
-		reqStatus.Location = location
-		reqStatus.StorageType = snapshotkube.StorageTypePVC
-		reqStatus.Message = "checkpoint job running"
-	})
+	return ctrl.Result{RequeueAfter: requeueDelay}, setCheckpointState(snapshotv1alpha1.SnapshotRequestStateRunning, "checkpoint job running")
 }
 
 func (r *Reconciler) reconcileRestore(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, storage snapshotkube.SnapshotStorage) (ctrl.Result, error) {
-	if request.Spec.TargetPodRef != nil {
+	if strings.TrimSpace(request.Spec.TargetPodName) != "" {
 		return r.reconcileTargetRestore(ctx, request, storage)
 	}
 	if request.Spec.PodTemplate != nil {
 		return r.reconcileStandaloneRestore(ctx, request, storage)
 	}
-	return ctrl.Result{}, r.setFailed(ctx, request, "restore requests require spec.targetPodRef or spec.podTemplate")
+	return ctrl.Result{}, r.fail(ctx, request, "restore requests require spec.targetPodName or spec.podTemplate")
 }
 
 func (r *Reconciler) reconcileStandaloneRestore(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, storage snapshotkube.SnapshotStorage) (ctrl.Result, error) {
 	podName := childName(request.Name, "restore")
+	location := storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
+	setRestoreState := func(state snapshotv1alpha1.SnapshotRequestState, message string) error {
+		return r.updateStatus(ctx, request, state, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
+			status.PodName = podName
+			status.Location = location
+			status.StorageType = snapshotkube.StorageTypePVC
+			status.Message = message
+		})
+	}
 	pod := &corev1.Pod{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: podName}, pod)
 	if apierrors.IsNotFound(err) {
 		pod, err = r.buildRestorePod(request, storage, podName)
 		if err != nil {
-			return ctrl.Result{}, r.setFailed(ctx, request, err.Error())
+			return ctrl.Result{}, r.fail(ctx, request, err.Error())
 		}
 		if err := controllerutil.SetControllerReference(request, pod, r.Scheme); err != nil {
 			return ctrl.Result{}, err
@@ -152,49 +151,54 @@ func (r *Reconciler) reconcileStandaloneRestore(ctx context.Context, request *sn
 		if err := r.Create(ctx, pod); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: requeueDelay}, r.setWaiting(ctx, request, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
-			status.PodName = podName
-			status.Location = storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
-			status.StorageType = snapshotkube.StorageTypePVC
-			status.Message = "restore pod created"
-		})
+		return ctrl.Result{RequeueAfter: requeueDelay}, setRestoreState(snapshotv1alpha1.SnapshotRequestStateWaitingForTarget, "restore pod created")
 	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return r.observeRestorePod(ctx, request, pod, storage)
+	return r.observeRestorePod(ctx, request, pod, setRestoreState)
 }
 
 func (r *Reconciler) reconcileTargetRestore(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, storage snapshotkube.SnapshotStorage) (ctrl.Result, error) {
-	podName := request.Spec.TargetPodRef.Name
+	podName := strings.TrimSpace(request.Spec.TargetPodName)
+	location := storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
+	setRestoreState := func(state snapshotv1alpha1.SnapshotRequestState, message string) error {
+		return r.updateStatus(ctx, request, state, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
+			status.PodName = podName
+			status.Location = location
+			status.StorageType = snapshotkube.StorageTypePVC
+			status.Message = message
+		})
+	}
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: podName}, pod); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: requeueDelay}, r.setWaiting(ctx, request, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
-				status.PodName = podName
-				status.Location = storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
-				status.StorageType = snapshotkube.StorageTypePVC
-				status.Message = "waiting for target pod"
-			})
+			return ctrl.Result{RequeueAfter: requeueDelay}, setRestoreState(snapshotv1alpha1.SnapshotRequestStateWaitingForTarget, "waiting for target pod")
 		}
 		return ctrl.Result{}, err
 	}
 	if err := snapshotkube.ValidateRestoreTargetPod(pod, storage, snapshotkube.DefaultSeccompLocalhostProfile); err != nil {
-		return ctrl.Result{}, r.setFailed(ctx, request, fmt.Sprintf("target pod %s is not prepared for snapshot restore: %v", podName, err))
+		return ctrl.Result{}, r.fail(ctx, request, fmt.Sprintf("target pod %s is not prepared for snapshot restore: %v", podName, err))
 	}
 
-	desiredLabels := mapsClone(pod.Labels)
-	desiredAnnotations := mapsClone(pod.Annotations)
+	desiredLabels := maps.Clone(pod.Labels)
+	if desiredLabels == nil {
+		desiredLabels = map[string]string{}
+	}
+	desiredAnnotations := maps.Clone(pod.Annotations)
+	if desiredAnnotations == nil {
+		desiredAnnotations = map[string]string{}
+	}
 	snapshotkube.ApplyRestoreTargetMetadata(
 		desiredLabels,
 		desiredAnnotations,
 		true,
 		request.Spec.SnapshotID,
-		storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion),
+		location,
 		snapshotkube.StorageTypePVC,
 	)
-	if !mapsEqual(pod.Labels, desiredLabels) || !mapsEqual(pod.Annotations, desiredAnnotations) {
+	if !maps.Equal(pod.Labels, desiredLabels) || !maps.Equal(pod.Annotations, desiredAnnotations) {
 		pod = pod.DeepCopy()
 		pod.Labels = desiredLabels
 		pod.Annotations = desiredAnnotations
@@ -203,36 +207,26 @@ func (r *Reconciler) reconcileTargetRestore(ctx context.Context, request *snapsh
 		}
 	}
 
-	return r.observeRestorePod(ctx, request, pod, storage)
+	return r.observeRestorePod(ctx, request, pod, setRestoreState)
 }
 
-func (r *Reconciler) observeRestorePod(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, pod *corev1.Pod, storage snapshotkube.SnapshotStorage) (ctrl.Result, error) {
+func (r *Reconciler) observeRestorePod(
+	ctx context.Context,
+	request *snapshotv1alpha1.SnapshotRequest,
+	pod *corev1.Pod,
+	setRestoreState func(snapshotv1alpha1.SnapshotRequestState, string) error,
+) (ctrl.Result, error) {
 	status := strings.TrimSpace(pod.Annotations[snapshotkube.RestoreStatusAnnotation])
 	if status == "completed" {
-		return ctrl.Result{}, r.setSucceeded(ctx, request, func(reqStatus *snapshotv1alpha1.SnapshotRequestStatus) {
-			reqStatus.PodName = pod.Name
-			reqStatus.Location = storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
-			reqStatus.StorageType = snapshotkube.StorageTypePVC
-			reqStatus.Message = ""
-		})
+		return ctrl.Result{}, setRestoreState(snapshotv1alpha1.SnapshotRequestStateSucceeded, "")
 	}
 	if status == "failed" || pod.Status.Phase == corev1.PodFailed {
-		return ctrl.Result{}, r.setFailed(ctx, request, "restore failed")
+		return ctrl.Result{}, r.fail(ctx, request, "restore failed")
 	}
 	if pod.Status.Phase == corev1.PodPending {
-		return ctrl.Result{RequeueAfter: requeueDelay}, r.setWaiting(ctx, request, func(reqStatus *snapshotv1alpha1.SnapshotRequestStatus) {
-			reqStatus.PodName = pod.Name
-			reqStatus.Location = storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
-			reqStatus.StorageType = snapshotkube.StorageTypePVC
-			reqStatus.Message = "waiting for restore pod"
-		})
+		return ctrl.Result{RequeueAfter: requeueDelay}, setRestoreState(snapshotv1alpha1.SnapshotRequestStateWaitingForTarget, "waiting for restore pod")
 	}
-	return ctrl.Result{RequeueAfter: requeueDelay}, r.setRunning(ctx, request, func(reqStatus *snapshotv1alpha1.SnapshotRequestStatus) {
-		reqStatus.PodName = pod.Name
-		reqStatus.Location = storage.CheckpointLocation(request.Spec.SnapshotID, request.Spec.ArtifactVersion)
-		reqStatus.StorageType = snapshotkube.StorageTypePVC
-		reqStatus.Message = "restore running"
-	})
+	return ctrl.Result{RequeueAfter: requeueDelay}, setRestoreState(snapshotv1alpha1.SnapshotRequestStateRunning, "restore running")
 }
 
 func (r *Reconciler) buildCheckpointJob(request *snapshotv1alpha1.SnapshotRequest, storage snapshotkube.SnapshotStorage, jobName string) (*batchv1.Job, error) {
@@ -277,10 +271,16 @@ func (r *Reconciler) buildRestorePod(request *snapshotv1alpha1.SnapshotRequest, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        podName,
 			Namespace:   request.Namespace,
-			Labels:      mapsClone(podTemplate.Labels),
-			Annotations: mapsClone(podTemplate.Annotations),
+			Labels:      maps.Clone(podTemplate.Labels),
+			Annotations: maps.Clone(podTemplate.Annotations),
 		},
 		Spec: *podTemplate.Spec.DeepCopy(),
+	}
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
 	}
 	if err := snapshotkube.PrepareStandaloneRestorePod(
 		pod,
@@ -294,47 +294,28 @@ func (r *Reconciler) buildRestorePod(request *snapshotv1alpha1.SnapshotRequest, 
 	return pod, nil
 }
 
-func (r *Reconciler) setWaiting(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, mutate func(*snapshotv1alpha1.SnapshotRequestStatus)) error {
-	return r.updateStatus(ctx, request, snapshotv1alpha1.SnapshotRequestStateWaitingForTarget, mutate)
-}
-
-func (r *Reconciler) setRunning(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, mutate func(*snapshotv1alpha1.SnapshotRequestStatus)) error {
-	return r.updateStatus(ctx, request, snapshotv1alpha1.SnapshotRequestStateRunning, mutate)
-}
-
-func (r *Reconciler) setSucceeded(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, mutate func(*snapshotv1alpha1.SnapshotRequestStatus)) error {
-	return r.updateStatus(ctx, request, snapshotv1alpha1.SnapshotRequestStateSucceeded, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
-		if status.CompletedAt == nil {
-			status.CompletedAt = snapshotv1alpha1.Now()
-		}
-		mutate(status)
-	})
-}
-
-func (r *Reconciler) setFailed(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, message string) error {
+func (r *Reconciler) fail(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, message string) error {
 	return r.updateStatus(ctx, request, snapshotv1alpha1.SnapshotRequestStateFailed, func(status *snapshotv1alpha1.SnapshotRequestStatus) {
 		status.Message = message
-		if status.CompletedAt == nil {
-			status.CompletedAt = snapshotv1alpha1.Now()
-		}
 	})
 }
 
 func (r *Reconciler) updateStatus(ctx context.Context, request *snapshotv1alpha1.SnapshotRequest, state snapshotv1alpha1.SnapshotRequestState, mutate func(*snapshotv1alpha1.SnapshotRequestStatus)) error {
 	current := request.DeepCopy()
-	if current.Status.State == state && current.Status.ObservedGeneration == current.Generation {
-		before := current.Status.DeepCopy()
-		mutate(&current.Status)
-		if before != nil && *before == current.Status {
-			return nil
-		}
-	} else {
+	if current.Status.State != state || current.Status.ObservedGeneration != current.Generation {
 		current.Status.State = state
 		current.Status.ObservedGeneration = current.Generation
 		if current.Status.StartedAt == nil && state != snapshotv1alpha1.SnapshotRequestStatePending {
 			current.Status.StartedAt = snapshotv1alpha1.Now()
 		}
-		mutate(&current.Status)
+	}
+	if (state == snapshotv1alpha1.SnapshotRequestStateSucceeded || state == snapshotv1alpha1.SnapshotRequestStateFailed) && current.Status.CompletedAt == nil {
+		current.Status.CompletedAt = snapshotv1alpha1.Now()
+	}
+	before := current.Status.DeepCopy()
+	mutate(&current.Status)
+	if before != nil && *before == current.Status {
+		return nil
 	}
 	return r.Status().Patch(ctx, current, client.MergeFrom(request))
 }
@@ -366,33 +347,6 @@ func jobFailed(job *batchv1.Job) bool {
 		}
 	}
 	return false
-}
-
-func mapsClone(in map[string]string) map[string]string {
-	if in == nil {
-		return map[string]string{}
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func mapsEqual(a map[string]string, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
-func isTerminalState(state snapshotv1alpha1.SnapshotRequestState) bool {
-	return state == snapshotv1alpha1.SnapshotRequestStateSucceeded || state == snapshotv1alpha1.SnapshotRequestStateFailed
 }
 
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {

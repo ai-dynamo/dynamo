@@ -29,9 +29,7 @@ func BuildRestoreRequest(namespace string, name string, snapshotID string, artif
 			Phase:           snapshotv1alpha1.SnapshotRequestPhaseRestore,
 			SnapshotID:      snapshotID,
 			ArtifactVersion: artifactVersion,
-			TargetPodRef: &snapshotv1alpha1.SnapshotTargetPodRef{
-				Name: podName,
-			},
+			TargetPodName:   podName,
 		},
 	}
 }

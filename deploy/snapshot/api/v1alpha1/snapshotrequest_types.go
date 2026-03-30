@@ -5,16 +5,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type SnapshotTargetPodRef struct {
-	Name string `json:"name"`
-}
-
 type SnapshotRequestSpec struct {
 	Phase                   SnapshotRequestPhase    `json:"phase"`
 	SnapshotID              string                  `json:"snapshotID"`
 	ArtifactVersion         string                  `json:"artifactVersion,omitempty"`
 	PodTemplate             *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
-	TargetPodRef            *SnapshotTargetPodRef   `json:"targetPodRef,omitempty"`
+	TargetPodName           string                  `json:"targetPodName,omitempty"`
 	ActiveDeadlineSeconds   *int64                  `json:"activeDeadlineSeconds,omitempty"`
 	TTLSecondsAfterFinished *int32                  `json:"ttlSecondsAfterFinished,omitempty"`
 }

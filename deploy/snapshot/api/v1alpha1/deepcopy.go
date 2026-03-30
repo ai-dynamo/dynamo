@@ -5,28 +5,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func (in *SnapshotTargetPodRef) DeepCopyInto(out *SnapshotTargetPodRef) {
-	*out = *in
-}
-
-func (in *SnapshotTargetPodRef) DeepCopy() *SnapshotTargetPodRef {
-	if in == nil {
-		return nil
-	}
-	out := new(SnapshotTargetPodRef)
-	in.DeepCopyInto(out)
-	return out
-}
-
 func (in *SnapshotRequestSpec) DeepCopyInto(out *SnapshotRequestSpec) {
 	*out = *in
 	if in.PodTemplate != nil {
 		out.PodTemplate = new(corev1.PodTemplateSpec)
 		in.PodTemplate.DeepCopyInto(out.PodTemplate)
-	}
-	if in.TargetPodRef != nil {
-		out.TargetPodRef = new(SnapshotTargetPodRef)
-		in.TargetPodRef.DeepCopyInto(out.TargetPodRef)
 	}
 }
 
