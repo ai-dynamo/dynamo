@@ -374,10 +374,9 @@ fn allocate_side_system(count: usize, size: usize) -> SideBuffers {
 }
 
 fn allocate_side_device(dev: &Arc<ZeDevice>, count: usize, size: usize) -> SideBuffers {
-    let queue = dev.new_queue().expect("queue for alloc");
     SideBuffers::Device(
         (0..count)
-            .map(|_| queue.alloc_zeros::<u8>(size).expect("alloc"))
+            .map(|_| dev.alloc_zeros::<u8>(size).expect("alloc"))
             .collect(),
     )
 }
@@ -722,7 +721,6 @@ fn run_benchmark(
     };
 
     // Scratch for vectorized backend (device-side pointer arrays).
-    let queue = dev.new_queue().expect("queue");
     let ptr_array_bytes = num_copies * std::mem::size_of::<u64>();
     let needs_ptr_arrays = match backend {
         Backend::Vectorized | Backend::VectorizedIndirect => true,
@@ -731,12 +729,12 @@ fn run_benchmark(
         _ => false,
     };
     let src_addrs_dev: Option<ZeSlice<u8>> = if needs_ptr_arrays {
-        Some(unsafe { queue.alloc::<u8>(ptr_array_bytes).expect("alloc src_addrs_dev") })
+        Some(unsafe { dev.alloc_device::<u8>(ptr_array_bytes).expect("alloc src_addrs_dev") })
     } else {
         None
     };
     let dst_addrs_dev: Option<ZeSlice<u8>> = if needs_ptr_arrays {
-        Some(unsafe { queue.alloc::<u8>(ptr_array_bytes).expect("alloc dst_addrs_dev") })
+        Some(unsafe { dev.alloc_device::<u8>(ptr_array_bytes).expect("alloc dst_addrs_dev") })
     } else {
         None
     };
@@ -757,7 +755,7 @@ fn run_benchmark(
 
     // Indirect-args: allocate 32-byte args device buffer, set arg 0 once.
     let args_dev: Option<ZeSlice<u8>> = if matches!(backend, Backend::VectorizedIndirect) {
-        let buf = unsafe { queue.alloc::<u8>(vc::INDIRECT_ARGS_BYTES).expect("alloc args_dev") };
+        let buf = unsafe { dev.alloc_device::<u8>(vc::INDIRECT_ARGS_BYTES).expect("alloc args_dev") };
         let ptr = buf.as_ptr() as u64;
         unsafe { kernel_indirect.set_arg(0, &ptr).expect("indirect arg0"); }
         Some(buf)
