@@ -30,7 +30,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 SLA planner uses two interpolators to estimate the performance of prefill and decode. You can test the interpolators with the following command:
 
 ```bash
-python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
+python components/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir <path_to_profile_results> \
   --isl <ISL> \
   --osl <OSL> \
@@ -43,7 +43,7 @@ The script will perform the interpolation based on ISL, OSL, and TTFT and ITL SL
 For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 (target TTFT=200ms, ITL=10ms):
 
 ```bash
-python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
+python components/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
   --isl 3000 \
   --osl 300 \

@@ -5,18 +5,18 @@ import asyncio
 import logging
 import time
 
-from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
-from dynamo.planner.utils.decode_planner import DecodePlanner
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.planner_core import (
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.base import (
     BasePlanner,
     PlannerPrometheusMetrics,
-    PlannerSharedState,
-    _apply_global_gpu_budget,
     _initialize_gpu_counts,
 )
-from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.core.budget import _apply_global_gpu_budget
+from dynamo.planner.core.decode import DecodePlanner
+from dynamo.planner.core.prefill import PrefillPlanner
+from dynamo.planner.core.state import PlannerSharedState
+from dynamo.planner.types import SubComponentType, TargetReplica
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 

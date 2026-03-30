@@ -5,19 +5,19 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
-from dynamo.planner.utils.planner_config import PlannerConfig
-
-if TYPE_CHECKING:
-    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
-from dynamo.planner.utils.planner_core import (
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.base import (
     BasePlanner,
     PlannerPrometheusMetrics,
     PlannerSharedState,
     _apply_component_gpu_budget,
     _initialize_gpu_counts,
 )
+from dynamo.planner.types import SubComponentType, TargetReplica
+
+if TYPE_CHECKING:
+    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -67,7 +67,7 @@ class AggPlanner:
             component_type=SubComponentType.DECODE,
         )
 
-        from dynamo.planner.utils.fpm_regression import AggRegressionModel
+        from dynamo.planner.core.load.fpm_regression import AggRegressionModel
 
         self.regression = AggRegressionModel(
             window_size=config.load_learning_window,

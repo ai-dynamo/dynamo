@@ -15,7 +15,7 @@
 
 from abc import ABC, abstractmethod
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.types import SubComponentType
 
 
 # TODO: add ability to scale component to X replicas

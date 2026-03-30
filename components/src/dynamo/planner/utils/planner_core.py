@@ -10,29 +10,26 @@ from typing import TYPE_CHECKING, Optional, Union
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import (
-    KubernetesConnector,
-    SubComponentType,
-    TargetReplica,
-    VirtualConnector,
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
+from dynamo.planner.connectors.virtual import VirtualConnector
+from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
+from dynamo.planner.core.throughput.interpolation import (
+    DecodeInterpolator,
+    PrefillInterpolator,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
-from dynamo.planner.global_planner_connector import GlobalPlannerConnector
-from dynamo.planner.utils.exceptions import DeploymentValidationError
+from dynamo.planner.core.throughput.pre_swept_results import PreSweptResultsHelper
+from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
+from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
+from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
+from dynamo.planner.types import SubComponentType, TargetReplica
 
 if TYPE_CHECKING:
     from dynamo.common.forward_pass_metrics import ForwardPassMetrics
     from dynamo.llm import FpmEventSubscriber
-from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
-from dynamo.planner.utils.perf_interpolation import (
-    DecodeInterpolator,
-    PrefillInterpolator,
-)
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
-from dynamo.planner.utils.prometheus import Metrics, PrometheusAPIClient
-from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
-from dynamo.planner.worker_info import WorkerInfo, resolve_worker_info
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -429,7 +426,7 @@ class BasePlanner:
             self.no_correction = config.no_correction
 
         if self.enable_load:
-            from dynamo.planner.utils.fpm_regression import (
+            from dynamo.planner.core.load.fpm_regression import (
                 DecodeRegressionModel,
                 PrefillRegressionModel,
             )

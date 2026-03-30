@@ -27,7 +27,7 @@ import pmdarima
 from filterpy.kalman import KalmanFilter
 from prophet import Prophet
 
-from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
