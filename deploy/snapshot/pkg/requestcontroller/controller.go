@@ -26,7 +26,8 @@ const requeueDelay = 2 * time.Second
 
 type Reconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme                       *runtime.Scheme
+	DisableCudaCheckpointJobFile bool
 }
 
 // +kubebuilder:rbac:groups=snapshot.nvidia.com,resources=snapshotrequests,verbs=get;list;watch;create;update;patch;delete
@@ -241,7 +242,7 @@ func (r *Reconciler) buildCheckpointJob(request *snapshotv1alpha1.SnapshotReques
 		request.Spec.SnapshotID,
 		request.Spec.ArtifactVersion,
 		storage,
-		request.Spec.DisableCudaCheckpointJobFile,
+		r.DisableCudaCheckpointJobFile,
 		snapshotkube.DefaultSeccompLocalhostProfile,
 	); err != nil {
 		return nil, err

@@ -536,7 +536,6 @@ func (r *CheckpointReconciler) buildCheckpointRequest(ckpt *nvidiacomv1alpha1.Dy
 			SnapshotID:              hash,
 			ArtifactVersion:         desiredArtifactVersion(ckpt),
 			PodTemplate:             r.buildCheckpointPodTemplate(ckpt),
-			DisableCudaCheckpointJobFile: true,
 			ActiveDeadlineSeconds:   activeDeadlineSeconds,
 			TTLSecondsAfterFinished: ttlSecondsAfterFinished,
 		},

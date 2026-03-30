@@ -99,6 +99,7 @@ daemonset:
 controller:
   enabled: true
   replicas: 1
+  disableCudaCheckpointJobFile: false
   resources:
     limits:
       cpu: 500m

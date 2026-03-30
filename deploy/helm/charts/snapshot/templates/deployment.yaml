@@ -34,6 +34,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: DISABLE_CUDA_CHECKPOINT_JOB_FILE
+              value: {{ ternary "true" "false" .Values.controller.disableCudaCheckpointJobFile | quote }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
       {{- with .Values.daemonset.imagePullSecrets }}

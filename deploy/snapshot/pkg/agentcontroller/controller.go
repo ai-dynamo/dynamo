@@ -1,8 +1,8 @@
-// Package controller implements the node-local control loop inside snapshot-agent.
+// Package agentcontroller implements the node-local control loop inside snapshot-agent.
 // It does not own CRDs or replace the operator. Instead it watches pod, job, and
 // lease state on the current node and delegates CRIU/CUDA execution to the
 // snapshot executor workflows.
-package controller
+package agentcontroller
 
 import (
 	"context"

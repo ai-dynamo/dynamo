@@ -10,14 +10,13 @@ type SnapshotTargetPodRef struct {
 }
 
 type SnapshotRequestSpec struct {
-	Phase                        SnapshotRequestPhase    `json:"phase"`
-	SnapshotID                   string                  `json:"snapshotID"`
-	ArtifactVersion              string                  `json:"artifactVersion,omitempty"`
-	PodTemplate                  *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
-	TargetPodRef                 *SnapshotTargetPodRef   `json:"targetPodRef,omitempty"`
-	DisableCudaCheckpointJobFile bool                    `json:"disableCudaCheckpointJobFile,omitempty"`
-	ActiveDeadlineSeconds        *int64                  `json:"activeDeadlineSeconds,omitempty"`
-	TTLSecondsAfterFinished      *int32                  `json:"ttlSecondsAfterFinished,omitempty"`
+	Phase                   SnapshotRequestPhase    `json:"phase"`
+	SnapshotID              string                  `json:"snapshotID"`
+	ArtifactVersion         string                  `json:"artifactVersion,omitempty"`
+	PodTemplate             *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+	TargetPodRef            *SnapshotTargetPodRef   `json:"targetPodRef,omitempty"`
+	ActiveDeadlineSeconds   *int64                  `json:"activeDeadlineSeconds,omitempty"`
+	TTLSecondsAfterFinished *int32                  `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 type SnapshotRequestStatus struct {

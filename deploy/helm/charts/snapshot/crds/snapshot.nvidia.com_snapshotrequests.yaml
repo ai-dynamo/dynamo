@@ -61,8 +61,6 @@ spec:
                       type: string
                   required:
                     - name
-                disableCudaCheckpointJobFile:
-                  type: boolean
                 activeDeadlineSeconds:
                   type: integer
                   format: int64

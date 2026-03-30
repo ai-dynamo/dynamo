@@ -12,8 +12,8 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/agentcontroller"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/controller"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
 )
 
@@ -46,7 +46,7 @@ func main() {
 		"restricted_namespace", cfg.RestrictedNamespace,
 	)
 
-	nodeController, err := controller.NewNodeController(cfg, ctrd, rootLog.WithName("controller"))
+	nodeController, err := agentcontroller.NewNodeController(cfg, ctrd, rootLog.WithName("agentcontroller"))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}

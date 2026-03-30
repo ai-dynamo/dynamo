@@ -136,7 +136,6 @@ func TestBuildCheckpointRequest(t *testing.T) {
 	assert.Equal(t, testHash, request.Spec.SnapshotID)
 	assert.Equal(t, consts.DefaultCheckpointArtifactVersion, request.Spec.ArtifactVersion)
 	assert.Equal(t, snapshotv1alpha1.SnapshotRequestPhaseCheckpoint, request.Spec.Phase)
-	assert.True(t, request.Spec.DisableCudaCheckpointJobFile)
 	assert.Equal(t, testHash, request.Labels[consts.KubeLabelCheckpointHash])
 
 	// Env vars (checkpoint-specific + user-provided preserved)
