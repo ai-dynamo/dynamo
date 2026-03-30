@@ -24,6 +24,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -79,43 +80,6 @@ func testScheme() *runtime.Scheme {
 
 func testInfo() *CheckpointInfo {
 	return &CheckpointInfo{Enabled: true, Hash: testHash}
-}
-
-func assertRestoreTUNPresent(t *testing.T, podSpec *corev1.PodSpec) {
-	t.Helper()
-
-	hasVolume := false
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == "host-dev-net-tun" && volume.HostPath != nil && volume.HostPath.Path == "/dev/net/tun" {
-			hasVolume = true
-			break
-		}
-	}
-	assert.True(t, hasVolume)
-
-	hasMount := false
-	for _, mount := range podSpec.Containers[0].VolumeMounts {
-		if mount.Name == "host-dev-net-tun" && mount.MountPath == "/dev/net/tun" {
-			hasMount = true
-			break
-		}
-	}
-	assert.True(t, hasMount)
-}
-
-func assertRestoreTUNAbsent(t *testing.T, podSpec *corev1.PodSpec) {
-	t.Helper()
-
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == "host-dev-net-tun" {
-			t.Fatalf("unexpected restore TUN volume: %#v", volume)
-		}
-	}
-	for _, mount := range podSpec.Containers[0].VolumeMounts {
-		if mount.Name == "host-dev-net-tun" {
-			t.Fatalf("unexpected restore TUN mount: %#v", mount)
-		}
-	}
 }
 
 type createHookClient struct {
@@ -265,7 +229,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 func TestInjectionIdempotency(t *testing.T) {
 	// Volume injection is idempotent
 	podSpec := &corev1.PodSpec{Volumes: []corev1.Volume{{Name: consts.CheckpointVolumeName}, {Name: consts.PodInfoVolumeName}}}
-	InjectCheckpointVolume(podSpec, "snapshot-pvc")
+	snapshotpodspec.InjectCheckpointVolume(podSpec, "snapshot-pvc")
 	InjectPodInfoVolume(podSpec)
 	assert.Len(t, podSpec.Volumes, 2)
 
@@ -273,7 +237,7 @@ func TestInjectionIdempotency(t *testing.T) {
 	container := &corev1.Container{VolumeMounts: []corev1.VolumeMount{
 		{Name: consts.CheckpointVolumeName}, {Name: consts.PodInfoVolumeName},
 	}}
-	InjectCheckpointVolumeMount(container, "/checkpoints")
+	snapshotpodspec.InjectCheckpointVolumeMount(container, "/checkpoints")
 	InjectPodInfoVolumeMount(container)
 	assert.Len(t, container.VolumeMounts, 2)
 }
@@ -283,7 +247,7 @@ func TestApplyCheckpointPodMetadata(t *testing.T) {
 		labels := map[string]string{}
 		annotations := map[string]string{}
 
-		ApplyCheckpointSourcePodMetadata(labels, annotations, testHash, "/checkpoints/"+testHash, "pvc")
+		snapshotpodspec.ApplyCheckpointSourceMetadata(labels, annotations, testHash, "/checkpoints/"+testHash, "pvc")
 
 		assert.Equal(t, consts.KubeLabelValueTrue, labels[consts.KubeLabelIsCheckpointSource])
 		assert.Equal(t, testHash, labels[consts.KubeLabelCheckpointHash])
@@ -331,7 +295,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, testPVCConfig()))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
-		assertRestoreTUNPresent(t, podSpec)
 	})
 
 	t.Run("ready checkpoint preserves published versioned location", func(t *testing.T) {
@@ -352,7 +315,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		podSpec := testPodSpec()
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, testInfo(), testPVCConfig()))
 		assert.Equal(t, []string{"python3"}, podSpec.Containers[0].Command)
-		assertRestoreTUNAbsent(t, podSpec)
 	})
 
 	t.Run("sets seccomp profile", func(t *testing.T) {

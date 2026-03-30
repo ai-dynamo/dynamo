@@ -23,19 +23,9 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotkube "github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/kube"
+	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
 	corev1 "k8s.io/api/core/v1"
 )
-
-func ApplyCheckpointSourcePodMetadata(
-	labels map[string]string,
-	annotations map[string]string,
-	hash string,
-	location string,
-	storageType nvidiacomv1alpha1.DynamoCheckpointStorageType,
-) {
-	snapshotkube.ApplyCheckpointSourceMetadata(labels, annotations, hash, location, string(storageType))
-}
 
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
 	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
@@ -47,19 +37,7 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		location = checkpointInfo.Location
 		storageType = string(checkpointInfo.StorageType)
 	}
-	snapshotkube.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
-}
-
-func ClearRestorePodMetadata(labels map[string]string, annotations map[string]string) {
-	snapshotkube.ApplyRestoreTargetMetadata(labels, annotations, false, "", "", "")
-}
-
-func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
-	snapshotkube.InjectCheckpointVolume(podSpec, pvcName)
-}
-
-func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
-	snapshotkube.InjectCheckpointVolumeMount(container, basePath)
+	snapshotpodspec.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
 }
 
 func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
@@ -179,12 +157,11 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	if info.Ready {
-		if err := snapshotkube.PrepareRestoreTargetPodSpec(podSpec, commonconsts.SeccompProfilePath); err != nil {
-			return err
-		}
-	} else {
-		snapshotkube.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
+		mainContainer.Command = []string{"sleep", "infinity"}
+		mainContainer.Args = nil
 	}
+
+	snapshotpodspec.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
 
 	storageType := configv1alpha1.CheckpointStorageTypePVC
 	var storageConfig *configv1alpha1.CheckpointStorageConfiguration
@@ -241,8 +218,8 @@ func injectCheckpointStorage(
 		if info.Location == "" {
 			info.Location = fmt.Sprintf("%s/%s", storageConfig.PVC.BasePath, info.Hash)
 		}
-		InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
-		InjectCheckpointVolumeMount(mainContainer, storageConfig.PVC.BasePath)
+		snapshotpodspec.InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
+		snapshotpodspec.InjectCheckpointVolumeMount(mainContainer, storageConfig.PVC.BasePath)
 		return nil
 	}
 }

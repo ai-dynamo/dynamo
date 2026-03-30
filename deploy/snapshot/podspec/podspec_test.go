@@ -1,4 +1,4 @@
-package kube
+package podspec
 
 import (
 	"testing"
@@ -188,61 +188,5 @@ func TestInjectRestoreTUN(t *testing.T) {
 	}
 	if container.VolumeMounts[0].Name != RestoreTUNVolumeName || container.VolumeMounts[0].MountPath != "/dev/net/tun" {
 		t.Fatalf("unexpected restore TUN mount: %#v", container.VolumeMounts[0])
-	}
-}
-
-func TestPrepareRestoreTargetPodSpec(t *testing.T) {
-	podSpec := corev1.PodSpec{
-		Containers: []corev1.Container{{
-			Name:    "main",
-			Command: []string{"python3"},
-			Args:    []string{"-m", "dynamo.vllm"},
-		}},
-	}
-
-	if err := PrepareRestoreTargetPodSpec(&podSpec, DefaultSeccompLocalhostProfile); err != nil {
-		t.Fatalf("prepare restore pod spec failed: %v", err)
-	}
-
-	container := podSpec.Containers[0]
-	if len(container.Command) != 2 || container.Command[0] != "sleep" || container.Command[1] != "infinity" {
-		t.Fatalf("unexpected restore command: %#v", container.Command)
-	}
-	if container.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
-	}
-	if !hasLocalhostSeccompProfile(&podSpec, DefaultSeccompLocalhostProfile) {
-		t.Fatalf("expected localhost seccomp profile to be present")
-	}
-	if !hasRestoreTUN(&podSpec, &container) {
-		t.Fatalf("expected restore TUN mount to be present")
-	}
-}
-
-func TestValidateRestoreTargetPod(t *testing.T) {
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:    "main",
-				Command: []string{"python3"},
-				Args:    []string{"-m", "dynamo.vllm"},
-			}},
-		},
-	}
-	storage := SnapshotStorage{PVCName: "snapshot-pvc", BasePath: "/checkpoints"}
-
-	InjectCheckpointVolume(&pod.Spec, storage.PVCName)
-	InjectCheckpointVolumeMount(&pod.Spec.Containers[0], storage.BasePath)
-	if err := PrepareRestoreTargetPodSpec(&pod.Spec, DefaultSeccompLocalhostProfile); err != nil {
-		t.Fatalf("prepare restore pod spec failed: %v", err)
-	}
-	if err := ValidateRestoreTargetPod(pod, storage, DefaultSeccompLocalhostProfile); err != nil {
-		t.Fatalf("validate restore target pod failed: %v", err)
-	}
-
-	badPod := pod.DeepCopy()
-	badPod.Spec.Containers[0].Command = []string{"python3"}
-	if err := ValidateRestoreTargetPod(badPod, storage, DefaultSeccompLocalhostProfile); err == nil {
-		t.Fatalf("expected validation to fail for non-placeholder restore pod")
 	}
 }

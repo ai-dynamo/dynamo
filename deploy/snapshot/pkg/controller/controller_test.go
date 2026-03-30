@@ -1,4 +1,4 @@
-package agentcontroller
+package controller
 
 import (
 	"context"

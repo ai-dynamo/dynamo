@@ -95,19 +95,6 @@ daemonset:
   # Affinity rules
   affinity: {}
 
-# Cluster-side SnapshotRequest controller
-controller:
-  enabled: true
-  replicas: 1
-  disableCudaCheckpointJobFile: false
-  resources:
-    limits:
-      cpu: 500m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
-
 # Seccomp profile configuration
 seccomp:
   # Deploy seccomp profile for blocking io_uring (required for CRIU)

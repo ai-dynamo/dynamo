@@ -1,8 +1,8 @@
-// Package agentcontroller implements the node-local control loop inside snapshot-agent.
+// Package controller implements the node-local control loop inside snapshot-agent.
 // It does not own CRDs or replace the operator. Instead it watches pod, job, and
 // lease state on the current node and delegates CRIU/CUDA execution to the
 // snapshot executor workflows.
-package agentcontroller
+package controller
 
 import (
 	"context"
@@ -28,19 +28,19 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/executor"
-	snapshotkube "github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/kube"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
 )
 
 const (
-	kubeLabelIsCheckpointSource         = snapshotkube.CheckpointSourceLabel
-	kubeLabelCheckpointHash             = snapshotkube.CheckpointHashLabel
-	kubeLabelIsRestoreTarget            = snapshotkube.RestoreTargetLabel
-	kubeAnnotationCheckpointLocation    = snapshotkube.CheckpointLocationAnnotation
-	kubeAnnotationCheckpointStorageType = snapshotkube.CheckpointStorageAnnotation
-	kubeAnnotationCheckpointStatus      = snapshotkube.CheckpointStatusAnnotation
-	kubeAnnotationRestoreStatus         = snapshotkube.RestoreStatusAnnotation
-	kubeAnnotationRestoreContainerID    = snapshotkube.RestoreContainerIDAnnotation
+	kubeLabelIsCheckpointSource         = snapshotpodspec.CheckpointSourceLabel
+	kubeLabelCheckpointHash             = snapshotpodspec.CheckpointHashLabel
+	kubeLabelIsRestoreTarget            = snapshotpodspec.RestoreTargetLabel
+	kubeAnnotationCheckpointLocation    = snapshotpodspec.CheckpointLocationAnnotation
+	kubeAnnotationCheckpointStorageType = snapshotpodspec.CheckpointStorageAnnotation
+	kubeAnnotationCheckpointStatus      = snapshotpodspec.CheckpointStatusAnnotation
+	kubeAnnotationRestoreStatus         = snapshotpodspec.RestoreStatusAnnotation
+	kubeAnnotationRestoreContainerID    = snapshotpodspec.RestoreContainerIDAnnotation
 )
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles

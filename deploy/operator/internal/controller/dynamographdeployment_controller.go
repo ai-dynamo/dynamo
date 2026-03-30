@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -57,7 +56,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	snapshotv1alpha1 "github.com/ai-dynamo/dynamo/deploy/snapshot/api/v1alpha1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
@@ -93,8 +91,6 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=snapshot.nvidia.com,resources=snapshotrequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=snapshot.nvidia.com,resources=snapshotrequests/status,verbs=get;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -238,15 +234,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	if reconcileResult.CheckpointsPending {
-		if state != nvidiacomv1alpha1.DGDStateFailed {
-			state = nvidiacomv1alpha1.DGDStatePending
-			reason = "checkpoint_pending"
-			message = "Waiting for checkpoint to become ready"
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-
 	return ctrl.Result{}, nil
 }
 
@@ -262,7 +249,6 @@ type ReconcileResult struct {
 	Message       Message
 	ServiceStatus map[string]nvidiacomv1alpha1.ServiceReplicaStatus
 	RestartStatus *nvidiacomv1alpha1.RestartStatus
-	CheckpointsPending bool
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (ReconcileResult, error) {
@@ -317,13 +303,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)
 	}
 	dynamoDeployment.Status.Checkpoints = checkpointStatuses
-	checkpointsPending := false
-	for _, checkpointInfo := range checkpointInfos {
-		if checkpointInfo != nil && checkpointInfo.Enabled && !checkpointInfo.Ready {
-			checkpointsPending = true
-			break
-		}
-	}
 
 	// Reconcile DynamoGraphDeploymentScalingAdapters for each service
 	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
@@ -370,9 +349,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
 		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
-		if err == nil {
-			err = r.syncGroveRestoreRequests(ctx, dynamoDeployment, checkpointInfos)
-		}
 	} else {
 		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
 		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
@@ -381,7 +357,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		logger.Error(err, "Failed to reconcile Dynamo components deployments")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
-	result.CheckpointsPending = checkpointsPending
 	result.RestartStatus = restartStatus
 	return result, nil
 }
@@ -1362,52 +1337,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	return checkpointStatuses, checkpointInfos, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) syncGroveRestoreRequests(
-	ctx context.Context,
-	dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment,
-	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) error {
-	for serviceName, checkpointInfo := range checkpointInfos {
-		if checkpointInfo == nil || !checkpointInfo.Ready || strings.TrimSpace(checkpointInfo.Hash) == "" {
-			continue
-		}
-
-		selector := dynamo.GetDCDResourceName(dynamoDeployment, serviceName, "")
-		pods := &corev1.PodList{}
-		if err := r.List(
-			ctx,
-			pods,
-			client.InNamespace(dynamoDeployment.Namespace),
-			client.MatchingLabels{consts.KubeLabelDynamoSelector: selector},
-		); err != nil {
-			return err
-		}
-
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			if pod.DeletionTimestamp != nil {
-				continue
-			}
-
-			requestName := checkpoint.RestoreRequestName(checkpointInfo.Hash, pod.Name)
-			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*snapshotv1alpha1.SnapshotRequest, bool, error) {
-				return checkpoint.BuildRestoreRequest(
-					dynamoDeployment.Namespace,
-					requestName,
-					checkpointInfo.Hash,
-					checkpointInfo.ArtifactVersion,
-					pod.Name,
-				), false, nil
-			})
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
 // createCheckpointCR creates a DynamoCheckpoint CR for a service in Auto mode
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	ctx context.Context,
@@ -1680,12 +1609,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the PVC
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		Owns(&snapshotv1alpha1.SnapshotRequest{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
