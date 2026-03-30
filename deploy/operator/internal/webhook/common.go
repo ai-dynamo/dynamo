@@ -121,35 +121,33 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 	return false
 }
 
-// DGDReplicasModifierSuffixes defines suffixes for service accounts that are authorized
-// to modify DGD replicas when scaling adapter is enabled.
-// Service accounts matching any of these suffixes are allowed regardless of namespace.
-var DGDReplicasModifierSuffixes = []string{
-	// Dynamo operator controller manager (handles DGDSA reconciliation)
-	// Example: "dynamo-platform-dynamo-operator-controller-manager"
-	"-dynamo-operator-controller-manager",
+// allowedDGDReplicasModifiers holds the exact SA names (not full usernames) that are
+// authorized to modify DGD replicas. Set from OperatorConfiguration at startup.
+// This replaces the previous suffix-based matching which was fragile when the
+// Helm fullname helper collapsed the release/chart name (see #7656).
+var allowedDGDReplicasModifiers []string
 
-	// Planner service account (manages DGD replicas for autoscaling)
-	// Example: "planner-serviceaccount"
-	"planner-serviceaccount",
+// SetAllowedDGDReplicasModifiers configures the exact SA names authorized to modify
+// DGD replicas. This should be called from main.go before starting the webhook server.
+func SetAllowedDGDReplicasModifiers(saNames []string) {
+	allowedDGDReplicasModifiers = saNames
 }
 
 // CanModifyDGDReplicas checks if the request comes from a service account authorized
 // to modify DGD replicas when scaling adapter is enabled.
 // Service accounts are identified by username format: system:serviceaccount:<namespace>:<name>
 //
-// Authorized service accounts (by suffix):
-// - *-dynamo-operator-controller-manager (for DGDSA reconciliation)
-// - *planner-serviceaccount (for Planner autoscaling)
+// The SA name is matched exactly against the config-provided allow-list, which is
+// populated by the Helm chart with the operator controller-manager SA and the
+// planner SA. This avoids fragile suffix-based matching that broke when the Helm
+// fullname helper collapsed the release/chart name (#7656).
 func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
 	username := userInfo.Username
 
-	// Service accounts have username format: system:serviceaccount:<namespace>:<name>
 	if !strings.HasPrefix(username, "system:serviceaccount:") {
 		return false
 	}
 
-	// Parse: system:serviceaccount:<namespace>:<name>
 	parts := strings.Split(username, ":")
 	if len(parts) != 4 {
 		return false
@@ -158,13 +156,12 @@ func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
 	namespace := parts[2]
 	saName := parts[3]
 
-	// Check against authorized suffixes
-	for _, suffix := range DGDReplicasModifierSuffixes {
-		if strings.HasSuffix(saName, suffix) {
+	for _, allowed := range allowedDGDReplicasModifiers {
+		if saName == allowed {
 			webhookCommonLog.V(1).Info("allowing DGD replicas modification",
 				"serviceAccount", saName,
 				"namespace", namespace,
-				"matchedSuffix", suffix)
+				"matchedAllowedSA", allowed)
 			return true
 		}
 	}

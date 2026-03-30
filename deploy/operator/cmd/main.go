@@ -686,6 +686,12 @@ func registerWebhooks(
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
+	if len(operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers) > 0 {
+		internalwebhook.SetAllowedDGDReplicasModifiers(operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers)
+		setupLog.Info("Configured allowed DGD replicas modifiers",
+			"allowedServiceAccounts", operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers)
+	}
+
 	setupLog.Info("Registering validation webhooks")
 
 	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
