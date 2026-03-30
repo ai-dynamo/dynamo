@@ -4,6 +4,7 @@
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, PotentialLoad, SchedulingRequest, SchedulingResponse,
+    TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -114,6 +115,9 @@ where
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
         overlaps: OverlapScores,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -128,6 +132,9 @@ where
                 isl_tokens,
                 token_seq,
                 overlaps,
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
                 router_config_override,
                 update_states,
                 lora_name,
@@ -181,10 +188,17 @@ where
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
         overlaps: OverlapScores,
+        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         self.inner
-            .get_potential_loads(token_seq, isl_tokens, overlaps, track_prefill_tokens)
+            .get_potential_loads(
+                token_seq,
+                isl_tokens,
+                overlaps,
+                effective_cached_tokens,
+                track_prefill_tokens,
+            )
     }
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {

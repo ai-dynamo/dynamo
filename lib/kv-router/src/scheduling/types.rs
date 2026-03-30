@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterConfigOverride;
 use crate::protocols::{DpRank, OverlapScores, WorkerId, WorkerWithDpRank};
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TierOverlapBlocks {
+    pub host_pinned: HashMap<WorkerWithDpRank, usize>,
+    pub disk: HashMap<WorkerWithDpRank, usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
     pub worker_id: WorkerId,
@@ -33,6 +39,8 @@ pub enum KvSchedulerError {
 pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub overlap_blocks: u32,
+    pub effective_overlap_blocks: f64,
+    pub cached_tokens: usize,
 }
 
 pub struct SchedulingRequest {
@@ -40,6 +48,9 @@ pub struct SchedulingRequest {
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub overlaps: OverlapScores,
+    pub tier_overlap_blocks: TierOverlapBlocks,
+    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+    pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
     pub decode_blocks: HashMap<WorkerWithDpRank, usize>,
     pub prefill_tokens: HashMap<WorkerWithDpRank, usize>,
     pub track_prefill_tokens: bool,

@@ -19,9 +19,7 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
-use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
-};
+use crate::protocols::{ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -83,6 +81,9 @@ pub enum SequenceError {
 
     #[error("Request {request_id} not found")]
     RequestNotFound { request_id: String },
+
+    #[error("Failed to publish replica-sync event: {0}")]
+    ReplicaSyncPublishFailed(String),
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
@@ -90,7 +91,7 @@ pub struct SequenceRequest {
     pub request_id: RequestId,
     pub token_sequence: Option<Vec<SequenceHash>>,
     pub isl: usize,
-    pub overlap: u32,
+    pub cached_tokens: usize,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
     pub worker: WorkerWithDpRank,
@@ -232,7 +233,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         ActiveSequenceEventData::AddRequest {
                             token_sequence,
                             isl,
-                            overlap,
+                            cached_tokens,
                             track_prefill_tokens,
                             expected_output_tokens,
                         } => {
@@ -250,7 +251,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     event.request_id.clone(),
                                     token_sequence.clone(),
                                     *isl,
-                                    *overlap,
+                                    *cached_tokens,
                                     *expected_output_tokens,
                                     *track_prefill_tokens,
                                 );
@@ -386,7 +387,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             request_id,
             token_sequence,
             isl,
-            overlap,
+            cached_tokens,
             track_prefill_tokens,
             expected_output_tokens,
             worker,
@@ -432,7 +433,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 request_id,
                 token_sequence,
                 isl,
-                overlap,
+                cached_tokens,
                 expected_output_tokens,
                 track_prefill_tokens,
             )
@@ -448,20 +449,34 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    pub fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        self.spawn_publish_event(ActiveSequenceEvent {
-            request_id: req.request_id.clone(),
-            worker: req.worker,
-            data: ActiveSequenceEventData::AddRequest {
-                token_sequence: req.token_sequence.clone(),
-                isl: req.isl,
-                overlap: req.overlap,
-                track_prefill_tokens: req.track_prefill_tokens,
-                expected_output_tokens: req.expected_output_tokens,
-            },
-            router_id: self.router_id,
-            lora_name: req.lora_name.clone(),
-        });
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: req.request_id.clone(),
+                worker: req.worker,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: req.token_sequence.clone(),
+                    isl: req.isl,
+                    cached_tokens: req.cached_tokens,
+                    track_prefill_tokens: req.track_prefill_tokens,
+                    expected_output_tokens: req.expected_output_tokens,
+                },
+                router_id: self.router_id,
+                lora_name: req.lora_name.clone(),
+            };
+            self.publisher
+                .publish_event(&event)
+                .await
+                .map_err(|e| SequenceError::ReplicaSyncPublishFailed(e.to_string()))?;
+        }
+
+        self.add_request_local(req)
+    }
+
+    pub fn add_request_sync(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        if self.replica_sync {
+            tracing::warn!("add_request_sync bypasses replica-sync event publication");
+        }
         self.add_request_local(req)
     }
 
@@ -673,19 +688,24 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlaps: OverlapScores,
+        cached_tokens: HashMap<WorkerWithDpRank, usize>,
     ) -> (
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
-        self.potential_blocks_and_tokens_with_prefill_tracking(token_sequence, isl, overlaps, true)
+        self.potential_blocks_and_tokens_with_prefill_tracking(
+            token_sequence,
+            isl,
+            cached_tokens,
+            true,
+        )
     }
 
     pub fn potential_blocks_and_tokens_with_prefill_tracking(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlaps: OverlapScores,
+        cached_tokens: HashMap<WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> (
         HashMap<WorkerWithDpRank, usize>,
@@ -703,14 +723,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let mut potential_tokens = HashMap::with_capacity(table.slots.len());
 
         for (worker, lock) in &table.slots {
-            let overlap = *overlaps.scores.get(worker).unwrap_or(&0);
+            let worker_cached_tokens = cached_tokens.get(worker).copied().unwrap_or(0);
 
             let (blocks, tokens) = lock
                 .read()
                 .potential_blocks_and_tokens_with_prefill_tracking(
                     token_sequence,
                     isl,
-                    overlap,
+                    worker_cached_tokens,
                     track_prefill_tokens,
                 );
             potential_blocks.insert(*worker, blocks);
@@ -860,12 +880,13 @@ mod tests {
                 request_id: "req-1".to_string(),
                 token_sequence: Some(vec![1, 2, 3]),
                 isl: 12,
-                overlap: 0,
+                cached_tokens: 0,
                 track_prefill_tokens: false,
                 expected_output_tokens: None,
                 worker,
                 lora_name: None,
             })
+            .await
             .unwrap();
 
         assert_eq!(sequences.active_tokens().get(&worker).copied(), Some(0));

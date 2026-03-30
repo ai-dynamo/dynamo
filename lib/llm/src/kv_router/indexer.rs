@@ -16,7 +16,8 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{
         IndexerQueryRequest, IndexerQueryResponse, KV_INDEXER_QUERY_ENDPOINT, KvIndexer,
-        KvIndexerInterface, KvIndexerMetrics, KvRouterError,
+        KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
+        LowerTierMatchDetails, MatchDetails,
     },
     protocols::{
         LocalBlockHash, OverlapScores, RouterEvent, StorageTier, TokensWithHashes, WorkerId,
@@ -51,6 +52,78 @@ fn get_or_create_lower_tier_indexer(
 fn all_lower_tier_indexers(indexers: &LowerTierIndexers) -> Vec<Arc<LowerTierIndexer>> {
     let lower_tier_indexers = indexers.lock().unwrap();
     lower_tier_indexers.values().cloned().collect()
+}
+
+fn get_lower_tier_indexer(
+    indexers: &LowerTierIndexers,
+    storage_tier: StorageTier,
+) -> Option<Arc<LowerTierIndexer>> {
+    let lower_tier_indexers = indexers.lock().unwrap();
+    lower_tier_indexers.get(&storage_tier).cloned()
+}
+
+fn lower_tier_query_order() -> [StorageTier; 3] {
+    [
+        StorageTier::HostPinned,
+        StorageTier::Disk,
+        StorageTier::External,
+    ]
+}
+
+fn query_lower_tiers(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    let mut continuations = LowerTierMatchDetails::default().next_continuations;
+    for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
+        let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
+            debug_assert!(
+                false,
+                "device match result missing last matched hash for worker {worker:?}"
+            );
+            continue;
+        };
+
+        continuations.insert(
+            *worker,
+            LowerTierContinuation::new(*matched_blocks as usize, last_hash),
+        );
+    }
+
+    let mut lower_tier_matches = HashMap::new();
+
+    for storage_tier in lower_tier_query_order() {
+        let Some(indexer) = get_lower_tier_indexer(indexers, storage_tier) else {
+            continue;
+        };
+
+        for worker in indexer.workers() {
+            continuations
+                .entry(worker)
+                .or_insert_with(|| LowerTierContinuation::from_root(0));
+        }
+
+        let tier_matches = indexer.query_match_details(sequence, &continuations);
+        let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
+        tracing::debug!(
+            ?storage_tier,
+            queried_workers = continuations.len(),
+            matched_workers,
+            "Queried lower-tier indexer"
+        );
+        continuations = tier_matches.next_continuations.clone();
+        lower_tier_matches.insert(storage_tier, tier_matches);
+    }
+
+    lower_tier_matches
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TieredMatchDetails {
+    pub device: MatchDetails,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
 }
 
 pub struct RemoteIndexer {
@@ -184,19 +257,53 @@ impl Indexer {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
+        self.find_match_details(sequence)
+            .await
+            .map(|details| details.overlap_scores)
+    }
+
+    pub(crate) async fn find_match_details(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<MatchDetails, KvRouterError> {
         match self {
-            Self::KvIndexer { primary, .. } => primary.find_matches(sequence).await,
-            Self::Concurrent { primary, .. } => primary.find_matches(sequence).await,
-            Self::Remote(remote) => remote.find_matches(sequence).await.map_err(|e| {
-                tracing::warn!(error = %e, "Remote indexer query failed");
-                KvRouterError::IndexerOffline
-            }),
-            Self::None => Ok(OverlapScores::new()),
+            Self::KvIndexer { primary, .. } => primary.find_match_details(sequence).await,
+            Self::Concurrent { primary, .. } => {
+                Ok(primary.backend().find_match_details_impl(&sequence, false))
+            }
+            Self::Remote(remote) => remote
+                .find_matches(sequence)
+                .await
+                .map(|overlap_scores| MatchDetails {
+                    overlap_scores,
+                    ..Default::default()
+                })
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "Remote indexer query failed");
+                    KvRouterError::IndexerOffline
+                }),
+            Self::None => Ok(MatchDetails::new()),
         }
+    }
+
+    pub(crate) async fn find_matches_by_tier(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        let device = self.find_match_details(sequence.clone()).await?;
+        let lower_tier = match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                query_lower_tiers(lower_tier, &sequence, &device)
+            }
+            Self::Remote(_) | Self::None => HashMap::new(),
+        };
+
+        Ok(TieredMatchDetails { device, lower_tier })
     }
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
@@ -336,5 +443,207 @@ impl Indexer {
             Self::Concurrent { primary, .. } => primary.backend().get_workers(),
             Self::Remote(_) | Self::None => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::{Indexer, new_lower_tier_indexers};
+    use dynamo_kv_router::{
+        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics},
+        protocols::{
+            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+            KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerWithDpRank,
+            compute_seq_hash_for_block,
+        },
+    };
+
+    fn make_test_indexer() -> Indexer {
+        Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: new_lower_tier_indexers(),
+        }
+    }
+
+    async fn flush_primary(indexer: &Indexer) {
+        match indexer {
+            Indexer::KvIndexer { primary, .. } => {
+                let _ = primary.flush().await;
+            }
+            Indexer::Concurrent { primary, .. } => {
+                primary.flush().await;
+            }
+            Indexer::Remote(_) | Indexer::None => {}
+        }
+    }
+
+    fn store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        prefix_hashes: &[u64],
+        local_hashes: &[u64],
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        let prefix_block_hashes: Vec<LocalBlockHash> =
+            prefix_hashes.iter().copied().map(LocalBlockHash).collect();
+        let parent_hash = compute_seq_hash_for_block(&prefix_block_hashes)
+            .last()
+            .copied()
+            .map(ExternalSequenceBlockHash);
+
+        let full_hashes: Vec<LocalBlockHash> = prefix_hashes
+            .iter()
+            .chain(local_hashes.iter())
+            .copied()
+            .map(LocalBlockHash)
+            .collect();
+        let full_sequence_hashes = compute_seq_hash_for_block(&full_hashes);
+        let new_sequence_hashes = &full_sequence_hashes[prefix_hashes.len()..];
+        let blocks = local_hashes
+            .iter()
+            .zip(new_sequence_hashes.iter())
+            .map(|(&local_hash, &sequence_hash)| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(sequence_hash),
+                tokens_hash: LocalBlockHash(local_hash),
+                mm_extra_info: None,
+            })
+            .collect();
+
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash,
+                    blocks,
+                }),
+                dp_rank,
+            },
+            storage_tier,
+        )
+    }
+
+    #[tokio::test]
+    async fn tiered_query_chains_device_host_and_disk() {
+        let indexer = make_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                3,
+                &[11, 12, 13],
+                &[14],
+                StorageTier::Disk,
+            ))
+            .await;
+        flush_primary(&indexer).await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![
+                LocalBlockHash(11),
+                LocalBlockHash(12),
+                LocalBlockHash(13),
+                LocalBlockHash(14),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&2));
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|tier| tier.hits.get(&worker)),
+            Some(&1)
+        );
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::Disk)
+                .and_then(|tier| tier.hits.get(&worker)),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn tiered_query_seeds_lower_tier_only_workers_without_affecting_device_scores() {
+        let indexer = make_test_indexer();
+        let device_worker = WorkerWithDpRank::new(10, 0);
+        let host_only_worker = WorkerWithDpRank::new(20, 0);
+        let disk_only_worker = WorkerWithDpRank::new(30, 0);
+
+        indexer
+            .apply_event(store_event(10, 0, 1, &[], &[21], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(20, 0, 2, &[], &[21], StorageTier::HostPinned))
+            .await;
+        indexer
+            .apply_event(store_event(30, 0, 3, &[], &[21], StorageTier::Disk))
+            .await;
+        flush_primary(&indexer).await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(21)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            matches.device.overlap_scores.scores.get(&device_worker),
+            Some(&1)
+        );
+        assert!(
+            !matches
+                .device
+                .overlap_scores
+                .scores
+                .contains_key(&host_only_worker)
+        );
+        assert!(
+            !matches
+                .device
+                .overlap_scores
+                .scores
+                .contains_key(&disk_only_worker)
+        );
+
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|tier| tier.hits.get(&host_only_worker)),
+            Some(&1)
+        );
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::Disk)
+                .and_then(|tier| tier.hits.get(&disk_only_worker)),
+            Some(&1)
+        );
     }
 }

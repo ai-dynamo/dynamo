@@ -36,6 +36,8 @@ struct WorkerSelection {
     instance_id: u64,
     dp_rank: u32,
     overlap_amount: u32,
+    effective_overlap_blocks: f64,
+    cached_tokens: usize,
 }
 
 /// Drop guard that manages the full lifecycle of a routed request:
@@ -216,9 +218,9 @@ impl KvPushRouter {
 
         let Some(id) = preselected_id else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let (best_worker, overlap_amount) = self
+            let selection = self
                 .chooser
-                .find_best_match(
+                .find_best_match_details(
                     Some(context_id),
                     routing_token_ids,
                     block_mm_infos,
@@ -230,6 +232,8 @@ impl KvPushRouter {
                     allowed_worker_ids,
                 )
                 .await?;
+            let best_worker = selection.worker;
+            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -256,6 +260,8 @@ impl KvPushRouter {
                 instance_id: best_worker.worker_id,
                 dp_rank: best_worker.dp_rank,
                 overlap_amount,
+                effective_overlap_blocks: selection.cache_hit.effective_overlap_blocks,
+                cached_tokens: selection.cache_hit.cached_tokens,
             });
         };
 
@@ -267,15 +273,16 @@ impl KvPushRouter {
         );
 
         let worker = WorkerWithDpRank::new(id, dp_rank);
-        let overlap_blocks = self
+        let cache_hit = self
             .chooser
-            .get_overlap_blocks(
+            .get_cache_hit_estimate(
                 routing_token_ids,
                 block_mm_infos,
                 worker,
                 lora_name.as_deref(),
             )
             .await?;
+        let overlap_blocks = cache_hit.rounded_overlap_blocks();
 
         if !is_query_only {
             self.chooser
@@ -283,7 +290,7 @@ impl KvPushRouter {
                     context_id.to_string(),
                     routing_token_ids,
                     block_mm_infos,
-                    overlap_blocks,
+                    cache_hit.cached_tokens,
                     expected_output_tokens,
                     worker,
                     lora_name,
@@ -303,6 +310,8 @@ impl KvPushRouter {
             instance_id: id,
             dp_rank,
             overlap_amount: overlap_blocks,
+            effective_overlap_blocks: cache_hit.effective_overlap_blocks,
+            cached_tokens: cache_hit.cached_tokens,
         })
     }
 }
@@ -356,6 +365,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             instance_id,
             dp_rank,
             overlap_amount,
+            effective_overlap_blocks,
+            cached_tokens,
         } = selection;
 
         // In approximate mode (use_kv_events=false), record the routing decision
@@ -395,11 +406,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
-            tracker.record_kv_hit(overlap_amount, isl_blocks);
-            tracker.record_isl(
-                routing_token_ids.len(),
-                overlap_amount as usize * block_size,
-            );
+            tracker.record_kv_hit(effective_overlap_blocks, isl_blocks);
+            tracker.record_isl(routing_token_ids.len(), cached_tokens);
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
             tracker.record_router_queue_depth(self.chooser.pending_count());
             if let Some(hit_rate) = tracker.kv_hit_rate() {

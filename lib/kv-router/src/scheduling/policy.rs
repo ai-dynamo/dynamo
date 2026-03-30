@@ -68,6 +68,7 @@ impl SchedulingPolicy for LcfsPolicy {
 /// (Smith 1956). Short or high-priority requests are scheduled before
 /// long low-priority ones, reducing mean latency across the batch.
 pub struct WsptPolicy {
+    #[allow(dead_code)]
     pub block_size: usize,
 }
 
@@ -76,8 +77,12 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let max_overlap = request.overlaps.scores.values().copied().max().unwrap_or(0) as usize;
-        let cached_tokens = max_overlap * self.block_size;
+        let cached_tokens = request
+            .effective_cached_tokens
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0);
         let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
         OrderedFloat(weight / new_tokens as f64)
     }
@@ -128,11 +133,24 @@ mod tests {
         priority_jump: f64,
         overlaps: OverlapScores,
     ) -> SchedulingRequest {
+        let effective_overlap_blocks = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as f64))
+            .collect();
+        let effective_cached_tokens = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as usize * 16))
+            .collect();
         SchedulingRequest {
             maybe_request_id: None,
             token_seq: None,
             isl_tokens,
             overlaps,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks,
+            effective_cached_tokens,
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             track_prefill_tokens: true,

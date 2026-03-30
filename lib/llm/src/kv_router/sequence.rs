@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(), 16);
 
-        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 4, None);
+        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 16, None);
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(), 16);
 
@@ -217,38 +217,44 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        seq_manager_1.add_request(SequenceRequest {
-            request_id: "request_0".to_string(),
-            token_sequence: Some(vec![0, 1, 2]),
-            isl: 12,
-            overlap: 0,
-            track_prefill_tokens: true,
-            expected_output_tokens: None,
-            worker: WorkerWithDpRank::new(0, 0),
-            lora_name: None,
-        })?;
+        seq_manager_1
+            .add_request(SequenceRequest {
+                request_id: "request_0".to_string(),
+                token_sequence: Some(vec![0, 1, 2]),
+                isl: 12,
+                cached_tokens: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(0, 0),
+                lora_name: None,
+            })
+            .await?;
 
-        seq_manager_1.add_request(SequenceRequest {
-            request_id: "request_1".to_string(),
-            token_sequence: Some(vec![3, 4]),
-            isl: 8,
-            overlap: 0,
-            track_prefill_tokens: true,
-            expected_output_tokens: None,
-            worker: WorkerWithDpRank::new(0, 1),
-            lora_name: None,
-        })?;
+        seq_manager_1
+            .add_request(SequenceRequest {
+                request_id: "request_1".to_string(),
+                token_sequence: Some(vec![3, 4]),
+                isl: 8,
+                cached_tokens: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(0, 1),
+                lora_name: None,
+            })
+            .await?;
 
-        seq_manager_2.add_request(SequenceRequest {
-            request_id: "request_2".to_string(),
-            token_sequence: Some(vec![0, 1, 2, 3]),
-            isl: 16,
-            overlap: 0,
-            track_prefill_tokens: true,
-            expected_output_tokens: None,
-            worker: WorkerWithDpRank::new(1, 0),
-            lora_name: None,
-        })?;
+        seq_manager_2
+            .add_request(SequenceRequest {
+                request_id: "request_2".to_string(),
+                token_sequence: Some(vec![0, 1, 2, 3]),
+                isl: 16,
+                cached_tokens: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(1, 0),
+                lora_name: None,
+            })
+            .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -364,38 +370,44 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        seq_manager_1.add_request(SequenceRequest {
-            request_id: "request_0".to_string(),
-            token_sequence: None,
-            isl: 12,
-            overlap: 0,
-            track_prefill_tokens: true,
-            expected_output_tokens: None,
-            worker: WorkerWithDpRank::from_worker_id(0),
-            lora_name: None,
-        })?;
+        seq_manager_1
+            .add_request(SequenceRequest {
+                request_id: "request_0".to_string(),
+                token_sequence: None,
+                isl: 12,
+                cached_tokens: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(0),
+                lora_name: None,
+            })
+            .await?;
 
-        seq_manager_1.add_request(SequenceRequest {
-            request_id: "request_1".to_string(),
-            token_sequence: None,
-            isl: 8,
-            overlap: 0,
-            track_prefill_tokens: true,
-            expected_output_tokens: None,
-            worker: WorkerWithDpRank::from_worker_id(1),
-            lora_name: None,
-        })?;
+        seq_manager_1
+            .add_request(SequenceRequest {
+                request_id: "request_1".to_string(),
+                token_sequence: None,
+                isl: 8,
+                cached_tokens: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(1),
+                lora_name: None,
+            })
+            .await?;
 
-        seq_manager_2.add_request(SequenceRequest {
-            request_id: "request_2".to_string(),
-            token_sequence: None,
-            isl: 16,
-            overlap: 0,
-            track_prefill_tokens: true,
-            expected_output_tokens: None,
-            worker: WorkerWithDpRank::from_worker_id(2),
-            lora_name: None,
-        })?;
+        seq_manager_2
+            .add_request(SequenceRequest {
+                request_id: "request_2".to_string(),
+                token_sequence: None,
+                isl: 16,
+                cached_tokens: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(2),
+                lora_name: None,
+            })
+            .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 

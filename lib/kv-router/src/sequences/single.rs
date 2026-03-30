@@ -141,14 +141,14 @@ impl ActiveSequences {
         request_id: RequestId,
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
-        overlap: u32,
+        cached_tokens: usize,
         expected_output_tokens: Option<u32>,
     ) -> HashSet<RequestId> {
         self.add_request_with_prefill_tracking(
             request_id,
             token_sequence,
             isl,
-            overlap,
+            cached_tokens,
             expected_output_tokens,
             true,
         )
@@ -161,7 +161,7 @@ impl ActiveSequences {
         request_id: RequestId,
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
-        overlap: u32,
+        cached_tokens: usize,
         expected_output_tokens: Option<u32>,
         track_prefill_tokens: bool,
     ) -> HashSet<RequestId> {
@@ -175,7 +175,7 @@ impl ActiveSequences {
         let removed_requests = self.force_expiry();
 
         let prefill_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, overlap)
+            self.new_tokens(isl, cached_tokens)
         } else {
             0
         };
@@ -216,13 +216,11 @@ impl ActiveSequences {
         }
     }
 
-    pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
-        let cached_tokens = (overlap as usize) * self.block_size;
+    pub fn new_tokens(&self, isl: usize, cached_tokens: usize) -> usize {
         isl.checked_sub(cached_tokens)
             .unwrap_or_else(|| {
                 tracing::error!(
-                    "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
-                    self.block_size
+                    "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens}, returning 0"
                 );
                 0
             })
@@ -232,16 +230,21 @@ impl ActiveSequences {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlap: u32,
+        cached_tokens: usize,
     ) -> (usize, usize) {
-        self.potential_blocks_and_tokens_with_prefill_tracking(token_sequence, isl, overlap, true)
+        self.potential_blocks_and_tokens_with_prefill_tracking(
+            token_sequence,
+            isl,
+            cached_tokens,
+            true,
+        )
     }
 
     pub fn potential_blocks_and_tokens_with_prefill_tracking(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlap: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> (usize, usize) {
         let potential_blocks = if let Some(token_seq) = token_sequence {
@@ -250,7 +253,7 @@ impl ActiveSequences {
             self.active_blocks()
         };
         let potential_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, overlap) + self.active_tokens
+            self.new_tokens(isl, cached_tokens) + self.active_tokens
         } else {
             self.active_tokens
         };
@@ -386,7 +389,7 @@ mod tests {
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(), 16);
 
-        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 4, None);
+        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 16, None);
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(), 16);
 

@@ -196,7 +196,7 @@ impl<
             .potential_blocks_and_tokens_with_prefill_tracking(
                 request.token_seq.as_deref(),
                 request.isl_tokens,
-                request.overlaps.clone(),
+                request.effective_cached_tokens.clone(),
                 request.track_prefill_tokens,
             );
         request.decode_blocks = decode_blocks;
@@ -220,6 +220,8 @@ impl<
         request.respond(Ok(SchedulingResponse {
             best_worker: selection.worker,
             overlap_blocks: selection.overlap_blocks,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
         }));
 
         if !request.update_states {
@@ -231,16 +233,20 @@ impl<
             return;
         };
 
-        if let Err(e) = self.slots.add_request(SequenceRequest {
-            request_id: request_id.clone(),
-            token_sequence: request.token_seq,
-            isl: request.isl_tokens,
-            overlap: selection.overlap_blocks,
-            track_prefill_tokens: request.track_prefill_tokens,
-            expected_output_tokens: request.expected_output_tokens,
-            worker: selection.worker,
-            lora_name: request.lora_name.clone(),
-        }) {
+        if let Err(e) = self
+            .slots
+            .add_request(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: request.token_seq,
+                isl: request.isl_tokens,
+                cached_tokens: selection.cached_tokens,
+                track_prefill_tokens: request.track_prefill_tokens,
+                expected_output_tokens: request.expected_output_tokens,
+                worker: selection.worker,
+                lora_name: request.lora_name.clone(),
+            })
+            .await
+        {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
     }
@@ -374,6 +380,9 @@ mod tests {
             token_seq: None,
             isl_tokens,
             overlaps: OverlapScores::default(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             track_prefill_tokens: true,
@@ -690,6 +699,9 @@ mod tests {
             token_seq: None,
             isl_tokens: isl,
             overlaps: OverlapScores::default(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             track_prefill_tokens: true,

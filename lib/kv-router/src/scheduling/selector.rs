@@ -126,8 +126,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let isl = request.isl_tokens;
         let request_blocks = isl.div_ceil(block_size as usize);
-        let overlaps = &request.overlaps.scores;
-
         let decode_blocks = &request.decode_blocks;
         let prefill_tokens = &request.prefill_tokens;
 
@@ -144,7 +142,22 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(self.kv_router_config.router_temperature);
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let overlap = *overlaps.get(&worker).unwrap_or(&0);
+            let effective_overlap_blocks = *request
+                .effective_overlap_blocks
+                .get(&worker)
+                .unwrap_or(&0.0);
+            let host_pinned_overlap_blocks = request
+                .tier_overlap_blocks
+                .host_pinned
+                .get(&worker)
+                .copied()
+                .unwrap_or(0);
+            let disk_overlap_blocks = request
+                .tier_overlap_blocks
+                .disk
+                .get(&worker)
+                .copied()
+                .unwrap_or(0);
             let prefill_token = *prefill_tokens.get(&worker).unwrap_or(&isl);
             let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
             let decode_block = *decode_blocks
@@ -155,11 +168,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let logit = overlap_weight * potential_prefill_block + decode_block;
 
             tracing::debug!(
-                "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
+                "Formula for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks \
+                 (host_pinned={} disk={}): {logit:.3} \
                  = {overlap_weight:.1} * prefill_blocks + decode_blocks \
                  = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
                 worker.worker_id,
-                worker.dp_rank
+                worker.dp_rank,
+                host_pinned_overlap_blocks,
+                disk_overlap_blocks,
             );
 
             logit
@@ -218,22 +234,56 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             softmax_sample(&worker_logits, temperature)
         };
 
+        let best_host_pinned_overlap_blocks = request
+            .tier_overlap_blocks
+            .host_pinned
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0);
+        let best_disk_overlap_blocks = request
+            .tier_overlap_blocks
+            .disk
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0);
+
         if self.worker_type == "decode" {
             tracing::info!(
-                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}",
+                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, host_pinned blocks: {}, disk blocks: {}",
                 self.worker_type,
                 best_worker.worker_id,
                 best_worker.dp_rank,
                 best_logit,
+                best_host_pinned_overlap_blocks,
+                best_disk_overlap_blocks,
             );
             return Ok(WorkerSelectionResult {
                 worker: best_worker,
                 required_blocks: request_blocks as u64,
-                overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+                overlap_blocks: request
+                    .effective_overlap_blocks
+                    .get(&best_worker)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .round() as u32,
+                effective_overlap_blocks: request
+                    .effective_overlap_blocks
+                    .get(&best_worker)
+                    .copied()
+                    .unwrap_or(0.0),
+                cached_tokens: request
+                    .effective_cached_tokens
+                    .get(&best_worker)
+                    .copied()
+                    .unwrap_or(0),
             });
         }
 
-        let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
+        let best_overlap = request
+            .effective_overlap_blocks
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0.0);
 
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
@@ -249,12 +299,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(0);
 
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
+            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}, tree size: {}{}",
             self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,
             best_logit,
             best_overlap,
+            best_host_pinned_overlap_blocks,
+            best_disk_overlap_blocks,
             tree_size,
             total_blocks_info
         );
@@ -262,7 +314,22 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         Ok(WorkerSelectionResult {
             worker: best_worker,
             required_blocks: request_blocks as u64,
-            overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+            overlap_blocks: request
+                .effective_overlap_blocks
+                .get(&best_worker)
+                .copied()
+                .unwrap_or(0.0)
+                .round() as u32,
+            effective_overlap_blocks: request
+                .effective_overlap_blocks
+                .get(&best_worker)
+                .copied()
+                .unwrap_or(0.0),
+            cached_tokens: request
+                .effective_cached_tokens
+                .get(&best_worker)
+                .copied()
+                .unwrap_or(0),
         })
     }
 }

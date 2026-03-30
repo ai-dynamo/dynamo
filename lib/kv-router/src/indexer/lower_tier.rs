@@ -219,6 +219,12 @@ impl LowerTierContinuation {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LowerTierMatchDetails {
+    pub hits: FxHashMap<WorkerWithDpRank, usize>,
+    pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
+}
+
 /// Standalone lower-tier continuation index.
 pub struct LowerTierIndexer {
     workers: DashMap<WorkerWithDpRank, WorkerState, FxBuildHasher>,
@@ -284,6 +290,10 @@ impl LowerTierIndexer {
             .remove(&WorkerWithDpRank::new(worker_id, dp_rank));
     }
 
+    pub fn workers(&self) -> Vec<WorkerWithDpRank> {
+        self.workers.iter().map(|entry| *entry.key()).collect()
+    }
+
     pub fn query_contiguous_hits(
         &self,
         local_hashes: &[LocalBlockHash],
@@ -303,6 +313,38 @@ impl LowerTierIndexer {
 
         results
     }
+
+    pub fn query_match_details(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
+    ) -> LowerTierMatchDetails {
+        let mut results = LowerTierMatchDetails::default();
+
+        for (worker, continuation) in continuations {
+            let (hits, final_hash) = match self.workers.get(worker) {
+                Some(worker_state) => {
+                    continuation_progress_for_worker(&worker_state, local_hashes, *continuation)
+                }
+                None => (0, None),
+            };
+
+            results.hits.insert(*worker, hits);
+            let next_continuation = if hits == 0 {
+                *continuation
+            } else {
+                LowerTierContinuation {
+                    start_pos: continuation.start_pos + hits,
+                    last_matched_hash: final_hash.or(continuation.last_matched_hash),
+                }
+            };
+            results
+                .next_continuations
+                .insert(*worker, next_continuation);
+        }
+
+        results
+    }
 }
 
 impl Default for LowerTierIndexer {
@@ -316,13 +358,22 @@ fn contiguous_hits_for_worker(
     local_hashes: &[LocalBlockHash],
     continuation: LowerTierContinuation,
 ) -> usize {
+    continuation_progress_for_worker(worker_state, local_hashes, continuation).0
+}
+
+fn continuation_progress_for_worker(
+    worker_state: &WorkerState,
+    local_hashes: &[LocalBlockHash],
+    continuation: LowerTierContinuation,
+) -> (usize, Option<ExternalSequenceBlockHash>) {
     if continuation.start_pos >= local_hashes.len() {
-        return 0;
+        return (0, None);
     }
 
     let mut count = 0usize;
     let mut position = continuation.start_pos;
     let mut parent_hash = continuation.last_matched_hash;
+    let mut last_matched_hash = None;
 
     while position < local_hashes.len() {
         let Some(child_hash) = worker_state.next_child(parent_hash, local_hashes[position]) else {
@@ -330,10 +381,11 @@ fn contiguous_hits_for_worker(
         };
         count += 1;
         parent_hash = Some(child_hash);
+        last_matched_hash = Some(child_hash);
         position += 1;
     }
 
-    count
+    (count, last_matched_hash)
 }
 
 #[cfg(test)]

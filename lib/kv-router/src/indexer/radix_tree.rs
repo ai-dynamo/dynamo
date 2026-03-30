@@ -23,6 +23,7 @@ use std::{
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::MatchDetails;
 use crate::protocols::*;
 
 /// A shared reference to a [`RadixBlock`].
@@ -152,12 +153,20 @@ impl RadixTree {
     ///
     /// ### Returns
     ///
-    /// An `OverlapScores` representing the match scores.
-    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
-        let mut scores = OverlapScores::new();
+    /// A `MatchDetails` representing overlap scores plus continuation state.
+    pub fn find_match_details(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+    ) -> MatchDetails {
+        let mut details = MatchDetails::new();
+        let MatchDetails {
+            overlap_scores: scores,
+            last_matched_hashes,
+        } = &mut details;
 
         if sequence.is_empty() {
-            return scores;
+            return details;
         }
 
         let now = Instant::now();
@@ -174,7 +183,7 @@ impl RadixTree {
         };
 
         let Some(first_child) = first_child else {
-            return scores;
+            return details;
         };
 
         // Initialize active worker set from first child.
@@ -198,12 +207,18 @@ impl RadixTree {
         }
 
         if active.is_empty() {
-            return scores;
+            return details;
         }
+
+        let mut current_hash = first_child
+            .borrow()
+            .block_hash
+            .expect("matched radix node must have a block hash");
 
         if early_exit && active_count == 1 {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
+                last_matched_hashes.insert(*worker, current_hash);
             }
             for worker in scores.scores.keys() {
                 let tree_size = self
@@ -213,7 +228,7 @@ impl RadixTree {
                     .len();
                 scores.tree_sizes.insert(*worker, tree_size);
             }
-            return scores;
+            return details;
         }
 
         let mut current = first_child;
@@ -249,6 +264,7 @@ impl RadixTree {
                     for worker in &active {
                         if !borrow.workers.contains(worker) {
                             scores.scores.insert(*worker, matched_depth);
+                            last_matched_hashes.insert(*worker, current_hash);
                         }
                     }
                     active.clone_from(&borrow.workers);
@@ -261,6 +277,7 @@ impl RadixTree {
                             true
                         } else {
                             scores.scores.insert(*w, matched_depth);
+                            last_matched_hashes.insert(*w, current_hash);
                             false
                         }
                     });
@@ -288,9 +305,17 @@ impl RadixTree {
 
             if early_exit && active_count == 1 {
                 matched_depth = (idx + 1) as u32;
+                current_hash = block
+                    .borrow()
+                    .block_hash
+                    .expect("matched radix node must have a block hash");
                 break;
             }
 
+            current_hash = block
+                .borrow()
+                .block_hash
+                .expect("matched radix node must have a block hash");
             current = block;
             matched_depth = (idx + 1) as u32;
         }
@@ -298,6 +323,7 @@ impl RadixTree {
         // Record scores for workers that survived through the deepest matched level.
         for worker in &active {
             scores.scores.insert(*worker, matched_depth);
+            last_matched_hashes.insert(*worker, current_hash);
         }
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
@@ -312,7 +338,12 @@ impl RadixTree {
             scores.tree_sizes.insert(*worker, tree_size);
         }
 
-        scores
+        details
+    }
+
+    /// An `OverlapScores` representing the match scores.
+    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+        self.find_match_details(sequence, early_exit).overlap_scores
     }
 
     /// Apply a [`RouterEvent`] to the radix tree.

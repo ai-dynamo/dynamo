@@ -353,9 +353,14 @@ pub struct WorkerSelectionResult {
     /// The total number of blocks required to prefill the request
     pub required_blocks: u64,
 
-    /// The number of blocks that the selected worker may already have cached.
-    /// This is not a guarantee, but an estimate.
+    /// Approximate effective cache hit on the selected worker, rounded to whole blocks.
     pub overlap_blocks: u32,
+
+    /// Approximate effective cache hit on the selected worker in fractional blocks.
+    pub effective_overlap_blocks: f64,
+
+    /// Approximate cached-token count derived from the weighted cache hit.
+    pub cached_tokens: usize,
 }
 
 /// Active load metrics for a worker, used for busy detection.
@@ -434,7 +439,7 @@ pub enum ActiveSequenceEventData {
     AddRequest {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
-        overlap: u32,
+        cached_tokens: usize,
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,

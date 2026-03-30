@@ -11,7 +11,9 @@ use tokio_util::sync::CancellationToken;
 use super::policy::{RouterSchedulingPolicy, SchedulingPolicy};
 use super::queue::SchedulerQueue;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
+use super::types::{
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+};
 use crate::protocols::{OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
@@ -149,6 +151,9 @@ where
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
         overlaps: OverlapScores,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -165,6 +170,9 @@ where
             token_seq,
             isl_tokens,
             overlaps,
+            tier_overlap_blocks,
+            effective_overlap_blocks,
+            effective_cached_tokens,
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             track_prefill_tokens,
@@ -192,7 +200,7 @@ where
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        self.slots.add_request(req)
+        self.slots.add_request(req).await
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
@@ -228,7 +236,8 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        overlaps: OverlapScores,
+        _overlaps: OverlapScores,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         let (decode_blocks, prefill_tokens) = self
@@ -236,7 +245,7 @@ where
             .potential_blocks_and_tokens_with_prefill_tracking(
                 token_seq.as_deref(),
                 isl_tokens,
-                overlaps,
+                effective_cached_tokens,
                 track_prefill_tokens,
             );
 
@@ -337,6 +346,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
@@ -374,6 +386,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 Some(&crate::config::RouterConfigOverride {
                     track_prefill_tokens: Some(false),
                     ..Default::default()
@@ -399,6 +414,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_schedule_uses_weighted_cached_tokens_for_active_tracking() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        let response = scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![1, 2, 3, 4]),
+                OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::from([(worker, 0.75)]),
+                HashMap::from([(worker, 48)]),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.best_worker, worker);
+        assert_eq!(response.cached_tokens, 48);
+        assert_eq!(response.overlap_blocks, 1);
+        assert_eq!(
+            slots.active_tokens().get(&worker).copied(),
+            Some(16),
+            "weighted cached tokens should reduce tracked prefill load",
+        );
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn test_mark_prefill_completed_drains_pending_queue() {
         let mut workers = HashMap::new();
         workers.insert(
@@ -416,6 +475,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -435,6 +497,9 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         OverlapScores::default(),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -474,6 +539,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
@@ -514,9 +582,10 @@ mod tests {
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true);
         let token_seq = vec![11, 22, 33, 44];
         let overlaps = OverlapScores::default();
+        let cached_tokens = HashMap::new();
 
         let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), 128, overlaps.clone());
+            slots.potential_blocks_and_tokens(Some(&token_seq), 128, cached_tokens.clone());
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
@@ -528,7 +597,8 @@ mod tests {
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
-        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, overlaps, true);
+        let mut actual =
+            scheduler.get_potential_loads(Some(token_seq), 128, overlaps, cached_tokens, true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -554,7 +624,8 @@ mod tests {
             make_scheduler(HashMap::new(), None, false);
 
         scheduler.register_workers(&HashSet::from([42]));
-        let loads = scheduler.get_potential_loads(None, 64, OverlapScores::default(), true);
+        let loads =
+            scheduler.get_potential_loads(None, 64, OverlapScores::default(), HashMap::new(), true);
 
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].worker_id, 42);
@@ -571,7 +642,13 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, OverlapScores::default(), true)
+                .get_potential_loads(
+                    None,
+                    64,
+                    OverlapScores::default(),
+                    HashMap::new(),
+                    true,
+                )
                 .len(),
             1
         );
@@ -590,7 +667,13 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, OverlapScores::default(), true)
+                    .get_potential_loads(
+                        None,
+                        64,
+                        OverlapScores::default(),
+                        HashMap::new(),
+                        true,
+                    )
                     .len()
                     == 3
                 {
@@ -623,6 +706,9 @@ mod tests {
                 64,
                 Some(vec![11, 22]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -633,7 +719,13 @@ mod tests {
             .await
             .unwrap();
 
-        let loads = scheduler.get_potential_loads(None, 64, OverlapScores::default(), false);
+        let loads = scheduler.get_potential_loads(
+            None,
+            64,
+            OverlapScores::default(),
+            HashMap::new(),
+            false,
+        );
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 64);
 
