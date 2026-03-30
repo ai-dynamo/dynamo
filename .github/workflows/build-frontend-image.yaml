@@ -72,7 +72,7 @@ jobs:
     name: Build Frontend Image
     needs: [changed-files]
     if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
-    runs-on: prod-builder-v3
+    runs-on: stg-builder-v3
     outputs:
       target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
     env:
@@ -203,7 +203,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     name: Compliance frontend-${{ matrix.arch }}
-    runs-on: prod-builder-v3
+    runs-on: stg-builder-v3
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

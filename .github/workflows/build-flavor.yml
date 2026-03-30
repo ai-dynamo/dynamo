@@ -90,7 +90,7 @@ on:
 jobs:
   build:
     name: Build cuda${{ matrix.cuda_version }}
-    runs-on: prod-builder-v3
+    runs-on: stg-builder-v3
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     strategy:
       fail-fast: false

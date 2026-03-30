@@ -144,7 +144,7 @@ jobs:
   build:
     if: inputs.build_image
     name: Build cuda${{ inputs.cuda_version }}
-    runs-on: prod-builder-v3
+    runs-on: stg-builder-v3
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.build.outputs.target_tag_plain }}
@@ -385,7 +385,7 @@ jobs:
       matrix:
         arch: ${{ fromJson(needs.build.outputs.compliance_arches) }}
     name: Compliance cuda${{ inputs.cuda_version }}-${{ matrix.arch }}
-    runs-on: prod-builder-v3
+    runs-on: stg-builder-v3
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

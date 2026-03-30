@@ -4,6 +4,9 @@
 name: Build On Demand
 
 on:
+  push:
+    branches:
+      - ops-3435/test
   workflow_dispatch:
     inputs:
       build_vllm:
