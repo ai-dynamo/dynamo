@@ -1,0 +1,15 @@
+{"run": 1, "exact_ms": 125.5, "mutated_ms": 124.3, "delta_ms": -1.2}
+{"run": 2, "exact_ms": 125.2, "mutated_ms": 122.4, "delta_ms": -2.8}
+{"run": 3, "exact_ms": 124.4, "mutated_ms": 121.9, "delta_ms": -2.5}
+{"run": 4, "exact_ms": 124.5, "mutated_ms": 121.5, "delta_ms": -3.1}
+{"run": 5, "exact_ms": 121.7, "mutated_ms": 123.6, "delta_ms": 1.9}
+{"run": 6, "exact_ms": 121.0, "mutated_ms": 121.7, "delta_ms": 0.7}
+{"run": 7, "exact_ms": 122.6, "mutated_ms": 121.8, "delta_ms": -0.7}
+{"run": 8, "exact_ms": 124.2, "mutated_ms": 121.7, "delta_ms": -2.6}
+{"run": 9, "exact_ms": 121.2, "mutated_ms": 123.2, "delta_ms": 2.0}
+{"run": 10, "exact_ms": 122.0, "mutated_ms": 121.8, "delta_ms": -0.1}
+{"run": 11, "exact_ms": 123.8, "mutated_ms": 121.9, "delta_ms": -1.8}
+{"run": 12, "exact_ms": 121.7, "mutated_ms": 123.7, "delta_ms": 2.0}
+{"run": 13, "exact_ms": 122.0, "mutated_ms": 122.4, "delta_ms": 0.4}
+{"run": 14, "exact_ms": 123.6, "mutated_ms": 121.6, "delta_ms": -1.9}
+{"run": 15, "exact_ms": 121.9, "mutated_ms": 123.7, "delta_ms": 1.8}

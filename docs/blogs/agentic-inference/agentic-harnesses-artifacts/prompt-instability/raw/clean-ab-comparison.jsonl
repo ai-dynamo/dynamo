@@ -1,0 +1,15 @@
+{"request": 1, "stable_ttft_ms": 419.2, "varying_ttft_ms": 785.7}
+{"request": 2, "stable_ttft_ms": 411.9, "varying_ttft_ms": 571.2}
+{"request": 3, "stable_ttft_ms": 372.5, "varying_ttft_ms": 1375.2}
+{"request": 4, "stable_ttft_ms": 378.3, "varying_ttft_ms": 1208.1}
+{"request": 5, "stable_ttft_ms": 578.1, "varying_ttft_ms": 1367.1}
+{"request": 6, "stable_ttft_ms": 678.6, "varying_ttft_ms": 541.9}
+{"request": 7, "stable_ttft_ms": 678.0, "varying_ttft_ms": 501.4}
+{"request": 8, "stable_ttft_ms": 923.8, "varying_ttft_ms": 398.5}
+{"request": 9, "stable_ttft_ms": 450.5, "varying_ttft_ms": 369.1}
+{"request": 10, "stable_ttft_ms": 417.3, "varying_ttft_ms": 474.8}
+{"request": 11, "stable_ttft_ms": 405.3, "varying_ttft_ms": 437.0}
+{"request": 12, "stable_ttft_ms": 568.5, "varying_ttft_ms": 922.5}
+{"request": 13, "stable_ttft_ms": 719.1, "varying_ttft_ms": 535.1}
+{"request": 14, "stable_ttft_ms": 801.1, "varying_ttft_ms": 459.3}
+{"request": 15, "stable_ttft_ms": 977.9, "varying_ttft_ms": 478.5}

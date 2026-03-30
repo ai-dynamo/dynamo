@@ -1,0 +1,15 @@
+{"run": 1, "exact_ms": 172.7, "mutated_ms": 193.4}
+{"run": 2, "exact_ms": 170.7, "mutated_ms": 172.0}
+{"run": 3, "exact_ms": 190.0, "mutated_ms": 170.7}
+{"run": 4, "exact_ms": 173.5, "mutated_ms": 190.5}
+{"run": 5, "exact_ms": 171.7, "mutated_ms": 171.8}
+{"run": 6, "exact_ms": 190.3, "mutated_ms": 170.6}
+{"run": 7, "exact_ms": 171.0, "mutated_ms": 190.5}
+{"run": 8, "exact_ms": 171.0, "mutated_ms": 172.4}
+{"run": 9, "exact_ms": 190.6, "mutated_ms": 170.6}
+{"run": 10, "exact_ms": 173.0, "mutated_ms": 190.4}
+{"run": 11, "exact_ms": 170.7, "mutated_ms": 171.1}
+{"run": 12, "exact_ms": 189.6, "mutated_ms": 170.5}
+{"run": 13, "exact_ms": 172.9, "mutated_ms": 190.4}
+{"run": 14, "exact_ms": 170.0, "mutated_ms": 172.5}
+{"run": 15, "exact_ms": 186.3, "mutated_ms": 170.1}
