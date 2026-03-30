@@ -3,7 +3,6 @@
 .vscode/
 .helix
 issues/
-plans/
 *rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
