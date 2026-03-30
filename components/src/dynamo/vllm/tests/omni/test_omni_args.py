@@ -22,7 +22,7 @@ pytestmark = [
 
 def _make_omni_config(**overrides) -> OmniConfig:
     """Build a minimal OmniConfig with valid defaults, applying overrides."""
-    defaults = {
+    defaults: dict = {
         # DynamoRuntimeConfig fields
         "namespace": "dynamo",
         "component": "backend",
