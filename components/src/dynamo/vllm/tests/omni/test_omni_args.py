@@ -133,7 +133,9 @@ def test_omni_router_requires_stage_configs_path():
 
 
 def test_stage_id_and_omni_router_mutually_exclusive():
-    config = _make_omni_config(stage_id=0, omni_router=True, stage_configs_path="/tmp/fake.yaml")
+    config = _make_omni_config(
+        stage_id=0, omni_router=True, stage_configs_path="/tmp/fake.yaml"
+    )
     with pytest.raises(ValueError, match="mutually exclusive"):
         config.validate()
 

@@ -17,7 +17,8 @@ class StageEngine(Protocol):
         sampling_params: Any,
         *,
         request_id: str,
-    ) -> AsyncIterator[Any]: ...
+    ) -> AsyncIterator[Any]:
+        ...
 
 
 @runtime_checkable
