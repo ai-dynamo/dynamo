@@ -17,7 +17,6 @@ use dynamo_llm::protocols::{
         completions::NvCreateCompletionResponse,
     },
 };
-use dynamo_protocols::types::ChatCompletionMessageContent;
 use futures::StreamExt;
 
 fn get_text(content: &ChatCompletionMessageContent) -> &str {

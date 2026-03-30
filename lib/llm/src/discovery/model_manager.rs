@@ -47,15 +47,6 @@ pub enum ModelManagerError {
 
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
-
-    #[error(
-        "Checksum mismatch for model {model}: expected {expected}, got {got}. All WorkerSets of a model must share the same checksum. Drain all old workers before deploying a new version."
-    )]
-    ChecksumMismatch {
-        model: String,
-        expected: String,
-        got: String,
-    },
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -124,15 +115,9 @@ impl ModelManager {
     }
 
     /// Add a WorkerSet to a Model. Creates the Model if it doesn't exist.
-    /// Returns `Err` if the WorkerSet's checksum doesn't match the model's canonical checksum.
-    pub fn add_worker_set(
-        &self,
-        model_name: &str,
-        namespace: &str,
-        worker_set: WorkerSet,
-    ) -> Result<(), ModelManagerError> {
+    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) {
         let model = self.get_or_create_model(model_name);
-        model.add_worker_set(namespace.to_string(), Arc::new(worker_set))
+        model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
     }
 
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
@@ -142,16 +127,6 @@ impl ModelManager {
         drop(model);
         self.remove_model_if_empty(model_name);
         removed
-    }
-
-    // -- Checksum validation --
-
-    /// Check if a candidate checksum is valid for a model.
-    /// Returns `Some(true)` if it matches the model's canonical checksum, `Some(false)` if it
-    /// doesn't match, or `None` if the model doesn't exist or has no canonical checksum yet.
-    pub fn is_valid_checksum(&self, model_name: &str, candidate_checksum: &str) -> Option<bool> {
-        let model = self.models.get(model_name)?;
-        model.is_valid_checksum(candidate_checksum)
     }
 
     // -- Model cards --
@@ -372,7 +347,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.chat_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -393,7 +368,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.completions_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -414,7 +389,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.embeddings_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -435,7 +410,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.tensor_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -456,7 +431,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.images_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -477,7 +452,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.videos_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -496,7 +471,7 @@ impl ModelManager {
             card_checksum.to_string(),
             ModelDeploymentCard::default(),
         );
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -821,7 +796,7 @@ mod tests {
     fn test_add_and_get_worker_set() {
         let mm = ModelManager::new();
         let ws = make_worker_set("ns1", "abc");
-        mm.add_worker_set("llama", "ns1", ws).unwrap();
+        mm.add_worker_set("llama", "ns1", ws);
 
         let model = mm.get_model("llama");
         assert!(model.is_some());
@@ -835,16 +810,14 @@ mod tests {
         let mm = ModelManager::new();
         assert!(mm.get_model("llama").is_none());
 
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.get_model("llama").is_some());
     }
 
     #[test]
     fn test_remove_worker_set_removes_empty_model() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.get_model("llama").is_some());
 
         let removed = mm.remove_worker_set("llama", "ns1");
@@ -858,10 +831,8 @@ mod tests {
     #[test]
     fn test_remove_worker_set_keeps_model_with_remaining() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
-        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"));
 
         mm.remove_worker_set("llama", "ns1");
 
@@ -881,8 +852,7 @@ mod tests {
     #[test]
     fn test_remove_worker_set_nonexistent_namespace() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.remove_worker_set("llama", "ns2").is_none());
 
         // Model should still exist (ns1 still there)
@@ -892,8 +862,7 @@ mod tests {
     #[test]
     fn test_remove_model_if_empty_noop_when_not_empty() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
 
         mm.remove_model_if_empty("llama");
         assert!(mm.get_model("llama").is_some()); // Still has ns1
@@ -908,10 +877,8 @@ mod tests {
     #[test]
     fn test_remove_model() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
-        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"));
 
         let removed = mm.remove_model("llama");
         assert!(removed.is_some());
@@ -927,56 +894,6 @@ mod tests {
         assert!(Arc::ptr_eq(&m1, &m2));
     }
 
-    // -- Checksum validation tests --
-
-    #[test]
-    fn test_is_valid_checksum_match() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"))
-            .unwrap();
-
-        assert_eq!(mm.is_valid_checksum("llama", "abc123"), Some(true));
-    }
-
-    #[test]
-    fn test_is_valid_checksum_mismatch() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"))
-            .unwrap();
-
-        assert_eq!(mm.is_valid_checksum("llama", "wrong"), Some(false));
-    }
-
-    #[test]
-    fn test_is_valid_checksum_no_canonical_yet() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"))
-            .unwrap();
-
-        // Canonical is set, so even for a "new namespace" scenario the checksum is checked
-        assert_eq!(mm.is_valid_checksum("llama", "abc123"), Some(true));
-        assert_eq!(mm.is_valid_checksum("llama", "xyz"), Some(false));
-    }
-
-    #[test]
-    fn test_is_valid_checksum_missing_model() {
-        let mm = ModelManager::new();
-        assert_eq!(mm.is_valid_checksum("nonexistent", "abc"), None);
-    }
-
-    #[test]
-    fn test_is_valid_checksum_cross_namespace_enforcement() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "checksum_a"))
-            .unwrap();
-
-        // A different namespace with a different checksum should be rejected at the model level
-        assert_eq!(mm.is_valid_checksum("llama", "checksum_b"), Some(false));
-
-        // Same checksum is accepted
-        assert_eq!(mm.is_valid_checksum("llama", "checksum_a"), Some(true));
-    }
-
     // -- Model listing and filtering tests --
 
     #[test]
@@ -987,8 +904,7 @@ mod tests {
         assert!(!mm.has_decode_model("llama"));
 
         // Prefill-only set (no engines) → false
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(!mm.has_decode_model("llama"));
     }
 
@@ -997,8 +913,7 @@ mod tests {
         let mm = ModelManager::new();
 
         // Prefill set = no engines
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.has_prefill_model("llama"));
     }
 
@@ -1007,16 +922,14 @@ mod tests {
         let mm = ModelManager::new();
         assert!(!mm.has_model_any("llama"));
 
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.has_model_any("llama")); // has prefill
     }
 
     #[test]
     fn test_model_display_names_includes_prefill() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
 
         let names = mm.model_display_names();
         assert!(names.contains("llama"));
@@ -1031,10 +944,8 @@ mod tests {
     #[test]
     fn test_list_prefill_models() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
-        mm.add_worker_set("gpt", "ns1", make_worker_set("ns1", "def"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("gpt", "ns1", make_worker_set("ns1", "def"));
 
         let prefill = mm.list_prefill_models();
         assert_eq!(prefill.len(), 2);
