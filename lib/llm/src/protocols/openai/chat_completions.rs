@@ -64,21 +64,24 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
-/// `CreateChatCompletionResponse`.
-///
-/// # Fields
-/// - `inner`: The base OpenAI unary chat completion response, embedded
-///   using `serde(flatten)`.
-pub type NvCreateChatCompletionResponse = dynamo_async_openai::types::CreateChatCompletionResponse;
+/// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NvCreateChatCompletionResponse {
+    #[serde(flatten)]
+    pub inner: dynamo_async_openai::types::CreateChatCompletionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+}
 
 /// A response structure for streamed chat completions, embedding OpenAI's
-/// `CreateChatCompletionStreamResponse`.
-///
-/// # Fields
-/// - `inner`: The base OpenAI streaming chat completion response, embedded
-///   using `serde(flatten)`.
-pub type NvCreateChatCompletionStreamResponse =
-    dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+/// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NvCreateChatCompletionStreamResponse {
+    #[serde(flatten)]
+    pub inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+}
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
