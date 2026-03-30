@@ -521,7 +521,7 @@ class WorkerFactory:
         if config.gms_shadow_mode:
             # Shadow mode: lock-driven activation.
             # Flow: sleep → startup probe passes → block on lock → wake → register.
-            await handler.sleep({"level": 1})
+            await handler._quiesce_controller.quiesce(1)
 
             runtime.set_health_status(True)
             logger.info(
@@ -536,7 +536,8 @@ class WorkerFactory:
             await lock.acquire(engine_id=f"engine-{engine_id}")
             logger.info("[Shadow] Lock acquired, waking engine")
 
-            await handler.wake_up({})
+            await handler._quiesce_controller.resume()
+            handler._quiesce_controller.mark_resumed()
             logger.info("[Shadow] Engine awake, registering with discovery")
 
         await self.register_vllm_model(
