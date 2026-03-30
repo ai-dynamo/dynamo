@@ -39,14 +39,16 @@ fn create_mock_response_chunk(
     };
 
     let response = NvCreateChatCompletionStreamResponse {
-        id: "test-id".to_string(),
-        choices: vec![choice],
-        created: 1234567890,
-        model: "test-model".to_string(),
-        system_fingerprint: Some("test-fingerprint".to_string()),
-        object: "chat.completion.chunk".to_string(),
-        usage: None,
-        service_tier: None,
+        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![choice],
+            created: 1234567890,
+            model: "test-model".to_string(),
+            system_fingerprint: Some("test-fingerprint".to_string()),
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
         nvext: None,
     };
 
@@ -125,7 +127,7 @@ mod tests {
         let mut all_content = String::new();
         while let Some(item) = output_stream.next().await {
             if let Some(ref data) = item.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref r) = choice.delta.reasoning_content {
                         all_reasoning.push_str(r);
                     }
@@ -177,15 +179,15 @@ mod tests {
         assert_eq!(output_chunks.len(), 3);
 
         // Chunk 0: "<think>This"
-        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_0, None, Some("This"));
 
         // Chunk 1: " is reasoning content"
-        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().choices[0];
+        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_1, None, Some(" is reasoning content"));
 
         // Chunk 2: "</think> Here's my answer."
-        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().choices[0];
+        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_2, Some(" Here's my answer."), None);
     }
 
@@ -223,15 +225,15 @@ mod tests {
         assert_eq!(output_chunks.len(), 3);
 
         // Chunk 0: "<think>Only"
-        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_0, None, Some("Only"));
 
         // Chunk 1: " reasoning"
-        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().choices[0];
+        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_1, None, Some(" reasoning"));
 
         // Chunk 2: " here</think>"
-        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().choices[0];
+        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_2, None, Some(" here"));
     }
 
@@ -266,7 +268,7 @@ mod tests {
 
         // Verify that only normal content is present
         assert_eq!(output_chunks.len(), 1);
-        let output_choice = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
         assert_choice(
             output_choice,
             Some("Just normal text without reasoning tags."),
@@ -304,8 +306,8 @@ mod tests {
         assert_eq!(output_chunks.len(), input_chunks.len());
 
         for (input, output) in input_chunks.iter().zip(output_chunks.iter()) {
-            let input_choice = &input.data.as_ref().unwrap().choices[0];
-            let output_choice = &output.data.as_ref().unwrap().choices[0];
+            let input_choice = &input.data.as_ref().unwrap().inner.choices[0];
+            let output_choice = &output.data.as_ref().unwrap().inner.choices[0];
             assert_choice(
                 output_choice,
                 input_choice.delta.content.as_ref().map(get_text),
@@ -345,7 +347,7 @@ mod tests {
 
         // Verify that Mistral-style reasoning is parsed correctly
         assert_eq!(output_chunks.len(), 1);
-        let output_choice = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
 
         assert!(
             output_choice.delta.reasoning_content.is_some(),
@@ -422,7 +424,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
+                for choice in &response_data.inner.choices {
                     // Collect reasoning content
                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                         all_reasoning.push_str(reasoning);
@@ -574,7 +576,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
+                for choice in &response_data.inner.choices {
                     // Collect reasoning content
                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                         all_reasoning.push_str(reasoning);
@@ -685,7 +687,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref data) = chunk.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref r) = choice.delta.reasoning_content {
                         all_reasoning.push_str(r);
                     }
@@ -782,7 +784,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
+                for choice in &response_data.inner.choices {
                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                         all_reasoning.push_str(reasoning);
                     }

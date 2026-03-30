@@ -63,7 +63,7 @@ impl Scheduler {
     pub fn new(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
@@ -80,7 +80,7 @@ impl Scheduler {
     pub(crate) fn new_with_admission(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
@@ -98,7 +98,7 @@ impl Scheduler {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
@@ -137,7 +137,7 @@ impl Scheduler {
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 }
-                flush_output_signals(&mut core, &output_tx, &pass.output_signals);
+                flush_output_signals(&mut core, &output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 let _ = metrics_tx.send(MockerMetrics::new(
                     dp_rank,
@@ -198,17 +198,20 @@ async fn receive_requests(
 
 fn flush_output_signals(
     core: &mut VllmCore,
-    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
-    output_signals: &[OutputSignal],
+    output_tx: &Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+    output_signals: Vec<OutputSignal>,
 ) {
     let Some(tx) = output_tx.as_ref() else {
         return;
     };
 
-    for signal in output_signals {
-        if tx.send(signal.clone()).is_ok() {
-            continue;
+    if output_signals.is_empty() {
+        return;
+    }
+
+    if let Err(error) = tx.send(output_signals) {
+        for signal in error.0 {
+            core.drop_request(signal.uuid);
         }
-        core.drop_request(signal.uuid);
     }
 }

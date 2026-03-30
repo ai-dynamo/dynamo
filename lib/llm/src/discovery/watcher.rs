@@ -208,19 +208,20 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // If we already have a WorkerSet for this model and the checksums
-                    // don't match, reject the new worker. All WorkerSets of a model
-                    // must share the same checksum.
-                    let can_add = self.manager.is_valid_checksum(card.name(), card.mdcsum());
-                    if can_add.is_some_and(|is_valid| !is_valid) {
+                    // If a WorkerSet already exists for this (model, namespace, type),
+                    // validate that the new worker's checksum matches. Different
+                    // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
+                    let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+                    if let Some(model) = self.manager.get_model(card.name())
+                        && !model.is_checksum_compatible(&ws_key, card.mdcsum())
+                    {
                         tracing::error!(
                             model_name = card.name(),
                             namespace = mcid.namespace,
-                            "Checksum for new worker does not match model's canonical checksum. \
-                             All WorkerSets must share the same checksum. \
-                             Drain all old workers before deploying a new version."
+                            new_checksum = card.mdcsum(),
+                            "Checksum for new worker does not match existing WorkerSet's checksum. \
+                             Drain all old workers in this namespace before deploying a new version."
                         );
-
                         // TODO: mark that instance down in clients
                         // Not obvious how to do that given the current design
                         // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
@@ -465,6 +466,7 @@ impl ModelWatcher {
                             Some(self.router_config.kv_router_config.clone()),
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
+                            card.runtime_config.enable_eagle,
                         )
                         .await?,
                 )
@@ -495,6 +497,7 @@ impl ModelWatcher {
                         self.router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),
+                        card.runtime_config.enable_eagle,
                     )
                 });
 
@@ -502,8 +505,18 @@ impl ModelWatcher {
             // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
             // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
             // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            //
+            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
+            // so that busy-state updates (via update_free_instances) are visible to the
+            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
+            // Using a different Client instance would cause the PushRouter to never see
+            // busy workers, since each Client::new() creates independent ArcSwap state.
+            let monitor_client = kv_chooser
+                .as_ref()
+                .map(|chooser| chooser.client().clone())
+                .unwrap_or_else(|| client.clone());
             let worker_monitor = Some(KvWorkerMonitor::new(
-                client.clone(),
+                monitor_client,
                 self.router_config.load_threshold_config.clone(),
             ));
 
@@ -716,7 +729,7 @@ impl ModelWatcher {
             // Prefill sets have no engines — we add the WorkerSet first for tracking,
             // then activate the prefill router.
             self.manager
-                .add_worker_set(card.name(), &ws_key, worker_set)?;
+                .add_worker_set(card.name(), &ws_key, worker_set);
 
             // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
             // because it coordinates between decode and prefill WorkerSets that share
@@ -750,7 +763,7 @@ impl ModelWatcher {
 
         // Add the completed WorkerSet to the Model
         self.manager
-            .add_worker_set(card.name(), &ws_key, worker_set)?;
+            .add_worker_set(card.name(), &ws_key, worker_set);
 
         Ok(())
     }
@@ -853,8 +866,7 @@ mod tests {
     fn test_is_model_type_list_empty_prefill_present() {
         let mm = ModelManager::new();
         // A WorkerSet with no engines is treated as a prefill set
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"))
-            .unwrap();
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
 
         assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
         // Other types should still be empty since the WorkerSet has no engines
@@ -869,8 +881,7 @@ mod tests {
     #[test]
     fn test_is_model_type_list_empty_after_removal() {
         let mm = ModelManager::new();
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"))
-            .unwrap();
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
         assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
 
         mm.remove_model("model-a");
@@ -880,10 +891,8 @@ mod tests {
     #[test]
     fn test_is_model_type_list_not_empty_when_other_model_remains() {
         let mm = ModelManager::new();
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"))
-            .unwrap();
-        mm.add_worker_set("model-b", "ns1", make_worker_set("ns1"))
-            .unwrap();
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+        mm.add_worker_set("model-b", "ns1", make_worker_set("ns1"));
 
         // Remove one model — other still provides prefill
         mm.remove_model("model-a");
