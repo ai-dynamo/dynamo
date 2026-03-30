@@ -249,7 +249,7 @@ def update_engine_config_with_dynamo(
     # This preserves user-provided values like --runner pooling for embedding
     # models.
     if hasattr(engine_config, "runner"):
-        if getattr(engine_config, "runner", "auto") == "auto":
+        if engine_config.runner == "auto":
             defaults["runner"] = "generate"
         else:
             logger.debug(
