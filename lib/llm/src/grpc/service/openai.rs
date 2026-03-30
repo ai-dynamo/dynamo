@@ -21,7 +21,7 @@ use super::kserve::inference;
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, InflightGuard, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
 use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
@@ -54,14 +54,22 @@ pub async fn completion_response_stream(
     // create the context for the request
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());
+    let streaming = request.inner.stream.unwrap_or(false);
+    let cancellation_labels = CancellationLabels {
+        model: request.inner.model.clone(),
+        endpoint: "grpc_completions".to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id.clone());
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
-
-    let streaming = request.inner.stream.unwrap_or(false);
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
     // update the request to always stream
     let request = request.map(|mut req| {
         req.inner.stream = Some(true);

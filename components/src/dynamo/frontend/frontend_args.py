@@ -50,6 +50,7 @@ class FrontendConfig(KvRouterConfigBase):
     tls_key_path: Optional[pathlib.Path]
 
     router_mode: str
+    min_initial_workers: int
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
     enforce_disagg: bool
@@ -75,6 +76,7 @@ class FrontendConfig(KvRouterConfigBase):
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
 
@@ -89,6 +91,8 @@ class FrontendConfig(KvRouterConfigBase):
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
+        if self.min_initial_workers < 0:
+            raise ValueError("--router-min-initial-workers must be >= 0")
         if self.router_enable_cache_control and self.router_mode != "kv":
             raise ValueError("--enable-cache-control requires --router-mode=kv")
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
@@ -181,8 +185,25 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
-            help="How to route the request.",
-            choices=["round-robin", "random", "kv", "direct"],
+            help="How to route the request. power-of-two picks 2 random workers and "
+            "routes to the one with fewer in-flight requests. In disaggregated prefill "
+            "mode, power-of-two skips bootstrap optimization and falls back to the "
+            "synchronous prefill path.",
+            choices=["round-robin", "random", "power-of-two", "kv", "direct"],
+        )
+        add_argument(
+            g,
+            flag_name="--router-min-initial-workers",
+            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
+            default=0,
+            help=(
+                "Minimum number of workers required before router startup continues. "
+                "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
+                "push-router path and the KV router's config-ready worker gate share "
+                "the same startup threshold. Set to 0 to disable the startup wait."
+            ),
+            arg_type=int,
+            dest="min_initial_workers",
         )
 
         # KV router options (shared with dynamo.router)
@@ -387,6 +408,22 @@ class FrontendArgGroup(ArgGroup):
                 "single 'event: reasoning_dispatch' SSE event on /v1/chat/completions "
                 "with the complete reasoning block once thinking ends. "
                 "Can be combined with --enable-streaming-tool-dispatch."
+            ),
+        )
+        # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
+        # Both definitions are needed: runtime_args controls the Rust-native
+        # chat template path (oai.rs), while this one controls the Python
+        # frontend processors (vllm_processor / sglang_processor) which parse
+        # arguments independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help=(
+                "Exclude tool definitions from the chat template when "
+                "tool_choice='none'. Prevents models from generating raw XML "
+                "tool calls in the content field."
             ),
         )
         add_argument(

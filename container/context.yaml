@@ -40,27 +40,27 @@ vllm:
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: 12.9.1-runtime-ubuntu24.04
-    vllm_ref: v0.17.1
+    vllm_ref: v0.18.0
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: 13.0.2-runtime-ubuntu24.04
-    vllm_ref: v0.17.1
+    vllm_ref: v0.18.0
   xpu:
     base_image: intel/deep-learning-essentials
     runtime_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    vllm_ref: v0.14.0
+    vllm_ref: v0.17.1
   cpu:
     base_image: ubuntu
     runtime_image: ubuntu
     base_image_tag: 24.04
     runtime_image_tag: 24.04
     vllm_ref: v0.16.0
-  flashinf_ref: v0.6.4
-  lmcache_ref: 0.4.1
+  flashinf_ref: v0.6.6
+  lmcache_ref: 0.4.2
   vllm_omni_ref: "v0.16.0"
   max_jobs: "10"
   enable_media_ffmpeg: "false"
@@ -96,10 +96,10 @@ trtllm:
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/
-  pip_wheel: tensorrt-llm==1.3.0rc5.post1
+  pip_wheel: tensorrt-llm==1.3.0rc8
   trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
 
-  github_trtllm_commit: v1.3.0rc5.post1
+  github_trtllm_commit: v1.3.0rc8
   torch_version: 2.10.0a0+b4e4ee81d3.nv25.12
   torch_tensorrt_version: 2.10.0a0
   torchvision_version: 0.25.0a0+ca221243

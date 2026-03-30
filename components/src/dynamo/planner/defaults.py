@@ -73,16 +73,13 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     no_correction = True
     mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
-    throughput_metrics_source = "frontend"  # "frontend" | "router"
+    throughput_metrics_source: Literal["frontend", "router"] = "frontend"
 
     # Scaling mode flags
     enable_throughput_scaling = True
     enable_load_scaling = False
 
     # Load-based scaling settings
-    load_router_metrics_url: Optional[
-        str
-    ] = None  # will be auto-discovered from the DGD in kubernetes mode if not provided
     load_adjustment_interval = 5  # in seconds, must be < throughput_adjustment_interval
     load_learning_window = 50  # sliding window size for regression
     load_scaling_down_sensitivity = 80  # 0-100
@@ -90,7 +87,18 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_min_observations = 5  # cold start threshold
 
 
-class VllmComponentName:
+class ComponentName:
+    """Base class for backend component name configurations."""
+
+    prefill_worker_k8s_name: str = ""
+    prefill_worker_component_name: str = ""
+    prefill_worker_endpoint: str = ""
+    decode_worker_k8s_name: str = ""
+    decode_worker_component_name: str = ""
+    decode_worker_endpoint: str = ""
+
+
+class VllmComponentName(ComponentName):
     prefill_worker_k8s_name = "VllmPrefillWorker"
     prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
@@ -99,7 +107,7 @@ class VllmComponentName:
     decode_worker_endpoint = "generate"
 
 
-class SGLangComponentName:
+class SGLangComponentName(ComponentName):
     prefill_worker_k8s_name = (
         "prefill"  # use short name to stay within k8s limits with grove
     )
@@ -112,7 +120,7 @@ class SGLangComponentName:
     decode_worker_endpoint = "generate"
 
 
-class TrtllmComponentName:
+class TrtllmComponentName(ComponentName):
     # Unified frontend architecture (consistent with vLLM/SGLang):
     # - Prefill workers use "prefill" component
     # - Decode workers use "tensorrt_llm" component
@@ -124,7 +132,7 @@ class TrtllmComponentName:
     decode_worker_endpoint = "generate"
 
 
-class MockerComponentName:
+class MockerComponentName(ComponentName):
     # Mocker backend for testing/simulation purposes
     prefill_worker_k8s_name = "prefill"
     prefill_worker_component_name = "prefill"
@@ -134,7 +142,7 @@ class MockerComponentName:
     decode_worker_endpoint = "generate"
 
 
-WORKER_COMPONENT_NAMES = {
+WORKER_COMPONENT_NAMES: dict[str, type[ComponentName]] = {
     "vllm": VllmComponentName,
     "sglang": SGLangComponentName,
     "trtllm": TrtllmComponentName,

@@ -64,6 +64,7 @@ python -m dynamo.frontend \
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
+# TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \

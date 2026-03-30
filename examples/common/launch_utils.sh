@@ -135,6 +135,12 @@ print_launch_banner() {
     echo "=========================================="
     echo "Model:       $_model"
     echo "Frontend:    http://localhost:$_port"
+
+    local _seq_len="${MAX_MODEL_LEN:-${CONTEXT_LENGTH:-${MAX_SEQ_LEN:-}}}"
+    local _frac="${GPU_MEM_FRACTION:-}"
+    [[ -n "$_seq_len" ]] && echo "Max seq len: $_seq_len"
+    [[ -n "$_frac" ]] && echo "GPU frac:    $_frac"
+
     for _line in "$@"; do
         echo "$_line"
     done

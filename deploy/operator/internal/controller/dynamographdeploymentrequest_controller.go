@@ -130,20 +130,60 @@ const (
 	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
 )
 
-// shell script template for the output copier sidecar
+// shell script template for the output copier sidecar.
+//
+// The sidecar is a continuous poller that:
+//  1. During profiling: polls profiler_status.yaml every 10s, relays phase+message
+//     to the output ConfigMap so the controller can track sub-phase progress.
+//  2. After profiler terminates: writes the final profiling output (final_config.yaml
+//     + profiler_status.yaml) to the same ConfigMap, preserving the phase+message keys.
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
 
-# Wait for profiler container to terminate (no timeout - profiling can take hours)
-echo "Waiting for profiler to complete..."
+STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
+LAST_PHASE=""
 START_TIME=$(date +%s)
 LAST_PROGRESS_LOG=$START_TIME
 PROGRESS_INTERVAL=300
 
+# relay_phase: read phase+message from profiler_status.yaml and write to ConfigMap.
+# Only writes when the phase changes (debounce).
+relay_phase() {
+  if [ ! -f "$STATUS_FILE" ]; then
+    return
+  fi
+  PHASE=$(grep "^phase:" "$STATUS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
+  MESSAGE=$(grep "^message:" "$STATUS_FILE" 2>/dev/null | sed 's/^message: *//' | tr -d '"' | tr -d "'" || true)
+  if [ -z "$PHASE" ] || [ "$PHASE" = "$LAST_PHASE" ]; then
+    return
+  fi
+  echo "Phase update: $PHASE - $MESSAGE"
+  cat >/tmp/progress.yaml <<PEOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{.ConfigMapName}}
+  namespace: {{.Namespace}}
+  labels:
+    dgdr.nvidia.com/name: {{.DGDRName}}
+    dgdr.nvidia.com/namespace: {{.Namespace}}
+    nvidia.com/managed-by: dynamo-operator
+data:
+  phase: "$PHASE"
+  message: "$MESSAGE"
+PEOF
+  kubectl apply -f /tmp/progress.yaml 2>/dev/null && LAST_PHASE="$PHASE" || echo "Warning: failed to update progress ConfigMap"
+}
+
+# Main loop: poll profiler_status.yaml and wait for profiler to terminate
+echo "Waiting for profiler to complete..."
 while true; do
   CURRENT_TIME=$(date +%s)
   ELAPSED=$((CURRENT_TIME - START_TIME))
+
+  # Relay phase updates to ConfigMap
+  relay_phase
 
   # Log progress every 5 minutes
   if [ $((CURRENT_TIME - LAST_PROGRESS_LOG)) -ge $PROGRESS_INTERVAL ]; then
@@ -157,12 +197,14 @@ while true; do
     echo "Profiler terminated (ran for $(($ELAPSED / 60)) minutes)"
     break
   fi
-  sleep 5
+  sleep 10
 done
+
+# Final relay: pick up any last phase change written just before termination
+relay_phase
 
 # Check profiler status file (2 minute timeout)
 echo "Checking profiler status..."
-STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
 TIMEOUT=120
 CHECK_START=$(date +%s)
 
@@ -206,9 +248,13 @@ case "$STATUS" in
     ;;
 esac
 
-echo "Creating ConfigMap..."
+echo "Writing profiling output to ConfigMap..."
 
-# Start building ConfigMap YAML with DGD spec
+# Read final phase+message to preserve them alongside the profiling output
+FINAL_PHASE=$(grep "^phase:" "$STATUS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
+FINAL_MESSAGE=$(grep "^message:" "$STATUS_FILE" 2>/dev/null | sed 's/^message: *//' | tr -d '"' | tr -d "'" || true)
+
+# Start building ConfigMap YAML with DGD spec + preserved phase/message
 cat >/tmp/cm.yaml <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -217,8 +263,11 @@ metadata:
   namespace: {{.Namespace}}
   labels:
     dgdr.nvidia.com/name: {{.DGDRName}}
+    dgdr.nvidia.com/namespace: {{.Namespace}}
     nvidia.com/managed-by: dynamo-operator
 data:
+  phase: "$FINAL_PHASE"
+  message: "$FINAL_MESSAGE"
   {{.OutputFile}}: |
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
@@ -241,6 +290,44 @@ fi
 kubectl apply -f /tmp/cm.yaml
 echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 `
+
+// profilingPhaseReason returns the condition Reason for a profiling sub-phase.
+// By design, the ProfilingPhase string values are identical to the Reason values
+// (e.g., ProfilingPhaseSweepingDecode = "SweepingDecode" = ProfilingReasonSweepingDecode).
+func profilingPhaseReason(phase nvidiacomv1beta1.ProfilingPhase) string {
+	if phase == nvidiacomv1beta1.ProfilingPhaseDone {
+		return nvidiacomv1beta1.ProfilingReasonCompleted
+	}
+
+	return string(phase)
+}
+
+// profilingPhaseFailureReason returns the condition Reason for a failed profiling sub-phase.
+// By convention, failure reasons are "<Phase>Failed" (e.g., "SweepingDecodeFailed").
+// An empty phase yields the generic "ProfilingFailed".
+func profilingPhaseFailureReason(phase nvidiacomv1beta1.ProfilingPhase) string {
+	if phase == "" {
+		return "ProfilingFailed"
+	}
+	return string(phase) + "Failed"
+}
+
+// validProfilingPhases is the set of phases the profiler sidecar may report.
+var validProfilingPhases = map[nvidiacomv1beta1.ProfilingPhase]struct{}{
+	nvidiacomv1beta1.ProfilingPhaseInitializing:    {},
+	nvidiacomv1beta1.ProfilingPhaseSweepingPrefill: {},
+	nvidiacomv1beta1.ProfilingPhaseSweepingDecode:  {},
+	nvidiacomv1beta1.ProfilingPhaseSelectingConfig: {},
+	nvidiacomv1beta1.ProfilingPhaseBuildingCurves:  {},
+	nvidiacomv1beta1.ProfilingPhaseGeneratingDGD:   {},
+	nvidiacomv1beta1.ProfilingPhaseDone:            {},
+}
+
+// isValidProfilingPhase returns true if phase is a recognized ProfilingPhase value.
+func isValidProfilingPhase(phase string) bool {
+	_, ok := validProfilingPhases[nvidiacomv1beta1.ProfilingPhase(phase)]
+	return ok
+}
 
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
@@ -389,9 +476,66 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
 	}
 
-	// Update to Profiling phase — show DiscoveringHardware until the job is confirmed running.
+	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
-	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "DiscoveringHardware", MessageDiscoveringHardware)
+	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, nvidiacomv1beta1.ProfilingReasonInitializing, MessageDiscoveringHardware)
+}
+
+// updateProfilingSubPhase reads the output ConfigMap and updates status.profilingPhase
+// and the Profiling/Succeeded conditions. The sidecar continuously polls profiler_status.yaml
+// and writes phase+message to the output ConfigMap (dgdr-output-<name>). This function
+// reads those keys and copies them verbatim into the DGDR status.
+func (r *DynamoGraphDeploymentRequestReconciler) updateProfilingSubPhase(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) error {
+	logger := log.FromContext(ctx)
+	outputCMName := getOutputConfigMapName(dgdr)
+
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name: outputCMName, Namespace: dgdr.Namespace,
+	}, cm); err != nil {
+		return nil // No output ConfigMap yet — skip
+	}
+
+	phase, exists := cm.Data["phase"]
+	if !exists || phase == "" {
+		return nil
+	}
+
+	if !isValidProfilingPhase(phase) {
+		return fmt.Errorf("invalid profiling phase %q in ConfigMap %s", phase, outputCMName)
+	}
+
+	profilingPhase := nvidiacomv1beta1.ProfilingPhase(phase)
+	if dgdr.Status.ProfilingPhase == profilingPhase {
+		return nil // No change
+	}
+
+	logger.Info("Profiling sub-phase updated", "phase", phase)
+	dgdr.SetProfilingPhase(profilingPhase)
+
+	// Reason is derived from phase; message comes from the profiler via ConfigMap.
+	reason := profilingPhaseReason(profilingPhase)
+	message := cm.Data["message"] // written by profiler, relayed by sidecar
+
+	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta1.ConditionTypeProfiling,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: dgdr.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: dgdr.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+
+	return r.Status().Update(ctx, dgdr)
 }
 
 // handleProfilingPhase monitors profiling progress and generates spec when complete
@@ -399,21 +543,54 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	logger := log.FromContext(ctx)
 	logger.Info("Handling profiling phase", "name", dgdr.Name)
 
+	// Check for sub-phase updates from output ConfigMap (populated by sidecar poller)
+	if err := r.updateProfilingSubPhase(ctx, dgdr); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Check profiling job status (both online and offline/AIC run as Jobs)
 	// Note: We watch the Job via Owns(), so we'll be triggered automatically on Job changes
 	completed, err := r.checkProfilingJobStatus(ctx, dgdr)
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
-		// Job failed - clear profiling sub-phase and transition to Failed
-		dgdr.ClearProfilingPhase()
-		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
+		// Job failed - keep profilingPhase set so users can see where it died.
+		// profilingPhase is already current: set to Initializing on entry,
+		// then updated by updateProfilingSubPhase() above (reads output ConfigMap).
+		failureReason := "ProfilingFailed"
+		failureMessage := err.Error()
+		if dgdr.Status.ProfilingPhase != "" {
+			failureReason = profilingPhaseFailureReason(dgdr.Status.ProfilingPhase)
+		}
+
+		// Set phase and conditions directly so we can use sub-phase-specific failure
+		// reason on both Profiling and Succeeded conditions. (updatePhaseWithCondition
+		// would hardcode Succeeded reason to generic "Failed".)
+		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
+		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+			Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: dgdr.Generation,
+			Reason:             failureReason,
+			Message:            failureMessage,
+		})
+		dgdr.AddStatusCondition(metav1.Condition{
+			Type:               nvidiacomv1beta1.ConditionTypeProfiling,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: dgdr.Generation,
+			Reason:             failureReason,
+			Message:            failureMessage,
+		})
+		if err := r.Status().Update(ctx, dgdr); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	if !completed {
 		logger.Info("Profiling job still running", "name", dgdr.Name)
-		// Transition from DiscoveringHardware to ProfilingRunning once the job is confirmed active.
+		// Transition from Initializing to ProfilingRunning once the job is confirmed active.
 		cond := meta.FindStatusCondition(dgdr.Status.Conditions, nvidiacomv1beta1.ConditionTypeProfiling)
-		if cond != nil && cond.Reason == "DiscoveringHardware" {
+		if cond != nil && cond.Reason == nvidiacomv1beta1.ProfilingReasonInitializing {
 			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
 		}
 		// Don't requeue - we'll be triggered when the Job completes/fails
@@ -1784,6 +1961,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})). // Watch Jobs created by this controller (via ownerReference)
+		// Watch DGDs created by this controller (via label)
 		Watches(
 			&dgdv1alpha1.DynamoGraphDeployment{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -1809,7 +1987,41 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 				GenericFunc: func(ge event.GenericEvent) bool { return true },
 			}),
 		).
-		// Watch DGDs created by this controller (via label)
+		// Watch output ConfigMaps for profiling sub-phase updates (via label)
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+				// Only trigger for ConfigMaps with DGDR labels (written by the sidecar)
+				cm := obj.(*corev1.ConfigMap)
+				dgdrName, hasName := cm.Labels[nvidiacomv1beta1.LabelDGDRName]
+				dgdrNamespace, hasNamespace := cm.Labels[nvidiacomv1beta1.LabelDGDRNamespace]
+				if !hasName || !hasNamespace {
+					return nil
+				}
+				return []ctrl.Request{{
+					NamespacedName: types.NamespacedName{
+						Name:      dgdrName,
+						Namespace: dgdrNamespace,
+					},
+				}}
+			}),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(ce event.CreateEvent) bool {
+					labels := ce.Object.GetLabels()
+					_, hasName := labels[nvidiacomv1beta1.LabelDGDRName]
+					_, hasNamespace := labels[nvidiacomv1beta1.LabelDGDRNamespace]
+					return hasName && hasNamespace
+				},
+				UpdateFunc: func(ue event.UpdateEvent) bool {
+					labels := ue.ObjectNew.GetLabels()
+					_, hasName := labels[nvidiacomv1beta1.LabelDGDRName]
+					_, hasNamespace := labels[nvidiacomv1beta1.LabelDGDRNamespace]
+					return hasName && hasNamespace
+				},
+				DeleteFunc:  func(de event.DeleteEvent) bool { return false },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		).
 		// Set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
