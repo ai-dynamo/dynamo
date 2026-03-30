@@ -3,11 +3,10 @@
 
 import asyncio
 import logging
-import math
 import time
 from typing import TYPE_CHECKING, Optional, Union
 
-from prometheus_client import Gauge, start_http_server
+from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
