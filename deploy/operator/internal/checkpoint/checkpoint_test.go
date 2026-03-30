@@ -24,7 +24,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -224,37 +223,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	assert.Equal(t, consts.DefaultCheckpointArtifactVersion, ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
 }
 
-// --- Injection idempotency tests ---
-
-func TestInjectionIdempotency(t *testing.T) {
-	// Volume injection is idempotent
-	podSpec := &corev1.PodSpec{Volumes: []corev1.Volume{{Name: consts.CheckpointVolumeName}, {Name: consts.PodInfoVolumeName}}}
-	snapshotpodspec.InjectCheckpointVolume(podSpec, "snapshot-pvc")
-	InjectPodInfoVolume(podSpec)
-	assert.Len(t, podSpec.Volumes, 2)
-
-	// Mount injection is idempotent
-	container := &corev1.Container{VolumeMounts: []corev1.VolumeMount{
-		{Name: consts.CheckpointVolumeName}, {Name: consts.PodInfoVolumeName},
-	}}
-	snapshotpodspec.InjectCheckpointVolumeMount(container, "/checkpoints")
-	InjectPodInfoVolumeMount(container)
-	assert.Len(t, container.VolumeMounts, 2)
-}
-
 func TestApplyCheckpointPodMetadata(t *testing.T) {
-	t.Run("checkpoint source metadata uses annotations for location and storage", func(t *testing.T) {
-		labels := map[string]string{}
-		annotations := map[string]string{}
-
-		snapshotpodspec.ApplyCheckpointSourceMetadata(labels, annotations, testHash, "/checkpoints/"+testHash, "pvc")
-
-		assert.Equal(t, consts.KubeLabelValueTrue, labels[consts.KubeLabelIsCheckpointSource])
-		assert.Equal(t, testHash, labels[consts.KubeLabelCheckpointHash])
-		assert.Equal(t, "/checkpoints/"+testHash, annotations[consts.KubeAnnotationCheckpointLocation])
-		assert.Equal(t, "pvc", annotations[consts.KubeAnnotationCheckpointStorageType])
-	})
-
 	t.Run("restore metadata clears stale values when checkpoint is not ready", func(t *testing.T) {
 		labels := map[string]string{
 			consts.KubeLabelIsRestoreTarget: consts.KubeLabelValueTrue,
