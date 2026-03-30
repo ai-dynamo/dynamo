@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.config.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.planner_config import PlannerConfig
 
 if TYPE_CHECKING:
