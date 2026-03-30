@@ -61,14 +61,14 @@ python -m dynamo.frontend \
   --http-port 8000 \
   --enable-anthropic-api \
   --strip-anthropic-preamble \
-  --dyn-reasoning-parser nemotron_nas
+  --dyn-reasoning-parser nemotron_deci
 ```
 
 All experiments in the artifact set ran against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. That caveat matters. Some of the strongest results below are correctness results with clear systems implications; others are quantitative. We try to distinguish those cleanly.
 
 ## The DGD Settings That Actually Matter
 
-One thing that became obvious while doing this work is that the speedups do not come from "serving the right model" alone. A harness-friendly deployment needs a specific set of frontend and worker settings turned on together. The reference DGD we used for this is [`nemotron3-nvfp4-vllm-b200.yaml`](/Users/mkosec/work/dynamo-ai-workflows/configs/dgd/nemotron3-nvfp4-vllm-b200.yaml).
+One thing that became obvious while doing this work is that the speedups do not come from "serving the right model" alone. A harness-friendly deployment needs a specific set of frontend and worker settings turned on together. The reference DGD we used for this is [`nemotron3-nvfp4-vllm-b200.yaml`](configs/dgd/nemotron3-nvfp4-vllm-b200.yaml).
 
 On the frontend side, the key settings are:
 
@@ -114,13 +114,13 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
 
 The artifact set gave us a clean before-and-after story.
 
-First, the Anthropic baseline. Via cc-proxy in passthrough mode, a 6-request Claude Code session produced `53,992` cache creation tokens and `215,102` cache read tokens. After the first request, the session is effectively all cache reads. That is what good harness behavior looks like: one cold write, then repeated reuse of the same high-value prefix.
+First, the Anthropic baseline. Via cc-proxy (a local Anthropic API proxy) in passthrough mode, a 6-request Claude Code session produced `53,992` cache creation tokens and `215,102` cache read tokens. After the first request, the session is effectively all cache reads. That is what good harness behavior looks like: one cold write, then repeated reuse of the same high-value prefix.
 
 Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill.
 
 We also verified the control case: a prompt with no extra header lands at the same fast path as the stripped version. That is useful as validation, but it is not the main comparison. The real question is whether the per-session header stays in the prefix or gets removed before tokenization.
 
-That is the right framing for this section. Anthropic is the baseline for how the harness is meant to behave. Dynamo's result is the systems lesson: a harness quirk that looks incidental at the API boundary can destroy cache reuse if it perturbs the prefix too early.
+Anthropic is the baseline for how the harness is meant to behave. Dynamo's result is the systems lesson: a harness quirk that looks incidental at the API boundary can destroy cache reuse if it perturbs the prefix too early.
 
 Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Strip it before tokenization, and the system prompt becomes shareable again across requests and even across sessions that would otherwise differ only in that header.
 
@@ -208,7 +208,7 @@ It is still a real systems improvement. A tool call is a state transition, not j
 
 The localhost multi-turn measurements make the right claim narrower, not weaker. On the 30-city workload, the harness learned about each tool call about `9-10ms` before `finish_reason`, and the cumulative earlier feedback over many turns was real but modest. That is not a dramatic latency chart. It is a protocol improvement that removes blind buffering and gives the harness actionable state immediately.
 
-So this section should not pretend to be a benchmark victory. The better claim is that the stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
+The stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
 
 ## Anthropic and Claude Code API Fidelity
 
@@ -224,8 +224,6 @@ Claude Code compatibility is more than text generation behind an Anthropic-shape
 The fixes in this area were not glamorous, but they mattered. Claude Code does not stop at `GET /v1/models`; it also retrieves the specific connected model. That means the route has to handle identifiers like `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` without treating the slash as a path-segmentation bug. Likewise, a field like `input_tokens` in `message_start` can look minor until you realize the client reads that event early and uses it for context accounting before the stream is over.
 
 This is a good example of harness compatibility being more than "the field exists somewhere." Retrieval path, identifier handling, response shape, and timing all matter. A backend can be broadly Anthropic-flavored and still be just off enough to make a harness feel brittle.
-
-The right tone for this section is checklist-driven rather than benchmark-driven. The artifact set already has the useful table: what Claude Code expects, what Dynamo returned, and which details turned out to matter in practice. The throughline is simple: Claude Code support stopped feeling hypothetical once Dynamo behaved like a backend the harness could reason about, not just one that could generate the next token.
 
 One concrete example captures the flavor of these bugs better than a long checklist. Claude Code asks for the connected model directly. On the measured deployment, that lookup still failed:
 
@@ -271,7 +269,7 @@ Client Request (Responses API)
 
 Codex surfaced a different failure mode than Claude Code. The issue was not whether Dynamo could generate the next token. It was whether a realistic Responses request could survive an internal round-trip without losing the fields that made it a Responses request in the first place. Preserving those fields turned out to be an architectural concern, not just a serializer concern.
 
-This section should stay shorter than the Claude Code sections. One diagram and one concrete replay example are enough. The important point is that protocol fidelity on the Responses side is still part of the serving problem. A lossy conversion path quietly erases the structure the harness depends on.
+The important point is that protocol fidelity on the Responses side is still part of the serving problem. A lossy conversion path quietly erases the structure the harness depends on.
 
 The simple text-generation capture is a useful example because it shows both preservation and the remaining gaps in one response. A request as small as:
 

@@ -1,0 +1,10 @@
+{"run": 1, "segmented_ttft_ms": 104.24, "segmented_total_ms": 392.66, "flattened_ttft_ms": 103.19, "flattened_total_ms": 380.59, "delta_ttft_ms": -1.05}
+{"run": 2, "segmented_ttft_ms": 103.08, "segmented_total_ms": 858.75, "flattened_ttft_ms": 102.62, "flattened_total_ms": 802.5, "delta_ttft_ms": -0.46}
+{"run": 3, "segmented_ttft_ms": 102.32, "segmented_total_ms": 301.84, "flattened_ttft_ms": 101.94, "flattened_total_ms": 500.41, "delta_ttft_ms": -0.38}
+{"run": 4, "segmented_ttft_ms": 102.19, "segmented_total_ms": 511.32, "flattened_ttft_ms": 103.05, "flattened_total_ms": 778.52, "delta_ttft_ms": 0.86}
+{"run": 5, "segmented_ttft_ms": 103.09, "segmented_total_ms": 336.02, "flattened_ttft_ms": 102.53, "flattened_total_ms": 734.62, "delta_ttft_ms": -0.57}
+{"run": 6, "segmented_ttft_ms": 102.05, "segmented_total_ms": 289.97, "flattened_ttft_ms": 102.81, "flattened_total_ms": 656.07, "delta_ttft_ms": 0.76}
+{"run": 7, "segmented_ttft_ms": 102.38, "segmented_total_ms": 656.61, "flattened_ttft_ms": 101.61, "flattened_total_ms": 801.92, "delta_ttft_ms": -0.76}
+{"run": 8, "segmented_ttft_ms": 101.87, "segmented_total_ms": 791.38, "flattened_ttft_ms": 101.61, "flattened_total_ms": 334.12, "delta_ttft_ms": -0.25}
+{"run": 9, "segmented_ttft_ms": 102.02, "segmented_total_ms": 447.04, "flattened_ttft_ms": 102.87, "flattened_total_ms": 458.37, "delta_ttft_ms": 0.85}
+{"run": 10, "segmented_ttft_ms": 104.36, "segmented_total_ms": 746.33, "flattened_ttft_ms": 102.16, "flattened_total_ms": 635.15, "delta_ttft_ms": -2.2}
