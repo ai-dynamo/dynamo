@@ -84,7 +84,7 @@ func InjectCheckpointIntoPodSpec(
 			storageType = storageConfig.Type
 		}
 	}
-	pvcName, basePath, err := injectCheckpointStorage(podSpec, mainContainer, info, storageType, storageConfig)
+	pvcName, basePath, err := injectCheckpointStorage(info, storageType, storageConfig)
 	if err != nil {
 		return err
 	}
@@ -177,13 +177,7 @@ func InjectCheckpointIntoPodSpec(
 	return nil
 }
 
-func injectCheckpointStorage(
-	podSpec *corev1.PodSpec,
-	mainContainer *corev1.Container,
-	info *CheckpointInfo,
-	storageType string,
-	storageConfig *configv1alpha1.CheckpointStorageConfiguration,
-) (string, string, error) {
+func injectCheckpointStorage(info *CheckpointInfo, storageType string, storageConfig *configv1alpha1.CheckpointStorageConfiguration) (string, string, error) {
 	if info.StorageType == "" {
 		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
 	}
