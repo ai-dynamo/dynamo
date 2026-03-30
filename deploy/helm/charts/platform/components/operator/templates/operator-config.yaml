@@ -32,8 +32,7 @@ data:
         secretName: {{ .Values.webhook.certificateSecret.name | quote }}
         serviceName: {{ include "dynamo-operator.fullname" . }}-webhook-service
         allowedDGDReplicasModifiers:
-          - {{ include "dynamo-operator.fullname" . }}-controller-manager
-          - planner-serviceaccount
+          - system:serviceaccount:{{ .Release.Namespace }}:{{ include "dynamo-operator.fullname" . }}-controller-manager
     leaderElection:
       enabled: true
       id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}

@@ -686,11 +686,16 @@ func registerWebhooks(
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
-	if len(operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers) > 0 {
-		internalwebhook.SetAllowedDGDReplicasModifiers(operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers)
-		setupLog.Info("Configured allowed DGD replicas modifiers",
-			"allowedServiceAccounts", operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers)
+	modifiers := append([]string{}, operatorCfg.Server.Webhook.AllowedDGDReplicasModifiers...)
+	if sa, ns := os.Getenv("POD_SERVICE_ACCOUNT"), os.Getenv("POD_NAMESPACE"); sa != "" && ns != "" {
+		principal := fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
+		modifiers = append(modifiers, principal)
+		setupLog.Info("Auto-detected operator SA from downward API", "principal", principal)
+	} else {
+		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set (non-fatal, relying on config)")
 	}
+	internalwebhook.SetAllowedDGDReplicasModifiers(modifiers)
+	setupLog.Info("Configured allowed DGD replicas modifiers", "principals", modifiers)
 
 	setupLog.Info("Registering validation webhooks")
 

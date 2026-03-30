@@ -129,9 +129,11 @@ type WebhookServer struct {
 	// ServiceName is the name of the Kubernetes Service fronting the webhook server.
 	// Used to generate certificate SANs. Set by the Helm chart.
 	ServiceName string `json:"serviceName"`
-	// AllowedDGDReplicasModifiers lists service account names that are authorized to
-	// modify DGD replicas when scaling adapter is enabled. Populated by the Helm chart
-	// with the actual SA names to avoid fragile suffix-based matching.
+	// AllowedDGDReplicasModifiers lists full Kubernetes SA usernames
+	// (system:serviceaccount:<namespace>:<name>) authorized to modify DGD replicas
+	// when scaling adapter is enabled. Populated by the Helm chart with the operator's
+	// own SA principal; the operator also auto-detects its runtime identity from the
+	// mounted JWT token as a fallback.
 	AllowedDGDReplicasModifiers []string `json:"allowedDGDReplicasModifiers,omitempty"`
 }
 
