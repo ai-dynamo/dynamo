@@ -69,7 +69,7 @@ sglang = [
 # TODO: Pin to new released version with FP4Config once released: https://github.com/hao-ai-lab/FastVideo/issues/1171
 fastvideo = [
     "uvloop",
-    "fastvideo==0.1.7",
+    "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git",
 ]
 
 mocker = [
