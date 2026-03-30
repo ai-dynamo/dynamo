@@ -176,8 +176,8 @@ impl DeviceStreamOps for CudaStreamWrapper {
 
 /// CUDA event wrapper
 #[derive(Debug)]
-struct CudaEventWrapper {
-    event: cudarc::driver::CudaEvent,
+pub struct CudaEventWrapper {
+    pub event: cudarc::driver::CudaEvent,
 }
 
 impl DeviceEventOps for CudaEventWrapper {
