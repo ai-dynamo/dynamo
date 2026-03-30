@@ -124,7 +124,7 @@ impl TransferCapabilities {
         let ctx = TransportManager::builder()
             .worker_id(0)
             .nixl_agent(agent)
-            .cuda_device_id(0)
+            .device_id(0)
             .build()?;
 
         execute_transfer(
