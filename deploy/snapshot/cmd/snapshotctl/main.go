@@ -107,7 +107,7 @@ func runRestore(args []string) error {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `snapshotctl runs manual snapshot checkpoint and restore flows from a worker Pod manifest.
+	fmt.Fprintf(os.Stderr, `snapshotctl runs snapshot checkpoint and restore flows from a worker Pod manifest.
 
 Subcommands:
   checkpoint

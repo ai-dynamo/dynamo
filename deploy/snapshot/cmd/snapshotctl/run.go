@@ -50,25 +50,6 @@ type result struct {
 	Status             string
 }
 
-type selectedPod struct {
-	Name              string
-	ManifestNamespace string
-	Labels            map[string]string
-	Annotations       map[string]string
-	PodSpec           corev1.PodSpec
-}
-
-type runSpec struct {
-	Namespace                    string
-	CheckpointHash               string
-	DisableCudaCheckpointJobFile bool
-	SeccompLocalhostProfile      string
-	Pod                          selectedPod
-	SnapshotStorage              snapshotStorage
-	CheckpointJobName            string
-	RestorePodName               string
-}
-
 type snapshotStorage struct {
 	PVCName  string
 	BasePath string
@@ -82,39 +63,25 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
 
-	pod, err := loadPod(opts.ManifestPath)
+	pod, clientset, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace)
 	if err != nil {
 		return nil, err
 	}
 
-	clientset, currentNamespace, err := loadClientset()
-	if err != nil {
-		return nil, err
+	checkpointHash := strings.TrimSpace(opts.CheckpointHash)
+	if checkpointHash == "" {
+		checkpointHash = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointHashPrefix, time.Now().UTC().UnixNano())
 	}
+	checkpointLocation := strings.TrimRight(storage.BasePath, "/") + "/" + checkpointHash
+	checkpointJobName := pod.Name + "-checkpoint"
 
-	namespace := corev1.NamespaceDefault
-	if currentNamespace != "" {
-		namespace = currentNamespace
-	}
-	if pod.ManifestNamespace != "" {
-		namespace = pod.ManifestNamespace
-	}
-	if opts.Namespace != "" {
-		namespace = opts.Namespace
-	}
-	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
+	job, err := buildCheckpointJob(pod, namespace, checkpointJobName, checkpointHash, checkpointLocation, storage, opts.DisableCudaCheckpointJobFile)
 	if err != nil {
 		return nil, err
 	}
-	spec := buildRunSpec(namespace, opts.CheckpointHash, opts.DisableCudaCheckpointJobFile, pod, storage)
-
-	job, err := buildCheckpointJob(spec)
-	if err != nil {
-		return nil, err
-	}
-	_, err = clientset.BatchV1().Jobs(spec.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	_, err = clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("checkpoint job %s/%s already exists", spec.Namespace, spec.CheckpointJobName)
+		return nil, fmt.Errorf("checkpoint job %s/%s already exists", namespace, checkpointJobName)
 	}
 	if err != nil {
 		return nil, err
@@ -122,17 +89,17 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
-	status, err := waitForCheckpoint(waitCtx, clientset, spec)
+	status, err := waitForCheckpoint(waitCtx, clientset, namespace, checkpointJobName)
 	if err != nil {
 		return nil, err
 	}
 
 	return &result{
-		Name:               spec.Pod.Name,
-		Namespace:          spec.Namespace,
-		CheckpointHash:     spec.CheckpointHash,
-		CheckpointLocation: spec.checkpointLocation(),
-		CheckpointJob:      spec.CheckpointJobName,
+		Name:               pod.Name,
+		Namespace:          namespace,
+		CheckpointHash:     checkpointHash,
+		CheckpointLocation: checkpointLocation,
+		CheckpointJob:      checkpointJobName,
 		Status:             status,
 	}, nil
 }
@@ -152,36 +119,18 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
 
-	pod, err := loadPod(opts.ManifestPath)
+	pod, clientset, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace)
 	if err != nil {
 		return nil, err
 	}
 
-	clientset, currentNamespace, err := loadClientset()
-	if err != nil {
-		return nil, err
-	}
+	checkpointHash := strings.TrimSpace(opts.CheckpointHash)
+	checkpointLocation := strings.TrimRight(storage.BasePath, "/") + "/" + checkpointHash
 
-	namespace := corev1.NamespaceDefault
-	if currentNamespace != "" {
-		namespace = currentNamespace
-	}
-	if pod.ManifestNamespace != "" {
-		namespace = pod.ManifestNamespace
-	}
-	if opts.Namespace != "" {
-		namespace = opts.Namespace
-	}
-	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
-	if err != nil {
-		return nil, err
-	}
-	spec := buildRunSpec(namespace, opts.CheckpointHash, false, pod, storage)
-
-	restorePod := buildRestorePod(spec)
-	_, err = clientset.CoreV1().Pods(spec.Namespace).Create(ctx, restorePod, metav1.CreateOptions{})
+	restorePod := buildRestorePod(pod, namespace, checkpointHash, checkpointLocation, storage)
+	_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("restore pod %s/%s already exists", spec.Namespace, spec.RestorePodName)
+		return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)
 	}
 	if err != nil {
 		return nil, err
@@ -189,19 +138,48 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
-	status, err := waitForRestore(waitCtx, clientset, spec)
+	status, err := waitForRestore(waitCtx, clientset, namespace, pod.Name)
 	if err != nil {
 		return nil, err
 	}
 
 	return &result{
-		Name:               spec.Pod.Name,
-		Namespace:          spec.Namespace,
-		CheckpointHash:     spec.CheckpointHash,
-		CheckpointLocation: spec.checkpointLocation(),
-		RestorePod:         spec.RestorePodName,
+		Name:               pod.Name,
+		Namespace:          namespace,
+		CheckpointHash:     checkpointHash,
+		CheckpointLocation: checkpointLocation,
+		RestorePod:         pod.Name,
 		Status:             status,
 	}, nil
+}
+
+func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string) (*corev1.Pod, kubernetes.Interface, string, snapshotStorage, error) {
+	pod, err := loadPod(manifestPath)
+	if err != nil {
+		return nil, nil, "", snapshotStorage{}, err
+	}
+
+	clientset, currentNamespace, err := loadClientset()
+	if err != nil {
+		return nil, nil, "", snapshotStorage{}, err
+	}
+
+	namespace := currentNamespace
+	if namespace == "" {
+		namespace = corev1.NamespaceDefault
+	}
+	if pod.Namespace != "" {
+		namespace = pod.Namespace
+	}
+	if namespaceOverride != "" {
+		namespace = namespaceOverride
+	}
+
+	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
+	if err != nil {
+		return nil, nil, "", snapshotStorage{}, err
+	}
+	return pod, clientset, namespace, storage, nil
 }
 
 func loadClientset() (kubernetes.Interface, string, error) {
@@ -286,74 +264,54 @@ func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface
 	)
 }
 
-func loadPod(manifestPath string) (selectedPod, error) {
+func loadPod(manifestPath string) (*corev1.Pod, error) {
 	content, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return selectedPod{}, fmt.Errorf("read manifest %s: %w", manifestPath, err)
+		return nil, fmt.Errorf("read manifest %s: %w", manifestPath, err)
 	}
 
 	var pod corev1.Pod
 	if err := yaml.Unmarshal(content, &pod); err != nil {
-		return selectedPod{}, fmt.Errorf("parse manifest %s: %w", manifestPath, err)
+		return nil, fmt.Errorf("parse manifest %s: %w", manifestPath, err)
 	}
 	if kind := strings.TrimSpace(pod.Kind); kind != "" && kind != "Pod" {
-		return selectedPod{}, fmt.Errorf("manifest %s is kind %q, expected Pod", manifestPath, kind)
+		return nil, fmt.Errorf("manifest %s is kind %q, expected Pod", manifestPath, kind)
 	}
 	if len(pod.Spec.Containers) != 1 {
-		return selectedPod{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"manifest %s has %d containers; snapshotctl requires exactly one worker container",
 			manifestPath,
 			len(pod.Spec.Containers),
 		)
 	}
 	if strings.TrimSpace(pod.Spec.Containers[0].Image) == "" {
-		return selectedPod{}, fmt.Errorf("manifest %s: worker container image is required", manifestPath)
+		return nil, fmt.Errorf("manifest %s: worker container image is required", manifestPath)
+	}
+	if strings.TrimSpace(pod.Name) == "" {
+		return nil, fmt.Errorf("manifest %s: metadata.name is required", manifestPath)
 	}
 
-	name := strings.TrimSpace(pod.Name)
-	if name == "" {
-		name = "snapshot-worker"
-	}
-
-	return selectedPod{
-		Name:              name,
-		ManifestNamespace: strings.TrimSpace(pod.Namespace),
-		Labels:            maps.Clone(pod.Labels),
-		Annotations:       maps.Clone(pod.Annotations),
-		PodSpec:           *pod.Spec.DeepCopy(),
-	}, nil
+	pod.Namespace = strings.TrimSpace(pod.Namespace)
+	return &pod, nil
 }
 
-func buildRunSpec(namespace string, checkpointHash string, disableCudaCheckpointJobFile bool, pod selectedPod, storage snapshotStorage) runSpec {
-	if strings.TrimSpace(checkpointHash) == "" {
-		checkpointHash = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointHashPrefix, time.Now().UTC().UnixNano())
-	}
-
-	return runSpec{
-		Namespace:                    namespace,
-		CheckpointHash:               checkpointHash,
-		DisableCudaCheckpointJobFile: disableCudaCheckpointJobFile,
-		SeccompLocalhostProfile:      snapshotpodspec.DefaultSeccompLocalhostProfile,
-		Pod:                          pod,
-		SnapshotStorage:              storage,
-		CheckpointJobName:            pod.Name + "-checkpoint",
-		RestorePodName:               pod.Name,
-	}
-}
-
-func (s runSpec) checkpointLocation() string {
-	return strings.TrimRight(s.SnapshotStorage.BasePath, "/") + "/" + s.CheckpointHash
-}
-
-func buildCheckpointJob(spec runSpec) (*batchv1.Job, error) {
-	podSpec := *spec.Pod.PodSpec.DeepCopy()
+func buildCheckpointJob(
+	pod *corev1.Pod,
+	namespace string,
+	jobName string,
+	checkpointHash string,
+	checkpointLocation string,
+	storage snapshotStorage,
+	disableCudaCheckpointJobFile bool,
+) (*batchv1.Job, error) {
+	podSpec := *pod.Spec.DeepCopy()
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
-	snapshotpodspec.InjectLocalhostSeccompProfile(&podSpec, spec.SeccompLocalhostProfile)
-	snapshotpodspec.InjectCheckpointVolume(&podSpec, spec.SnapshotStorage.PVCName)
+	snapshotpodspec.InjectLocalhostSeccompProfile(&podSpec, snapshotpodspec.DefaultSeccompLocalhostProfile)
+	snapshotpodspec.InjectCheckpointVolume(&podSpec, storage.PVCName)
 
-	container := *spec.Pod.PodSpec.Containers[0].DeepCopy()
-	snapshotpodspec.InjectCheckpointVolumeMount(&container, spec.SnapshotStorage.BasePath)
-	if !spec.DisableCudaCheckpointJobFile {
+	container := *pod.Spec.Containers[0].DeepCopy()
+	snapshotpodspec.InjectCheckpointVolumeMount(&container, storage.BasePath)
+	if !disableCudaCheckpointJobFile {
 		if len(container.Command) == 0 {
 			return nil, fmt.Errorf(
 				"manifest must set container.command when launch-job wrapping is enabled; use --disable-cuda-checkpoint-job-file to preserve the image entrypoint",
@@ -363,8 +321,8 @@ func buildCheckpointJob(spec runSpec) (*batchv1.Job, error) {
 	}
 	podSpec.Containers = []corev1.Container{container}
 
-	labels := maps.Clone(spec.Pod.Labels)
-	annotations := maps.Clone(spec.Pod.Annotations)
+	labels := maps.Clone(pod.Labels)
+	annotations := maps.Clone(pod.Annotations)
 	if labels == nil {
 		labels = map[string]string{}
 	}
@@ -374,8 +332,8 @@ func buildCheckpointJob(spec runSpec) (*batchv1.Job, error) {
 	snapshotpodspec.ApplyCheckpointSourceMetadata(
 		labels,
 		annotations,
-		spec.CheckpointHash,
-		spec.checkpointLocation(),
+		checkpointHash,
+		checkpointLocation,
 		snapshotpodspec.StorageTypePVC,
 	)
 	zeroBackoffLimit := int32(0)
@@ -383,8 +341,8 @@ func buildCheckpointJob(spec runSpec) (*batchv1.Job, error) {
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      spec.CheckpointJobName,
-			Namespace: spec.Namespace,
+			Name:      jobName,
+			Namespace: namespace,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &zeroBackoffLimit,
@@ -399,20 +357,26 @@ func buildCheckpointJob(spec runSpec) (*batchv1.Job, error) {
 	}, nil
 }
 
-func buildRestorePod(spec runSpec) *corev1.Pod {
-	podSpec := *spec.Pod.PodSpec.DeepCopy()
+func buildRestorePod(
+	pod *corev1.Pod,
+	namespace string,
+	checkpointHash string,
+	checkpointLocation string,
+	storage snapshotStorage,
+) *corev1.Pod {
+	podSpec := *pod.Spec.DeepCopy()
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
-	snapshotpodspec.InjectLocalhostSeccompProfile(&podSpec, spec.SeccompLocalhostProfile)
-	snapshotpodspec.InjectCheckpointVolume(&podSpec, spec.SnapshotStorage.PVCName)
+	snapshotpodspec.InjectLocalhostSeccompProfile(&podSpec, snapshotpodspec.DefaultSeccompLocalhostProfile)
+	snapshotpodspec.InjectCheckpointVolume(&podSpec, storage.PVCName)
 
-	container := *spec.Pod.PodSpec.Containers[0].DeepCopy()
-	snapshotpodspec.InjectCheckpointVolumeMount(&container, spec.SnapshotStorage.BasePath)
+	container := *pod.Spec.Containers[0].DeepCopy()
+	snapshotpodspec.InjectCheckpointVolumeMount(&container, storage.BasePath)
 	snapshotpodspec.InjectRestoreTUN(&podSpec, &container)
 	snapshotpodspec.SetRestorePlaceholderCommand(&container)
 	podSpec.Containers = []corev1.Container{container}
 
-	labels := maps.Clone(spec.Pod.Labels)
-	annotations := maps.Clone(spec.Pod.Annotations)
+	labels := maps.Clone(pod.Labels)
+	annotations := maps.Clone(pod.Annotations)
 	if labels == nil {
 		labels = map[string]string{}
 	}
@@ -423,16 +387,16 @@ func buildRestorePod(spec runSpec) *corev1.Pod {
 		labels,
 		annotations,
 		true,
-		spec.CheckpointHash,
-		spec.checkpointLocation(),
+		checkpointHash,
+		checkpointLocation,
 		snapshotpodspec.StorageTypePVC,
 	)
 
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        spec.RestorePodName,
-			Namespace:   spec.Namespace,
+			Name:        pod.Name,
+			Namespace:   namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
@@ -440,17 +404,17 @@ func buildRestorePod(spec runSpec) *corev1.Pod {
 	}
 }
 
-func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, spec runSpec) (string, error) {
+func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, namespace string, jobName string) (string, error) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
-		job, err := clientset.BatchV1().Jobs(spec.Namespace).Get(ctx, spec.CheckpointJobName, metav1.GetOptions{})
+		job, err := clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 		if err != nil {
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("wait for checkpoint job %s/%s: %w", spec.Namespace, spec.CheckpointJobName, ctx.Err())
+				return "", fmt.Errorf("wait for checkpoint job %s/%s: %w", namespace, jobName, ctx.Err())
 			}
-			return "", fmt.Errorf("get checkpoint job %s/%s: %w", spec.Namespace, spec.CheckpointJobName, err)
+			return "", fmt.Errorf("get checkpoint job %s/%s: %w", namespace, jobName, err)
 		}
 
 		status := strings.TrimSpace(job.Annotations[snapshotpodspec.CheckpointStatusAnnotation])
@@ -458,35 +422,59 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, spec
 			return status, nil
 		}
 		if status == "failed" {
-			return "", fmt.Errorf("checkpoint job %s/%s failed", spec.Namespace, spec.CheckpointJobName)
+			return "", fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
 		}
 
 		select {
 		case <-ctx.Done():
 			summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
+				LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
+			})
+			summary := "no checkpoint pod created yet"
+			if err != nil {
+				summary = "unable to list checkpoint pod: " + err.Error()
+			} else if len(pods.Items) != 0 {
+				pod := pods.Items[0]
+				parts := []string{fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase)}
+				for _, condition := range pod.Status.Conditions {
+					if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
+						parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
+					}
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.State.Waiting != nil {
+						parts = append(parts, fmt.Sprintf("container=%s waiting=%s", status.Name, status.State.Waiting.Reason))
+					}
+					if status.State.Terminated != nil {
+						parts = append(parts, fmt.Sprintf("container=%s terminated=%s", status.Name, status.State.Terminated.Reason))
+					}
+				}
+				summary = strings.Join(parts, " ")
+			}
 			return "", fmt.Errorf(
 				"checkpoint job %s/%s timed out: %s",
-				spec.Namespace,
-				spec.CheckpointJobName,
-				checkpointPodSummary(summaryCtx, clientset, spec),
+				namespace,
+				jobName,
+				summary,
 			)
 		case <-ticker.C:
 		}
 	}
 }
 
-func waitForRestore(ctx context.Context, clientset kubernetes.Interface, spec runSpec) (string, error) {
+func waitForRestore(ctx context.Context, clientset kubernetes.Interface, namespace string, podName string) (string, error) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
-		pod, err := clientset.CoreV1().Pods(spec.Namespace).Get(ctx, spec.RestorePodName, metav1.GetOptions{})
+		pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("wait for restore pod %s/%s: %w", spec.Namespace, spec.RestorePodName, ctx.Err())
+				return "", fmt.Errorf("wait for restore pod %s/%s: %w", namespace, podName, ctx.Err())
 			}
-			return "", fmt.Errorf("get restore pod %s/%s: %w", spec.Namespace, spec.RestorePodName, err)
+			return "", fmt.Errorf("get restore pod %s/%s: %w", namespace, podName, err)
 		}
 
 		status := strings.TrimSpace(pod.Annotations[snapshotpodspec.RestoreStatusAnnotation])
@@ -494,44 +482,16 @@ func waitForRestore(ctx context.Context, clientset kubernetes.Interface, spec ru
 			return status, nil
 		}
 		if status == "failed" {
-			return "", fmt.Errorf("restore pod %s/%s failed", spec.Namespace, spec.RestorePodName)
+			return "", fmt.Errorf("restore pod %s/%s failed", namespace, podName)
 		}
 		if pod.Status.Phase == corev1.PodFailed {
-			return "", fmt.Errorf("restore pod %s/%s entered phase Failed (%s)", spec.Namespace, spec.RestorePodName, pod.Status.Reason)
+			return "", fmt.Errorf("restore pod %s/%s entered phase Failed (%s)", namespace, podName, pod.Status.Reason)
 		}
 
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("restore pod %s/%s timed out: phase=%s status=%q", spec.Namespace, spec.RestorePodName, pod.Status.Phase, status)
+			return "", fmt.Errorf("restore pod %s/%s timed out: phase=%s status=%q", namespace, podName, pod.Status.Phase, status)
 		case <-ticker.C:
 		}
 	}
-}
-
-func checkpointPodSummary(ctx context.Context, clientset kubernetes.Interface, spec runSpec) string {
-	pods, err := clientset.CoreV1().Pods(spec.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "batch.kubernetes.io/job-name=" + spec.CheckpointJobName,
-	})
-	if err != nil {
-		return "unable to list checkpoint pod: " + err.Error()
-	}
-	if len(pods.Items) == 0 {
-		return "no checkpoint pod created yet"
-	}
-	pod := pods.Items[0]
-	parts := []string{fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase)}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
-			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
-		}
-	}
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.State.Waiting != nil {
-			parts = append(parts, fmt.Sprintf("container=%s waiting=%s", status.Name, status.State.Waiting.Reason))
-		}
-		if status.State.Terminated != nil {
-			parts = append(parts, fmt.Sprintf("container=%s terminated=%s", status.Name, status.State.Terminated.Reason))
-		}
-	}
-	return strings.Join(parts, " ")
 }

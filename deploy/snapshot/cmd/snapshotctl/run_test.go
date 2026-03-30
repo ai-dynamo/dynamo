@@ -36,6 +36,6 @@ func TestLoadPodParsesJSONManifest(t *testing.T) {
 	pod, err := loadPod(path)
 	require.NoError(t, err)
 	require.Equal(t, "test-worker", pod.Name)
-	require.Equal(t, "test-ns", pod.ManifestNamespace)
-	require.Len(t, pod.PodSpec.Containers, 1)
+	require.Equal(t, "test-ns", pod.Namespace)
+	require.Len(t, pod.Spec.Containers, 1)
 }
