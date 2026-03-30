@@ -64,3 +64,21 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		},
 	}, nil
 }
+
+func injectLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	podSpec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
+		Type:             corev1.SeccompProfileTypeLocalhost,
+		LocalhostProfile: &profile,
+	}
+}
+
+func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
+	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
+	wrappedArgs = append(wrappedArgs, "--launch-job")
+	wrappedArgs = append(wrappedArgs, command...)
+	wrappedArgs = append(wrappedArgs, args...)
+	return []string{"cuda-checkpoint"}, wrappedArgs
+}
