@@ -679,9 +679,9 @@ unsafe fn execute_vectorized_sycl(
 fn run_benchmark(
     dev: &Arc<ZeDevice>,
     cmd_copy: &ZeImmediateCmdList,
-    cmd_compute: &ZeImmediateCmdList,
-    kernel: &ZeKernel,
-    kernel_indirect: &ZeKernel,
+    cmd_compute: Option<&ZeImmediateCmdList>,
+    kernel: Option<&ZeKernel>,
+    kernel_indirect: Option<&ZeKernel>,
     direction: Direction,
     pattern: Pattern,
     backend: Backend,
@@ -741,15 +741,16 @@ fn run_benchmark(
 
     // Set kernel arguments once (they don't change across iterations).
     if matches!(backend, Backend::Vectorized) {
+        let k = kernel.expect("vectorized backend requires kernel");
         let src_ptr = src_addrs_dev.as_ref().unwrap().as_ptr() as u64;
         let dst_ptr = dst_addrs_dev.as_ref().unwrap().as_ptr() as u64;
         let copy_sz = copy_size as u64;
         let n_pairs = num_copies as i32;
         unsafe {
-            kernel.set_arg(0, &src_ptr).expect("arg0");
-            kernel.set_arg(1, &dst_ptr).expect("arg1");
-            kernel.set_arg(2, &copy_sz).expect("arg2");
-            kernel.set_arg(3, &n_pairs).expect("arg3");
+            k.set_arg(0, &src_ptr).expect("arg0");
+            k.set_arg(1, &dst_ptr).expect("arg1");
+            k.set_arg(2, &copy_sz).expect("arg2");
+            k.set_arg(3, &n_pairs).expect("arg3");
         }
     }
 
@@ -757,7 +758,7 @@ fn run_benchmark(
     let args_dev: Option<ZeSlice<u8>> = if matches!(backend, Backend::VectorizedIndirect) {
         let buf = unsafe { dev.alloc_device::<u8>(vc::INDIRECT_ARGS_BYTES).expect("alloc args_dev") };
         let ptr = buf.as_ptr() as u64;
-        unsafe { kernel_indirect.set_arg(0, &ptr).expect("indirect arg0"); }
+        unsafe { kernel_indirect.expect("indirect backend requires kernel").set_arg(0, &ptr).expect("indirect arg0"); }
         Some(buf)
     } else {
         None
@@ -769,8 +770,8 @@ fn run_benchmark(
             match backend {
                 Backend::Vectorized => execute_vectorized(
                     cmd_copy,
-                    cmd_compute,
-                    kernel,
+                    cmd_compute.expect("vectorized needs CCS"),
+                    kernel.expect("vectorized needs kernel"),
                     &src_addrs,
                     &dst_addrs,
                     src_addrs_dev.as_ref().unwrap(),
@@ -780,8 +781,8 @@ fn run_benchmark(
                 ),
                 Backend::VectorizedIndirect => execute_vectorized_indirect(
                     cmd_copy,
-                    cmd_compute,
-                    kernel_indirect,
+                    cmd_compute.expect("indirect needs CCS"),
+                    kernel_indirect.expect("indirect needs kernel"),
                     &src_addrs,
                     &dst_addrs,
                     src_addrs_dev.as_ref().unwrap(),
@@ -818,8 +819,8 @@ fn run_benchmark(
             match backend {
                 Backend::Vectorized => execute_vectorized(
                     cmd_copy,
-                    cmd_compute,
-                    kernel,
+                    cmd_compute.expect("vectorized needs CCS"),
+                    kernel.expect("vectorized needs kernel"),
                     &src_addrs,
                     &dst_addrs,
                     src_addrs_dev.as_ref().unwrap(),
@@ -829,8 +830,8 @@ fn run_benchmark(
                 ),
                 Backend::VectorizedIndirect => execute_vectorized_indirect(
                     cmd_copy,
-                    cmd_compute,
-                    kernel_indirect,
+                    cmd_compute.expect("indirect needs CCS"),
+                    kernel_indirect.expect("indirect needs kernel"),
                     &src_addrs,
                     &dst_addrs,
                     src_addrs_dev.as_ref().unwrap(),
@@ -963,25 +964,36 @@ fn main() {
     let dev = ZeDevice::new(cli.device).expect("Failed to create ZeDevice");
     let dev_name = dev.name().unwrap_or_else(|_| "unknown".into());
 
-    // Immediate command lists: copy (BCS) and compute (CCS).
+    // Immediate command lists: copy (BCS) — always needed.
     let cmd_copy =
         ZeImmediateCmdList::new_copy(dev.clone()).expect("Failed to create copy cmd list");
-    let cmd_compute =
-        ZeImmediateCmdList::new_compute(dev.clone()).expect("Failed to create compute cmd list");
 
-    // Compile SPIR-V module and create kernel.
-    let module = Arc::new(
-        ZeModule::from_spirv(&dev, vc::SPIRV, None).expect("Failed to compile SPIR-V module"),
-    );
-    let kernel = ZeKernel::new(&module, vc::KERNEL_NAME).expect("Failed to create kernel");
-    kernel
-        .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
-        .expect("Failed to set group size");
-    let kernel_indirect = ZeKernel::new(&module, vc::KERNEL_NAME_INDIRECT)
-        .expect("Failed to create indirect kernel");
-    kernel_indirect
-        .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
-        .expect("Failed to set indirect group size");
+    // Compute (CCS) resources — only when a kernel-based backend is requested.
+    let needs_compute = backends.iter().any(|b| matches!(b,
+        Backend::Vectorized | Backend::VectorizedIndirect));
+    #[cfg(feature = "sycl-kernel")]
+    let needs_compute = needs_compute || backends.iter().any(|b| matches!(b, Backend::VectorizedSycl));
+
+    let cmd_compute = if needs_compute {
+        Some(ZeImmediateCmdList::new_compute(dev.clone()).expect("Failed to create compute cmd list"))
+    } else {
+        None
+    };
+    let (module, kernel, kernel_indirect) = if needs_compute {
+        let m = Arc::new(
+            ZeModule::from_spirv(&dev, vc::SPIRV, None).expect("Failed to compile SPIR-V module"),
+        );
+        let k = ZeKernel::new(&m, vc::KERNEL_NAME).expect("Failed to create kernel");
+        k.set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
+            .expect("Failed to set group size");
+        let ki = ZeKernel::new(&m, vc::KERNEL_NAME_INDIRECT)
+            .expect("Failed to create indirect kernel");
+        ki.set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
+            .expect("Failed to set indirect group size");
+        (Some(m), Some(k), Some(ki))
+    } else {
+        (None, None, None)
+    };
 
     // Print config.
     eprintln!("KV Cache Transfer Benchmark (XPU / Level Zero)");
@@ -991,7 +1003,7 @@ fn main() {
         "  Layers: {NUM_LAYERS}, KV heads: {NUM_KV_HEADS}, Head dim: {HEAD_DIM}, Outer dim: {OUTER_DIM}"
     );
     eprintln!("  Warmup: {warmup_iters}, Timed: {timed_iters}");
-    eprintln!("  SPIR-V module: {} bytes", vc::SPIRV.len());
+    if module.is_some() { eprintln!("  SPIR-V module: {} bytes", vc::SPIRV.len()); }
     eprintln!("  Work-group size: {}", vc::WORK_GROUP_SIZE);
     eprintln!("  tokens_per_block: {:?}", tpb_options);
     eprintln!("  num_blocks: {:?}", num_blocks_options);
@@ -1068,9 +1080,9 @@ fn main() {
                             let (median_ms, bw) = run_benchmark(
                                 &dev,
                                 &cmd_copy,
-                                &cmd_compute,
-                                &kernel,
-                                &kernel_indirect,
+                                cmd_compute.as_ref(),
+                                kernel.as_ref(),
+                                kernel_indirect.as_ref(),
                                 direction,
                                 pattern,
                                 backend,
