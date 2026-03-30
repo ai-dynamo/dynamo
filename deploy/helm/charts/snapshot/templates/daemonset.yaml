@@ -8,6 +8,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
 spec:
   selector:
     matchLabels:
@@ -16,6 +17,7 @@ spec:
     metadata:
       labels:
         {{- include "snapshot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: checkpoint-agent
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

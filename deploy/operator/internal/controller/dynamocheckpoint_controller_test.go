@@ -20,23 +20,20 @@ package controller
 import (
 	"context"
 	"testing"
-	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotv1alpha1 "github.com/ai-dynamo/dynamo/deploy/snapshot/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -58,14 +55,14 @@ var testHash = func() string {
 	return hash
 }()
 
-var defaultCheckpointJobName = "checkpoint-job-" + testHash + "-" + consts.DefaultCheckpointArtifactVersion
+var defaultCheckpointRequestName = checkpoint.CheckpointRequestName(testHash, consts.DefaultCheckpointArtifactVersion)
+var defaultCheckpointJobName = "checkpoint-capture-job"
 
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(s)
+	_ = snapshotv1alpha1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = coordinationv1.AddToScheme(s)
 	return s
 }
 
@@ -121,20 +118,7 @@ func makeTestCheckpoint(phase nvidiacomv1alpha1.DynamoCheckpointPhase) *nvidiaco
 	}
 }
 
-func makeCheckpointLease(name string, renewTime time.Time, durationSeconds int32) *coordinationv1.Lease {
-	renewMicroTime := metav1.NewMicroTime(renewTime)
-	return &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       ptr.To("snapshot-agent/test"),
-			LeaseDurationSeconds: &durationSeconds,
-			AcquireTime:          &renewMicroTime,
-			RenewTime:            &renewMicroTime,
-		},
-	}
-}
-
-func TestBuildCheckpointJob(t *testing.T) {
+func TestBuildCheckpointRequest(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
 	ckpt.Spec.Job.PodTemplateSpec.Labels = map[string]string{
@@ -143,14 +127,17 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	job := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
-	podSpec := job.Spec.Template.Spec
+	request, err := r.buildCheckpointRequest(ckpt, defaultCheckpointRequestName)
+	require.NoError(t, err)
+	require.NotNil(t, request.Spec.PodTemplate)
+	podSpec := request.Spec.PodTemplate.Spec
 	main := podSpec.Containers[0]
 
-	// Job and pod template labels
-	assert.Equal(t, testHash, job.Labels[consts.KubeLabelCheckpointHash])
-	assert.Equal(t, "true", job.Spec.Template.Labels[consts.KubeLabelIsCheckpointSource])
-	assert.Equal(t, testHash, job.Spec.Template.Labels[consts.KubeLabelCheckpointHash])
+	assert.Equal(t, testHash, request.Spec.SnapshotID)
+	assert.Equal(t, consts.DefaultCheckpointArtifactVersion, request.Spec.ArtifactVersion)
+	assert.Equal(t, snapshotv1alpha1.SnapshotRequestPhaseCheckpoint, request.Spec.Phase)
+	assert.True(t, request.Spec.DisableCudaCheckpointJobFile)
+	assert.Equal(t, testHash, request.Labels[consts.KubeLabelCheckpointHash])
 
 	// Env vars (checkpoint-specific + user-provided preserved)
 	envMap := make(map[string]string, len(main.Env))
@@ -177,16 +164,6 @@ func TestBuildCheckpointJob(t *testing.T) {
 	require.NotNil(t, podNameEnv.ValueFrom)
 	require.NotNil(t, podNameEnv.ValueFrom.FieldRef)
 	assert.Equal(t, "metadata.name", podNameEnv.ValueFrom.FieldRef.FieldPath)
-
-	// Seccomp profile
-	require.NotNil(t, podSpec.SecurityContext)
-	require.NotNil(t, podSpec.SecurityContext.SeccompProfile)
-	assert.Equal(t, corev1.SeccompProfileTypeLocalhost, podSpec.SecurityContext.SeccompProfile.Type)
-	assert.Equal(t, consts.SeccompProfilePath, *podSpec.SecurityContext.SeccompProfile.LocalhostProfile)
-	require.NotNil(t, podSpec.SecurityContext.RunAsUser)
-	assert.Equal(t, int64(1234), *podSpec.SecurityContext.RunAsUser)
-	require.NotNil(t, podSpec.SecurityContext.FSGroup)
-	assert.Equal(t, int64(4321), *podSpec.SecurityContext.FSGroup)
 
 	// Probes: readiness set, liveness/startup cleared
 	require.NotNil(t, main.ReadinessProbe)
@@ -230,33 +207,23 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, main.Command)
 
 	// Default deadlines
-	assert.Equal(t, int64(3600), *job.Spec.ActiveDeadlineSeconds)
-	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
-	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
+	assert.Equal(t, int64(3600), *request.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, int32(300), *request.Spec.TTLSecondsAfterFinished)
 
-	// Custom deadlines override defaults, but checkpoint jobs never retry.
+	// Custom deadlines override defaults.
 	deadline := int64(7200)
 	backoff := int32(5)
 	ttl := int32(600)
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
 	ckpt.Spec.Job.BackoffLimit = &backoff //nolint:staticcheck // Compatibility test: deprecated field must remain ignored by checkpoint Jobs.
 	ckpt.Spec.Job.TTLSecondsAfterFinished = &ttl
-	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
-	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
-	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
-	assert.Equal(t, int32(600), *job.Spec.TTLSecondsAfterFinished)
-
-	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{
-			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
-		},
-	}
-	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
-	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+	request, err = r.buildCheckpointRequest(ckpt, defaultCheckpointRequestName)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7200), *request.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, int32(600), *request.Spec.TTLSecondsAfterFinished)
 }
 
-func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
+func TestBuildCheckpointRequestInjectsStandardEnvVars(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Env = append(
@@ -275,9 +242,10 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
-	job := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	request, err := r.buildCheckpointRequest(ckpt, defaultCheckpointRequestName)
+	require.NoError(t, err)
 	foundCustomShmVolume := false
-	for _, v := range job.Spec.Template.Spec.Volumes {
+	for _, v := range request.Spec.PodTemplate.Spec.Volumes {
 		if v.Name == consts.KubeValueNameSharedMemory {
 			foundCustomShmVolume = true
 			require.NotNil(t, v.EmptyDir)
@@ -286,7 +254,7 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 		}
 	}
 	require.True(t, foundCustomShmVolume, "shared-memory volume not found: "+consts.KubeValueNameSharedMemory)
-	main := job.Spec.Template.Spec.Containers[0]
+	main := request.Spec.PodTemplate.Spec.Containers[0]
 
 	envMap := make(map[string]string, len(main.Env))
 	for _, e := range main.Env {
@@ -369,7 +337,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
-		assert.Equal(t, defaultCheckpointJobName, updated.Status.JobName)
+		assert.Equal(t, defaultCheckpointRequestName, updated.Status.JobName)
 	})
 
 	t.Run("artifact version bump starts a new checkpoint job", func(t *testing.T) {
@@ -388,7 +356,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
-		assert.Equal(t, "checkpoint-job-"+testHash+"-2", updated.Status.JobName)
+		assert.Equal(t, checkpoint.CheckpointRequestName(testHash, "2"), updated.Status.JobName)
 		assert.Equal(t, "/checkpoints/"+testHash+"/versions/2", updated.Status.Location)
 	})
 
@@ -430,185 +398,96 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		return ckpt
 	}
 
-	t.Run("succeeded job transitions to Ready", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+	t.Run("succeeded request transitions to Ready", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointRequestName)
 		ckpt.Status.Location = "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion
 		ckpt.Status.StorageType = "pvc"
-		job := &batchv1.Job{
+		request := &snapshotv1alpha1.SnapshotRequest{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:        defaultCheckpointJobName,
-				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusCompleted},
+				Name:      defaultCheckpointRequestName,
+				Namespace: testNamespace,
 			},
-			Status: batchv1.JobStatus{
-				Succeeded: 1,
-				Conditions: []batchv1.JobCondition{
-					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
-				},
+			Status: snapshotv1alpha1.SnapshotRequestStatus{
+				State:       snapshotv1alpha1.SnapshotRequestStateSucceeded,
+				JobName:     defaultCheckpointJobName,
+				Location:    "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion,
+				StorageType: "pvc",
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, request)
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
+		assert.Equal(t, defaultCheckpointJobName, updated.Status.JobName)
 		assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, updated.Status.Location)
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), updated.Status.StorageType)
 		assert.NotNil(t, updated.Status.CreatedAt)
 	})
 
-	t.Run("failed job transitions to Failed", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-fail")
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "job-fail", Namespace: testNamespace},
-			Status: batchv1.JobStatus{
-				Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+	t.Run("failed request transitions to Failed", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointRequestName)
+		request := &snapshotv1alpha1.SnapshotRequest{
+			ObjectMeta: metav1.ObjectMeta{Name: defaultCheckpointRequestName, Namespace: testNamespace},
+			Status: snapshotv1alpha1.SnapshotRequestStatus{
+				State:   snapshotv1alpha1.SnapshotRequestStateFailed,
+				Message: "checkpoint failed",
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, request)
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+		assert.Equal(t, "checkpoint failed", updated.Status.Message)
 	})
 
-	t.Run("completed job without completion annotation waits while lease is active", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-missing-status-active-lease")
-		completionTime := metav1.NewTime(time.Now())
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "job-missing-status-active-lease", Namespace: testNamespace},
-			Status: batchv1.JobStatus{
-				Succeeded:      1,
-				CompletionTime: &completionTime,
-				Conditions: []batchv1.JobCondition{
-					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: completionTime},
-				},
-			},
-		}
-		lease := makeCheckpointLease("job-missing-status-active-lease", time.Now(), 30)
-
-		r := makeCheckpointReconciler(s, ckpt, job, lease)
-		result, err := r.handleCreating(ctx, ckpt)
-		require.NoError(t, err)
-		assert.Equal(t, time.Second, result.RequeueAfter)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
-	})
-
-	t.Run("completed job without completion annotation transitions to Failed once lease expires", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-missing-status")
-		completionTime := metav1.NewTime(time.Now().Add(-time.Minute))
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "job-missing-status", Namespace: testNamespace},
-			Status: batchv1.JobStatus{
-				Succeeded:      1,
-				CompletionTime: &completionTime,
-				Conditions: []batchv1.JobCondition{
-					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: completionTime},
-				},
-			},
-		}
-		r := makeCheckpointReconciler(s, ckpt, job)
-		_, err := r.handleCreating(ctx, ckpt)
-		require.NoError(t, err)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "without snapshot-agent completion confirmation")
-	})
-
-	t.Run("completed job with failed completion annotation transitions to Failed", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-agent-failed")
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        "job-agent-failed",
-				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusFailed},
-			},
-			Status: batchv1.JobStatus{
-				Succeeded: 1,
-				Conditions: []batchv1.JobCondition{
-					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
-				},
+	t.Run("running request keeps Creating phase", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointRequestName)
+		request := &snapshotv1alpha1.SnapshotRequest{
+			ObjectMeta: metav1.ObjectMeta{Name: defaultCheckpointRequestName, Namespace: testNamespace},
+			Status: snapshotv1alpha1.SnapshotRequestStatus{
+				State:       snapshotv1alpha1.SnapshotRequestStateRunning,
+				JobName:     defaultCheckpointJobName,
+				Location:    "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion,
+				StorageType: "pvc",
+				Message:     "checkpoint running",
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
-		_, err := r.handleCreating(ctx, ckpt)
-		require.NoError(t, err)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "snapshot-agent reported checkpoint failure")
-	})
-
-	t.Run("running job with failed checkpoint annotation transitions to Failed", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-running-agent-failed")
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        "job-running-agent-failed",
-				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusFailed},
-			},
-			Status: batchv1.JobStatus{Active: 1},
-		}
-
-		r := makeCheckpointReconciler(s, ckpt, job)
-		_, err := r.handleCreating(ctx, ckpt)
-		require.NoError(t, err)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Equal(t, "Checkpoint job failed", updated.Status.Message)
-	})
-
-	t.Run("running job keeps Creating phase", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-run")
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "job-run", Namespace: testNamespace},
-			Status:     batchv1.JobStatus{Active: 1},
-		}
-
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, request)
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+		assert.Equal(t, defaultCheckpointJobName, updated.Status.JobName)
+		assert.Equal(t, "checkpoint running", updated.Status.Message)
 	})
 
-	t.Run("in-flight version changes do not relabel the running job's artifact", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+	t.Run("request location wins over a later artifact version annotation bump", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointRequestName)
 		ckpt.Status.Location = "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion
 		ckpt.Status.StorageType = "pvc"
 		ckpt.Annotations = map[string]string{consts.KubeAnnotationCheckpointArtifactVersion: "2"}
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        defaultCheckpointJobName,
-				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusCompleted},
-			},
-			Status: batchv1.JobStatus{
-				Succeeded: 1,
-				Conditions: []batchv1.JobCondition{
-					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
-				},
+		request := &snapshotv1alpha1.SnapshotRequest{
+			ObjectMeta: metav1.ObjectMeta{Name: defaultCheckpointRequestName, Namespace: testNamespace},
+			Status: snapshotv1alpha1.SnapshotRequestStatus{
+				State:       snapshotv1alpha1.SnapshotRequestStateSucceeded,
+				JobName:     defaultCheckpointJobName,
+				Location:    "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion,
+				StorageType: "pvc",
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, request)
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -618,34 +497,19 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, updated.Status.Location)
 	})
 
-	t.Run("succeeded count without complete condition keeps Creating phase", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-succeeded-not-complete")
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "job-succeeded-not-complete", Namespace: testNamespace},
-			Status:     batchv1.JobStatus{Succeeded: 1},
-		}
+	t.Run("missing request resets checkpoint to Pending and retries", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, "request-missing")
+		r := makeCheckpointReconciler(s, ckpt)
 
-		r := makeCheckpointReconciler(s, ckpt, job)
-		_, err := r.handleCreating(ctx, ckpt)
+		result, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
+		assert.True(t, result.Requeue)
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
-	})
-
-	t.Run("deleted job transitions to Failed without retrying", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, "job-deleted")
-		r := makeCheckpointReconciler(s, ckpt) // no job object
-
-		_, err := r.handleCreating(ctx, ckpt)
-		require.NoError(t, err)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Equal(t, "job-deleted", updated.Status.JobName)
-		assert.Equal(t, "checkpoint job was deleted", updated.Status.Message)
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, updated.Status.Phase)
+		assert.Equal(t, "request-missing", updated.Status.JobName)
+		assert.Equal(t, "checkpoint SnapshotRequest not found, retrying", updated.Status.Message)
 	})
 
 }

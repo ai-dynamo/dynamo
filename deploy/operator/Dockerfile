@@ -17,14 +17,15 @@ RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 RUN apt-get update && apt-get install -y --no-install-recommends git python3-pip && apt-get clean && rm -rf /var/lib/apt/lists/* \
     && pip3 install --no-cache-dir pydantic --break-system-packages
 
-WORKDIR /workspace
+WORKDIR /workspace/operator
 
-# Copy go mod and sum files first for better layer caching
-COPY go.mod go.sum ./
+# Copy module manifests first for better layer caching.
+COPY operator/go.mod operator/go.sum ./
+COPY snapshot /workspace/snapshot
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy operator source after dependencies are resolved.
+COPY operator .
 
 # Lint stage
 FROM base AS linter
@@ -53,9 +54,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cm
 # Runtime stage
 FROM nvcr.io/nvidia/distroless/go:v4.0.3
 WORKDIR /
-COPY --from=builder /workspace/manager .
-COPY --from=builder /workspace/crd-apply .
-COPY --from=builder /workspace/config/crd/bases/ /opt/dynamo-operator/crds/
+COPY --from=builder /workspace/operator/manager .
+COPY --from=builder /workspace/operator/crd-apply .
+COPY --from=builder /workspace/operator/config/crd/bases/ /opt/dynamo-operator/crds/
 USER 65532:65532
 
 ENTRYPOINT ["./manager"]

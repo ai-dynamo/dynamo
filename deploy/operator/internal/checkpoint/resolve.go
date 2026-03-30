@@ -30,14 +30,23 @@ import (
 )
 
 type CheckpointInfo struct {
-	Enabled        bool
-	Exists         bool
-	Identity       *nvidiacomv1alpha1.DynamoCheckpointIdentity
-	Hash           string
-	Location       string
-	StorageType    nvidiacomv1alpha1.DynamoCheckpointStorageType
-	CheckpointName string
-	Ready          bool
+	Enabled         bool
+	Exists          bool
+	Identity        *nvidiacomv1alpha1.DynamoCheckpointIdentity
+	Hash            string
+	ArtifactVersion string
+	Location        string
+	StorageType     nvidiacomv1alpha1.DynamoCheckpointStorageType
+	CheckpointName  string
+	Ready           bool
+}
+
+func ArtifactVersionForCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+	version := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+	if version == "" {
+		return consts.DefaultCheckpointArtifactVersion
+	}
+	return version
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -47,14 +56,15 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	}
 
 	return &CheckpointInfo{
-		Enabled:        true,
-		Exists:         true,
-		Identity:       &ckpt.Spec.Identity,
-		Hash:           hash,
-		Location:       ckpt.Status.Location,
-		StorageType:    ckpt.Status.StorageType,
-		CheckpointName: ckpt.Name,
-		Ready:          ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Enabled:         true,
+		Exists:          true,
+		Identity:        &ckpt.Spec.Identity,
+		Hash:            hash,
+		ArtifactVersion: ArtifactVersionForCheckpoint(ckpt),
+		Location:        ckpt.Status.Location,
+		StorageType:     ckpt.Status.StorageType,
+		CheckpointName:  ckpt.Name,
+		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil
 }
 
@@ -92,9 +102,10 @@ func ResolveCheckpointForService(
 	}
 	if existing == nil {
 		return &CheckpointInfo{
-			Enabled:  true,
-			Identity: config.Identity,
-			Hash:     hash,
+			Enabled:         true,
+			Identity:        config.Identity,
+			Hash:            hash,
+			ArtifactVersion: consts.DefaultCheckpointArtifactVersion,
 		}, nil
 	}
 

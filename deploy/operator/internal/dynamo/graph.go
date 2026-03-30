@@ -1165,14 +1165,9 @@ func GenerateBasePodSpec(
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 
-	// Inject checkpoint configuration if enabled
-	// This handles ALL checkpoint-related modifications:
-	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
-	// - Security context (hostIPC, privileged mode)
-	// - Restore/checkpoint pod metadata (labels/annotations)
-	// - Storage configuration (volumes, mounts)
-	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
-	// Checkpoint config comes from the operator's controller config (Helm values)
+	// Inject snapshot-compatible pod shaping for checkpoint-aware workloads.
+	// SnapshotRequest owns the final checkpoint/restore metadata; the operator
+	// only prepares storage, seccomp, restore placeholder state, and Dynamo podinfo.
 	var checkpointConfig *configv1alpha1.CheckpointConfiguration
 	if operatorConfig.Checkpoint.Enabled {
 		checkpointConfig = &operatorConfig.Checkpoint
@@ -1464,8 +1459,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
-			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
-
+			checkpoint.ClearRestorePodMetadata(labels, annotations)
 			// Apply restart annotation if this service should be restarted.
 			// For services not in the current restart order, preserve their existing annotation
 			// to avoid triggering unwanted rollouts when a new restart begins.

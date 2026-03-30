@@ -81,6 +81,43 @@ func testInfo() *CheckpointInfo {
 	return &CheckpointInfo{Enabled: true, Hash: testHash}
 }
 
+func assertRestoreTUNPresent(t *testing.T, podSpec *corev1.PodSpec) {
+	t.Helper()
+
+	hasVolume := false
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == "host-dev-net-tun" && volume.HostPath != nil && volume.HostPath.Path == "/dev/net/tun" {
+			hasVolume = true
+			break
+		}
+	}
+	assert.True(t, hasVolume)
+
+	hasMount := false
+	for _, mount := range podSpec.Containers[0].VolumeMounts {
+		if mount.Name == "host-dev-net-tun" && mount.MountPath == "/dev/net/tun" {
+			hasMount = true
+			break
+		}
+	}
+	assert.True(t, hasMount)
+}
+
+func assertRestoreTUNAbsent(t *testing.T, podSpec *corev1.PodSpec) {
+	t.Helper()
+
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == "host-dev-net-tun" {
+			t.Fatalf("unexpected restore TUN volume: %#v", volume)
+		}
+	}
+	for _, mount := range podSpec.Containers[0].VolumeMounts {
+		if mount.Name == "host-dev-net-tun" {
+			t.Fatalf("unexpected restore TUN mount: %#v", mount)
+		}
+	}
+}
+
 type createHookClient struct {
 	client.Client
 	onCreate func(ctx context.Context, obj client.Object) error
@@ -294,6 +331,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, testPVCConfig()))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
+		assertRestoreTUNPresent(t, podSpec)
 	})
 
 	t.Run("ready checkpoint preserves published versioned location", func(t *testing.T) {
@@ -314,6 +352,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		podSpec := testPodSpec()
 		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, testInfo(), testPVCConfig()))
 		assert.Equal(t, []string{"python3"}, podSpec.Containers[0].Command)
+		assertRestoreTUNAbsent(t, podSpec)
 	})
 
 	t.Run("sets seccomp profile", func(t *testing.T) {

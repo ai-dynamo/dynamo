@@ -1,0 +1,97 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: snapshotrequests.snapshot.nvidia.com
+spec:
+  group: snapshot.nvidia.com
+  names:
+    kind: SnapshotRequest
+    listKind: SnapshotRequestList
+    plural: snapshotrequests
+    shortNames:
+      - sreq
+    singular: snapshotrequest
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - jsonPath: .spec.phase
+          name: Phase
+          type: string
+        - jsonPath: .spec.snapshotID
+          name: SnapshotID
+          type: string
+        - jsonPath: .status.state
+          name: State
+          type: string
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - phase
+                - snapshotID
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Checkpoint
+                    - Restore
+                snapshotID:
+                  type: string
+                artifactVersion:
+                  type: string
+                podTemplate:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                targetPodRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                  required:
+                    - name
+                disableCudaCheckpointJobFile:
+                  type: boolean
+                activeDeadlineSeconds:
+                  type: integer
+                  format: int64
+                ttlSecondsAfterFinished:
+                  type: integer
+                  format: int32
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                observedGeneration:
+                  type: integer
+                  format: int64
+                jobName:
+                  type: string
+                podName:
+                  type: string
+                location:
+                  type: string
+                storageType:
+                  type: string
+                message:
+                  type: string
+                startedAt:
+                  type: string
+                  format: date-time
+                completedAt:
+                  type: string
+                  format: date-time
+      subresources:
+        status: {}

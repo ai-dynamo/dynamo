@@ -12,14 +12,25 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 rules:
+  # SnapshotRequest controller API
+  - apiGroups: ["snapshot.nvidia.com"]
+    resources: ["snapshotrequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["snapshot.nvidia.com"]
+    resources: ["snapshotrequests/status"]
+    verbs: ["get", "update", "patch"]
   # Watch and annotate pods in this namespace to drive checkpoint/restore lifecycle
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # Patch checkpoint Jobs with terminal checkpoint status
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Discover checkpoint storage from the snapshot agent DaemonSet
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
   # Coordinate checkpoint ownership with per-Job leases
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -41,14 +52,25 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 rules:
+  # SnapshotRequest controller API
+  - apiGroups: ["snapshot.nvidia.com"]
+    resources: ["snapshotrequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["snapshot.nvidia.com"]
+    resources: ["snapshotrequests/status"]
+    verbs: ["get", "update", "patch"]
   # Watch and annotate pods cluster-wide on assigned nodes
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # Patch checkpoint Jobs with terminal checkpoint status
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Discover checkpoint storage from the snapshot agent DaemonSet
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
   # Coordinate checkpoint ownership with per-Job leases
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]

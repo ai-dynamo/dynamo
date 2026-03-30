@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -41,6 +42,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotv1alpha1 "github.com/ai-dynamo/dynamo/deploy/snapshot/api/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -80,6 +82,8 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
+// +kubebuilder:rbac:groups=snapshot.nvidia.com,resources=snapshotrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=snapshot.nvidia.com,resources=snapshotrequests/status,verbs=get;update;patch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -192,6 +196,14 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile the resources: %w", err)
 	}
 	modified := componentReconcileResult.modified
+
+	restoreRequestsModified, err := r.syncRestoreRequests(ctx, dynamoComponentDeployment)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile restore requests: %w", err)
+	}
+	if restoreRequestsModified {
+		modified = true
+	}
 
 	// create or update api-server service
 	serviceModified, err := r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
@@ -956,11 +968,18 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	}
 
 	// Checkpoint-restore pods must avoid overlap with prior replicas.
-	// Enforce Recreate whenever the rendered template is a restore target so
-	// the old pod is terminated before the restore placeholder is started.
-	if podTemplateSpec != nil &&
-		podTemplateSpec.Labels != nil &&
-		podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget] == commonconsts.KubeLabelValueTrue {
+	// Enforce Recreate whenever this component is restoring from a ready
+	// checkpoint so the old pod is terminated before the placeholder starts.
+	checkpointInfo, err := checkpoint.ResolveCheckpointForService(
+		ctx,
+		r.Client,
+		opt.dynamoComponentDeployment.Namespace,
+		opt.dynamoComponentDeployment.Spec.Checkpoint,
+	)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "failed to resolve checkpoint")
+	}
+	if checkpointInfo != nil && checkpointInfo.Ready {
 		strategy = appsv1.DeploymentStrategy{
 			Type: appsv1.RecreateDeploymentStrategyType,
 		}
@@ -1078,9 +1097,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if workerHash := opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
-	// Restore labels are operator-controlled state. Clear stale values after
-	// metadata merge and only reapply them when checkpoint material is ready.
-	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
+	checkpoint.ClearRestorePodMetadata(podLabels, podAnnotations)
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart
@@ -1154,6 +1171,56 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	return svc, false, nil
 }
 
+func (r *DynamoComponentDeploymentReconciler) syncRestoreRequests(ctx context.Context, dcd *v1alpha1.DynamoComponentDeployment) (bool, error) {
+	if dcd.Spec.Checkpoint == nil || !dcd.Spec.Checkpoint.Enabled {
+		return false, nil
+	}
+
+	checkpointInfo, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dcd.Namespace, dcd.Spec.Checkpoint)
+	if err != nil {
+		return false, err
+	}
+	if checkpointInfo == nil || !checkpointInfo.Ready || strings.TrimSpace(checkpointInfo.Hash) == "" {
+		return false, nil
+	}
+
+	pods := &corev1.PodList{}
+	if err := r.List(
+		ctx,
+		pods,
+		client.InNamespace(dcd.Namespace),
+		client.MatchingLabels{commonconsts.KubeLabelDynamoSelector: dcd.Name},
+	); err != nil {
+		return false, err
+	}
+
+	modified := false
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		requestName := checkpoint.RestoreRequestName(checkpointInfo.Hash, pod.Name)
+		requestModified, _, err := commonController.SyncResource(ctx, r, dcd, func(ctx context.Context) (*snapshotv1alpha1.SnapshotRequest, bool, error) {
+			return checkpoint.BuildRestoreRequest(
+				dcd.Namespace,
+				requestName,
+				checkpointInfo.Hash,
+				checkpointInfo.ArtifactVersion,
+				pod.Name,
+			), false, nil
+		})
+		if err != nil {
+			return false, err
+		}
+		if requestModified {
+			modified = true
+		}
+	}
+
+	return modified, nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
@@ -1169,6 +1236,12 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Owns(&snapshotv1alpha1.SnapshotRequest{}, builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
 
 	if r.RuntimeConfig.LWSEnabled {

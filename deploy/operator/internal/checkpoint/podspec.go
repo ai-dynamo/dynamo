@@ -50,6 +50,10 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 	snapshotkube.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
 }
 
+func ClearRestorePodMetadata(labels map[string]string, annotations map[string]string) {
+	snapshotkube.ApplyRestoreTargetMetadata(labels, annotations, false, "", "", "")
+}
+
 func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 	snapshotkube.InjectCheckpointVolume(podSpec, pvcName)
 }
@@ -175,11 +179,12 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	if info.Ready {
-		mainContainer.Command = []string{"sleep", "infinity"}
-		mainContainer.Args = nil
+		if err := snapshotkube.PrepareRestoreTargetPodSpec(podSpec, commonconsts.SeccompProfilePath); err != nil {
+			return err
+		}
+	} else {
+		snapshotkube.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
 	}
-
-	snapshotkube.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
 
 	storageType := configv1alpha1.CheckpointStorageTypePVC
 	var storageConfig *configv1alpha1.CheckpointStorageConfiguration

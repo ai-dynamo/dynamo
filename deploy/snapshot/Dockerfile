@@ -68,6 +68,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-controller ./cmd/controller
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
@@ -149,6 +150,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
+COPY --from=builder /snapshot-controller /usr/local/bin/snapshot-controller
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 
 # Create directories
