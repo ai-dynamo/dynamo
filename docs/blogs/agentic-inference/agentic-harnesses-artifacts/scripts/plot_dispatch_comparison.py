@@ -1,11 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Compare dispatch-off vs dispatch-on timing data."""
+
 import json
 import statistics
 import sys
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError:
@@ -15,7 +19,7 @@ except ImportError:
 
 def load(path):
     with open(path) as f:
-        return [json.loads(l) for l in f if l.strip()]
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def main():
@@ -23,7 +27,9 @@ def main():
     on = load("streaming-actionable-state/raw/timing-with-dispatch.jsonl")
 
     def gaps(runs):
-        return [r["done_ms"] - r.get("tool_call_complete_ms", r["done_ms"]) for r in runs]
+        return [
+            r["done_ms"] - r.get("tool_call_complete_ms", r["done_ms"]) for r in runs
+        ]
 
     def ttfts(runs):
         return [r["first_token_ms"] for r in runs]
@@ -62,14 +68,21 @@ def main():
 
     mean_off = statistics.mean(gaps(off))
     mean_on = statistics.mean(gaps(on))
-    ax.annotate(f"OFF: {mean_off:.0f}ms avg\nON: {mean_on:.0f}ms avg",
-                xy=(1.5, max(max(gaps(off)), max(gaps(on))) * 0.85),
-                ha="center", fontsize=9,
-                bbox=dict(boxstyle="round", fc="white", alpha=0.8))
+    ax.annotate(
+        f"OFF: {mean_off:.0f}ms avg\nON: {mean_on:.0f}ms avg",
+        xy=(1.5, max(max(gaps(off)), max(gaps(on))) * 0.85),
+        ha="center",
+        fontsize=9,
+        bbox=dict(boxstyle="round", fc="white", alpha=0.8),
+    )
 
     plt.suptitle("Streaming Tool Dispatch: OFF vs ON (n=10 each)", fontsize=13)
     plt.tight_layout()
-    plt.savefig("streaming-actionable-state/plots/dispatch-comparison.png", dpi=150, bbox_inches="tight")
+    plt.savefig(
+        "streaming-actionable-state/plots/dispatch-comparison.png",
+        dpi=150,
+        bbox_inches="tight",
+    )
     print("Saved dispatch-comparison.png", file=sys.stderr)
 
 

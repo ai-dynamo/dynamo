@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Measure the impact of unstable preambles on prefix cache reuse.
 
@@ -45,7 +47,12 @@ def make_billing_header():
     return f"x-anthropic-billing-header: cc_version=0.2.93; cch={session_id};\n"
 
 
-def make_request(model, system_prompt, user_msg="What files are in the current directory?", max_tokens=50):
+def make_request(
+    model,
+    system_prompt,
+    user_msg="What files are in the current directory?",
+    max_tokens=50,
+):
     return {
         "model": model,
         "max_tokens": max_tokens,
@@ -117,9 +124,15 @@ def run_condition(url, model, condition, n_sequential):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8000")
-    parser.add_argument("--model", default="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4")
-    parser.add_argument("--sequential", type=int, default=8, help="Sequential requests per condition")
-    parser.add_argument("--rounds", type=int, default=3, help="Rounds of the full experiment")
+    parser.add_argument(
+        "--model", default="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+    )
+    parser.add_argument(
+        "--sequential", type=int, default=8, help="Sequential requests per condition"
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=3, help="Rounds of the full experiment"
+    )
     parser.add_argument("--output", default="-")
     parser.add_argument("--jsonl", default=None)
     args = parser.parse_args()
@@ -143,7 +156,9 @@ def main():
 
         # Condition 3: Stripped (billing header present but stripped by Dynamo)
         print("  Stripped prefix...", file=sys.stderr)
-        stripped_ttfts = run_condition(args.url, args.model, "stripped", args.sequential)
+        stripped_ttfts = run_condition(
+            args.url, args.model, "stripped", args.sequential
+        )
 
         for i in range(args.sequential):
             row = {
@@ -155,16 +170,31 @@ def main():
             }
             all_results.append(row)
 
-        print(f"  Stable avg: {sum(stable_ttfts)/len(stable_ttfts):.1f}ms", file=sys.stderr)
-        print(f"  Varying avg: {sum(varying_ttfts)/len(varying_ttfts):.1f}ms", file=sys.stderr)
-        print(f"  Stripped avg: {sum(stripped_ttfts)/len(stripped_ttfts):.1f}ms", file=sys.stderr)
+        print(
+            f"  Stable avg: {sum(stable_ttfts)/len(stable_ttfts):.1f}ms",
+            file=sys.stderr,
+        )
+        print(
+            f"  Varying avg: {sum(varying_ttfts)/len(varying_ttfts):.1f}ms",
+            file=sys.stderr,
+        )
+        print(
+            f"  Stripped avg: {sum(stripped_ttfts)/len(stripped_ttfts):.1f}ms",
+            file=sys.stderr,
+        )
 
     if args.jsonl:
         with open(args.jsonl, "w") as f:
             for row in all_results:
                 f.write(json.dumps(row) + "\n")
 
-    fieldnames = ["round", "request_index", "stable_ttft_ms", "varying_ttft_ms", "stripped_ttft_ms"]
+    fieldnames = [
+        "round",
+        "request_index",
+        "stable_ttft_ms",
+        "varying_ttft_ms",
+        "stripped_ttft_ms",
+    ]
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
     writer = csv.DictWriter(out, fieldnames=fieldnames)
     writer.writeheader()

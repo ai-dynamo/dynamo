@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Compare TTFT for segmented vs flattened reasoning reconstruction (v2).
 
@@ -39,7 +41,6 @@ import sys
 import time
 
 import requests
-
 
 # Default conversation used when no file is provided
 DEFAULT_CONVERSATION = {
@@ -145,8 +146,12 @@ def main():
         default=None,
         help="Path to a JSON file with the conversation. See docstring for format.",
     )
-    parser.add_argument("--runs", type=int, default=10,
-                        help="Number of measurement runs per variant (default: 10)")
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=10,
+        help="Number of measurement runs per variant (default: 10)",
+    )
     parser.add_argument("--output", default="-", help="CSV output path (- for stdout)")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL output path")
     args = parser.parse_args()
@@ -220,7 +225,7 @@ def main():
     # Summary
     seg_avg = sum(seg_ttfts) / len(seg_ttfts)
     flat_avg = sum(flat_ttfts) / len(flat_ttfts)
-    print(f"\nSummary:", file=sys.stderr)
+    print("\nSummary:", file=sys.stderr)
     print(f"  Segmented avg TTFT: {seg_avg:.1f}ms", file=sys.stderr)
     print(f"  Flattened avg TTFT: {flat_avg:.1f}ms", file=sys.stderr)
     print(f"  Delta (flat - seg): {flat_avg - seg_avg:+.1f}ms", file=sys.stderr)
@@ -233,8 +238,10 @@ def main():
 
     fieldnames = [
         "run",
-        "segmented_ttft_ms", "segmented_total_ms",
-        "flattened_ttft_ms", "flattened_total_ms",
+        "segmented_ttft_ms",
+        "segmented_total_ms",
+        "flattened_ttft_ms",
+        "flattened_total_ms",
         "delta_ttft_ms",
     ]
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")

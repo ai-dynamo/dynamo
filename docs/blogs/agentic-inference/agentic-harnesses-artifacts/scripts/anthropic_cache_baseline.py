@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Measure Anthropic API prompt caching behavior for baseline comparison.
 
@@ -58,19 +60,27 @@ def send_request(client, system_text, model="claude-haiku-4-5"):
     response = client.messages.create(
         model=model,
         max_tokens=20,
-        system=[{
-            "type": "text",
-            "text": system_text,
-            "cache_control": {"type": "ephemeral"}
-        }],
-        messages=[{"role": "user", "content": "What files are in the current directory?"}],
+        system=[
+            {
+                "type": "text",
+                "text": system_text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[
+            {"role": "user", "content": "What files are in the current directory?"}
+        ],
     )
     ttft = (time.monotonic() - t0) * 1000
     return {
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
-        "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
-        "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+        "cache_creation_input_tokens": getattr(
+            response.usage, "cache_creation_input_tokens", 0
+        )
+        or 0,
+        "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0)
+        or 0,
         "ttft_ms": round(ttft, 2),
     }
 
@@ -85,13 +95,18 @@ def run_experiment(client, model, n_rounds, n_sequential):
         print("  Stable prefix...", file=sys.stderr)
         for i in range(n_sequential):
             usage = send_request(client, SYSTEM_PROMPT, model)
-            results.append({
-                "round": r + 1,
-                "request_index": i + 1,
-                "condition": "stable",
-                **usage,
-            })
-            print(f"    [{i+1}] cache_read={usage['cache_read_input_tokens']} cache_create={usage['cache_creation_input_tokens']} ttft={usage['ttft_ms']}ms", file=sys.stderr)
+            results.append(
+                {
+                    "round": r + 1,
+                    "request_index": i + 1,
+                    "condition": "stable",
+                    **usage,
+                }
+            )
+            print(
+                f"    [{i+1}] cache_read={usage['cache_read_input_tokens']} cache_create={usage['cache_creation_input_tokens']} ttft={usage['ttft_ms']}ms",
+                file=sys.stderr,
+            )
             time.sleep(0.3)
 
         time.sleep(1)
@@ -101,13 +116,18 @@ def run_experiment(client, model, n_rounds, n_sequential):
         for i in range(n_sequential):
             system = make_billing_header() + SYSTEM_PROMPT
             usage = send_request(client, system, model)
-            results.append({
-                "round": r + 1,
-                "request_index": i + 1,
-                "condition": "varying",
-                **usage,
-            })
-            print(f"    [{i+1}] cache_read={usage['cache_read_input_tokens']} cache_create={usage['cache_creation_input_tokens']} ttft={usage['ttft_ms']}ms", file=sys.stderr)
+            results.append(
+                {
+                    "round": r + 1,
+                    "request_index": i + 1,
+                    "condition": "varying",
+                    **usage,
+                }
+            )
+            print(
+                f"    [{i+1}] cache_read={usage['cache_read_input_tokens']} cache_create={usage['cache_creation_input_tokens']} ttft={usage['ttft_ms']}ms",
+                file=sys.stderr,
+            )
             time.sleep(0.3)
 
         time.sleep(1)
@@ -134,9 +154,14 @@ def main():
         print(f"Raw data written to {args.jsonl}", file=sys.stderr)
 
     fieldnames = [
-        "round", "request_index", "condition",
-        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
-        "output_tokens", "ttft_ms",
+        "round",
+        "request_index",
+        "condition",
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+        "ttft_ms",
     ]
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
     writer = csv.DictWriter(out, fieldnames=fieldnames)

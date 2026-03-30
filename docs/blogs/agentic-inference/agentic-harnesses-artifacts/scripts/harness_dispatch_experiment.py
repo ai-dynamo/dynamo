@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """
 Harness-in-the-loop dispatch experiment (Section 3, Agentic Harnesses blog).
@@ -29,7 +31,10 @@ CALCULATOR_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "expression": {"type": "string", "description": "Math expression to evaluate."}
+                "expression": {
+                    "type": "string",
+                    "description": "Math expression to evaluate.",
+                }
             },
             "required": ["expression"],
         },
@@ -71,9 +76,9 @@ def _iter_sse_lines(response):
             current_event = None
             continue
         if line.startswith("event:"):
-            current_event = line[len("event:"):].strip()
+            current_event = line[len("event:") :].strip()
         elif line.startswith("data:"):
-            data = line[len("data:"):].strip()
+            data = line[len("data:") :].strip()
             yield (current_event, data)
             # reset event after yielding
             current_event = None
@@ -121,7 +126,7 @@ def run_buffered(url: str, model: str, tool_latency_s: float) -> dict:
             first_token_seen = True
 
         # Accumulate tool call deltas
-        for tc in (delta.get("tool_calls") or []):
+        for tc in delta.get("tool_calls") or []:
             idx = tc["index"]
             if idx not in accumulated_tool_calls:
                 accumulated_tool_calls[idx] = {
@@ -278,7 +283,9 @@ def make_row(run_idx: int, variant: str, t: dict) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Harness dispatch experiment")
     parser.add_argument("--url", default="http://localhost:8000")
-    parser.add_argument("--model", default="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4")
+    parser.add_argument(
+        "--model", default="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+    )
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--tool-latency-ms", type=float, default=50)
     parser.add_argument("--output", default="-", help="CSV output path (- for stdout)")
@@ -298,7 +305,13 @@ def main():
         rows.append(row)
         wall = float(row["total_wall_ms"])
         wall_times["A_buffered"].append(wall)
-        raw_records.append({"run": i + 1, "variant": "A_buffered", "timestamps": {k: v for k, v in t.items()}})
+        raw_records.append(
+            {
+                "run": i + 1,
+                "variant": "A_buffered",
+                "timestamps": {k: v for k, v in t.items()},
+            }
+        )
         print(f"  run {i+1:>3d}: {wall:8.2f} ms", file=sys.stderr)
 
     # --- Variant B ---
@@ -309,7 +322,13 @@ def main():
         rows.append(row)
         wall = float(row["total_wall_ms"])
         wall_times["B_dispatch"].append(wall)
-        raw_records.append({"run": i + 1, "variant": "B_dispatch", "timestamps": {k: v for k, v in t.items()}})
+        raw_records.append(
+            {
+                "run": i + 1,
+                "variant": "B_dispatch",
+                "timestamps": {k: v for k, v in t.items()},
+            }
+        )
         print(f"  run {i+1:>3d}: {wall:8.2f} ms", file=sys.stderr)
 
     # --- CSV output ---
@@ -339,10 +358,17 @@ def main():
             continue
         mean = statistics.mean(times)
         stdev = statistics.stdev(times) if len(times) > 1 else 0.0
-        print(f"  {variant:>15s}: mean={mean:8.2f} ms  stdev={stdev:7.2f} ms  (n={len(times)})", file=sys.stderr)
+        print(
+            f"  {variant:>15s}: mean={mean:8.2f} ms  stdev={stdev:7.2f} ms  (n={len(times)})",
+            file=sys.stderr,
+        )
 
-    a_mean = statistics.mean(wall_times["A_buffered"]) if wall_times["A_buffered"] else 0
-    b_mean = statistics.mean(wall_times["B_dispatch"]) if wall_times["B_dispatch"] else 0
+    a_mean = (
+        statistics.mean(wall_times["A_buffered"]) if wall_times["A_buffered"] else 0
+    )
+    b_mean = (
+        statistics.mean(wall_times["B_dispatch"]) if wall_times["B_dispatch"] else 0
+    )
     if a_mean > 0:
         delta = a_mean - b_mean
         pct = (delta / a_mean) * 100
