@@ -131,13 +131,13 @@ impl PythonServerStreamingEngine {
 #[derive(Debug, thiserror::Error)]
 enum ResponseProcessingError {
     #[error("dynamo error")]
-    DynamoError(DynamoError),
+    Dynamo(DynamoError),
 
     #[error("deserialize error: {0}")]
-    DeserializeError(String),
+    Deserialize(String),
 
     #[error("gil offload error: {0}")]
-    OffloadError(String),
+    Offload(String),
 }
 
 #[async_trait::async_trait]
@@ -237,7 +237,7 @@ where
                         done = true;
 
                         match e {
-                            ResponseProcessingError::DeserializeError(e) => {
+                            ResponseProcessingError::Deserialize(e) => {
                                 // tell the python async generator to stop generating
                                 // right now, this is impossible as we are not passing the context to the python async generator
                                 // todo: add task-local context to the python async generator
@@ -247,10 +247,10 @@ where
                                     e
                                 ))
                             }
-                            ResponseProcessingError::DynamoError(dynamo_err) => {
+                            ResponseProcessingError::Dynamo(dynamo_err) => {
                                 Annotated::from_err(dynamo_err)
                             }
-                            ResponseProcessingError::OffloadError(e) => {
+                            ResponseProcessingError::Offload(e) => {
                                 Annotated::from_error(format!(
                                     "critical error: failed to offload the python async generator to a new thread: {}",
                                     e
@@ -302,7 +302,7 @@ where
             // Check if the Python exception is a Dynamo error type.
             // Wrap as Backend* since this is the backend engine context.
             if let Some((backend_err, message)) = py_exception_to_backend_error(py, &e) {
-                return ResponseProcessingError::DynamoError(
+                return ResponseProcessingError::Dynamo(
                     DynamoError::builder()
                         .error_type(ErrorType::Backend(backend_err))
                         .message(message)
@@ -313,7 +313,7 @@ where
             // GeneratorExit from Python's generator protocol (e.g., GC closing
             // a generator) is treated as an engine shutdown.
             if e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-                return ResponseProcessingError::DynamoError(
+                return ResponseProcessingError::Dynamo(
                     DynamoError::builder()
                         .error_type(ErrorType::Backend(BackendError::EngineShutdown))
                         .message("engine shutting down")
@@ -343,7 +343,7 @@ where
                 BackendError::Unknown
             };
 
-            ResponseProcessingError::DynamoError(
+            ResponseProcessingError::Dynamo(
                 DynamoError::builder()
                     .error_type(ErrorType::Backend(backend_err))
                     .message(e.to_string())
@@ -355,8 +355,8 @@ where
         Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
     })
     .await
-    .map_err(|e| ResponseProcessingError::OffloadError(e.to_string()))?
-    .map_err(|e| ResponseProcessingError::DeserializeError(e.to_string()))?;
+    .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
+    .map_err(|e| ResponseProcessingError::Deserialize(e.to_string()))?;
 
     let response = Annotated::from_data(response);
 
