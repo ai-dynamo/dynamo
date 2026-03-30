@@ -38,7 +38,7 @@ class AudioNvExt(BaseModel):
     """If True, the model uses only the speaker's acoustic features (embedding) without considering the ref_text."""
 
     speaker_embedding: Optional[list[float]] = None
-    """A pre-computed vector (1024 or 2048 dimensions) representing a voice."""
+    """A pre-computed vector representing a voice."""
 
     initial_codec_chunk_frames: Optional[int] = None
     """Controls the initial buffering size for the audio codec."""

@@ -53,7 +53,7 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub x_vector_only_mode: Option<bool>,
 
-    /// A pre-computed vector (1024 or 2048 dimensions) representing a voice.
+    /// A pre-computed vector representing a voice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub speaker_embedding: Option<Vec<f32>>,

@@ -1,4 +1,3 @@
-
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -37,6 +36,7 @@ pub struct NvCreateAudioRequest {
 
     /// Playback speed (0.25 to 4.0, default 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(range(min = 0.25, max = 4.0))]
     pub speed: Option<f32>,
 
     /// The format to stream the audio in
