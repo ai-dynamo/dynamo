@@ -29,7 +29,6 @@ pub use async_openai::types::chat::{
     ChatCompletionFunctionCall,
     ChatCompletionFunctions,
     ChatCompletionFunctionsArgs,
-    ChatCompletionMessageToolCall,
     ChatCompletionMessageToolCallChunk,
     ChatCompletionRequestAssistantMessageAudio,
     ChatCompletionRequestAssistantMessageContent,
@@ -149,6 +148,23 @@ pub struct FunctionName {
 pub struct ChatCompletionNamedToolChoice {
     pub r#type: ChatCompletionToolType,
     pub function: FunctionName,
+}
+
+fn default_function_type() -> FunctionType {
+    FunctionType::Function
+}
+
+/// Tool call kept locally to preserve `type: "function"` in unary request/response payloads.
+///
+/// Differs from upstream: `type` is serialized by default and also defaults to
+/// `function` when omitted during deserialization, preserving compatibility with
+/// both Dynamo's historical wire format and upstream spec-compliant inputs.
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct ChatCompletionMessageToolCall {
+    pub id: String,
+    #[serde(default = "default_function_type")]
+    pub r#type: FunctionType,
+    pub function: FunctionCall,
 }
 
 /// Tool choice enum kept locally because upstream changed variant names.
@@ -672,4 +688,38 @@ pub struct CreateChatCompletionStreamResponse {
     pub system_fingerprint: Option<String>,
     pub object: String,
     pub usage: Option<CompletionUsage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_call_defaults_type_on_deserialize() {
+        let tool_call: ChatCompletionMessageToolCall = serde_json::from_value(serde_json::json!({
+            "id": "call_123",
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\":\"SF\"}"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(tool_call.r#type, FunctionType::Function);
+    }
+
+    #[test]
+    fn tool_call_serializes_type_for_wire_compat() {
+        let tool_call = ChatCompletionMessageToolCall {
+            id: "call_123".into(),
+            r#type: FunctionType::Function,
+            function: FunctionCall {
+                name: "get_weather".into(),
+                arguments: "{\"location\":\"SF\"}".into(),
+            },
+        };
+
+        let json = serde_json::to_value(tool_call).unwrap();
+        assert_eq!(json["type"], "function");
+    }
 }

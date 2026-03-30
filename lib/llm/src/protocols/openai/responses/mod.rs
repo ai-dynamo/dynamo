@@ -23,7 +23,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
     CreateChatCompletionRequest, FunctionName, FunctionObject, ImageDetail as ChatImageDetail,
-    ImageUrl, ResponseFormat, ServiceTier as ChatServiceTier,
+    FunctionType, ImageUrl, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -291,6 +291,7 @@ fn convert_input_items_to_messages(
                             audio: None,
                             tool_calls: Some(vec![ChatCompletionMessageToolCall {
                                 id: fc.call_id.clone(),
+                                r#type: FunctionType::Function,
                                 function: dynamo_protocols::types::FunctionCall {
                                     name: fc.name.clone(),
                                     arguments: fc.arguments.clone(),
@@ -1203,6 +1204,7 @@ mod tests {
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionMessageToolCall {
                             id: "call_abc".into(),
+                            r#type: FunctionType::Function,
                             function: dynamo_protocols::types::FunctionCall {
                                 name: "get_weather".into(),
                                 arguments: r#"{"location":"SF"}"#.into(),

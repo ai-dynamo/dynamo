@@ -79,6 +79,7 @@ fn convert_tool_chunk_to_message_tool_call(
         if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
             Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
                 id: id.clone(),
+                r#type: dynamo_protocols::types::FunctionType::Function,
                 function: dynamo_protocols::types::FunctionCall {
                     name: name.clone(),
                     arguments: arguments.clone(),
@@ -787,6 +788,7 @@ mod tests {
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].r#type, dynamo_protocols::types::FunctionType::Function);
 
         // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
         assert_eq!(
@@ -830,6 +832,7 @@ mod tests {
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].r#type, dynamo_protocols::types::FunctionType::Function);
 
         // Verify that finish reason was overridden to ToolCalls despite original being Length
         assert_eq!(

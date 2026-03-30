@@ -30,6 +30,7 @@ pub async fn try_tool_call_parse_aggregate(
             .map(
                 |parsed| dynamo_protocols::types::ChatCompletionMessageToolCall {
                     id: parsed.id,
+                    r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: parsed.function.name,
                         arguments: parsed.function.arguments,
