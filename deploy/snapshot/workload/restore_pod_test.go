@@ -23,10 +23,10 @@ func TestNewRestorePod(t *testing.T) {
 				Args:    []string{"--model", "Qwen"},
 			}},
 		},
-	}, RestorePodOptions{
+	}, PodOptions{
 		Namespace:    "test-ns",
 		CheckpointID: "hash",
-		Storage: ResolvedStorage{
+		Storage: Storage{
 			Type:     StorageTypePVC,
 			Location: "/checkpoints/hash",
 			PVCName:  "snapshot-pvc",
@@ -74,7 +74,7 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		Args:    []string{"--model", "Qwen"},
 	}
 
-	storage := ResolvedStorage{
+	storage := Storage{
 		Type:     StorageTypePVC,
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",
@@ -119,7 +119,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 			MountPath: "/checkpoints",
 		}},
 	}
-	storage := ResolvedStorage{
+	storage := Storage{
 		Type:     StorageTypePVC,
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",

@@ -69,7 +69,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(checkpointID, "", snapshotworkload.StorageTypePVC, snapshotworkload.StorageConfig{
+	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(checkpointID, "", snapshotworkload.StorageTypePVC, snapshotworkload.Storage{
 		Type:     snapshotworkload.StorageTypePVC,
 		PVCName:  storage.PVCName,
 		BasePath: storage.BasePath,
@@ -87,7 +87,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 				Annotations: pod.Annotations,
 			},
 			Spec: *pod.Spec.DeepCopy(),
-		}, snapshotworkload.RestorePodOptions{
+		}, snapshotworkload.PodOptions{
 			Namespace:      namespace,
 			CheckpointID:   checkpointID,
 			Storage:        resolvedStorage,

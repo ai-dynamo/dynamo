@@ -237,6 +237,9 @@ dynamo-operator:
     # These settings tell the operator where to find checkpoint storage
     # Must match the configuration in the snapshot chart
     storage:
+      # -- Storage backend type for checkpoints. Only `pvc` is currently supported.
+      type: "pvc"
+
       # -- PVC storage configuration for the snapshot checkpoint store
       pvc:
         # -- Name of the PVC created by the snapshot chart

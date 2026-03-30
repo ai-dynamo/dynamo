@@ -24,16 +24,18 @@ func TestNewCheckpointJob(t *testing.T) {
 			}},
 		},
 	}, CheckpointJobOptions{
-		Namespace:             "test-ns",
-		Name:                  "test-job",
-		CheckpointID:          "hash",
-		Storage: ResolvedStorage{
-			Type:     StorageTypePVC,
-			Location: "/checkpoints/hash",
+		PodOptions: PodOptions{
+			Namespace:    "test-ns",
+			CheckpointID: "hash",
+			Storage: Storage{
+				Type:     StorageTypePVC,
+				Location: "/checkpoints/hash",
+			},
+			SeccompProfile: DefaultSeccompLocalhostProfile,
 		},
+		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
-		SeccompProfile:        DefaultSeccompLocalhostProfile,
 		WrapLaunchJob:         true,
 	})
 	if err != nil {

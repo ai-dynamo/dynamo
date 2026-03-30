@@ -4,14 +4,14 @@ import "fmt"
 
 import corev1 "k8s.io/api/core/v1"
 
-type RestorePodOptions struct {
+type PodOptions struct {
 	Namespace      string
 	CheckpointID   string
-	Storage        ResolvedStorage
+	Storage        Storage
 	SeccompProfile string
 }
 
-func NewRestorePod(pod *corev1.Pod, opts RestorePodOptions) *corev1.Pod {
+func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 	pod = pod.DeepCopy()
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
@@ -29,7 +29,7 @@ func NewRestorePod(pod *corev1.Pod, opts RestorePodOptions) *corev1.Pod {
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	container *corev1.Container,
-	storage ResolvedStorage,
+	storage Storage,
 	seccompProfile string,
 	placeholder bool,
 ) {
@@ -49,7 +49,7 @@ func PrepareRestorePodSpec(
 func ValidateRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	container *corev1.Container,
-	storage ResolvedStorage,
+	storage Storage,
 	seccompProfile string,
 ) error {
 	if podSpec == nil {

@@ -223,7 +223,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	}
 	version := desiredArtifactVersion(ckpt)
 	jobName := desiredCheckpointJobName(ckpt, hash)
-	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(hash, version, snapshotworkload.StorageConfig{
+	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(hash, version, snapshotworkload.Storage{
 		Type:     r.Config.Checkpoint.Storage.Type,
 		PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
 		BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
@@ -390,7 +390,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
 				ckpt.Status.IdentityHash,
 				desiredArtifactVersion(ckpt),
-				snapshotworkload.StorageConfig{
+				snapshotworkload.Storage{
 					Type:     r.Config.Checkpoint.Storage.Type,
 					PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
 					BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
@@ -492,7 +492,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
 		hash,
 		desiredArtifactVersion(ckpt),
-		snapshotworkload.StorageConfig{
+		snapshotworkload.Storage{
 			Type:     r.Config.Checkpoint.Storage.Type,
 			PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
 			BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
@@ -648,13 +648,15 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	ttlSecondsAfterFinish := consts.DefaultCheckpointJobTTLSeconds
 
 	return snapshotworkload.NewCheckpointJob(podTemplate, snapshotworkload.CheckpointJobOptions{
-		Namespace:             ckpt.Namespace,
+		PodOptions: snapshotworkload.PodOptions{
+			Namespace:      ckpt.Namespace,
+			CheckpointID:   hash,
+			Storage:        resolvedStorage,
+			SeccompProfile: consts.SeccompProfilePath,
+		},
 		Name:                  jobName,
-		CheckpointID:          hash,
-		Storage:               resolvedStorage,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
-		SeccompProfile:        consts.SeccompProfilePath,
 		WrapLaunchJob:         wrapLaunchJob,
 	})
 }

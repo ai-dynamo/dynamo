@@ -79,7 +79,7 @@ func InjectCheckpointIntoPodSpec(
 		return fmt.Errorf("checkpoint config is required")
 	}
 
-	storageConfig := snapshotworkload.StorageConfig{
+	storageConfig := snapshotworkload.Storage{
 		Type:     checkpointConfig.Storage.Type,
 		PVCName:  checkpointConfig.Storage.PVC.PVCName,
 		BasePath: checkpointConfig.Storage.PVC.BasePath,

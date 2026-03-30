@@ -7,23 +7,17 @@ import (
 
 const DefaultCheckpointArtifactVersion = "1"
 
-type StorageConfig struct {
-	Type     string
-	PVCName  string
-	BasePath string
-}
-
-type ResolvedStorage struct {
+type Storage struct {
 	Type     string
 	Location string
 	PVCName  string
 	BasePath string
 }
 
-func ResolveCheckpointStorage(checkpointID string, version string, config StorageConfig) (ResolvedStorage, error) {
-	resolved, err := resolveStorageConfig(config)
+func ResolveCheckpointStorage(checkpointID string, version string, storage Storage) (Storage, error) {
+	resolved, err := resolveStorageConfig(storage)
 	if err != nil {
-		return ResolvedStorage{}, err
+		return Storage{}, err
 	}
 	version = strings.TrimSpace(version)
 	if version == "" {
@@ -33,19 +27,19 @@ func ResolveCheckpointStorage(checkpointID string, version string, config Storag
 	return resolved, nil
 }
 
-func ResolveRestoreStorage(checkpointID string, location string, storageType string, config StorageConfig) (ResolvedStorage, error) {
-	resolved, err := resolveStorageConfig(config)
+func ResolveRestoreStorage(checkpointID string, location string, storageType string, storage Storage) (Storage, error) {
+	resolved, err := resolveStorageConfig(storage)
 	if err != nil {
-		return ResolvedStorage{}, err
+		return Storage{}, err
 	}
 	if strings.TrimSpace(storageType) != "" && strings.TrimSpace(storageType) != resolved.Type {
-		return ResolvedStorage{}, fmt.Errorf("checkpoint storage type %q does not match configured storage type %q", storageType, resolved.Type)
+		return Storage{}, fmt.Errorf("checkpoint storage type %q does not match configured storage type %q", storageType, resolved.Type)
 	}
 	location = strings.TrimSpace(location)
 	if location == "" {
-		resolved, err = ResolveCheckpointStorage(checkpointID, "", config)
+		resolved, err = ResolveCheckpointStorage(checkpointID, "", storage)
 		if err != nil {
-			return ResolvedStorage{}, err
+			return Storage{}, err
 		}
 		return resolved, nil
 	}
@@ -53,23 +47,23 @@ func ResolveRestoreStorage(checkpointID string, location string, storageType str
 	return resolved, nil
 }
 
-func resolveStorageConfig(config StorageConfig) (ResolvedStorage, error) {
-	storageType := strings.TrimSpace(config.Type)
+func resolveStorageConfig(storage Storage) (Storage, error) {
+	storageType := strings.TrimSpace(storage.Type)
 	if storageType == "" {
 		storageType = StorageTypePVC
 	}
 	if storageType != StorageTypePVC {
-		return ResolvedStorage{}, fmt.Errorf("checkpoint storage type %q is not supported", storageType)
+		return Storage{}, fmt.Errorf("checkpoint storage type %q is not supported", storageType)
 	}
-	pvcName := strings.TrimSpace(config.PVCName)
+	pvcName := strings.TrimSpace(storage.PVCName)
 	if pvcName == "" {
-		return ResolvedStorage{}, fmt.Errorf("checkpoint pvc name is required")
+		return Storage{}, fmt.Errorf("checkpoint pvc name is required")
 	}
-	basePath := strings.TrimSpace(config.BasePath)
+	basePath := strings.TrimSpace(storage.BasePath)
 	if basePath == "" {
-		return ResolvedStorage{}, fmt.Errorf("checkpoint base path is required")
+		return Storage{}, fmt.Errorf("checkpoint base path is required")
 	}
-	return ResolvedStorage{
+	return Storage{
 		Type:     storageType,
 		PVCName:  pvcName,
 		BasePath: strings.TrimRight(basePath, "/"),

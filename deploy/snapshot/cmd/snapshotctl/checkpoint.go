@@ -54,7 +54,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	if checkpointID == "" {
 		checkpointID = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointIDPrefix, time.Now().UTC().UnixNano())
 	}
-	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(checkpointID, "", snapshotworkload.StorageConfig{
+	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(checkpointID, "", snapshotworkload.Storage{
 		Type:     snapshotworkload.StorageTypePVC,
 		PVCName:  storage.PVCName,
 		BasePath: storage.BasePath,
@@ -71,12 +71,14 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		},
 		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotworkload.CheckpointJobOptions{
-		Namespace:      namespace,
-		Name:           checkpointJobName,
-		CheckpointID:   checkpointID,
-		Storage:        resolvedStorage,
-		SeccompProfile: snapshotworkload.DefaultSeccompLocalhostProfile,
-		WrapLaunchJob:  !opts.DisableCudaCheckpointJobFile,
+		PodOptions: snapshotworkload.PodOptions{
+			Namespace:      namespace,
+			CheckpointID:   checkpointID,
+			Storage:        resolvedStorage,
+			SeccompProfile: snapshotworkload.DefaultSeccompLocalhostProfile,
+		},
+		Name:          checkpointJobName,
+		WrapLaunchJob: !opts.DisableCudaCheckpointJobFile,
 	})
 	if err != nil {
 		return nil, err

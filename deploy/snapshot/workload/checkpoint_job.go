@@ -10,13 +10,10 @@ import (
 )
 
 type CheckpointJobOptions struct {
-	Namespace             string
+	PodOptions
 	Name                  string
-	CheckpointID          string
-	Storage               ResolvedStorage
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
-	SeccompProfile        string
 	WrapLaunchJob         bool
 }
 
