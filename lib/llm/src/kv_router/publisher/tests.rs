@@ -1457,6 +1457,13 @@ mod event_processor_tests {
         PlacementEvent::local_gpu(1, event)
     }
 
+    fn local_host_event(event: KvCacheEvent) -> PlacementEvent {
+        PlacementEvent::new(
+            Placement::local_worker(1, event.dp_rank, StorageTier::HostPinned),
+            event,
+        )
+    }
+
     /// Test that pushing N removed events results in batched output
     /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]
@@ -2002,6 +2009,106 @@ mod event_processor_tests {
             2,
             "Switching from Removed to Stored should cause immediate flush, resulting in 2 separate events"
         );
+    }
+
+    #[tokio::test]
+    async fn test_host_tier_events_are_published_and_preserved() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(100),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(42)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "Expected a single published host-tier event"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+
+        let KvCacheEventData::Removed(data) = &events[0].event.data else {
+            panic!("Expected Removed event");
+        };
+        assert_eq!(data.block_hashes, vec![ExternalSequenceBlockHash(42)]);
+    }
+
+    #[tokio::test]
+    async fn test_storage_tier_change_causes_flush() {
+        let timeout_ms = Some(100);
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(1)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(2)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "Changing storage tier should flush the current batch"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+        assert_eq!(events[1].storage_tier, StorageTier::Device);
     }
 
     /// Test that dp_rank change causes immediate flush

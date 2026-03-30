@@ -236,7 +236,11 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(&block_hash.into_u64().to_string(), engine_source);
+                tracker.handle_remove(
+                    &block_hash.into_u64().to_string(),
+                    engine_source,
+                    Some(storage_tier),
+                );
             }
         }
 

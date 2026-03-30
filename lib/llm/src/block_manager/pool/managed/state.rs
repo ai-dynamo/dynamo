@@ -17,11 +17,17 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        storage_tier: StorageTier,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
             inactive: InactiveBlockPool::new(),
-            registry: BlockRegistry::new(event_manager.clone(), global_registry, async_runtime),
+            registry: BlockRegistry::new(
+                event_manager.clone(),
+                global_registry,
+                async_runtime,
+                storage_tier,
+            ),
             return_tx,
             event_manager,
         }

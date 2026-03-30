@@ -33,6 +33,7 @@
 
 mod kv_indexer;
 mod local;
+mod lower_tier;
 mod metrics;
 mod sharded;
 mod thread_pool;
@@ -51,6 +52,7 @@ mod tests;
 // Re-export everything that was public in the old single-file module.
 pub use kv_indexer::*;
 pub use local::*;
+pub use lower_tier::*;
 pub use metrics::*;
 pub use sharded::*;
 pub use thread_pool::*;

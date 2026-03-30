@@ -27,6 +27,7 @@ pub(super) struct BatchingState {
     pub(super) pending_stored: Option<KvCacheStoreData>,
     pub(super) next_publish_id: u64,
     pub(super) last_dp_rank: u32,
+    pub(super) last_storage_tier: StorageTier,
     pub(super) last_flush_time: Instant,
 }
 
@@ -37,6 +38,7 @@ impl BatchingState {
             pending_stored: None,
             next_publish_id: 1,
             last_dp_rank: 0,
+            last_storage_tier: StorageTier::Device,
             last_flush_time: Instant::now(),
         }
     }
@@ -91,6 +93,7 @@ impl BatchingState {
                 publisher,
                 local_indexer,
                 worker_id,
+                self.last_storage_tier,
                 KvCacheEvent {
                     event_id: id,
                     data: KvCacheEventData::Removed(data),
@@ -104,6 +107,7 @@ impl BatchingState {
                 publisher,
                 local_indexer,
                 worker_id,
+                self.last_storage_tier,
                 KvCacheEvent {
                     event_id: id,
                     data: KvCacheEventData::Stored(data),
@@ -137,9 +141,10 @@ async fn emit<P: RouterEventSink>(
     publisher: &P,
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
+    storage_tier: StorageTier,
     event: KvCacheEvent,
 ) {
-    let router_event = RouterEvent::new(worker_id, event);
+    let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
     if let Some(indexer) = local_indexer
         && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
     {
@@ -200,16 +205,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                 }
                 last_raw_input_id = Some(raw_event_id);
 
-                if !placement_event.placement.is_local_gpu() {
-                    tracing::trace!(
-                        worker_id,
-                        ?placement_event.placement,
-                        event_id = placement_event.event.event_id,
-                        "Skipping non-local-GPU placement event"
-                    );
-                    continue;
-                }
-
+                let storage_tier = placement_event.placement.tier;
                 let event = placement_event.event;
                 tracing::trace!(
                     "Event processor for worker_id {} processing event: {:?}",
@@ -219,10 +215,15 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
 
                 let dp_rank_changed =
                     batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
+                let storage_tier_changed =
+                    batching_state.has_pending() && storage_tier != batching_state.last_storage_tier;
 
                 match event.data {
                     KvCacheEventData::Removed(data) => {
-                        if batching_state.pending_stored.is_some() || dp_rank_changed {
+                        if batching_state.pending_stored.is_some()
+                            || dp_rank_changed
+                            || storage_tier_changed
+                        {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
                         match &mut batching_state.pending_removed {
@@ -234,6 +235,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                     }
                     KvCacheEventData::Stored(data) => {
                         let should_flush = dp_rank_changed
+                            || storage_tier_changed
                             || batching_state.pending_removed.is_some()
                             || batching_state.pending_stored.as_ref().is_some_and(|p| {
                                 data.parent_hash != p.blocks.last().map(|b| b.block_hash)
@@ -254,6 +256,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                             &publisher,
                             &local_indexer,
                             worker_id,
+                            storage_tier,
                             KvCacheEvent {
                                 event_id: batching_state.next_publish_id,
                                 data: KvCacheEventData::Cleared,
@@ -266,6 +269,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                 }
 
                 batching_state.last_dp_rank = event.dp_rank;
+                batching_state.last_storage_tier = storage_tier;
 
                 if batching_state.has_pending()
                     && (timeout_ms.is_none_or(|ms| batching_state.is_timeout_elapsed(ms))

@@ -60,9 +60,14 @@ impl KvEventConsolidatorHandle {
     /// Send a block remove event to the KV Event Consolidator
     ///
     /// This is called by KVBM when a block is removed from G2 or G3.
-    pub async fn handle_remove(&self, block_hash: &str, source: EventSource) {
+    pub async fn handle_remove(
+        &self,
+        block_hash: &str,
+        source: EventSource,
+        tier: Option<StorageTier>,
+    ) {
         let mut tracker = self.tracker.write().await;
-        tracker.handle_remove(block_hash, source);
+        tracker.handle_remove(block_hash, source, tier);
     }
 
     /// Clear all blocks from the KV Event Consolidator

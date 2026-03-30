@@ -195,11 +195,13 @@ pub enum ConsolidatedEvent {
         block_size: usize,
         lora_name: Option<String>,
         source: String,
+        tier: Option<StorageTier>,
     },
     /// Block removed (removed from all sources)
     Remove {
         block_hash: String,
         source: String, // The source where it was last removed
+        tier: Option<StorageTier>,
     },
     /// All blocks cleared
     ClearAll,
@@ -266,125 +268,18 @@ impl CacheStatusTracker {
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) -> bool {
-        // Compute LocalBlockHash from token IDs (content only)
-        let local_block_hash = compute_local_block_hash(&token_ids);
+        // Queue a STORE event with full metadata
+        self.event_queue.push(ConsolidatedEvent::Store {
+            block_hash: block_hash.clone(),
+            parent_hash,
+            token_ids,
+            block_size,
+            lora_name,
+            source: source.to_str().to_string(),
+            tier,
+        });
 
-        // Resolve parent sequence hash from parent's external hash (if provided)
-        let parent_sequence_hash = parent_hash
-            .as_ref()
-            .and_then(|ph| self.hash_mapping.get(ph).copied());
-
-        // Compute SequenceHash using KVBM's hashing method (position-aware)
-        // This ensures consistent deduplication regardless of source
-        let sequence_hash = compute_sequence_hash(parent_sequence_hash, local_block_hash);
-
-        tracing::debug!(
-            "Computing sequence_hash for block: local_block_hash={}, parent_seq_hash={:?}, sequence_hash={}",
-            local_block_hash,
-            parent_sequence_hash,
-            sequence_hash
-        );
-
-        if let Some(metadata) = self.blocks.get_mut(&sequence_hash) {
-            // Block already exists from another source (deduplication!), just add the new source
-            let is_new_source = metadata.add_source(source);
-
-            // Add this external hash to the mapping so remove events from this source can find the block
-            // Multiple external hashes (from different sources) can map to the same SequenceHash
-            self.hash_mapping.insert(block_hash.clone(), sequence_hash);
-
-            if is_new_source {
-                tracing::debug!(
-                    "DEDUP: Block {} (seq_hash={}) added to source {:?} (already exists in {} source(s), {} tokens, external_hash={})\n  Token IDs: {:?}",
-                    &metadata.first_block_hash[..16.min(metadata.first_block_hash.len())],
-                    sequence_hash,
-                    source,
-                    metadata.sources.len(),
-                    token_ids.len(),
-                    &block_hash[..16.min(block_hash.len())],
-                    &token_ids
-                );
-            } else {
-                tracing::debug!(
-                    "Block {} (seq_hash={}) already in source {:?}, external_hash={}\n  Token IDs: {:?}",
-                    &metadata.first_block_hash[..16.min(metadata.first_block_hash.len())],
-                    sequence_hash,
-                    source,
-                    &block_hash[..16.min(block_hash.len())],
-                    &token_ids
-                );
-            }
-            // Don't publish a new STORE event (block already exists)
-            false
-        } else {
-            // First time seeing this block from any source - create metadata and queue STORE event
-            let metadata = BlockMetadata::new(source, block_hash.clone());
-
-            tracing::debug!(
-                "New block {} (seq_hash={}) stored in source {:?} (tier={:?}): {} tokens, block_size={}, parent={}, lora={:?}, dp_rank={:?}\n  Token IDs: {:?}",
-                &block_hash[..16.min(block_hash.len())],
-                sequence_hash,
-                source,
-                tier,
-                token_ids.len(),
-                block_size,
-                parent_hash
-                    .as_ref()
-                    .map(|p| &p[..16.min(p.len())])
-                    .unwrap_or("none"),
-                lora_name,
-                data_parallel_rank,
-                &token_ids
-            );
-
-            self.blocks.insert(sequence_hash, metadata);
-
-            // Add to hash mapping so remove events can find the block by external hash
-            self.hash_mapping.insert(block_hash.clone(), sequence_hash);
-
-            // Resolve parent_hash to first_block_hash if parent was deduplicated
-            //
-            // Problem: When the same block is stored from multiple sources (deduplication),
-            // each source may use a different external hash for the same logical block.
-            // Example:
-            //   - Source A (TRTLLM) stores parent with hash "hash_A"
-            //   - Source B (KVBM) stores same parent with hash "hash_B" (different format/algorithm)
-            //   - Router only received STORE event with "hash_A" (first source)
-            //   - When Source B stores child with parent_hash="hash_B", router won't recognize it
-            //
-            // Resolve the parent's external hash to its first_block_hash (the hash
-            // that was sent to the router in the first STORE event) so the router can find it.
-            let resolved_parent_hash = parent_hash.and_then(|ph| {
-                // Look up parent's sequence hash from its external hash
-                self.hash_mapping.get(&ph).and_then(|&parent_seq_hash| {
-                    // Get parent's metadata to find first_block_hash
-                    self.blocks
-                        .get(&parent_seq_hash)
-                        .map(|parent_metadata| parent_metadata.first_block_hash.clone())
-                })
-            });
-
-            // Queue a STORE event with full metadata
-            // Use resolved_parent_hash (first_block_hash) so router can find the parent
-            self.event_queue.push(ConsolidatedEvent::Store {
-                block_hash: block_hash.clone(),
-                parent_hash: resolved_parent_hash,
-                token_ids,
-                block_size,
-                lora_name,
-                source: source.to_str().to_string(),
-            });
-
-            tracing::debug!(
-                "Block {} (seq_hash={}) stored in first source {:?}, will publish STORE event (total tracked: {}, hash_mapping: {})",
-                block_hash,
-                sequence_hash,
-                source,
-                self.blocks.len(),
-                self.hash_mapping.len()
-            );
-            true
-        }
+        true
     }
 
     /// Handle a REMOVE event
@@ -395,101 +290,20 @@ impl CacheStatusTracker {
     /// # Arguments
     /// * `block_hash` - The external block hash to remove
     /// * `source` - The event source (vLLM or KVBM) that removed this block
-    pub fn handle_remove(&mut self, block_hash: &str, source: EventSource) -> bool {
-        // Look up the SequenceHash from the external block hash
-        let sequence_hash = match self.hash_mapping.get(block_hash) {
-            Some(&hash) => hash,
-            None => {
-                tracing::warn!(
-                    "Attempted to remove unknown block {} from source {:?} (not in hash_mapping)",
-                    block_hash,
-                    source
-                );
-                return false;
-            }
-        };
+    /// * `tier` - Optional storage tier where the removal happened
+    pub fn handle_remove(
+        &mut self,
+        block_hash: &str,
+        source: EventSource,
+        tier: Option<StorageTier>,
+    ) -> bool {
+        self.event_queue.push(ConsolidatedEvent::Remove {
+            block_hash: block_hash.to_string(),
+            source: source.to_str().to_string(),
+            tier,
+        });
 
-        if let Some(metadata) = self.blocks.get_mut(&sequence_hash) {
-            // Remove the source
-            let was_removed = metadata.remove_source(source);
-            if !was_removed {
-                tracing::warn!(
-                    "Attempted to remove source {:?} from block {} but it wasn't present",
-                    source,
-                    block_hash
-                );
-                return false;
-            }
-
-            // Remove this external hash immediately when the source removes it
-            // This keeps hash_mapping clean
-            // Each external hash belongs to exactly one source, so when that source
-            // removes the block, we can safely remove the hash_mapping entry
-            self.hash_mapping.remove(block_hash);
-
-            tracing::debug!(
-                "Removed hash_mapping entry for {} (hash_mapping size: {})",
-                block_hash,
-                self.hash_mapping.len()
-            );
-
-            // Check if this was the last source
-            if !metadata.exists_in_any_source() {
-                // Block is gone from all sources - remove from tracker and publish REMOVE
-                let first_block_hash = metadata.first_block_hash.clone();
-                self.blocks.remove(&sequence_hash);
-
-                // Double-check: clean up any stray hash mappings (should be empty by now)
-                // This is a safety check
-                let stray_count_before = self.hash_mapping.len();
-                self.hash_mapping
-                    .retain(|_ext_hash, &mut seq_hash| seq_hash != sequence_hash);
-                let stray_count = stray_count_before - self.hash_mapping.len();
-
-                if stray_count > 0 {
-                    tracing::warn!(
-                        "Found {} stray hash_mapping entries for seq_hash={} after all sources removed - cleaned up (hash_mapping size now: {})",
-                        stray_count,
-                        sequence_hash,
-                        self.hash_mapping.len()
-                    );
-                }
-
-                self.event_queue.push(ConsolidatedEvent::Remove {
-                    block_hash: first_block_hash.clone(),
-                    source: source.to_str().to_string(),
-                });
-
-                tracing::debug!(
-                    "Block {} (seq_hash={}) removed from last source {:?}, will publish REMOVE event (total tracked: {}, hash_mapping: {})",
-                    first_block_hash,
-                    sequence_hash,
-                    source,
-                    self.blocks.len(),
-                    self.hash_mapping.len()
-                );
-                true
-            } else {
-                // Block still exists in other sources
-                tracing::debug!(
-                    "Block {} (seq_hash={}) removed from source {:?}, still in {} source(s): {:?} (hash_mapping: {})",
-                    &metadata.first_block_hash[..16.min(metadata.first_block_hash.len())],
-                    sequence_hash,
-                    source,
-                    metadata.sources.len(),
-                    metadata.sources,
-                    self.hash_mapping.len()
-                );
-                false
-            }
-        } else {
-            tracing::warn!(
-                "Attempted to remove block {} from source {:?} but block not tracked",
-                &block_hash[..16.min(block_hash.len())],
-                source
-            );
-            false
-        }
+        true
     }
 
     /// Handle a CLEAR_ALL event
@@ -638,13 +452,19 @@ mod tests {
         );
         tracker.drain_events();
 
-        let should_publish = tracker.handle_remove("hash1", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("hash1", EventSource::Vllm, Some(StorageTier::Device));
 
         assert!(should_publish);
         assert_eq!(tracker.num_blocks(), 0);
         let events = tracker.drain_events();
         assert_eq!(events.len(), 1);
-        matches!(events[0], ConsolidatedEvent::Remove { .. });
+        match &events[0] {
+            ConsolidatedEvent::Remove { tier, .. } => {
+                assert_eq!(*tier, Some(StorageTier::Device));
+            }
+            other => panic!("expected Remove event, got: {:?}", other),
+        }
     }
 
     #[test]
@@ -676,14 +496,19 @@ mod tests {
         tracker.drain_events();
 
         // Remove from vLLM - should not publish (still in KVBM)
-        let should_publish = tracker.handle_remove("vllm_hash1", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("vllm_hash1", EventSource::Vllm, Some(StorageTier::Device));
 
         assert!(!should_publish);
         assert_eq!(tracker.num_blocks(), 1);
         assert_eq!(tracker.drain_events().len(), 0);
 
         // Remove from KVBM (last source) - should publish REMOVE event
-        let should_publish = tracker.handle_remove("kvbm_hash1", EventSource::Kvbm);
+        let should_publish = tracker.handle_remove(
+            "kvbm_hash1",
+            EventSource::Kvbm,
+            Some(StorageTier::HostPinned),
+        );
 
         assert!(should_publish);
         assert_eq!(tracker.num_blocks(), 0);
@@ -815,7 +640,8 @@ mod tests {
         assert_eq!(tracker.num_blocks(), 0);
 
         // Verify hash_mapping is also cleared
-        let should_publish = tracker.handle_remove("block1", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("block1", EventSource::Vllm, Some(StorageTier::Device));
         assert!(!should_publish); // Should fail because block is gone
     }
 
@@ -872,7 +698,8 @@ mod tests {
     fn test_remove_non_existent_block() {
         let mut tracker = CacheStatusTracker::new();
 
-        let should_publish = tracker.handle_remove("non_existent", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("non_existent", EventSource::Vllm, Some(StorageTier::Device));
 
         assert!(!should_publish);
         assert_eq!(tracker.num_blocks(), 0);
@@ -916,10 +743,12 @@ mod tests {
             ConsolidatedEvent::Store {
                 lora_name,
                 token_ids,
+                tier,
                 ..
             } => {
                 assert_eq!(lora_name.as_deref(), Some("my-adapter"));
                 assert_eq!(token_ids, &[1, 2, 3, 4]);
+                assert_eq!(*tier, Some(StorageTier::Device));
             }
             other => panic!("expected Store event, got: {:?}", other),
         }
@@ -943,8 +772,11 @@ mod tests {
         let events = tracker.drain_events();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ConsolidatedEvent::Store { lora_name, .. } => {
+            ConsolidatedEvent::Store {
+                lora_name, tier, ..
+            } => {
                 assert!(lora_name.is_none());
+                assert_eq!(*tier, Some(StorageTier::Device));
             }
             other => panic!("expected Store event, got: {:?}", other),
         }

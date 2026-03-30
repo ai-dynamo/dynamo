@@ -532,6 +532,7 @@ pub(crate) mod tests {
                 state::CompleteState,
             },
             events::NullEventManager,
+            kv_consolidator::StorageTier,
             layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},
             storage::tests::{NullDeviceAllocator, NullDeviceStorage},
         },
@@ -701,8 +702,12 @@ pub(crate) mod tests {
         let mut blocks = create_block_collection(num_blocks).into_blocks().unwrap();
 
         let event_manager = NullEventManager::new();
-        let mut registry =
-            BlockRegistry::new(event_manager, GlobalRegistry::default(), async_runtime);
+        let mut registry = BlockRegistry::new(
+            event_manager,
+            GlobalRegistry::default(),
+            async_runtime,
+            StorageTier::Device,
+        );
 
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
@@ -745,8 +750,12 @@ pub(crate) mod tests {
         let matched_block_count = matched_blocks.len();
 
         let event_manager = NullEventManager::new();
-        let mut registry =
-            BlockRegistry::new(event_manager, GlobalRegistry::default(), async_runtime);
+        let mut registry = BlockRegistry::new(
+            event_manager,
+            GlobalRegistry::default(),
+            async_runtime,
+            StorageTier::Device,
+        );
 
         // all matched blocks should be in the complete or registered state
         for block in &mut matched_blocks {

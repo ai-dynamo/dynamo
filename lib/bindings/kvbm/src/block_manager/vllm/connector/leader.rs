@@ -435,6 +435,7 @@ impl Leader for KvConnectorLeader {
                 new_req.num_computed_tokens,
                 scheduled_tokens,
                 None,
+                None,
             )?;
 
             let pending_ops_opt = slot.take_pending_operations();
@@ -505,6 +506,7 @@ impl Leader for KvConnectorLeader {
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
+                None,
                 None,
             )?;
 

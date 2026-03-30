@@ -16,7 +16,7 @@ use dynamo_llm::{
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
     },
-    tokens::TokenBlock,
+    tokens::{SequenceHash, TokenBlock},
 };
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
@@ -114,6 +114,7 @@ pub trait Slot: std::fmt::Debug {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
+        external_sequence_hashes: Option<&[SequenceHash]>,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -481,6 +482,29 @@ impl VllmConnectorSlot {
         &self.device_blocks
     }
 
+    fn sync_external_sequence_hashes(
+        &mut self,
+        external_sequence_hashes: &[SequenceHash],
+    ) -> Result<(), SlotError> {
+        assert_eq!(
+            external_sequence_hashes.len(),
+            self.sequence.blocks().len(),
+            "external_sequence_hashes length ({}) must match completed block count ({}) for request {}",
+            external_sequence_hashes.len(),
+            self.sequence.blocks().len(),
+            self.request_id
+        );
+
+        self.sequence
+            .sync_external_sequence_hashes(external_sequence_hashes);
+
+        for block in self.sequence.blocks() {
+            block.assert_external_hashes_assigned();
+        }
+
+        Ok(())
+    }
+
     fn mark_as_skipped_prefill(&mut self) -> Result<(), SlotError> {
         if self.state != SlotState::Prefilling {
             return Err(SlotError::InvalidState(format!(
@@ -597,6 +621,7 @@ impl Slot for VllmConnectorSlot {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
+        external_sequence_hashes: Option<&[SequenceHash]>,
     ) -> Result<(), SlotError> {
         tracing::debug!(
             "ENTRY: apply_scheduler_output: req={}, tokens.len={}, block_ids.len={}, computed={}, scheduled={}, \
@@ -632,6 +657,10 @@ impl Slot for VllmConnectorSlot {
             self.sequence.extend(tokens.into()).unwrap();
         } else {
             self.state = SlotState::Prefilling;
+        }
+
+        if let Some(external_sequence_hashes) = external_sequence_hashes {
+            self.sync_external_sequence_hashes(external_sequence_hashes)?;
         }
 
         // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
@@ -848,6 +877,12 @@ impl Slot for VllmConnectorSlot {
                     .take(num_blocks_to_offload)
                     .copied()
                     .collect();
+
+                if external_sequence_hashes.is_some() {
+                    for block in &offload_token_blocks {
+                        block.assert_external_hashes_assigned();
+                    }
+                }
 
                 self.offload_blocks(
                     &offload_block_ids,
@@ -1878,7 +1913,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
 mod connector_tests {
     use super::*;
     use crate::block_manager::cache_stats::CacheStatsTracker;
-    use dynamo_llm::tokens::{SaltHash, Tokens};
+    use dynamo_llm::tokens::{SaltHash, SequenceHash, Tokens};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -1914,6 +1949,12 @@ mod connector_tests {
         (start..start + count).collect()
     }
 
+    fn external_hashes(start: SequenceHash, count: usize) -> Vec<SequenceHash> {
+        (0..count)
+            .map(|offset| start + offset as SequenceHash)
+            .collect()
+    }
+
     /// Drains all pending offload requests from the channel and returns their block IDs.
     fn drain_offload_block_ids(
         rx: &mut mpsc::UnboundedReceiver<LocalTransferRequest>,
@@ -1941,7 +1982,7 @@ mod connector_tests {
         assert_eq!(slot.num_device_blocks_allocated(), 3);
 
         // Step 2: apply_scheduler_output with empty blocks (vLLM pattern)
-        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None, None)
             .unwrap();
 
         // device_blocks should still be exactly 3 — no double-add
@@ -1964,11 +2005,68 @@ mod connector_tests {
 
         // Step 2: apply_scheduler_output with THE SAME blocks (TRT-LLM pattern)
         // Without the dedup guard, this doubles device_blocks to len=6.
-        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None, None)
             .unwrap();
 
         // device_blocks must still be exactly 3 — dedup guard prevented the double-add
         assert_eq!(slot.num_device_blocks_allocated(), 3);
+    }
+
+    #[test]
+    fn test_trtllm_external_hashes_are_assigned_to_completed_blocks() {
+        let num_tokens = 96; // 3 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+        let external_hashes = external_hashes(10_000, 3);
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None, Some(&external_hashes))
+            .unwrap();
+
+        let completed_blocks = slot.sequence.blocks();
+        assert_eq!(completed_blocks.len(), 3);
+        assert_eq!(
+            completed_blocks[0].external_sequence_hash(),
+            Some(external_hashes[0])
+        );
+        assert_eq!(completed_blocks[0].external_parent_sequence_hash(), None);
+        assert_eq!(
+            completed_blocks[1].external_sequence_hash(),
+            Some(external_hashes[1])
+        );
+        assert_eq!(
+            completed_blocks[1].external_parent_sequence_hash(),
+            Some(external_hashes[0])
+        );
+        assert_eq!(
+            completed_blocks[2].external_sequence_hash(),
+            Some(external_hashes[2])
+        );
+        assert_eq!(
+            completed_blocks[2].external_parent_sequence_hash(),
+            Some(external_hashes[1])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "external_sequence_hash mismatch")]
+    fn test_trtllm_external_hash_chain_mismatch_panics() {
+        let num_tokens = 96; // 3 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+        let external_hashes = external_hashes(20_000, 3);
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None, Some(&external_hashes))
+            .unwrap();
+
+        let mismatched_hashes = vec![
+            external_hashes[0],
+            external_hashes[1] + 1,
+            external_hashes[2],
+        ];
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None, Some(&mismatched_hashes))
+            .unwrap();
     }
 
     // ---------------------------------------------------------------
@@ -1982,14 +2080,14 @@ mod connector_tests {
 
         // Prefill: append + apply with empty blocks (vLLM pattern)
         slot.append_mutable_device_blocks(&prefill_blocks).unwrap();
-        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None, None)
             .unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 3);
 
         // Decode: new block at boundary (token 96 = block 3)
         let decode_block = block_ids(200, 1);
         let decode_token: Vec<u32> = vec![9999];
-        slot.apply_scheduler_output(&decode_token, &decode_block, 95, 1, None)
+        slot.apply_scheduler_output(&decode_token, &decode_block, 95, 1, None, None)
             .unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 4);
     }
@@ -2024,7 +2122,7 @@ mod connector_tests {
         // Empty tokens → Prefilling state, and next_position(96) == total_tokens(96)
         // so the early-return does not fire and offload proceeds.
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None, None)
             .unwrap();
 
         let offloads = drain_offload_block_ids(&mut rx);
@@ -2045,7 +2143,7 @@ mod connector_tests {
         // Use the TRT-LLM pattern: append_mutable first, then apply with same blocks + priorities.
         // The dedup guard prevents the double-add, but priorities are still processed.
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities))
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities), None)
             .unwrap();
 
         // device_blocks should be 3 (dedup prevented doubling)
@@ -2069,7 +2167,7 @@ mod connector_tests {
         let priorities: Vec<u32> = vec![80, 80, 10, 10];
 
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities))
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities), None)
             .unwrap();
 
         let offloads = drain_offload_block_ids(&mut rx);
@@ -2079,7 +2177,7 @@ mod connector_tests {
         // Because offload was terminated, no further offloading should happen.
         let decode_block = block_ids(200, 1);
         let decode_token: Vec<u32> = vec![9999];
-        slot.apply_scheduler_output(&decode_token, &decode_block, 127, 1, None)
+        slot.apply_scheduler_output(&decode_token, &decode_block, 127, 1, None, None)
             .unwrap();
 
         let further_offloads = drain_offload_block_ids(&mut rx);
@@ -2102,14 +2200,16 @@ mod connector_tests {
         slot.append_mutable_device_blocks(&blocks).unwrap();
 
         // Chunk 1: schedule first 64 tokens → evaluates blocks 0,1
-        slot.apply_scheduler_output(&[], &[], 0, 64, None).unwrap();
+        slot.apply_scheduler_output(&[], &[], 0, 64, None, None)
+            .unwrap();
         let offloads_1 = drain_offload_block_ids(&mut rx);
         assert_eq!(offloads_1.len(), 1);
         assert_eq!(offloads_1[0], vec![100, 101]); // blocks 0,1
 
         // Chunk 2: schedule next 64 tokens → evaluates blocks 2,3
         // (uses cached_request pattern: empty tokens, empty blocks)
-        slot.apply_scheduler_output(&[], &[], 64, 64, None).unwrap();
+        slot.apply_scheduler_output(&[], &[], 64, 64, None, None)
+            .unwrap();
         let offloads_2 = drain_offload_block_ids(&mut rx);
         assert_eq!(offloads_2.len(), 1);
         assert_eq!(offloads_2[0], vec![102, 103]); // blocks 2,3
@@ -2133,7 +2233,7 @@ mod connector_tests {
         // Step 2: apply_scheduler_output with overlapping blocks [12, 13].
         // Suffix [12] of device_blocks matches prefix [12] of block_ids.
         // Only block 13 is new and gets appended.
-        slot.apply_scheduler_output(&[], &[12, 13], 0, 128, None)
+        slot.apply_scheduler_output(&[], &[12, 13], 0, 128, None, None)
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 4);
@@ -2152,7 +2252,7 @@ mod connector_tests {
 
         // Chunk 1: 3 blocks, all high priority, schedule 96 tokens
         slot.append_mutable_device_blocks(&[10, 11, 12]).unwrap();
-        slot.apply_scheduler_output(&[], &[10, 11, 12], 0, 96, Some(&[80, 80, 80]))
+        slot.apply_scheduler_output(&[], &[10, 11, 12], 0, 96, Some(&[80, 80, 80]), None)
             .unwrap();
 
         let offloads_1 = drain_offload_block_ids(&mut rx);
@@ -2171,7 +2271,7 @@ mod connector_tests {
         slot.append_mutable_device_blocks(&[13]).unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 4);
 
-        slot.apply_scheduler_output(&[], &[12, 13], 96, 32, Some(&[80, 10]))
+        slot.apply_scheduler_output(&[], &[12, 13], 96, 32, Some(&[80, 10]), None)
             .unwrap();
 
         // Candidate is block 13 (index 3, evaluated_blocks=3).
@@ -2198,7 +2298,7 @@ mod connector_tests {
 
         // block_ids[0]=11 is found at device_blocks[1], but device_blocks[1..] = [11,12]
         // does NOT match block_ids[..2] = [11,14]. Contract violation.
-        slot.apply_scheduler_output(&[], &[11, 14], 0, 128, None)
+        slot.apply_scheduler_output(&[], &[11, 14], 0, 128, None, None)
             .unwrap();
     }
 
@@ -2218,7 +2318,7 @@ mod connector_tests {
 
         // Overlap: suffix [13,14] matches prefix [13,14], overlap=2.
         // new_ids = [10]. But 10 ∈ device_blocks → contract violation.
-        slot.apply_scheduler_output(&[], &[13, 14, 10], 0, 192, None)
+        slot.apply_scheduler_output(&[], &[13, 14, 10], 0, 192, None, None)
             .unwrap();
     }
 
@@ -2238,7 +2338,7 @@ mod connector_tests {
         // block_ids[0]=10 found at device_blocks[0], suffix_len=3.
         // device_blocks[0..3]=[10,11,12] == block_ids[0..3]=[10,11,12] → overlap=3.
         // new_ids=[13,14], both genuinely new → extend.
-        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14], 0, 160, None)
+        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14], 0, 160, None, None)
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 5);
@@ -2261,7 +2361,7 @@ mod connector_tests {
         assert_eq!(slot.num_device_blocks_allocated(), 5);
 
         // Full overlap of all 5 existing blocks, plus 2 new.
-        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14, 15, 16], 0, 224, None)
+        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14, 15, 16], 0, 224, None, None)
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 7);

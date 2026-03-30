@@ -25,6 +25,17 @@ def is_truthy(val: str) -> bool:
     return val.lower() in ("1", "true", "on", "yes")
 
 
+def _get_connector_module(kv_connector_config) -> str | None:
+    """Extract connector_module from either a dict or a TRT-LLM config object."""
+    if kv_connector_config is None:
+        return None
+
+    if isinstance(kv_connector_config, dict):
+        return kv_connector_config.get("connector_module")
+
+    return getattr(kv_connector_config, "connector_module", None)
+
+
 def should_enable_consolidator(arg_map) -> bool:
     """
     Determine if the KV Event Consolidator should be enabled for TensorRT-LLM.
@@ -53,14 +64,14 @@ def should_enable_consolidator(arg_map) -> bool:
         logger.warning("KV Event Consolidator is not enabled: arg_map is not a dict")
         return False
 
-    kv_connector_config = arg_map.get("kv_connector_config", {})
-    if not isinstance(kv_connector_config, dict):
+    kv_connector_config = arg_map.get("kv_connector_config")
+    connector_module = _get_connector_module(kv_connector_config) or ""
+    if not connector_module:
         logger.warning(
-            "KV Event Consolidator is not enabled: kv_connector_config is not a dict"
+            "KV Event Consolidator is not enabled: kv_connector_config has no connector_module"
         )
         return False
 
-    connector_module = kv_connector_config.get("connector_module", "")
     has_kvbm_connector = "kvbm.trtllm_integration.connector" in connector_module
 
     if not has_kvbm_connector:
