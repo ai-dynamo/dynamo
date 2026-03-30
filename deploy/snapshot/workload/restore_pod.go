@@ -42,7 +42,6 @@ func PrepareRestorePodSpec(
 	if basePath != "" {
 		injectCheckpointVolumeMount(container, basePath)
 	}
-	injectRestoreTUN(podSpec, container)
 	if placeholder {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
@@ -76,35 +75,5 @@ func injectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      CheckpointVolumeName,
 		MountPath: basePath,
-	})
-}
-
-func injectRestoreTUN(podSpec *corev1.PodSpec, container *corev1.Container) {
-	charDevice := corev1.HostPathCharDev
-
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == RestoreTUNVolumeName {
-			goto mount
-		}
-	}
-	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-		Name: RestoreTUNVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			HostPath: &corev1.HostPathVolumeSource{
-				Path: "/dev/net/tun",
-				Type: &charDevice,
-			},
-		},
-	})
-
-mount:
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == RestoreTUNVolumeName {
-			return
-		}
-	}
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      RestoreTUNVolumeName,
-		MountPath: "/dev/net/tun",
 	})
 }

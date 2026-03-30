@@ -10,7 +10,6 @@ const (
 	RestoreStatusAnnotation        = "nvidia.com/snapshot-restore-status"
 	RestoreContainerIDAnnotation   = "nvidia.com/snapshot-restore-container-id"
 	CheckpointVolumeName           = "checkpoint-storage"
-	RestoreTUNVolumeName           = "host-dev-net-tun"
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
 	StorageTypePVC                 = "pvc"
 )

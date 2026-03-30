@@ -57,11 +57,11 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
 	}
-	if len(restorePod.Spec.Volumes) != 2 {
-		t.Fatalf("expected checkpoint and tun volumes, got %#v", restorePod.Spec.Volumes)
+	if len(restorePod.Spec.Volumes) != 1 {
+		t.Fatalf("expected checkpoint volume, got %#v", restorePod.Spec.Volumes)
 	}
-	if len(restorePod.Spec.Containers[0].VolumeMounts) != 2 {
-		t.Fatalf("expected checkpoint and tun mounts, got %#v", restorePod.Spec.Containers[0].VolumeMounts)
+	if len(restorePod.Spec.Containers[0].VolumeMounts) != 1 {
+		t.Fatalf("expected checkpoint mount, got %#v", restorePod.Spec.Containers[0].VolumeMounts)
 	}
 }
 
@@ -78,11 +78,11 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", podSpec.SecurityContext)
 	}
-	if len(podSpec.Volumes) != 2 {
-		t.Fatalf("expected checkpoint and tun volumes, got %#v", podSpec.Volumes)
+	if len(podSpec.Volumes) != 1 {
+		t.Fatalf("expected checkpoint volume, got %#v", podSpec.Volumes)
 	}
-	if len(container.VolumeMounts) != 2 {
-		t.Fatalf("expected checkpoint and tun mounts, got %#v", container.VolumeMounts)
+	if len(container.VolumeMounts) != 1 {
+		t.Fatalf("expected checkpoint mount, got %#v", container.VolumeMounts)
 	}
 	if len(container.Command) != 2 || container.Command[0] != "sleep" || container.Command[1] != "infinity" {
 		t.Fatalf("expected placeholder command, got %#v", container.Command)
