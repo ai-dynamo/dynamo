@@ -90,17 +90,28 @@ def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     isl = dgdr.workload.isl
     osl = dgdr.workload.osl
     request_latency = dgdr.sla.e2eLatency
+
+    # Determine SLA mode
     if request_latency is not None:
+        # e2eLatency mode — both targets equal the e2e value
         target_ttft = request_latency
         target_tpot = request_latency
+    elif dgdr.sla.optimizationType is not None:
+        # optimizationType mode — use sentinel values so downstream picking
+        # uses optimization-type-specific logic instead of SLA filtering
+        target_ttft = float("inf")
+        target_tpot = float("inf")
     else:
+        # Explicit ttft+itl mode
         target_ttft = dgdr.sla.ttft
         target_tpot = dgdr.sla.itl
+
     search_strategy = SearchStrategy(dgdr.searchStrategy)
     picking_mode = determine_picking_mode(dgdr)
     logger.info(
         "Profiler config: model=%s, backend=%s, system=%s, total_gpus=%s, "
-        "isl=%d, osl=%d, ttft=%.1f, itl=%.1f, e2e_latency=%s, strategy=%s, picking=%s",
+        "isl=%d, osl=%d, ttft=%s, itl=%s, e2e_latency=%s, "
+        "optimization_type=%s, strategy=%s, picking=%s",
         model,
         backend,
         system,
@@ -110,6 +121,7 @@ def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
         target_ttft,
         target_tpot,
         request_latency,
+        dgdr.sla.optimizationType,
         search_strategy.value,
         picking_mode,
     )
@@ -431,7 +443,8 @@ async def run_profile(
             phase=ops.current_phase,
         )
         final_config = assemble_final_config(
-            dgdr, ops, dgd_config, best_prefill_config, best_decode_config
+            dgdr, ops, dgd_config, best_prefill_config, best_decode_config,
+            best_latencies=pick_result.get("best_latencies") if not ops.dry_run else None,
         )
 
         # --- Apply DGD overrides (user-supplied partial DGD) ---
