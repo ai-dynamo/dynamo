@@ -37,6 +37,7 @@ pub trait Worker: Send + Sync {
         device_layout_type: Option<LayoutType>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
+        active_save_layers: Option<usize>,
     ) -> anyhow::Result<()>;
 
     fn bind_connector_metadata(&mut self, metadata: Vec<u8>) -> anyhow::Result<()>;
@@ -58,6 +59,12 @@ pub struct KvConnectorWorker {
     transfer_client: TransferSchedulerClient,
 
     kv_cache_layers: Vec<(String, Arc<VllmTensor>)>,
+
+    /// Number of layers that actively call save_kv_layer (attention layers).
+    /// Hybrid models (e.g. Nemotron) have Mamba/SSM layers that never call
+    /// save_kv_layer, so completion must trigger at this count rather than
+    /// the total number of registered kv_cache_layers.
+    active_save_layers: usize,
 
     /// Map of request id to inflight load requests
     maybe_finished_onboarding: HashSet<String>,
@@ -111,6 +118,7 @@ impl KvConnectorWorker {
             iteration: 0,
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
+            active_save_layers: 0,
             layer_events: Vec::new(),
         })
     }
@@ -132,6 +140,7 @@ impl Worker for KvConnectorWorker {
         device_layout_type: Option<LayoutType>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
+        active_save_layers: Option<usize>,
     ) -> anyhow::Result<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
@@ -164,6 +173,13 @@ impl Worker for KvConnectorWorker {
         }
 
         self.layer_events = raw_event_handles;
+        self.active_save_layers = active_save_layers.unwrap_or(self.kv_cache_layers.len());
+
+        tracing::info!(
+            "Registered {} KV cache layers ({} active save layers)",
+            self.kv_cache_layers.len(),
+            self.active_save_layers,
+        );
 
         // Auto-detect device layout type if not explicitly provided
         let detected_device_layout_type = match device_layout_type {
@@ -305,30 +321,48 @@ impl Worker for KvConnectorWorker {
     }
 
     /// Trigger layer-wise completion signals.
-    /// Trigger block-wise completion signals afer last layer.
-    fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
+    /// Trigger block-wise completion signals after the last active save layer.
+    fn save_kv_layer(&mut self, layer_name: String) -> anyhow::Result<()> {
         self.layers_complete += 1;
+
+        // Resolve the event index for this layer so we can sync on the
+        // correct CUDA event when triggering offload.  For hybrid models
+        // the layer ordering may interleave attention and Mamba layers, so
+        // we cannot assume `layers_complete - 1` maps to the right event.
+        let event_idx = self
+            .kv_cache_layers
+            .iter()
+            .position(|(name, _)| name == &layer_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "save_kv_layer: layer '{}' not found in kv_cache_layers",
+                    layer_name
+                )
+            })?;
+
         tracing::debug!(
             iteration = self.iteration,
             layers_complete = self.layers_complete,
+            active_save_layers = self.active_save_layers,
             total_layers = self.kv_cache_layers.len(),
             pending_offload_ops = self.offloading_operations.len(),
             "save_kv_layer called"
         );
-        if self.layers_complete == self.kv_cache_layers.len() {
+
+        if self.layers_complete == self.active_save_layers {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
 
             tracing::trace!(
                 iteration = self.iteration,
                 num_operations = offloading_operations.len(),
-                "All layers complete, enqueuing {} offload operations",
+                "All save layers complete, enqueuing {} offload operations",
                 offloading_operations.len()
             );
 
-            // block on the the completion of the last layer
+            // Block on the completion of the last save layer's CUDA event.
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
+            event_sync_blocking(self.layer_events[event_idx]);
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,
@@ -485,7 +519,7 @@ impl PyKvConnectorWorker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None, active_save_layers=None))]
     pub fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -497,6 +531,7 @@ impl PyKvConnectorWorker {
         device_layout_type: Option<PyLayoutType>,
         host_layout_type: Option<PyLayoutType>,
         disk_layout_type: Option<PyLayoutType>,
+        active_save_layers: Option<usize>,
     ) -> PyResult<()> {
         // Convert Python tensors to Rust VllmTensor objects
         let mut rust_kv_caches = Vec::new();
@@ -516,6 +551,7 @@ impl PyKvConnectorWorker {
                 device_layout_type.map(|py_layout| py_layout.into()),
                 host_layout_type.map(|py_layout| py_layout.into()),
                 disk_layout_type.map(|py_layout| py_layout.into()),
+                active_save_layers,
             )
             .map_err(to_pyerr)
     }
