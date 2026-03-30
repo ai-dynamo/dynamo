@@ -1,11 +1,10 @@
-package manual
+package main
 
 import (
 	"context"
 	"fmt"
 	"maps"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -26,9 +25,7 @@ const (
 	defaultGeneratedCheckpointHashPrefix = "manual-snapshot"
 )
 
-var dnsLabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
-
-type CheckpointOptions struct {
+type checkpointOptions struct {
 	ManifestPath                 string
 	Namespace                    string
 	CheckpointHash               string
@@ -36,14 +33,14 @@ type CheckpointOptions struct {
 	Timeout                      time.Duration
 }
 
-type RestoreOptions struct {
+type restoreOptions struct {
 	ManifestPath   string
 	Namespace      string
 	CheckpointHash string
 	Timeout        time.Duration
 }
 
-type Result struct {
+type result struct {
 	Name               string
 	Namespace          string
 	CheckpointHash     string
@@ -63,7 +60,6 @@ type selectedPod struct {
 
 type runSpec struct {
 	Namespace                    string
-	WorkloadName                 string
 	CheckpointHash               string
 	DisableCudaCheckpointJobFile bool
 	SeccompLocalhostProfile      string
@@ -78,7 +74,7 @@ type snapshotStorage struct {
 	BasePath string
 }
 
-func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error) {
+func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, error) {
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		return nil, fmt.Errorf("missing required flags: --manifest")
 	}
@@ -112,7 +108,15 @@ func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error)
 	}
 	spec := buildRunSpec(namespace, opts.CheckpointHash, opts.DisableCudaCheckpointJobFile, pod, storage)
 
-	if err := createCheckpointJob(ctx, clientset, spec); err != nil {
+	job, err := buildCheckpointJob(spec)
+	if err != nil {
+		return nil, err
+	}
+	_, err = clientset.BatchV1().Jobs(spec.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("checkpoint job %s/%s already exists", spec.Namespace, spec.CheckpointJobName)
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -123,8 +127,8 @@ func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error)
 		return nil, err
 	}
 
-	return &Result{
-		Name:               spec.WorkloadName,
+	return &result{
+		Name:               spec.Pod.Name,
 		Namespace:          spec.Namespace,
 		CheckpointHash:     spec.CheckpointHash,
 		CheckpointLocation: spec.checkpointLocation(),
@@ -133,7 +137,7 @@ func RunCheckpoint(ctx context.Context, opts CheckpointOptions) (*Result, error)
 	}, nil
 }
 
-func RunRestore(ctx context.Context, opts RestoreOptions) (*Result, error) {
+func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	var missing []string
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		missing = append(missing, "--manifest")
@@ -174,7 +178,12 @@ func RunRestore(ctx context.Context, opts RestoreOptions) (*Result, error) {
 	}
 	spec := buildRunSpec(namespace, opts.CheckpointHash, false, pod, storage)
 
-	if err := createRestorePod(ctx, clientset, spec); err != nil {
+	restorePod := buildRestorePod(spec)
+	_, err = clientset.CoreV1().Pods(spec.Namespace).Create(ctx, restorePod, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("restore pod %s/%s already exists", spec.Namespace, spec.RestorePodName)
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -185,8 +194,8 @@ func RunRestore(ctx context.Context, opts RestoreOptions) (*Result, error) {
 		return nil, err
 	}
 
-	return &Result{
-		Name:               spec.WorkloadName,
+	return &result{
+		Name:               spec.Pod.Name,
 		Namespace:          spec.Namespace,
 		CheckpointHash:     spec.CheckpointHash,
 		CheckpointLocation: spec.checkpointLocation(),
@@ -307,7 +316,7 @@ func loadPod(manifestPath string) (selectedPod, error) {
 	}
 
 	return selectedPod{
-		Name:              sanitizeName(name),
+		Name:              name,
 		ManifestNamespace: strings.TrimSpace(pod.Namespace),
 		Labels:            maps.Clone(pod.Labels),
 		Annotations:       maps.Clone(pod.Annotations),
@@ -320,20 +329,14 @@ func buildRunSpec(namespace string, checkpointHash string, disableCudaCheckpoint
 		checkpointHash = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointHashPrefix, time.Now().UTC().UnixNano())
 	}
 
-	suffix := sanitizeName(checkpointHash)
-	if len(suffix) > 12 {
-		suffix = strings.Trim(suffix[len(suffix)-12:], "-")
-	}
-	resourcePrefix := sanitizeName(pod.Name + "-" + suffix)
 	return runSpec{
 		Namespace:                    namespace,
-		WorkloadName:                 pod.Name,
 		CheckpointHash:               checkpointHash,
 		DisableCudaCheckpointJobFile: disableCudaCheckpointJobFile,
 		SeccompLocalhostProfile:      snapshotpodspec.DefaultSeccompLocalhostProfile,
 		Pod:                          pod,
 		SnapshotStorage:              storage,
-		CheckpointJobName:            sanitizeName(resourcePrefix + "-checkpoint"),
+		CheckpointJobName:            pod.Name + "-checkpoint",
 		RestorePodName:               pod.Name,
 	}
 }
@@ -437,33 +440,6 @@ func buildRestorePod(spec runSpec) *corev1.Pod {
 	}
 }
 
-func createCheckpointJob(ctx context.Context, clientset kubernetes.Interface, spec runSpec) error {
-	job, err := buildCheckpointJob(spec)
-	if err != nil {
-		return err
-	}
-	_, err = clientset.BatchV1().Jobs(spec.Namespace).Create(ctx, job, metav1.CreateOptions{})
-	if err == nil {
-		return nil
-	}
-	if apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("checkpoint job %s/%s already exists", spec.Namespace, spec.CheckpointJobName)
-	}
-	return fmt.Errorf("create checkpoint job %s/%s: %w", spec.Namespace, spec.CheckpointJobName, err)
-}
-
-func createRestorePod(ctx context.Context, clientset kubernetes.Interface, spec runSpec) error {
-	pod := buildRestorePod(spec)
-	_, err := clientset.CoreV1().Pods(spec.Namespace).Create(ctx, pod, metav1.CreateOptions{})
-	if err == nil {
-		return nil
-	}
-	if apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("restore pod %s/%s already exists", spec.Namespace, spec.RestorePodName)
-	}
-	return fmt.Errorf("create restore pod %s/%s: %w", spec.Namespace, spec.RestorePodName, err)
-}
-
 func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, spec runSpec) (string, error) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -558,20 +534,4 @@ func checkpointPodSummary(ctx context.Context, clientset kubernetes.Interface, s
 		}
 	}
 	return strings.Join(parts, " ")
-}
-
-func sanitizeName(value string) string {
-	value = strings.ToLower(value)
-	value = dnsLabelPattern.ReplaceAllString(value, "-")
-	value = strings.Trim(value, "-")
-	if value == "" {
-		value = "snapshot"
-	}
-	if len(value) > 63 {
-		value = strings.Trim(value[:63], "-")
-	}
-	if value == "" {
-		return "snapshot"
-	}
-	return value
 }

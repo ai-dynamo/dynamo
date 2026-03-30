@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/manual"
 )
 
 func main() {
@@ -53,7 +51,7 @@ func runCheckpoint(args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 
-	result, err := manual.RunCheckpoint(context.Background(), manual.CheckpointOptions{
+	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
 		ManifestPath:                 *manifest,
 		Namespace:                    *namespace,
 		CheckpointHash:               *checkpointHash,
@@ -89,7 +87,7 @@ func runRestore(args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 
-	result, err := manual.RunRestore(context.Background(), manual.RestoreOptions{
+	result, err := runRestoreFlow(context.Background(), restoreOptions{
 		ManifestPath:   *manifest,
 		Namespace:      *namespace,
 		CheckpointHash: *checkpointHash,
