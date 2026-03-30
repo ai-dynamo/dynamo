@@ -12,13 +12,13 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
-	"k8s.io/client-go/kubernetes"
 	"github.com/google/uuid"
+	"k8s.io/client-go/kubernetes"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/cuda"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.

@@ -7,7 +7,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func TestClassifyMounts(t *testing.T) {

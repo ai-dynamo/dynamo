@@ -5,7 +5,7 @@ import (
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func TestParseManageCgroupsMode(t *testing.T) {

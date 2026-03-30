@@ -9,10 +9,10 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/cuda"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 // RestoreOptions holds configuration for an in-namespace restore.

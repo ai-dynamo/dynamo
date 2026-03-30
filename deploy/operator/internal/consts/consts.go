@@ -140,8 +140,8 @@ const (
 	ResourceStateUnknown  = "unknown"
 
 	// Checkpoint/restore constants
-	// CROSS-REFERENCE: Some constants below are duplicated in the snapshot package at
-	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
+	// CROSS-REFERENCE: Some constants below are duplicated in deploy/snapshot/podspec/podspec.go.
+	// If you change a value here, update there too.
 
 	// Kubernetes labels
 	KubeLabelIsCheckpointSource             = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint

@@ -12,9 +12,9 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/controller"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/controller"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 )
 
 func main() {

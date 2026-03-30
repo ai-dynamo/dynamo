@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-logr/logr/testr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func TestBuildExclusions(t *testing.T) {

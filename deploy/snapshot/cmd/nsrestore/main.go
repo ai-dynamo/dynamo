@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/executor"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 )
 
 func main() {

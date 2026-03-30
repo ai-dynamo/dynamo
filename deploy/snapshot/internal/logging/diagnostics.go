@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
 )
 
 // LogProcessDiagnostics logs process state and CRIU restore log for debugging a failed restore.

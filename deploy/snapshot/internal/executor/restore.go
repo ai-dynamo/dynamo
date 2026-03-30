@@ -16,11 +16,11 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/cuda"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 // RestoreRequest holds the parameters for a restore operation.

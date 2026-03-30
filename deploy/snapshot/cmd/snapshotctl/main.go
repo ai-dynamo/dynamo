@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 )
+
+var snapshotctlLog = logging.ConfigureLogger("stderr").WithName("snapshotctl")
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		snapshotctlLog.Error(err, "snapshotctl failed")
 		os.Exit(1)
 	}
 }
@@ -51,6 +55,7 @@ func runCheckpoint(args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 
+	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
 	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
 		ManifestPath:                 *manifest,
 		Namespace:                    *namespace,
@@ -61,6 +66,7 @@ func runCheckpoint(args []string) error {
 	if err != nil {
 		return err
 	}
+	snapshotctlLog.Info("Checkpoint completed", "job", result.CheckpointJob, "checkpoint_hash", result.CheckpointHash)
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
@@ -87,6 +93,7 @@ func runRestore(args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 
+	snapshotctlLog.Info("Running restore", "manifest", *manifest, "namespace", *namespace, "checkpoint_hash", *checkpointHash)
 	result, err := runRestoreFlow(context.Background(), restoreOptions{
 		ManifestPath:   *manifest,
 		Namespace:      *namespace,
@@ -96,6 +103,7 @@ func runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
+	snapshotctlLog.Info("Restore completed", "pod", result.RestorePod, "checkpoint_hash", result.CheckpointHash)
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
