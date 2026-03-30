@@ -10,7 +10,6 @@ to <think> blocks in the content field before chat template rendering.
 
 import copy
 
-
 from dynamo.common.utils.input_params import _inject_reasoning_content
 
 
