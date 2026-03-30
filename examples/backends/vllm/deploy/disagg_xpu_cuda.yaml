@@ -30,7 +30,7 @@ spec:
           env:
             - name: DYN_ROUTER_MODE
               value: kv
-            
+
     DecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -56,7 +56,7 @@ spec:
                 --is-decode-worker --enforce-eager --dtype auto \
                 --block-size 64  \
                 --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cpu", "kv_connector_extra_config":{"enforce_handshake_compat": false}, "enable_permute_local_kv":"True"}'  \
-                --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}' 
+                --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}'
           env:
             - name: VLLM_NIXL_SIDE_CHANNEL_HOST
               valueFrom:
@@ -65,20 +65,20 @@ spec:
             - name: UCX_TLS
               value: "tcp"
             - name: VLLM_NIXL_SIDE_CHANNEL_PORT
-              value: "20096"          
+              value: "20096"
             - name: VLLM_NIXL_DEVICE_TO_DEVICE
               value: "1"
             - name: VLLM_KV_CACHE_LAYOUT
               value: "NHD"
             - name: PYTHONHASHSEED
               value: "0"
-            
+
 
     PrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
-      replicas: 1   
+      replicas: 1
       requests:
           custom:
             # Increase this value for larger models
@@ -98,7 +98,7 @@ spec:
               --model Qwen/Qwen3-0.6B \
               --is-prefill-worker --block-size 64 --enforce-eager  \
               --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cpu", "enable_permute_local_kv":"True"}' \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}' 
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}'
           resources:
             claims:
               - name: xpu-resource
@@ -121,4 +121,3 @@ spec:
               value: "1"
             - name: VLLM_TARGET_DEVICE
               value: xpu
-            

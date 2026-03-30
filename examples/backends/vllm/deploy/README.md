@@ -66,6 +66,8 @@ Hardware-specific aggregated/disaggregated deployments using Kubernetes Dynamic 
 - Both workers claim an RDMA NIC via `ResourceClaimTemplate` (`rdma-dranet`)
 - High-performance GPU-to-GPU KV transfer via NIXL over RDMA fabric
 
+> **Note:** Only `IPC_LOCK` is required — it allows the kernel's IB verbs layer (`ib_umem_get`) to bypass `RLIMIT_MEMLOCK` when pinning RDMA memory regions.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

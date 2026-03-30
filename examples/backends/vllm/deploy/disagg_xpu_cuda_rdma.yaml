@@ -40,7 +40,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          
+
     DecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -68,16 +68,11 @@ spec:
                 --model Qwen/Qwen3-0.6B \
                 --is-decode-worker --max-model-len 2048 \
                 --block-size 64   \
-                --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cuda", "kv_connector_extra_config":{"enforce_handshake_compat": false}, "enable_permute_local_kv":"True"}' 
+                --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cuda", "kv_connector_extra_config":{"enforce_handshake_compat": false}, "enable_permute_local_kv":"True"}'
           securityContext:
             capabilities:
               add:
                 - IPC_LOCK
-                - SYS_PTRACE
-                - NET_ADMIN
-                - NET_RAW
-                - SYS_ADMIN
-                - SYS_RESOURCE
           resources:
             claims:
               - name: rdma-resource
@@ -100,18 +95,18 @@ spec:
               value: "NHD"
             - name: PYTHONHASHSEED
               value: "0"
-            
+
     PrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
-      replicas: 1   
+      replicas: 1
       resources:
         requests:
           custom:
             # Increase this value for larger models
             ephemeral-storage: "2Gi"
-      extraPodSpec:  
+      extraPodSpec:
         resourceClaims:
           - name: rdma-resource
             resourceClaimTemplateName: rdma-net-template
@@ -127,16 +122,11 @@ spec:
             python3 -m dynamo.vllm \
               --model Qwen/Qwen3-0.6B \
               --is-prefill-worker --block-size 64 --enforce-eager --max-model-len 2048 \
-              --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"xpu", "enable_permute_local_kv":"True"}' 
+              --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"xpu", "enable_permute_local_kv":"True"}'
           securityContext:
             capabilities:
               add:
                 - IPC_LOCK
-                - SYS_PTRACE
-                - NET_ADMIN
-                - NET_RAW
-                - SYS_ADMIN 
-                - SYS_RESOURCE
           resources:
             claims:
               - name: xpu-resource
@@ -164,4 +154,3 @@ spec:
               value: "1"
             - name: VLLM_TARGET_DEVICE
               value: xpu
-            
