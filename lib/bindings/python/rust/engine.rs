@@ -250,12 +250,10 @@ where
                             ResponseProcessingError::Dynamo(dynamo_err) => {
                                 Annotated::from_err(dynamo_err)
                             }
-                            ResponseProcessingError::Offload(e) => {
-                                Annotated::from_error(format!(
-                                    "critical error: failed to offload the python async generator to a new thread: {}",
-                                    e
-                                ))
-                            }
+                            ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
+                                "critical error: failed to offload the python async generator to a new thread: {}",
+                                e
+                            )),
                         }
                     }
                 };
