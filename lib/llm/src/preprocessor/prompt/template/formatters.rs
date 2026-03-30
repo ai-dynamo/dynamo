@@ -99,7 +99,7 @@ impl HfTokenizerConfigJsonFormatter {
                 ValueKind::Undefined | ValueKind::None => 0,
                 _ => value.len().unwrap_or(0),
             }
-            .any(|(_, tmpl)| tmpl.source().contains("reasoning_content"));
+        });
 
         // add pycompat
         // todo: should we use this: minijinja_contrib::add_to_environment(&mut env);
