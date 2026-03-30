@@ -135,20 +135,15 @@ func validateCheckpoint(checkpoint *configv1alpha1.CheckpointConfiguration, fldP
 	}
 
 	storagePath := fldPath.Child("storage")
-	switch checkpoint.Storage.Type {
-	case configv1alpha1.CheckpointStorageTypePVC:
-		// PVC is the default, no additional required fields
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if checkpoint.Storage.S3.URI == "" {
-			allErrs = append(allErrs, field.Required(storagePath.Child("s3", "uri"), "S3 URI is required when storage type is s3"))
-		}
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if checkpoint.Storage.OCI.URI == "" {
-			allErrs = append(allErrs, field.Required(storagePath.Child("oci", "uri"), "OCI URI is required when storage type is oci"))
-		}
-	default:
+	if checkpoint.Storage.Type != "" && checkpoint.Storage.Type != configv1alpha1.CheckpointStorageTypePVC {
 		allErrs = append(allErrs, field.NotSupported(storagePath.Child("type"), checkpoint.Storage.Type,
-			[]string{configv1alpha1.CheckpointStorageTypePVC, configv1alpha1.CheckpointStorageTypeS3, configv1alpha1.CheckpointStorageTypeOCI}))
+			[]string{configv1alpha1.CheckpointStorageTypePVC}))
+	}
+	if checkpoint.Storage.PVC.PVCName == "" {
+		allErrs = append(allErrs, field.Required(storagePath.Child("pvc", "pvcName"), "checkpoint PVC name is required"))
+	}
+	if checkpoint.Storage.PVC.BasePath == "" {
+		allErrs = append(allErrs, field.Required(storagePath.Child("pvc", "basePath"), "checkpoint PVC base path is required"))
 	}
 
 	return allErrs

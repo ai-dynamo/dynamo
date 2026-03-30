@@ -97,20 +97,6 @@ func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts .
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestResolveCheckpointStorage(t *testing.T) {
-	config := testPVCConfig()
-
-	location, storageType, err := ResolveCheckpointStorage(testHash, "", config)
-	require.NoError(t, err)
-	assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, location)
-	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), storageType)
-
-	location, storageType, err = ResolveCheckpointStorage(testHash, "7", config)
-	require.NoError(t, err)
-	assert.Equal(t, "/checkpoints/"+testHash+"/versions/7", location)
-	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), storageType)
-}
-
 func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
@@ -124,7 +110,7 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 			Name:      "friendly-checkpoint",
 			Namespace: testNamespace,
 			Labels: map[string]string{
-				consts.KubeLabelCheckpointHash: hash,
+				consts.KubeLabelCheckpointID: hash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
@@ -182,7 +168,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
-		assert.Equal(t, "/checkpoints/"+info.Hash, info.Location)
+		assert.Equal(t, "/checkpoints/"+info.Hash+"/versions/"+consts.DefaultCheckpointArtifactVersion, info.Location)
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), info.StorageType)
 
 		volumes := map[string]corev1.Volume{}
@@ -223,7 +209,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"no containers", &corev1.PodSpec{}, testInfo(), testPVCConfig(), "no container found"},
 			{"PVC name missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
-			}, "no PVC name"},
+			}, "checkpoint pvc name is required"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				err := InjectCheckpointIntoPodSpec(tc.podSpec, tc.info, tc.config)

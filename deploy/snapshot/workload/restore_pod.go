@@ -1,14 +1,13 @@
 package workload
 
+import "fmt"
+
 import corev1 "k8s.io/api/core/v1"
 
 type RestorePodOptions struct {
 	Namespace      string
-	SnapshotID     string
-	Location       string
-	StorageType    string
-	CheckpointPVC  string
-	CheckpointPath string
+	CheckpointID   string
+	Storage        ResolvedStorage
 	SeccompProfile string
 }
 
@@ -20,8 +19,8 @@ func NewRestorePod(pod *corev1.Pod, opts RestorePodOptions) *corev1.Pod {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.SnapshotID, opts.Location, opts.StorageType)
-	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.CheckpointPVC, opts.CheckpointPath, opts.SeccompProfile, true)
+	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.Storage.Location, opts.Storage.Type)
+	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.Storage, opts.SeccompProfile, true)
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
 	return pod
@@ -30,22 +29,70 @@ func NewRestorePod(pod *corev1.Pod, opts RestorePodOptions) *corev1.Pod {
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	container *corev1.Container,
-	pvcName string,
-	basePath string,
+	storage ResolvedStorage,
 	seccompProfile string,
 	placeholder bool,
 ) {
 	injectLocalhostSeccompProfile(podSpec, seccompProfile)
-	if pvcName != "" {
-		injectCheckpointVolume(podSpec, pvcName)
+	if storage.PVCName != "" {
+		injectCheckpointVolume(podSpec, storage.PVCName)
 	}
-	if basePath != "" {
-		injectCheckpointVolumeMount(container, basePath)
+	if storage.BasePath != "" {
+		injectCheckpointVolumeMount(container, storage.BasePath)
 	}
 	if placeholder {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
 	}
+}
+
+func ValidateRestorePodSpec(
+	podSpec *corev1.PodSpec,
+	container *corev1.Container,
+	storage ResolvedStorage,
+	seccompProfile string,
+) error {
+	if podSpec == nil {
+		return fmt.Errorf("pod spec is nil")
+	}
+	if container == nil {
+		return fmt.Errorf("container is nil")
+	}
+	if storage.PVCName != "" {
+		hasVolume := false
+		for _, volume := range podSpec.Volumes {
+			if volume.Name == CheckpointVolumeName {
+				hasVolume = true
+				break
+			}
+		}
+		if !hasVolume {
+			return fmt.Errorf("missing %s volume", CheckpointVolumeName)
+		}
+	}
+	if storage.BasePath != "" {
+		hasMount := false
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
+				hasMount = true
+				break
+			}
+		}
+		if !hasMount {
+			return fmt.Errorf("missing %s mount at %s", CheckpointVolumeName, storage.BasePath)
+		}
+	}
+	if seccompProfile == "" {
+		return nil
+	}
+	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
+		return fmt.Errorf("missing localhost seccomp profile")
+	}
+	profile := podSpec.SecurityContext.SeccompProfile
+	if profile.Type != corev1.SeccompProfileTypeLocalhost || profile.LocalhostProfile == nil || *profile.LocalhostProfile != seccompProfile {
+		return fmt.Errorf("expected localhost seccomp profile %q", seccompProfile)
+	}
+	return nil
 }
 
 func injectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {

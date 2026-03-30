@@ -6864,8 +6864,8 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
-					"extra-label":                        "keep-too",
-					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+					"extra-label":                      "keep-too",
+					commonconsts.KubeLabelCheckpointID: "stale-hash",
 				},
 			},
 		},
@@ -6884,7 +6884,7 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 	assert.Equal(t, "keep", labels["user-label"])
 	assert.Equal(t, "keep-too", labels["extra-label"])
 	_, hasRestoreTarget := labels[commonconsts.KubeLabelIsRestoreTarget]
-	_, hasCheckpointHash := labels[commonconsts.KubeLabelCheckpointHash]
+	_, hasCheckpointHash := labels[commonconsts.KubeLabelCheckpointID]
 	assert.False(t, hasRestoreTarget)
 	assert.False(t, hasCheckpointHash)
 }
@@ -6899,7 +6899,7 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
-					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+					commonconsts.KubeLabelCheckpointID: "stale-hash",
 				},
 			},
 		},
@@ -6916,7 +6916,7 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 		Hash:    "resolved-hash",
 	})
 	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[commonconsts.KubeLabelIsRestoreTarget])
-	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointHash])
+	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointID])
 }
 
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {

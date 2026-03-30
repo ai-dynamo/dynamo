@@ -26,9 +26,11 @@ func TestNewCheckpointJob(t *testing.T) {
 	}, CheckpointJobOptions{
 		Namespace:             "test-ns",
 		Name:                  "test-job",
-		SnapshotID:            "hash",
-		Location:              "/checkpoints/hash",
-		StorageType:           StorageTypePVC,
+		CheckpointID:          "hash",
+		Storage: ResolvedStorage{
+			Type:     StorageTypePVC,
+			Location: "/checkpoints/hash",
+		},
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
 		SeccompProfile:        DefaultSeccompLocalhostProfile,
@@ -41,7 +43,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
 	}
-	if job.Labels[CheckpointHashLabel] != "hash" {
+	if job.Labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint hash label on job: %#v", job.Labels)
 	}
 	if job.Spec.Template.Labels[CheckpointSourceLabel] != "true" {
@@ -49,6 +51,12 @@ func TestNewCheckpointJob(t *testing.T) {
 	}
 	if job.Spec.Template.Annotations[CheckpointLocationAnnotation] != "/checkpoints/hash" {
 		t.Fatalf("expected checkpoint location annotation on template: %#v", job.Spec.Template.Annotations)
+	}
+	if len(job.Spec.Template.Spec.Volumes) != 0 {
+		t.Fatalf("expected no checkpoint volume, got %#v", job.Spec.Template.Spec.Volumes)
+	}
+	if len(job.Spec.Template.Spec.Containers[0].VolumeMounts) != 0 {
+		t.Fatalf("expected no checkpoint volume mount, got %#v", job.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", job.Spec.Template.Spec.RestartPolicy)

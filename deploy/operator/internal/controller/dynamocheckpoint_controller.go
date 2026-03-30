@@ -126,8 +126,8 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if ckpt.Labels == nil {
 		ckpt.Labels = map[string]string{}
 	}
-	if ckpt.Labels[consts.KubeLabelCheckpointHash] != identityHash {
-		ckpt.Labels[consts.KubeLabelCheckpointHash] = identityHash
+	if ckpt.Labels[consts.KubeLabelCheckpointID] != identityHash {
+		ckpt.Labels[consts.KubeLabelCheckpointID] = identityHash
 		if err := r.Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -223,7 +223,11 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	}
 	version := desiredArtifactVersion(ckpt)
 	jobName := desiredCheckpointJobName(ckpt, hash)
-	location, storageType, err := checkpoint.ResolveCheckpointStorage(hash, version, &r.Config.Checkpoint)
+	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(hash, version, snapshotworkload.StorageConfig{
+		Type:     r.Config.Checkpoint.Storage.Type,
+		PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
+		BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
+	})
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -245,8 +249,8 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	// Update status to Creating phase
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
 	ckpt.Status.JobName = jobName
-	ckpt.Status.Location = location
-	ckpt.Status.StorageType = storageType
+	ckpt.Status.Location = resolvedStorage.Location
+	ckpt.Status.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(resolvedStorage.Type)
 	ckpt.Status.CreatedAt = nil
 	ckpt.Status.Message = ""
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
@@ -383,17 +387,20 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", "Checkpoint creation completed successfully")
 
 		if ckpt.Status.Location == "" || ckpt.Status.StorageType == "" {
-			version := desiredArtifactVersion(ckpt)
-			location, storageType, err := checkpoint.ResolveCheckpointStorage(
+			resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
 				ckpt.Status.IdentityHash,
-				version,
-				&r.Config.Checkpoint,
+				desiredArtifactVersion(ckpt),
+				snapshotworkload.StorageConfig{
+					Type:     r.Config.Checkpoint.Storage.Type,
+					PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
+					BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
+				},
 			)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			ckpt.Status.Location = location
-			ckpt.Status.StorageType = storageType
+			ckpt.Status.Location = resolvedStorage.Location
+			ckpt.Status.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(resolvedStorage.Type)
 		}
 
 		now := metav1.Now()
@@ -474,7 +481,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if hash == "" {
 		hash, _ = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
 	}
-	version := desiredArtifactVersion(ckpt)
 
 	// Add checkpoint-related labels
 	if podTemplate.Labels == nil {
@@ -483,14 +489,17 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
-	location, storageType, err := checkpoint.ResolveCheckpointStorage(
+	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
 		hash,
-		version,
-		&r.Config.Checkpoint,
+		desiredArtifactVersion(ckpt),
+		snapshotworkload.StorageConfig{
+			Type:     r.Config.Checkpoint.Storage.Type,
+			PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
+			BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
+		},
 	)
 	if err != nil {
-		location = ""
-		storageType = ""
+		return nil, err
 	}
 	hasPodInfoVolume := false
 	for _, volume := range podTemplate.Spec.Volumes {
@@ -630,27 +639,21 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	ttlSeconds := ckpt.Spec.Job.TTLSecondsAfterFinished
-	if ttlSeconds == nil {
-		defaultTTL := int32(300) // 5 minutes
-		ttlSeconds = &defaultTTL
-	}
-
 	wrapLaunchJob := false
 	if len(podTemplate.Spec.Containers) != 0 {
 		if gpus, ok := podTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
 			wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
 		}
 	}
+	ttlSecondsAfterFinish := consts.DefaultCheckpointJobTTLSeconds
 
 	return snapshotworkload.NewCheckpointJob(podTemplate, snapshotworkload.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		Name:                  jobName,
-		SnapshotID:            hash,
-		Location:              location,
-		StorageType:           string(storageType),
+		CheckpointID:          hash,
+		Storage:               resolvedStorage,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
-		TTLSecondsAfterFinish: ttlSeconds,
+		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
 		SeccompProfile:        consts.SeccompProfilePath,
 		WrapLaunchJob:         wrapLaunchJob,
 	})

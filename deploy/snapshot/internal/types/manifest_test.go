@@ -42,8 +42,8 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 
 	// Verify key fields survived the round-trip
-	if loaded.CheckpointHash != original.CheckpointHash {
-		t.Errorf("CheckpointHash = %q, want %q", loaded.CheckpointHash, original.CheckpointHash)
+	if loaded.CheckpointID != original.CheckpointID {
+		t.Errorf("CheckpointID = %q, want %q", loaded.CheckpointID, original.CheckpointID)
 	}
 	if loaded.CRIUDump.CRIU.LogLevel != 4 {
 		t.Errorf("CRIU.LogLevel = %d, want 4", loaded.CRIUDump.CRIU.LogLevel)

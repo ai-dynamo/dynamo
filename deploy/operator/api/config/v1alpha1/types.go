@@ -24,8 +24,6 @@ import (
 // Checkpoint storage type constants
 const (
 	CheckpointStorageTypePVC = "pvc"
-	CheckpointStorageTypeS3  = "s3"
-	CheckpointStorageTypeOCI = "oci"
 )
 
 // +kubebuilder:object:root=true
@@ -251,15 +249,11 @@ type CheckpointConfiguration struct {
 
 // CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
 type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type: pvc, s3, or oci
+	// Type is the storage backend type. Only pvc is currently supported.
 	// +kubebuilder:default="pvc"
 	Type string `json:"type"`
 	// PVC configuration (used when Type=pvc)
 	PVC CheckpointPVCConfig `json:"pvc"`
-	// S3 configuration (used when Type=s3)
-	S3 CheckpointS3Config `json:"s3"`
-	// OCI configuration (used when Type=oci)
-	OCI CheckpointOCIConfig `json:"oci"`
 }
 
 // CheckpointPVCConfig holds PVC storage configuration.
@@ -270,22 +264,6 @@ type CheckpointPVCConfig struct {
 	// BasePath is the base directory within the PVC
 	// +kubebuilder:default="/checkpoints"
 	BasePath string `json:"basePath"`
-}
-
-// CheckpointS3Config holds S3 storage configuration.
-type CheckpointS3Config struct {
-	// URI is the S3 URI (s3://[endpoint/]bucket/prefix)
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the name of the credentials secret
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
-}
-
-// CheckpointOCIConfig holds OCI registry storage configuration.
-type CheckpointOCIConfig struct {
-	// URI is the OCI URI (oci://registry/repository)
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the name of the docker config secret
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
 }
 
 // DiscoveryConfiguration holds discovery backend settings.

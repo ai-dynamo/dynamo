@@ -4,8 +4,8 @@ import "testing"
 
 func TestApplyCheckpointSourceMetadata(t *testing.T) {
 	labels := map[string]string{
-		RestoreTargetLabel:  "true",
-		CheckpointHashLabel: "old",
+		RestoreTargetLabel: "true",
+		CheckpointIDLabel:  "old",
 	}
 	annotations := map[string]string{
 		CheckpointLocationAnnotation: "old",
@@ -17,7 +17,7 @@ func TestApplyCheckpointSourceMetadata(t *testing.T) {
 	if labels[CheckpointSourceLabel] != "true" {
 		t.Fatalf("expected checkpoint source label, got %#v", labels)
 	}
-	if labels[CheckpointHashLabel] != "hash" {
+	if labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint hash label, got %#v", labels)
 	}
 	if _, ok := labels[RestoreTargetLabel]; ok {
@@ -34,7 +34,7 @@ func TestApplyCheckpointSourceMetadata(t *testing.T) {
 func TestApplyRestoreTargetMetadata(t *testing.T) {
 	labels := map[string]string{
 		CheckpointSourceLabel: "true",
-		CheckpointHashLabel:   "old",
+		CheckpointIDLabel:     "old",
 	}
 	annotations := map[string]string{
 		CheckpointLocationAnnotation: "old",
@@ -46,7 +46,7 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	if labels[RestoreTargetLabel] != "true" {
 		t.Fatalf("expected restore target label, got %#v", labels)
 	}
-	if labels[CheckpointHashLabel] != "hash" {
+	if labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint hash label, got %#v", labels)
 	}
 	if _, ok := labels[CheckpointSourceLabel]; ok {
@@ -62,8 +62,8 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 
 func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	labels := map[string]string{
-		RestoreTargetLabel:  "true",
-		CheckpointHashLabel: "hash",
+		RestoreTargetLabel: "true",
+		CheckpointIDLabel:  "hash",
 	}
 	annotations := map[string]string{
 		CheckpointLocationAnnotation: "/checkpoints/hash",
@@ -75,7 +75,7 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	if _, ok := labels[RestoreTargetLabel]; ok {
 		t.Fatalf("restore target label was not cleared: %#v", labels)
 	}
-	if _, ok := labels[CheckpointHashLabel]; ok {
+	if _, ok := labels[CheckpointIDLabel]; ok {
 		t.Fatalf("checkpoint hash label was not cleared: %#v", labels)
 	}
 	if _, ok := annotations[CheckpointLocationAnnotation]; ok {

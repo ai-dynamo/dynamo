@@ -2,7 +2,7 @@ package workload
 
 const (
 	CheckpointSourceLabel          = "nvidia.com/snapshot-is-checkpoint-source"
-	CheckpointHashLabel            = "nvidia.com/snapshot-checkpoint-hash"
+	CheckpointIDLabel              = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel             = "nvidia.com/snapshot-is-restore-target"
 	CheckpointLocationAnnotation   = "nvidia.com/snapshot-checkpoint-location"
 	CheckpointStorageAnnotation    = "nvidia.com/snapshot-checkpoint-storage-type"
@@ -14,15 +14,15 @@ const (
 	StorageTypePVC                 = "pvc"
 )
 
-func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, hash string, location string, storageType string) {
+func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, location string, storageType string) {
 	delete(labels, RestoreTargetLabel)
-	delete(labels, CheckpointHashLabel)
+	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointLocationAnnotation)
 	delete(annotations, CheckpointStorageAnnotation)
 
 	labels[CheckpointSourceLabel] = "true"
-	if hash != "" {
-		labels[CheckpointHashLabel] = hash
+	if checkpointID != "" {
+		labels[CheckpointIDLabel] = checkpointID
 	}
 	if location != "" {
 		annotations[CheckpointLocationAnnotation] = location
@@ -32,10 +32,10 @@ func applyCheckpointSourceMetadata(labels map[string]string, annotations map[str
 	}
 }
 
-func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, hash string, location string, storageType string) {
+func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, location string, storageType string) {
 	delete(labels, CheckpointSourceLabel)
 	delete(labels, RestoreTargetLabel)
-	delete(labels, CheckpointHashLabel)
+	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointLocationAnnotation)
 	delete(annotations, CheckpointStorageAnnotation)
 
@@ -44,8 +44,8 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	}
 
 	labels[RestoreTargetLabel] = "true"
-	if hash != "" {
-		labels[CheckpointHashLabel] = hash
+	if checkpointID != "" {
+		labels[CheckpointIDLabel] = checkpointID
 	}
 	if location != "" {
 		annotations[CheckpointLocationAnnotation] = location

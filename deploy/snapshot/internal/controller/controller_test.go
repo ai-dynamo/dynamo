@@ -191,7 +191,7 @@ func TestReconcileCheckpointPod(t *testing.T) {
 				"batch.kubernetes.io/job-name": "checkpoint-job",
 			}
 			if tc.hash != "" {
-				labels[kubeLabelCheckpointHash] = tc.hash
+				labels[kubeLabelCheckpointID] = tc.hash
 			}
 
 			job := &batchv1.Job{
@@ -385,7 +385,7 @@ func TestReconcileRestorePod(t *testing.T) {
 				kubeLabelIsRestoreTarget: "true",
 			}
 			if tc.hash != "" {
-				labels[kubeLabelCheckpointHash] = tc.hash
+				labels[kubeLabelCheckpointID] = tc.hash
 			}
 
 			w := makeTestController(t)

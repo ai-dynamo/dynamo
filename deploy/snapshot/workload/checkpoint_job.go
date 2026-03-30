@@ -12,9 +12,8 @@ import (
 type CheckpointJobOptions struct {
 	Namespace             string
 	Name                  string
-	SnapshotID            string
-	Location              string
-	StorageType           string
+	CheckpointID          string
+	Storage               ResolvedStorage
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
 	SeccompProfile        string
@@ -29,7 +28,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = map[string]string{}
 	}
-	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.SnapshotID, opts.Location, opts.StorageType)
+	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.Storage.Location, opts.Storage.Type)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
 		injectLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
@@ -53,7 +52,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 			Name:      opts.Name,
 			Namespace: opts.Namespace,
 			Labels: map[string]string{
-				CheckpointHashLabel: opts.SnapshotID,
+				CheckpointIDLabel: opts.CheckpointID,
 			},
 		},
 		Spec: batchv1.JobSpec{

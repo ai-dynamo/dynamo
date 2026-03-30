@@ -8258,10 +8258,8 @@ spec:
                   type: string
                 location:
                   description: |-
-                    Location is the full URI/path to the checkpoint in the storage backend
-                    For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)
-                    For S3: s3://bucket/prefix/{hash}.tar
-                    For OCI: oci://registry/repo:{hash}
+                    Location is the full path to the checkpoint artifact in the storage backend.
+                    For PVC this is typically /checkpoints/{checkpoint-id}/versions/{artifact-version}.
                   type: string
                 message:
                   description: Message provides additional information about the current state
@@ -8275,11 +8273,9 @@ spec:
                     - Failed
                   type: string
                 storageType:
-                  description: StorageType indicates the storage backend type used for this checkpoint
+                  description: StorageType indicates the storage backend type used for this checkpoint.
                   enum:
                     - pvc
-                    - s3
-                    - oci
                   type: string
               type: object
           type: object

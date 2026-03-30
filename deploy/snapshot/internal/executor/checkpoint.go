@@ -25,7 +25,7 @@ import (
 type CheckpointRequest struct {
 	ContainerID           string
 	ContainerName         string
-	CheckpointHash        string
+	CheckpointID          string
 	CheckpointLocation    string
 	CheckpointStorageType string
 	NodeName              string
@@ -202,7 +202,7 @@ func configureCheckpoint(
 	}
 
 	m := types.NewCheckpointManifest(
-		req.CheckpointHash,
+		req.CheckpointID,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),

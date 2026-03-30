@@ -24,12 +24,14 @@ func TestNewRestorePod(t *testing.T) {
 			}},
 		},
 	}, RestorePodOptions{
-		Namespace:      "test-ns",
-		SnapshotID:     "hash",
-		Location:       "/checkpoints/hash",
-		StorageType:    StorageTypePVC,
-		CheckpointPVC:  "snapshot-pvc",
-		CheckpointPath: "/checkpoints",
+		Namespace:    "test-ns",
+		CheckpointID: "hash",
+		Storage: ResolvedStorage{
+			Type:     StorageTypePVC,
+			Location: "/checkpoints/hash",
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		},
 		SeccompProfile: DefaultSeccompLocalhostProfile,
 	})
 
@@ -39,8 +41,8 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Labels[RestoreTargetLabel] != "true" {
 		t.Fatalf("expected restore target label: %#v", restorePod.Labels)
 	}
-	if restorePod.Labels[CheckpointHashLabel] != "hash" {
-		t.Fatalf("expected checkpoint hash label: %#v", restorePod.Labels)
+	if restorePod.Labels[CheckpointIDLabel] != "hash" {
+		t.Fatalf("expected checkpoint id label: %#v", restorePod.Labels)
 	}
 	if restorePod.Annotations[CheckpointLocationAnnotation] != "/checkpoints/hash" {
 		t.Fatalf("expected checkpoint location annotation: %#v", restorePod.Annotations)
@@ -72,8 +74,13 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		Args:    []string{"--model", "Qwen"},
 	}
 
-	PrepareRestorePodSpec(&podSpec, &container, "snapshot-pvc", "/checkpoints", DefaultSeccompLocalhostProfile, true)
-	PrepareRestorePodSpec(&podSpec, &container, "snapshot-pvc", "/checkpoints", DefaultSeccompLocalhostProfile, true)
+	storage := ResolvedStorage{
+		Type:     StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	}
+	PrepareRestorePodSpec(&podSpec, &container, storage, DefaultSeccompLocalhostProfile, true)
+	PrepareRestorePodSpec(&podSpec, &container, storage, DefaultSeccompLocalhostProfile, true)
 
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", podSpec.SecurityContext)
@@ -89,5 +96,54 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	}
 	if container.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
+	}
+}
+
+func TestValidateRestorePodSpec(t *testing.T) {
+	profile := DefaultSeccompLocalhostProfile
+	podSpec := &corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{
+			SeccompProfile: &corev1.SeccompProfile{
+				Type:             corev1.SeccompProfileTypeLocalhost,
+				LocalhostProfile: &profile,
+			},
+		},
+		Volumes: []corev1.Volume{{
+			Name: CheckpointVolumeName,
+		}},
+	}
+	container := &corev1.Container{
+		Name: "main",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      CheckpointVolumeName,
+			MountPath: "/checkpoints",
+		}},
+	}
+	storage := ResolvedStorage{
+		Type:     StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	}
+
+	if err := ValidateRestorePodSpec(podSpec, container, storage, DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("expected restore pod spec to be valid, got %v", err)
+	}
+
+	badSpec := podSpec.DeepCopy()
+	badSpec.Volumes = nil
+	if err := ValidateRestorePodSpec(badSpec, container.DeepCopy(), storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume" {
+		t.Fatalf("expected missing volume error, got %v", err)
+	}
+
+	badContainer := container.DeepCopy()
+	badContainer.VolumeMounts = nil
+	if err := ValidateRestorePodSpec(podSpec.DeepCopy(), badContainer, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage mount at /checkpoints" {
+		t.Fatalf("expected missing mount error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.SecurityContext = nil
+	if err := ValidateRestorePodSpec(badSpec, container.DeepCopy(), storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
+		t.Fatalf("expected missing seccomp error, got %v", err)
 	}
 }

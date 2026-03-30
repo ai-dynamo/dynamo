@@ -15,8 +15,8 @@ const manifestFilename = "manifest.yaml"
 
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {
-	CheckpointHash string    `yaml:"checkpointHash"`
-	CreatedAt      time.Time `yaml:"createdAt"`
+	CheckpointID string    `yaml:"checkpointId"`
+	CreatedAt    time.Time `yaml:"createdAt"`
 
 	CRIUDump CRIUDumpManifest  `yaml:"criuDump"`
 	K8s      SourcePodManifest `yaml:"k8s"`
@@ -25,17 +25,17 @@ type CheckpointManifest struct {
 }
 
 func NewCheckpointManifest(
-	checkpointHash string,
+	checkpointID string,
 	criuDump CRIUDumpManifest,
 	k8s SourcePodManifest,
 	overlay OverlayManifest,
 ) *CheckpointManifest {
 	return &CheckpointManifest{
-		CheckpointHash: checkpointHash,
-		CreatedAt:      time.Now().UTC(),
-		CRIUDump:       criuDump,
-		K8s:            k8s,
-		Overlay:        overlay,
+		CheckpointID: checkpointID,
+		CreatedAt:    time.Now().UTC(),
+		CRIUDump:     criuDump,
+		K8s:          k8s,
+		Overlay:      overlay,
 	}
 }
 

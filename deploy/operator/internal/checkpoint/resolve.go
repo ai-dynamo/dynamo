@@ -20,11 +20,8 @@ package checkpoint
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -104,38 +101,4 @@ func ResolveCheckpointForService(
 	}
 	info.Identity = config.Identity
 	return info, nil
-}
-
-func ResolveCheckpointStorage(
-	hash string,
-	version string,
-	config *configv1alpha1.CheckpointConfiguration,
-) (string, nvidiacomv1alpha1.DynamoCheckpointStorageType, error) {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		version = consts.DefaultCheckpointArtifactVersion
-	}
-
-	storageType := configv1alpha1.CheckpointStorageTypePVC
-	if config != nil && config.Storage.Type != "" {
-		storageType = config.Storage.Type
-	}
-
-	switch storageType {
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if config == nil || config.Storage.S3.URI == "" {
-			return "", "", fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
-		}
-		return fmt.Sprintf("%s/%s/versions/%s.tar", config.Storage.S3.URI, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if config == nil || config.Storage.OCI.URI == "" {
-			return "", "", fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
-		}
-		return fmt.Sprintf("%s:%s-%s", config.Storage.OCI.URI, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	default:
-		if config == nil || config.Storage.PVC.BasePath == "" {
-			return "", "", fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
-		}
-		return fmt.Sprintf("%s/%s/versions/%s", config.Storage.PVC.BasePath, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	}
 }

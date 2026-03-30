@@ -32,6 +32,8 @@ func validConfig() *configv1alpha1.OperatorConfiguration {
 	cfg.MPI.SSHSecretName = "mpi-ssh"
 	cfg.MPI.SSHSecretNamespace = "default"
 	cfg.RBAC.PlannerClusterRoleName = "planner-role"
+	cfg.RBAC.DGDRProfilingClusterRoleName = "dgdr-profiling-role"
+	cfg.RBAC.EPPClusterRoleName = "epp-role"
 	return cfg
 }
 
@@ -41,6 +43,8 @@ func validNamespaceScopedConfig() *configv1alpha1.OperatorConfiguration {
 	cfg.Namespace.Restricted = "my-namespace"
 	// RBAC not required in namespace mode
 	cfg.RBAC.PlannerClusterRoleName = ""
+	cfg.RBAC.DGDRProfilingClusterRoleName = ""
+	cfg.RBAC.EPPClusterRoleName = ""
 	return cfg
 }
 
@@ -120,30 +124,6 @@ func TestValidateOperatorConfiguration_NamespaceScopedLeaseRenewExceedsDuration(
 	}
 }
 
-func TestValidateOperatorConfiguration_CheckpointS3MissingURI(t *testing.T) {
-	cfg := validConfig()
-	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = configv1alpha1.CheckpointStorageTypeS3
-	cfg.Checkpoint.Storage.S3.URI = ""
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for missing S3 URI, got %d: %v", len(errs), errs)
-	}
-}
-
-func TestValidateOperatorConfiguration_CheckpointOCIMissingURI(t *testing.T) {
-	cfg := validConfig()
-	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = configv1alpha1.CheckpointStorageTypeOCI
-	cfg.Checkpoint.Storage.OCI.URI = ""
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for missing OCI URI, got %d: %v", len(errs), errs)
-	}
-}
-
 func TestValidateOperatorConfiguration_CheckpointInvalidStorageType(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = true
@@ -152,6 +132,18 @@ func TestValidateOperatorConfiguration_CheckpointInvalidStorageType(t *testing.T
 	errs := ValidateOperatorConfiguration(cfg)
 	if len(errs) != 1 {
 		t.Errorf("expected 1 error for invalid storage type, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateOperatorConfiguration_CheckpointMissingPVCConfig(t *testing.T) {
+	cfg := validConfig()
+	cfg.Checkpoint.Enabled = true
+	cfg.Checkpoint.Storage.PVC.PVCName = ""
+	cfg.Checkpoint.Storage.PVC.BasePath = ""
+
+	errs := ValidateOperatorConfiguration(cfg)
+	if len(errs) != 2 {
+		t.Errorf("expected 2 errors for missing checkpoint pvc config, got %d: %v", len(errs), errs)
 	}
 }
 

@@ -25,7 +25,7 @@ import (
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointHash        string
+	CheckpointID          string
 	CheckpointLocation    string
 	CheckpointStorageType string
 	NSRestorePath         string
@@ -42,7 +42,7 @@ type RestoreRequest struct {
 func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (int, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
-		"checkpoint_hash", req.CheckpointHash,
+		"checkpoint_id", req.CheckpointID,
 		"pod", req.PodName,
 		"namespace", req.PodNamespace,
 		"container", req.ContainerName,
@@ -92,7 +92,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		return nil, fmt.Errorf("failed to resolve checkpoint path: %w", err)
 	}
 	if checkpointAbs != baseAbs && !strings.HasPrefix(checkpointAbs, baseAbs+string(os.PathSeparator)) {
-		return nil, fmt.Errorf("invalid checkpoint hash %q", req.CheckpointHash)
+		return nil, fmt.Errorf("invalid checkpoint id %q", req.CheckpointID)
 	}
 
 	m, err := types.ReadManifest(checkpointPath)

@@ -37,8 +37,8 @@ const (
 	DynamoCheckpointPhaseFailed DynamoCheckpointPhase = "Failed"
 )
 
-// DynamoCheckpointStorageType defines the supported storage backends for checkpoints
-// +kubebuilder:validation:Enum=pvc;s3;oci
+// DynamoCheckpointStorageType defines the storage backend used for the checkpoint artifact.
+// +kubebuilder:validation:Enum=pvc
 type DynamoCheckpointStorageType string
 
 // DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
@@ -108,12 +108,6 @@ type DynamoCheckpointJobConfig struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
-
-	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=300
-	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
@@ -148,14 +142,12 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 
-	// Location is the full URI/path to the checkpoint in the storage backend
-	// For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)
-	// For S3: s3://bucket/prefix/{hash}.tar
-	// For OCI: oci://registry/repo:{hash}
+	// Location is the full path to the checkpoint artifact in the storage backend.
+	// For PVC this is typically /checkpoints/{checkpoint-id}/versions/{artifact-version}.
 	// +optional
 	Location string `json:"location,omitempty"`
 
-	// StorageType indicates the storage backend type used for this checkpoint
+	// StorageType indicates the storage backend type used for this checkpoint.
 	// +optional
 	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
