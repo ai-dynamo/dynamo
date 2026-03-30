@@ -192,6 +192,9 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
+    /// Time between prefill completion and decode dispatch in disaggregated serving (seconds)
+    pub const KV_TRANSFER_LATENCY_SECONDS: &str = "kv_transfer_latency_seconds";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 

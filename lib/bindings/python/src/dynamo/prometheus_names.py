@@ -83,6 +83,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Time between prefill completion and decode dispatch in disaggregated serving (seconds)
+    KV_TRANSFER_LATENCY_SECONDS = "kv_transfer_latency_seconds"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -360,22 +362,6 @@ class tokio_perf:
 
 class transport:
     """Transport-specific metrics (TCP / NATS)"""
-
-    # NOTE: Nested classes added manually because the codegen does not yet
-    # handle Rust submodules (see TODO in prometheus_parser.rs).
-    # Re-running gen-python-prometheus-names will overwrite this file and
-    # lose these classes until the codegen is updated.
-
-    class tcp:
-        POOL_ACTIVE = "tcp_pool_active"
-        POOL_IDLE = "tcp_pool_idle"
-        BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
-        BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
-        ERRORS_TOTAL = "tcp_errors_total"
-        SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
-
-    class nats:
-        ERRORS_TOTAL = "nats_errors_total"
 
 
 class trtllm_additional:
