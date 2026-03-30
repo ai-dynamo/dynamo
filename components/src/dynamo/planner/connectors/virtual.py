@@ -6,7 +6,7 @@ import os
 from typing import Optional
 
 from dynamo._core import VirtualConnectorCoordinator
-from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.errors import EmptyTargetReplicasError
 from dynamo.runtime import DistributedRuntime

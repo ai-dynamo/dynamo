@@ -8,9 +8,8 @@ import os
 import time
 from typing import Optional
 
-from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes import TargetReplica
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
 from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import EmptyTargetReplicasError

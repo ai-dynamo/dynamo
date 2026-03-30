@@ -5,12 +5,13 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 
 if TYPE_CHECKING:
     from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+
 from dynamo.planner.core.base import BasePlanner
 from dynamo.planner.core.budget import (
     _apply_component_gpu_budget,

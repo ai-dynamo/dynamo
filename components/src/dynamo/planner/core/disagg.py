@@ -5,8 +5,8 @@ import asyncio
 import logging
 import time
 
-from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import BasePlanner
 from dynamo.planner.core.budget import _apply_global_gpu_budget, _initialize_gpu_counts
