@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from dynamo.planner.connectors.kubernetes import TargetReplica
+from dynamo.planner.config.defaults import TargetReplica
 
 
 class ScaleStatus(str, Enum):
