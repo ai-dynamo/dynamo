@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Generate a waterfall timeline plot from streaming timing data.
 
@@ -11,11 +13,15 @@ import sys
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 except ImportError:
-    print("matplotlib not installed. Install with: uv pip install matplotlib", file=sys.stderr)
+    print(
+        "matplotlib not installed. Install with: uv pip install matplotlib",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -24,7 +30,9 @@ def load_runs(path: str) -> list:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def plot_waterfall(runs: list, output: str, title: str = "Streaming Tool Call Timeline"):
+def plot_waterfall(
+    runs: list, output: str, title: str = "Streaming Tool Call Timeline"
+):
     """Plot a horizontal waterfall for each run showing phase durations."""
     fig, ax = plt.subplots(figsize=(10, max(4, len(runs) * 0.6)))
 
@@ -53,8 +61,15 @@ def plot_waterfall(runs: list, output: str, title: str = "Streaming Tool Call Ti
         for label, start, end in phases:
             width = end - start
             if width > 0:
-                ax.barh(y, width, left=start, height=0.6, color=colors[label],
-                        edgecolor="white", linewidth=0.5)
+                ax.barh(
+                    y,
+                    width,
+                    left=start,
+                    height=0.6,
+                    color=colors[label],
+                    edgecolor="white",
+                    linewidth=0.5,
+                )
 
         # Annotate the dispatch opportunity
         gap = done - tool_complete
@@ -62,8 +77,11 @@ def plot_waterfall(runs: list, output: str, title: str = "Streaming Tool Call Ti
             ax.annotate(
                 f"{gap:.0f}ms\nsaved",
                 xy=(tool_complete + gap / 2, y),
-                ha="center", va="center",
-                fontsize=7, color="white", fontweight="bold",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="white",
+                fontweight="bold",
             )
 
     ax.set_yticks(range(len(runs)))
@@ -72,7 +90,7 @@ def plot_waterfall(runs: list, output: str, title: str = "Streaming Tool Call Ti
     ax.set_title(title)
 
     # Legend
-    patches = [mpatches.Patch(color=c, label=l) for l, c in colors.items()]
+    patches = [mpatches.Patch(color=c, label=lbl) for lbl, c in colors.items()]
     ax.legend(handles=patches, loc="upper right", fontsize=8)
 
     plt.tight_layout()
@@ -92,11 +110,25 @@ def plot_summary_bars(runs: list, output: str):
     fig, ax = plt.subplots(figsize=(8, 4))
 
     labels = ["TTFT", "Tool Call\nComplete", "Stream\nDone"]
-    means = [statistics.mean(ttfts), statistics.mean(tool_completes), statistics.mean(dones)]
-    stds = [statistics.stdev(ttfts), statistics.stdev(tool_completes), statistics.stdev(dones)]
+    means = [
+        statistics.mean(ttfts),
+        statistics.mean(tool_completes),
+        statistics.mean(dones),
+    ]
+    stds = [
+        statistics.stdev(ttfts),
+        statistics.stdev(tool_completes),
+        statistics.stdev(dones),
+    ]
 
-    bars = ax.bar(labels, means, yerr=stds, capsize=5,
-                  color=["#4CAF50", "#FF9800", "#F44336"], alpha=0.85)
+    ax.bar(
+        labels,
+        means,
+        yerr=stds,
+        capsize=5,
+        color=["#4CAF50", "#FF9800", "#F44336"],
+        alpha=0.85,
+    )
 
     # Annotate gap
     mean_gap = statistics.mean(gaps)
@@ -105,7 +137,8 @@ def plot_summary_bars(runs: list, output: str):
         xy=(2, means[2]),
         xytext=(2.4, means[2] - 20),
         arrowprops=dict(arrowstyle="->", color="black"),
-        fontsize=9, ha="center",
+        fontsize=9,
+        ha="center",
     )
 
     ax.set_ylabel("Time (ms)")
