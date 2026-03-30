@@ -89,8 +89,3 @@ inherits = "release"
 debug = true
 strip = false
 
-[patch.crates-io]
-jiff = { path = "../../../third_party/cargo-vendor/jiff-0.2.22" }
-jiff-static = { path = "../../../third_party/cargo-vendor/jiff-static-0.2.22" }
-jiff-tzdb = { path = "../../../third_party/cargo-vendor/jiff-tzdb-0.1.5" }
-jiff-tzdb-platform = { path = "../../../third_party/cargo-vendor/jiff-tzdb-platform-0.1.3" }
