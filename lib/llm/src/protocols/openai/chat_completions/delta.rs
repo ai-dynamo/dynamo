@@ -278,19 +278,21 @@ impl DeltaGenerator {
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices,
-            usage: if self.options.enable_usage && self.options.continuous_usage_stats {
-                Some(self.get_usage())
-            } else {
-                None
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices,
+                usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+                    Some(self.get_usage())
+                } else {
+                    None
+                },
+                service_tier: self.service_tier.clone(),
             },
-            service_tier: self.service_tier.clone(),
             nvext: None, // Will be populated by router layer if needed
         }
     }
@@ -303,15 +305,17 @@ impl DeltaGenerator {
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![], // Empty choices for usage-only chunk
-            usage: Some(usage),
-            service_tier: self.service_tier.clone(),
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices: vec![], // Empty choices for usage-only chunk
+                usage: Some(usage),
+                service_tier: self.service_tier.clone(),
+            },
             nvext: None,
         }
     }

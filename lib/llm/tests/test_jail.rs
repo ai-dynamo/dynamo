@@ -48,14 +48,16 @@ mod tests {
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -89,14 +91,16 @@ mod tests {
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -134,14 +138,16 @@ mod tests {
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -180,14 +186,16 @@ mod tests {
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -226,14 +234,16 @@ mod tests {
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -254,7 +264,7 @@ mod tests {
             let content = result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .expect("Expected content in result");
 
@@ -276,7 +286,7 @@ mod tests {
             let tool_calls = result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .expect("Expected tool calls in result");
 
@@ -313,7 +323,7 @@ mod tests {
         #[allow(dead_code)]
         pub fn assert_empty_emission(result: &Annotated<NvCreateChatCompletionStreamResponse>) {
             if let Some(data) = &result.data
-                && let Some(choice) = data.choices.first()
+                && let Some(choice) = data.inner.choices.first()
             {
                 assert!(
                     choice.delta.content.is_none()
@@ -343,7 +353,7 @@ mod tests {
                 .filter_map(|r| {
                     r.data
                         .as_ref()
-                        .and_then(|d| d.choices.first())
+                        .and_then(|d| d.inner.choices.first())
                         .and_then(|c| c.delta.content.as_ref())
                 })
                 .map(extract_text)
@@ -356,7 +366,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .and_then(|content| match content {
                     ChatCompletionMessageContent::Text(text) => Some(text.clone()),
@@ -370,7 +380,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .map(|tc| !tc.is_empty())
                 .unwrap_or(false)
@@ -382,7 +392,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .map(|content| !extract_text(content).is_empty())
                 .unwrap_or(false)
@@ -422,7 +432,7 @@ mod tests {
 
         // First chunk should pass through
         assert_eq!(
-            results[0].data.as_ref().unwrap().choices[0]
+            results[0].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
                 .as_ref()
@@ -431,7 +441,9 @@ mod tests {
         );
 
         // When jail ends, accumulated content should be released
-        let unjailed_content = &results[1].data.as_ref().unwrap().choices[0].delta.content;
+        let unjailed_content = &results[1].data.as_ref().unwrap().inner.choices[0]
+            .delta
+            .content;
         assert!(unjailed_content.is_some());
         assert!(
             extract_text(unjailed_content.as_ref().unwrap())
@@ -440,7 +452,7 @@ mod tests {
 
         // Last chunk should pass through normally
         assert_eq!(
-            results[2].data.as_ref().unwrap().choices[0]
+            results[2].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
                 .as_ref()
@@ -476,7 +488,7 @@ mod tests {
         // Check if tool calls were parsed
         if let Some(last_result) = results.last()
             && let Some(ref response_data) = last_result.data
-            && let Some(ref tool_calls) = response_data.choices[0].delta.tool_calls
+            && let Some(ref tool_calls) = response_data.inner.choices[0].delta.tool_calls
         {
             assert!(!tool_calls.as_slice().is_empty());
             assert_eq!(
@@ -514,7 +526,7 @@ mod tests {
 
         // First chunk should pass through
         assert_eq!(
-            results[0].data.as_ref().unwrap().choices[0]
+            results[0].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
                 .as_ref()
@@ -523,7 +535,7 @@ mod tests {
         );
 
         // Second chunk should contain the accumulated jailed content
-        let jailed = results[1].data.as_ref().unwrap().choices[0]
+        let jailed = results[1].data.as_ref().unwrap().inner.choices[0]
             .delta
             .content
             .as_ref()
@@ -1226,7 +1238,7 @@ mod tests {
             .find(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
@@ -1247,7 +1259,7 @@ mod tests {
         );
 
         // Verify tool call was parsed correctly
-        let tool_calls = &tool_call_chunk.data.as_ref().unwrap().choices[0]
+        let tool_calls = &tool_call_chunk.data.as_ref().unwrap().inner.choices[0]
             .delta
             .tool_calls;
         assert!(tool_calls.is_some(), "Should have tool calls");
@@ -1318,20 +1330,20 @@ mod tests {
         // Verify inner response metadata carries forward real stream values (not placeholders)
         let inner = accumulated_chunk.data.as_ref().unwrap();
         assert_eq!(
-            inner.id, "test-id",
+            inner.inner.id, "test-id",
             "Inner response id should carry forward from real stream chunks, not be 'stream-end'"
         );
         assert_eq!(
-            inner.model, "test-model",
+            inner.inner.model, "test-model",
             "Inner response model should carry forward from real stream chunks, not be 'unknown'"
         );
         assert_eq!(
-            inner.created, 1234567890,
+            inner.inner.created, 1234567890,
             "Inner response created should carry forward from real stream chunks, not be 0"
         );
 
         // Verify accumulated content is returned
-        let content = &inner.choices[0].delta.content;
+        let content = &inner.inner.choices[0].delta.content;
         assert!(content.is_some(), "Should have accumulated content");
         let content = content.as_ref().unwrap();
         assert!(
@@ -1379,7 +1391,7 @@ mod tests {
             .find(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
@@ -1544,7 +1556,7 @@ mod tests {
         let choice_1_chunks: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 1 && c.delta.content.is_some())
             .collect();
 
@@ -1558,7 +1570,7 @@ mod tests {
         let choice_0_tool_calls: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 0 && c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1571,7 +1583,7 @@ mod tests {
         let choice_2_tool_calls: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 2 && c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1614,7 +1626,7 @@ mod tests {
         let mut tool_call_responses: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1659,7 +1671,7 @@ mod tests {
             let run_responses: Vec<_> = run_results
                 .iter()
                 .filter_map(|r| r.data.as_ref())
-                .flat_map(|d| &d.choices)
+                .flat_map(|d| &d.inner.choices)
                 .filter(|c| c.finish_reason == Some(FinishReason::ToolCalls))
                 .collect();
 
@@ -1683,8 +1695,8 @@ mod tests {
 
         // Modify the inner data to be a usage-only chunk
         if let Some(ref mut data) = usage_chunk.data {
-            data.choices.clear();
-            data.usage = Some(CompletionUsage {
+            data.inner.choices.clear();
+            data.inner.usage = Some(CompletionUsage {
                 prompt_tokens: 11,
                 completion_tokens: 3,
                 total_tokens: 14,
@@ -1703,7 +1715,7 @@ mod tests {
         assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
 
         // First chunk should be content chunk
-        let content = results[0].data.as_ref().unwrap().choices[0]
+        let content = results[0].data.as_ref().unwrap().inner.choices[0]
             .delta
             .content
             .as_ref()
@@ -1716,10 +1728,17 @@ mod tests {
 
         // Second chunk should be usage-only chunk
         assert!(
-            results[1].data.as_ref().unwrap().choices.is_empty(),
+            results[1].data.as_ref().unwrap().inner.choices.is_empty(),
             "Usage chunk should have no choices"
         );
-        let usage = results[1].data.as_ref().unwrap().usage.as_ref().unwrap();
+        let usage = results[1]
+            .data
+            .as_ref()
+            .unwrap()
+            .inner
+            .usage
+            .as_ref()
+            .unwrap();
         assert_eq!(usage.prompt_tokens, 11);
         assert_eq!(usage.completion_tokens, 3);
         assert_eq!(usage.total_tokens, 14);
@@ -1896,7 +1915,7 @@ mod tests {
         let has_analysis_text = results.iter().any(|r| {
             r.data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .map(|content| {
                     test_utils::extract_text(content)
@@ -1950,7 +1969,7 @@ mod tests {
             let Some(data) = result.data else {
                 continue;
             };
-            for choice in data.choices {
+            for choice in data.inner.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
                         !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
@@ -2024,7 +2043,7 @@ mod tests {
             let Some(data) = result.data else {
                 continue;
             };
-            for choice in data.choices {
+            for choice in data.inner.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
                         !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
@@ -2221,7 +2240,7 @@ mod tests {
             .filter_map(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .and_then(|c| c.delta.content.as_ref())
             })
             .filter(|content| {
@@ -2241,7 +2260,7 @@ mod tests {
             .filter_map(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .and_then(|c| c.delta.content.as_ref())
             })
             .find(|content| {
@@ -2264,7 +2283,7 @@ mod tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .and_then(|c| c.delta.tool_calls.as_ref())
                     .map(|tc| !tc.is_empty())
                     .unwrap_or(false)
@@ -2397,14 +2416,16 @@ mod parallel_jail_tests {
             .collect();
 
         let response = NvCreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices,
-            created: 1234567890,
-            model: "test-model".to_string(),
-            system_fingerprint: Some("test-fingerprint".to_string()),
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices,
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: Some("test-fingerprint".to_string()),
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
             nvext: None,
         };
 
@@ -2428,7 +2449,7 @@ mod parallel_jail_tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
+                    .is_some_and(|d| d.inner.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
@@ -2441,7 +2462,7 @@ mod parallel_jail_tests {
         let mut all_tool_calls = Vec::new();
         for result in &tool_call_results {
             if let Some(ref data) = result.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref tool_calls) = choice.delta.tool_calls {
                         all_tool_calls.extend(tool_calls.iter());
                     }
@@ -2635,7 +2656,7 @@ mod parallel_jail_tests {
         // Should have normal text before tool calls
         let normal_text_before = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
                         test_utils::extract_text(content).contains("I'll check the weather")
                     })
@@ -2664,7 +2685,7 @@ mod parallel_jail_tests {
         // Should have normal text after tool calls
         let normal_text_after = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
                         test_utils::extract_text(content).contains("Let me get that information")
                     })
@@ -2705,7 +2726,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2795,7 +2817,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2865,7 +2888,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2881,14 +2905,14 @@ mod parallel_jail_tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
+                    .is_some_and(|d| d.inner.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
         if let Some(result) = tool_call_results.first()
             && let Some(ref data) = result.data
         {
-            for choice in &data.choices {
+            for choice in &data.inner.choices {
                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                     for tool_call in tool_calls {
                         if let Some(ref function) = tool_call.function
@@ -2943,7 +2967,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2990,7 +3015,8 @@ mod parallel_jail_tests {
         // Should try to parse whatever content was accumulated
         let has_some_content = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices
+                d.inner
+                    .choices
                     .iter()
                     .any(|c| c.delta.content.is_some() || c.delta.tool_calls.is_some())
             })
@@ -3025,7 +3051,7 @@ mod parallel_jail_tests {
         // Should have normal text content but no tool calls
         let has_normal_text = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
                         test_utils::extract_text(content).contains("I'll help you")
                             || test_utils::extract_text(content).contains("don't need any tools")
@@ -3040,7 +3066,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()

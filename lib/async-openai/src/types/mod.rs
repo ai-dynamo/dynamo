@@ -10,6 +10,7 @@
 
 //! Types used in OpenAI API requests and responses.
 //! These types are created from component schemas in the [OpenAPI spec](https://github.com/openai/openai-openapi)
+pub mod anthropic;
 mod assistant;
 mod assistant_impls;
 mod assistant_stream;
