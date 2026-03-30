@@ -506,7 +506,7 @@ mod live_scheduler {
         #[case] enable_prefix_caching: bool,
         #[case] enable_chunked_prefill: bool,
     ) {
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(500)
@@ -539,7 +539,7 @@ mod live_scheduler {
         let num_requests = 10;
         let token_length = 65;
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(100)
@@ -576,8 +576,8 @@ mod live_scheduler {
                     let _metrics = metrics_rx.borrow().clone();
                     tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
                 }
-                Some(_signal) = output_rx.recv() => {
-                    received_tokens += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    received_tokens += output_batch.len();
                     timeout.set(tokio::time::sleep(Duration::from_millis(500)));
                 }
                 _ = &mut timeout => break,
@@ -592,7 +592,7 @@ mod live_scheduler {
 
     #[tokio::test]
     async fn test_receiver_drop_cleans_up_resources() {
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(10)
             .block_size(64)
@@ -612,8 +612,8 @@ mod live_scheduler {
 
         let mut received_count = 0;
         while received_count < 129 {
-            if output_rx.recv().await.is_some() {
-                received_count += 1;
+            if let Some(output_batch) = output_rx.recv().await {
+                received_count += output_batch.len();
                 continue;
             }
             panic!("Channel closed before receiving 129 tokens");
@@ -639,7 +639,7 @@ mod live_scheduler {
     #[tokio::test]
     async fn test_live_scheduler_forwards_buffered_kv_token_ids() {
         let sink = Arc::new(CapturingKvSink::default());
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(12)
@@ -667,10 +667,14 @@ mod live_scheduler {
             arrival_timestamp_ms: None,
         });
 
-        let signal = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+        let output_batch = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
             .await
             .expect("scheduler should emit output")
             .expect("output channel should stay open");
+        let signal = output_batch
+            .into_iter()
+            .next()
+            .expect("live scheduler should emit one output signal");
         assert!(signal.completed);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -691,7 +695,7 @@ mod live_scheduler {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let (sink, forward_task) = harness.spawn_forwarder();
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler = Scheduler::new(
             MockEngineArgs::builder()
                 .block_size(4)
@@ -726,8 +730,8 @@ mod live_scheduler {
 
         loop {
             tokio::select! {
-                Some(_) = output_rx.recv() => {
-                    seen += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    seen += output_batch.len();
                     if seen == expected {
                         break;
                     }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env::{self, VarError};
 use std::fmt;
 use std::str::FromStr;
 
@@ -13,12 +14,24 @@ use crate::protocols::{
     BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 
-const fn default_min_initial_workers() -> usize {
-    1
-}
-
 const fn default_track_prefill_tokens() -> bool {
     true
+}
+
+pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+
+pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
+    match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
+        Ok(value) => value.parse::<usize>().map_err(|error| {
+            anyhow::anyhow!(
+                "{DYN_ROUTER_MIN_INITIAL_WORKERS} must be a non-negative integer, got {value:?}: {error}"
+            )
+        }),
+        Err(VarError::NotPresent) => Ok(0),
+        Err(VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_ROUTER_MIN_INITIAL_WORKERS} must be valid unicode")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,16 +162,7 @@ pub struct KvRouterConfig {
     /// When false (default), cache_control is ignored and no cache_control client is created.
     pub router_enable_cache_control: bool,
 
-    /// Skip blocking for workers at init time (default: false).
-    /// When true, the router starts immediately without waiting for discovery-based
-    /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
-
-    /// Minimum number of workers that must be discovered before router startup continues.
-    /// Default: 1. Ignored when skip_initial_worker_wait=true.
-    #[serde(default = "default_min_initial_workers")]
-    #[validate(range(min = 1))]
-    pub min_initial_workers: usize,
 
     /// Scheduling policy for the router queue.
     /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
@@ -194,7 +198,6 @@ impl Default for KvRouterConfig {
             router_event_threads: 4,
             router_enable_cache_control: false,
             skip_initial_worker_wait: false,
-            min_initial_workers: default_min_initial_workers(),
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
         }
@@ -310,22 +313,8 @@ mod tests {
     }
 
     #[test]
-    fn kv_router_config_defaults_to_one_initial_worker() {
-        assert_eq!(KvRouterConfig::default().min_initial_workers, 1);
-    }
-
-    #[test]
     fn kv_router_config_defaults_to_tracking_prefill_tokens() {
         assert!(KvRouterConfig::default().router_track_prefill_tokens);
-    }
-
-    #[test]
-    fn kv_router_config_rejects_zero_initial_workers() {
-        let cfg = KvRouterConfig {
-            min_initial_workers: 0,
-            ..KvRouterConfig::default()
-        };
-        assert!(cfg.validate().is_err());
     }
 
     #[test]
