@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     DumpRequest, GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    WorkerKvQueryResponse,
+    LowerTierIndexer, WorkerKvQueryResponse,
 };
 use crate::protocols::*;
 
@@ -26,10 +26,21 @@ use crate::protocols::*;
 pub struct LocalKvIndexer {
     /// The underlying indexer
     indexer: KvIndexer,
+    /// Lazily-created exact lower-tier indexes partitioned by storage tier.
+    lower_tier_indexers: Arc<Mutex<HashMap<StorageTier, Arc<LowerTierIndexer>>>>,
     /// Circular buffer of recent events
     pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
+}
+
+fn map_lower_tier_error(error: KvCacheEventError) -> KvRouterError {
+    match error {
+        KvCacheEventError::BlockNotFound => KvRouterError::BlockNotFound,
+        KvCacheEventError::ParentBlockNotFound | KvCacheEventError::InvalidBlockSequence => {
+            KvRouterError::IndexerDroppedRequest
+        }
+    }
 }
 
 impl LocalKvIndexer {
@@ -42,6 +53,7 @@ impl LocalKvIndexer {
     ) -> Self {
         Self {
             indexer: KvIndexer::new(token, kv_block_size, metrics),
+            lower_tier_indexers: Arc::new(Mutex::new(HashMap::new())),
             event_buffer: Mutex::new(VecDeque::with_capacity(max_buffer_size)),
             max_buffer_size,
         }
@@ -204,13 +216,7 @@ impl LocalKvIndexer {
     ///
     /// This forwards the event to the underlying indexer and records it on success.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
-        // Forward to underlying indexer
-        let result = self
-            .indexer
-            .event_sender()
-            .send(event.clone())
-            .await
-            .map_err(|_| KvRouterError::IndexerOffline);
+        let result = self.apply_event_by_tier(&event).await;
         if result.is_ok() {
             self.record_event(event);
         }
@@ -255,6 +261,50 @@ impl LocalKvIndexer {
     pub fn block_size(&self) -> u32 {
         self.indexer.block_size()
     }
+
+    async fn apply_event_to_primary(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        self.indexer
+            .event_sender()
+            .send(event)
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn apply_event_to_lower_tier(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        self.get_or_create_lower_tier_indexer(event.storage_tier)
+            .apply_event(event)
+            .map_err(map_lower_tier_error)
+    }
+
+    async fn apply_event_by_tier(&self, event: &RouterEvent) -> Result<(), KvRouterError> {
+        match &event.event.data {
+            KvCacheEventData::Cleared => {
+                self.apply_event_to_primary(event.clone()).await?;
+                for indexer in self.all_lower_tier_indexers() {
+                    indexer
+                        .apply_event(event.clone())
+                        .map_err(map_lower_tier_error)?;
+                }
+                Ok(())
+            }
+            _ if event.storage_tier.is_gpu() => self.apply_event_to_primary(event.clone()).await,
+            _ => self.apply_event_to_lower_tier(event.clone()),
+        }
+    }
+
+    fn get_or_create_lower_tier_indexer(&self, storage_tier: StorageTier) -> Arc<LowerTierIndexer> {
+        debug_assert!(!storage_tier.is_gpu());
+        let mut indexers = self.lower_tier_indexers.lock().unwrap();
+        indexers
+            .entry(storage_tier)
+            .or_insert_with(|| Arc::new(LowerTierIndexer::new()))
+            .clone()
+    }
+
+    fn all_lower_tier_indexers(&self) -> Vec<Arc<LowerTierIndexer>> {
+        let indexers = self.lower_tier_indexers.lock().unwrap();
+        indexers.values().cloned().collect()
+    }
 }
 
 // Implement KvIndexerInterface by delegating to the underlying indexer
@@ -284,7 +334,17 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn remove_worker(&self, worker: WorkerId) {
+        for indexer in self.all_lower_tier_indexers() {
+            indexer.remove_worker(worker);
+        }
         let _ = self.indexer.remove_worker_sender().send(worker).await;
+    }
+
+    async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
+        for indexer in self.all_lower_tier_indexers() {
+            indexer.remove_worker_dp_rank(worker, dp_rank);
+        }
+        let _ = self.indexer.remove_worker_dp_rank(worker, dp_rank).await;
     }
 
     fn shutdown(&self) {
@@ -309,5 +369,220 @@ impl KvIndexerInterface for LocalKvIndexer {
 
     async fn flush(&self) -> usize {
         self.indexer.flush().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rustc_hash::FxHashMap;
+    use tokio_util::sync::CancellationToken;
+
+    use super::LocalKvIndexer;
+    use crate::indexer::{KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation};
+    use crate::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerWithDpRank,
+    };
+
+    fn lower_tier_store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        parent_hash: u64,
+        tokens_hash: u64,
+        block_hash: u64,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(parent_hash)),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(block_hash),
+                        tokens_hash: LocalBlockHash(tokens_hash),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank,
+            },
+            storage_tier,
+        )
+    }
+
+    fn lower_tier_hits(
+        indexer: &LocalKvIndexer,
+        storage_tier: StorageTier,
+        worker_id: u64,
+        dp_rank: u32,
+        parent_hash: u64,
+        tokens_hash: u64,
+    ) -> usize {
+        let lower_tier_indexer = {
+            let indexers = indexer.lower_tier_indexers.lock().unwrap();
+            indexers.get(&storage_tier).cloned()
+        };
+
+        let Some(lower_tier_indexer) = lower_tier_indexer else {
+            return 0;
+        };
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(worker_id, dp_rank),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(parent_hash)),
+        );
+
+        lower_tier_indexer
+            .query_contiguous_hits(&[LocalBlockHash(tokens_hash)], &continuations)
+            .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn lower_tier_events_are_buffered_without_touching_primary_index() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+        let event = lower_tier_store_event(7, 0, 1, 900, 11, 101, StorageTier::HostPinned);
+
+        indexer
+            .apply_event_with_buffer(event.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(indexer.get_all_events_in_buffer(), vec![event]);
+        assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 1);
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 7, 0, 900, 11),
+            1
+        );
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .unwrap();
+        assert!(overlap.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lower_tier_events_are_partitioned_by_storage_tier() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+
+        assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 0);
+
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event(
+                19,
+                0,
+                1,
+                1000,
+                31,
+                301,
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 1);
+
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event(
+                19,
+                0,
+                2,
+                2000,
+                31,
+                302,
+                StorageTier::Disk,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 2);
+
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 19, 0, 1000, 31),
+            1
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::Disk, 19, 0, 2000, 31),
+            1
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 19, 0, 2000, 31),
+            0
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::Disk, 19, 0, 1000, 31),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cleared_event_clears_all_lower_tier_dp_ranks_for_worker() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event(
+                11,
+                0,
+                1,
+                1000,
+                21,
+                201,
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event(
+                11,
+                1,
+                2,
+                2000,
+                22,
+                202,
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+
+        indexer
+            .apply_event_with_buffer(RouterEvent::with_storage_tier(
+                11,
+                KvCacheEvent {
+                    event_id: 3,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 0, 1000, 21),
+            0
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 1, 2000, 22),
+            0
+        );
     }
 }

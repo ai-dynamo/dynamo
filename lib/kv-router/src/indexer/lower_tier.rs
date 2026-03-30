@@ -231,6 +231,22 @@ impl LowerTierIndexer {
         }
     }
 
+    fn clear_worker(&self, worker_id: u64) {
+        let worker_keys: Vec<_> = self
+            .workers
+            .iter()
+            .filter_map(|entry| (entry.key().worker_id == worker_id).then_some(*entry.key()))
+            .collect();
+
+        for worker in worker_keys {
+            if let Some(mut worker_state) = self.workers.get_mut(&worker) {
+                worker_state.transitions.clear();
+                worker_state.blocks.clear();
+                worker_state.total_blocks = 0;
+            }
+        }
+    }
+
     pub fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let mut worker_state = self.workers.entry(worker).or_default();
@@ -244,12 +260,28 @@ impl LowerTierIndexer {
                 worker_state.apply_remove(&remove_data.block_hashes)
             }
             KvCacheEventData::Cleared => {
-                worker_state.transitions.clear();
-                worker_state.blocks.clear();
-                worker_state.total_blocks = 0;
+                drop(worker_state);
+                self.clear_worker(event.worker_id);
                 Ok(())
             }
         }
+    }
+
+    pub fn remove_worker(&self, worker_id: u64) {
+        let worker_keys: Vec<_> = self
+            .workers
+            .iter()
+            .filter_map(|entry| (entry.key().worker_id == worker_id).then_some(*entry.key()))
+            .collect();
+
+        for worker in worker_keys {
+            self.workers.remove(&worker);
+        }
+    }
+
+    pub fn remove_worker_dp_rank(&self, worker_id: u64, dp_rank: u32) {
+        self.workers
+            .remove(&WorkerWithDpRank::new(worker_id, dp_rank));
     }
 
     pub fn query_contiguous_hits(
@@ -540,7 +572,14 @@ mod tests {
     fn cleared_event_removes_all_lower_tier_state() {
         let index = LowerTierIndexer::new();
         index
-            .apply_event(store_event(29, 0, 0, Some(1200), &[101, 102], &[1001, 1002]))
+            .apply_event(store_event(
+                29,
+                0,
+                0,
+                Some(1200),
+                &[101, 102],
+                &[1001, 1002],
+            ))
             .unwrap();
         index
             .apply_event(router_event(29, 1, 0, KvCacheEventData::Cleared))
@@ -558,14 +597,106 @@ mod tests {
     }
 
     #[test]
+    fn cleared_event_is_worker_wide_across_dp_ranks() {
+        let index = LowerTierIndexer::new();
+        index
+            .apply_event(store_event(29, 0, 0, Some(1200), &[101], &[1001]))
+            .unwrap();
+        index
+            .apply_event(store_event(29, 1, 1, Some(2200), &[201], &[2001]))
+            .unwrap();
+        index
+            .apply_event(router_event(29, 2, 0, KvCacheEventData::Cleared))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(29, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(1200)),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(29, 1),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(2200)),
+        );
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[101]), &continuations);
+        assert_eq!(hits.get(&WorkerWithDpRank::new(29, 0)), Some(&0));
+        assert_eq!(hits.get(&WorkerWithDpRank::new(29, 1)), Some(&0));
+    }
+
+    #[test]
+    fn remove_worker_drops_all_ranks() {
+        let index = LowerTierIndexer::new();
+        index
+            .apply_event(store_event(41, 0, 0, Some(3000), &[1], &[301]))
+            .unwrap();
+        index
+            .apply_event(store_event(41, 1, 1, Some(4000), &[2], &[401]))
+            .unwrap();
+        index.remove_worker(41);
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(41, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(3000)),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(41, 1),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(4000)),
+        );
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
+        assert_eq!(hits.get(&WorkerWithDpRank::new(41, 0)), Some(&0));
+        assert_eq!(hits.get(&WorkerWithDpRank::new(41, 1)), Some(&0));
+    }
+
+    #[test]
+    fn remove_worker_dp_rank_keeps_other_ranks() {
+        let index = LowerTierIndexer::new();
+        index
+            .apply_event(store_event(43, 0, 0, Some(5000), &[1], &[501]))
+            .unwrap();
+        index
+            .apply_event(store_event(43, 1, 1, Some(6000), &[2], &[601]))
+            .unwrap();
+        index.remove_worker_dp_rank(43, 0);
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(43, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(5000)),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(43, 1),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(6000)),
+        );
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[2]), &continuations);
+        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 0)), Some(&0));
+        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 1)), Some(&1));
+    }
+
+    #[test]
     fn removing_parent_block_keeps_child_continuation_edge() {
         let index = LowerTierIndexer::new();
         index
-            .apply_event(store_event(31, 0, 0, Some(1300), &[111, 112], &[1101, 1102]))
+            .apply_event(store_event(
+                31,
+                0,
+                0,
+                Some(1300),
+                &[111, 112],
+                &[1101, 1102],
+            ))
             .unwrap();
 
         index
-            .apply_event(remove_event(31, 1, 0, vec![ExternalSequenceBlockHash(1101)]))
+            .apply_event(remove_event(
+                31,
+                1,
+                0,
+                vec![ExternalSequenceBlockHash(1101)],
+            ))
             .unwrap();
 
         let root_query = local_hashes(&[111, 112]);
@@ -608,7 +739,12 @@ mod tests {
         assert_eq!(ambiguous_hits.get(&WorkerWithDpRank::new(37, 0)), Some(&0));
 
         index
-            .apply_event(remove_event(37, 2, 0, vec![ExternalSequenceBlockHash(1202)]))
+            .apply_event(remove_event(
+                37,
+                2,
+                0,
+                vec![ExternalSequenceBlockHash(1202)],
+            ))
             .unwrap();
 
         let resolved_hits = index.query_contiguous_hits(&query, &continuations);

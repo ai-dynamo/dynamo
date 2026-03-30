@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::Result;
 use futures::StreamExt;
 
 use dynamo_kv_router::{
-    ConcurrentRadixTree, ThreadPoolIndexer,
+    ConcurrentRadixTree, LowerTierIndexer, ThreadPoolIndexer,
     approx::PruneConfig,
     config::KvRouterConfig,
     indexer::{
@@ -16,7 +19,8 @@ use dynamo_kv_router::{
         KvIndexerInterface, KvIndexerMetrics, KvRouterError,
     },
     protocols::{
-        LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        LocalBlockHash, OverlapScores, RouterEvent, StorageTier, TokensWithHashes, WorkerId,
+        WorkerWithDpRank,
     },
 };
 use dynamo_runtime::{
@@ -25,6 +29,29 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use tokio::sync::oneshot;
+
+type LowerTierIndexers = Arc<Mutex<HashMap<StorageTier, Arc<LowerTierIndexer>>>>;
+
+fn new_lower_tier_indexers() -> LowerTierIndexers {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn get_or_create_lower_tier_indexer(
+    indexers: &LowerTierIndexers,
+    storage_tier: StorageTier,
+) -> Arc<LowerTierIndexer> {
+    debug_assert!(!storage_tier.is_gpu());
+    let mut lower_tier_indexers = indexers.lock().unwrap();
+    lower_tier_indexers
+        .entry(storage_tier)
+        .or_insert_with(|| Arc::new(LowerTierIndexer::new()))
+        .clone()
+}
+
+fn all_lower_tier_indexers(indexers: &LowerTierIndexers) -> Vec<Arc<LowerTierIndexer>> {
+    let lower_tier_indexers = indexers.lock().unwrap();
+    lower_tier_indexers.values().cloned().collect()
+}
 
 pub struct RemoteIndexer {
     router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
@@ -73,8 +100,14 @@ impl RemoteIndexer {
 
 #[derive(Clone)]
 pub enum Indexer {
-    KvIndexer(KvIndexer),
-    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
+    KvIndexer {
+        primary: KvIndexer,
+        lower_tier: LowerTierIndexers,
+    },
+    Concurrent {
+        primary: Arc<ThreadPoolIndexer<ConcurrentRadixTree>>,
+        lower_tier: LowerTierIndexers,
+    },
     Remote(Arc<RemoteIndexer>),
     None,
 }
@@ -113,33 +146,42 @@ impl Indexer {
                 max_tree_size: kv_router_config.router_max_tree_size,
                 prune_target_ratio: kv_router_config.router_prune_target_ratio,
             });
-            return Ok(Self::KvIndexer(KvIndexer::new_with_frequency(
-                cancellation_token,
-                None,
-                block_size,
-                kv_indexer_metrics,
-                prune_config,
-            )));
+            return Ok(Self::KvIndexer {
+                primary: KvIndexer::new_with_frequency(
+                    cancellation_token,
+                    None,
+                    block_size,
+                    kv_indexer_metrics,
+                    prune_config,
+                ),
+                lower_tier: new_lower_tier_indexers(),
+            });
         }
 
         if kv_router_config.router_event_threads > 1 {
-            return Ok(Self::Concurrent(Arc::new(ThreadPoolIndexer::new(
-                ConcurrentRadixTree::new(),
-                kv_router_config.router_event_threads as usize,
-                block_size,
-            ))));
+            return Ok(Self::Concurrent {
+                primary: Arc::new(ThreadPoolIndexer::new(
+                    ConcurrentRadixTree::new(),
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                )),
+                lower_tier: new_lower_tier_indexers(),
+            });
         }
 
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
         let cancellation_token = component.drt().primary_token();
 
-        Ok(Self::KvIndexer(KvIndexer::new_with_frequency(
-            cancellation_token,
-            None,
-            block_size,
-            kv_indexer_metrics,
-            None,
-        )))
+        Ok(Self::KvIndexer {
+            primary: KvIndexer::new_with_frequency(
+                cancellation_token,
+                None,
+                block_size,
+                kv_indexer_metrics,
+                None,
+            ),
+            lower_tier: new_lower_tier_indexers(),
+        })
     }
 
     pub(crate) async fn find_matches(
@@ -147,8 +189,8 @@ impl Indexer {
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
         match self {
-            Self::KvIndexer(indexer) => indexer.find_matches(sequence).await,
-            Self::Concurrent(tpi) => tpi.find_matches(sequence).await,
+            Self::KvIndexer { primary, .. } => primary.find_matches(sequence).await,
+            Self::Concurrent { primary, .. } => primary.find_matches(sequence).await,
             Self::Remote(remote) => remote.find_matches(sequence).await.map_err(|e| {
                 tracing::warn!(error = %e, "Remote indexer query failed");
                 KvRouterError::IndexerOffline
@@ -159,8 +201,8 @@ impl Indexer {
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
-            Self::KvIndexer(indexer) => indexer.dump_events().await,
-            Self::Concurrent(tpi) => tpi.dump_events().await,
+            Self::KvIndexer { primary, .. } => primary.dump_events().await,
+            Self::Concurrent { primary, .. } => primary.dump_events().await,
             Self::Remote(_) => Ok(Vec::new()),
             Self::None => {
                 panic!(
@@ -176,13 +218,14 @@ impl Indexer {
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
         match self {
-            Self::KvIndexer(indexer) => {
-                indexer
+            Self::KvIndexer { primary, .. } => {
+                primary
                     .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
-            Self::Concurrent(tpi) => {
-                tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
+            Self::Concurrent { primary, .. } => {
+                primary
+                    .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
             Self::Remote(_) | Self::None => Ok(()),
@@ -191,25 +234,89 @@ impl Indexer {
 
     pub(crate) async fn apply_event(&self, event: RouterEvent) {
         match self {
-            Self::KvIndexer(indexer) => {
-                if let Err(e) = indexer.event_sender().send(event).await {
-                    tracing::warn!("Failed to send event to indexer: {e}");
+            Self::KvIndexer {
+                primary,
+                lower_tier,
+            } => match &event.event.data {
+                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
+                    if let Err(e) = primary.event_sender().send(event.clone()).await {
+                        tracing::warn!("Failed to send event to indexer: {e}");
+                    }
+
+                    for indexer in all_lower_tier_indexers(lower_tier) {
+                        if let Err(e) = indexer.apply_event(event.clone()) {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to apply cleared event to lower-tier indexer"
+                            );
+                        }
+                    }
                 }
-            }
-            Self::Concurrent(tpi) => tpi.apply_event(event).await,
+                _ if event.storage_tier.is_gpu() => {
+                    if let Err(e) = primary.event_sender().send(event).await {
+                        tracing::warn!("Failed to send event to indexer: {e}");
+                    }
+                }
+                _ => {
+                    if let Err(e) = get_or_create_lower_tier_indexer(lower_tier, event.storage_tier)
+                        .apply_event(event)
+                    {
+                        tracing::warn!(error = %e, "Failed to apply event to lower-tier indexer");
+                    }
+                }
+            },
+            Self::Concurrent {
+                primary,
+                lower_tier,
+            } => match &event.event.data {
+                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
+                    primary.apply_event(event.clone()).await;
+
+                    for indexer in all_lower_tier_indexers(lower_tier) {
+                        if let Err(e) = indexer.apply_event(event.clone()) {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to apply cleared event to lower-tier indexer"
+                            );
+                        }
+                    }
+                }
+                _ if event.storage_tier.is_gpu() => {
+                    primary.apply_event(event).await;
+                }
+                _ => {
+                    if let Err(e) = get_or_create_lower_tier_indexer(lower_tier, event.storage_tier)
+                        .apply_event(event)
+                    {
+                        tracing::warn!(error = %e, "Failed to apply event to lower-tier indexer");
+                    }
+                }
+            },
             Self::Remote(_) | Self::None => {}
         }
     }
 
     pub(crate) async fn remove_worker(&self, worker_id: WorkerId) {
         match self {
-            Self::KvIndexer(indexer) => {
-                if let Err(e) = indexer.remove_worker_sender().send(worker_id).await {
+            Self::KvIndexer {
+                primary,
+                lower_tier,
+            } => {
+                for indexer in all_lower_tier_indexers(lower_tier) {
+                    indexer.remove_worker(worker_id);
+                }
+                if let Err(e) = primary.remove_worker_sender().send(worker_id).await {
                     tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
                 }
             }
-            Self::Concurrent(tpi) => {
-                KvIndexerInterface::remove_worker(tpi.as_ref(), worker_id).await;
+            Self::Concurrent {
+                primary,
+                lower_tier,
+            } => {
+                for indexer in all_lower_tier_indexers(lower_tier) {
+                    indexer.remove_worker(worker_id);
+                }
+                KvIndexerInterface::remove_worker(primary.as_ref(), worker_id).await;
             }
             Self::Remote(_) | Self::None => {}
         }
@@ -217,16 +324,16 @@ impl Indexer {
 
     pub(crate) async fn get_workers(&self) -> Vec<WorkerId> {
         match self {
-            Self::KvIndexer(indexer) => {
+            Self::KvIndexer { primary, .. } => {
                 let (resp_tx, resp_rx) = oneshot::channel();
                 let req = dynamo_kv_router::indexer::GetWorkersRequest { resp: resp_tx };
-                if let Err(e) = indexer.get_workers_sender().send(req).await {
+                if let Err(e) = primary.get_workers_sender().send(req).await {
                     tracing::warn!("Failed to send get_workers request: {e}");
                     return Vec::new();
                 }
                 resp_rx.await.unwrap_or_default()
             }
-            Self::Concurrent(tpi) => tpi.backend().get_workers(),
+            Self::Concurrent { primary, .. } => primary.backend().get_workers(),
             Self::Remote(_) | Self::None => Vec::new(),
         }
     }

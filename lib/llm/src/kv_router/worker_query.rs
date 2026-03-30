@@ -829,7 +829,13 @@ mod tests {
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
         let kv_indexer = KvIndexer::new(token, 4, metrics);
-        (kv_indexer.clone(), Indexer::KvIndexer(kv_indexer))
+        (
+            kv_indexer.clone(),
+            Indexer::KvIndexer {
+                primary: kv_indexer,
+                lower_tier: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            },
+        )
     }
 
     async fn make_test_client(

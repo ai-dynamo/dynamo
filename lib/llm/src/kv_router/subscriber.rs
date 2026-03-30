@@ -87,8 +87,6 @@ async fn start_kv_router_background_event_plane(
                         }
                     };
 
-                    dbg!(event.storage_tier, &event.event);
-
                     tracing::trace!(
                         "Received event from publisher {} (seq {})",
                         envelope.publisher_id,
