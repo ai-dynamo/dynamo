@@ -211,7 +211,7 @@ impl std::fmt::Debug for DeviceStream {
 
 /// Device event wrapper
 pub struct DeviceEvent {
-    backend: DeviceBackend,
+    pub backend: DeviceBackend,
     pub ops: Box<dyn DeviceEventOps>,
 }
 
