@@ -13,10 +13,10 @@ import (
 
 func TestCanModifyDGDReplicas(t *testing.T) {
 	tests := []struct {
-		name           string
-		principal      string
-		username       string
-		expectAllowed  bool
+		name          string
+		principal     string
+		username      string
+		expectAllowed bool
 	}{
 		{
 			name:          "operator SA with standard Helm release (dynamo-platform)",
