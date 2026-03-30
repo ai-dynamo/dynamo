@@ -3,21 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
-	"maps"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	"sigs.k8s.io/yaml"
 )
 
@@ -75,10 +73,34 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	checkpointLocation := strings.TrimRight(storage.BasePath, "/") + "/" + checkpointHash
 	checkpointJobName := pod.Name + "-checkpoint"
 
-	job, err := buildCheckpointJob(pod, namespace, checkpointJobName, checkpointHash, checkpointLocation, storage, opts.DisableCudaCheckpointJobFile)
-	if err != nil {
-		return nil, err
+	podSpec := *pod.Spec.DeepCopy()
+	snapshotworkload.InjectLocalhostSeccompProfile(&podSpec, snapshotworkload.DefaultSeccompLocalhostProfile)
+	snapshotworkload.InjectCheckpointVolume(&podSpec, storage.PVCName)
+	container := *pod.Spec.Containers[0].DeepCopy()
+	snapshotworkload.InjectCheckpointVolumeMount(&container, storage.BasePath)
+	if !opts.DisableCudaCheckpointJobFile {
+		if len(container.Command) == 0 {
+			return nil, fmt.Errorf(
+				"manifest must set container.command when launch-job wrapping is enabled; use --disable-cuda-checkpoint-job-file to preserve the image entrypoint",
+			)
+		}
+		container.Command, container.Args = snapshotworkload.WrapWithCudaCheckpointLaunchJob(container.Command, container.Args)
 	}
+	podSpec.Containers = []corev1.Container{container}
+
+	job := snapshotworkload.NewCheckpointJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      pod.Labels,
+			Annotations: pod.Annotations,
+		},
+		Spec: podSpec,
+	}, snapshotworkload.CheckpointJobOptions{
+		Namespace:   namespace,
+		Name:        checkpointJobName,
+		SnapshotID:  checkpointHash,
+		Location:    checkpointLocation,
+		StorageType: snapshotworkload.StorageTypePVC,
+	})
 	_, err = clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("checkpoint job %s/%s already exists", namespace, checkpointJobName)
@@ -127,7 +149,24 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	checkpointHash := strings.TrimSpace(opts.CheckpointHash)
 	checkpointLocation := strings.TrimRight(storage.BasePath, "/") + "/" + checkpointHash
 
-	restorePod := buildRestorePod(pod, namespace, checkpointHash, checkpointLocation, storage)
+	podSpec := *pod.Spec.DeepCopy()
+	snapshotworkload.InjectLocalhostSeccompProfile(&podSpec, snapshotworkload.DefaultSeccompLocalhostProfile)
+	snapshotworkload.InjectCheckpointVolume(&podSpec, storage.PVCName)
+	container := *pod.Spec.Containers[0].DeepCopy()
+	snapshotworkload.InjectCheckpointVolumeMount(&container, storage.BasePath)
+	snapshotworkload.InjectRestoreTUN(&podSpec, &container)
+	snapshotworkload.SetRestorePlaceholderCommand(&container)
+	podSpec.Containers = []corev1.Container{container}
+
+	restorePod := snapshotworkload.NewRestorePod(&corev1.Pod{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        pod.Name,
+			Labels:      pod.Labels,
+			Annotations: pod.Annotations,
+		},
+		Spec: podSpec,
+	}, namespace, checkpointHash, checkpointLocation, snapshotworkload.StorageTypePVC)
 	_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)
@@ -295,115 +334,6 @@ func loadPod(manifestPath string) (*corev1.Pod, error) {
 	return &pod, nil
 }
 
-func buildCheckpointJob(
-	pod *corev1.Pod,
-	namespace string,
-	jobName string,
-	checkpointHash string,
-	checkpointLocation string,
-	storage snapshotStorage,
-	disableCudaCheckpointJobFile bool,
-) (*batchv1.Job, error) {
-	podSpec := *pod.Spec.DeepCopy()
-	podSpec.RestartPolicy = corev1.RestartPolicyNever
-	snapshotpodspec.InjectLocalhostSeccompProfile(&podSpec, snapshotpodspec.DefaultSeccompLocalhostProfile)
-	snapshotpodspec.InjectCheckpointVolume(&podSpec, storage.PVCName)
-
-	container := *pod.Spec.Containers[0].DeepCopy()
-	snapshotpodspec.InjectCheckpointVolumeMount(&container, storage.BasePath)
-	if !disableCudaCheckpointJobFile {
-		if len(container.Command) == 0 {
-			return nil, fmt.Errorf(
-				"manifest must set container.command when launch-job wrapping is enabled; use --disable-cuda-checkpoint-job-file to preserve the image entrypoint",
-			)
-		}
-		container.Command, container.Args = snapshotpodspec.WrapWithCudaCheckpointLaunchJob(container.Command, container.Args)
-	}
-	podSpec.Containers = []corev1.Container{container}
-
-	labels := maps.Clone(pod.Labels)
-	annotations := maps.Clone(pod.Annotations)
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	snapshotpodspec.ApplyCheckpointSourceMetadata(
-		labels,
-		annotations,
-		checkpointHash,
-		checkpointLocation,
-		snapshotpodspec.StorageTypePVC,
-	)
-	zeroBackoffLimit := int32(0)
-
-	return &batchv1.Job{
-		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-		},
-		Spec: batchv1.JobSpec{
-			BackoffLimit: &zeroBackoffLimit,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      labels,
-					Annotations: annotations,
-				},
-				Spec: podSpec,
-			},
-		},
-	}, nil
-}
-
-func buildRestorePod(
-	pod *corev1.Pod,
-	namespace string,
-	checkpointHash string,
-	checkpointLocation string,
-	storage snapshotStorage,
-) *corev1.Pod {
-	podSpec := *pod.Spec.DeepCopy()
-	podSpec.RestartPolicy = corev1.RestartPolicyNever
-	snapshotpodspec.InjectLocalhostSeccompProfile(&podSpec, snapshotpodspec.DefaultSeccompLocalhostProfile)
-	snapshotpodspec.InjectCheckpointVolume(&podSpec, storage.PVCName)
-
-	container := *pod.Spec.Containers[0].DeepCopy()
-	snapshotpodspec.InjectCheckpointVolumeMount(&container, storage.BasePath)
-	snapshotpodspec.InjectRestoreTUN(&podSpec, &container)
-	snapshotpodspec.SetRestorePlaceholderCommand(&container)
-	podSpec.Containers = []corev1.Container{container}
-
-	labels := maps.Clone(pod.Labels)
-	annotations := maps.Clone(pod.Annotations)
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	snapshotpodspec.ApplyRestoreTargetMetadata(
-		labels,
-		annotations,
-		true,
-		checkpointHash,
-		checkpointLocation,
-		snapshotpodspec.StorageTypePVC,
-	)
-
-	return &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        pod.Name,
-			Namespace:   namespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Spec: podSpec,
-	}
-}
-
 func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, namespace string, jobName string) (string, error) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -417,7 +347,7 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, name
 			return "", fmt.Errorf("get checkpoint job %s/%s: %w", namespace, jobName, err)
 		}
 
-		status := strings.TrimSpace(job.Annotations[snapshotpodspec.CheckpointStatusAnnotation])
+		status := strings.TrimSpace(job.Annotations[snapshotworkload.CheckpointStatusAnnotation])
 		if status == "completed" {
 			return status, nil
 		}
@@ -477,7 +407,7 @@ func waitForRestore(ctx context.Context, clientset kubernetes.Interface, namespa
 			return "", fmt.Errorf("get restore pod %s/%s: %w", namespace, podName, err)
 		}
 
-		status := strings.TrimSpace(pod.Annotations[snapshotpodspec.RestoreStatusAnnotation])
+		status := strings.TrimSpace(pod.Annotations[snapshotworkload.RestoreStatusAnnotation])
 		if status == "completed" {
 			return status, nil
 		}

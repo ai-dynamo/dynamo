@@ -15,9 +15,9 @@ import (
 	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -99,33 +99,33 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 
 func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
 	containerID := req.ContainerID
-	pid, ociSpec, err := common.ResolveContainer(ctx, ctrd, containerID)
+	pid, ociSpec, err := snapshotruntime.ResolveContainer(ctx, ctrd, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve container: %w", err)
 	}
 
 	var hostCgroupPath string
-	if cgPath, err := common.ResolveCgroupRootFromHostPID(pid); err == nil && cgPath != "" {
-		hostCgroupPath = filepath.Join(common.HostCgroupPath, cgPath)
+	if cgPath, err := snapshotruntime.ResolveCgroupRootFromHostPID(pid); err == nil && cgPath != "" {
+		hostCgroupPath = filepath.Join(snapshotruntime.HostCgroupPath, cgPath)
 	}
 
-	rootFS, err := common.GetRootFS(pid)
+	rootFS, err := snapshotruntime.GetRootFS(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rootfs: %w", err)
 	}
 
-	upperDir, err := common.GetOverlayUpperDir(pid)
+	upperDir, err := snapshotruntime.GetOverlayUpperDir(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get overlay upperdir: %w", err)
 	}
 
-	mountInfo, err := common.ReadMountInfo(pid)
+	mountInfo, err := snapshotruntime.ReadMountInfo(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse mountinfo: %w", err)
 	}
-	mounts := common.ClassifyMounts(mountInfo, ociSpec, rootFS)
+	mounts := snapshotruntime.ClassifyMounts(mountInfo, ociSpec, rootFS)
 
-	netNSInode, err := common.GetNetNSInode(pid)
+	netNSInode, err := snapshotruntime.GetNetNSInode(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get net namespace inode: %w", err)
 	}
@@ -133,7 +133,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	// Read stdio FD targets (like runc's getPipeFds / descriptors.json).
 	stdioFDs := make([]string, 3)
 	for i := range 3 {
-		target, err := os.Readlink(fmt.Sprintf("%s/%d/fd/%d", common.HostProcPath, pid, i))
+		target, err := os.Readlink(fmt.Sprintf("%s/%d/fd/%d", snapshotruntime.HostProcPath, pid, i))
 		if err != nil {
 			log.V(1).Info("Failed to readlink stdio FD", "fd", i, "error", err)
 			continue
@@ -142,11 +142,11 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	}
 
 	// Discover CUDA processes and GPU UUIDs
-	allPIDs := common.ProcessTreePIDs(pid)
+	allPIDs := snapshotruntime.ProcessTreePIDs(pid)
 	cudaHostPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
 	cudaNamespacePIDs := make([]int, 0, len(cudaHostPIDs))
 	for _, cudaHostPID := range cudaHostPIDs {
-		process, err := common.ReadProcessDetails(common.HostProcPath, cudaHostPID)
+		process, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, cudaHostPID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
 		}
@@ -166,7 +166,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		}
 		if len(gpuUUIDs) == 0 {
 			log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
-			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, common.HostProcPath, pid)
+			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, pid)
 			if err != nil {
 				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 			}
@@ -235,10 +235,10 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// propagated — a checkpoint without overlay diffs is still valid for restore
 	// (the base container image provides the filesystem).
 	if state.UpperDir != "" {
-		if _, err := common.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
+		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
 			log.Error(err, "Failed to capture rootfs diff")
 		}
-		if _, err := common.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
+		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
 			log.Error(err, "Failed to capture deleted files")
 		}
 	}

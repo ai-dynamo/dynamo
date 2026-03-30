@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,7 +44,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
 const (
@@ -493,8 +492,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		location = ""
 		storageType = ""
 	}
-	snapshotpodspec.ApplyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, hash, location, string(storageType))
-
 	hasPodInfoVolume := false
 	for _, volume := range podTemplate.Spec.Volumes {
 		if volume.Name == consts.PodInfoVolumeName {
@@ -590,7 +587,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			},
 		)
 		if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok && gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0 {
-			mainContainer.Command, mainContainer.Args = snapshotpodspec.WrapWithCudaCheckpointLaunchJob(mainContainer.Command, mainContainer.Args)
+			mainContainer.Command, mainContainer.Args = snapshotworkload.WrapWithCudaCheckpointLaunchJob(mainContainer.Command, mainContainer.Args)
 		}
 
 		// Override probes for checkpoint mode
@@ -629,12 +626,9 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 	}
 
-	// Set restart policy to Never for Jobs
-	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
-
 	// Apply seccomp profile to block io_uring syscalls
 	// CRIU doesn't support io_uring memory mappings, so we must block these syscalls
-	snapshotpodspec.InjectLocalhostSeccompProfile(&podTemplate.Spec, consts.SeccompProfilePath)
+	snapshotworkload.InjectLocalhostSeccompProfile(&podTemplate.Spec, consts.SeccompProfilePath)
 
 	// Build the Job
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
@@ -649,24 +643,15 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		ttlSeconds = &defaultTTL
 	}
 
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: ckpt.Namespace,
-			Labels: map[string]string{
-				consts.KubeLabelCheckpointHash: hash,
-			},
-		},
-		Spec: batchv1.JobSpec{
-			ActiveDeadlineSeconds: activeDeadlineSeconds,
-			// Checkpoint jobs are single-attempt to keep snapshot-agent status terminal.
-			BackoffLimit:            ptr.To[int32](0),
-			TTLSecondsAfterFinished: ttlSeconds,
-			Template:                *podTemplate,
-		},
-	}
-
-	return job
+	return snapshotworkload.NewCheckpointJob(podTemplate, snapshotworkload.CheckpointJobOptions{
+		Namespace:             ckpt.Namespace,
+		Name:                  jobName,
+		SnapshotID:            hash,
+		Location:              location,
+		StorageType:           string(storageType),
+		ActiveDeadlineSeconds: activeDeadlineSeconds,
+		TTLSecondsAfterFinish: ttlSeconds,
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.

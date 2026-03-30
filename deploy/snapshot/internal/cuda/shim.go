@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
 const (
@@ -57,13 +57,13 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, cudaCheckpointBinary, args...)
-	details := common.ProcessDetails{
+	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,
 		InnermostPID:  pid,
 		NamespacePIDs: []int{pid},
 	}
-	if process, err := common.ReadProcessDetails("/proc", pid); err == nil {
+	if process, err := snapshotruntime.ReadProcessDetails("/proc", pid); err == nil {
 		details = process
 	}
 	start := time.Now()

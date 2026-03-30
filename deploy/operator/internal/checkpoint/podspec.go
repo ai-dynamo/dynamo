@@ -23,7 +23,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotpodspec "github.com/ai-dynamo/dynamo/deploy/snapshot/podspec"
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -37,7 +37,7 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		location = checkpointInfo.Location
 		storageType = string(checkpointInfo.StorageType)
 	}
-	snapshotpodspec.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
+	snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -81,7 +81,7 @@ func InjectCheckpointIntoPodSpec(
 		mainContainer.Args = nil
 	}
 
-	snapshotpodspec.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
+	snapshotworkload.InjectLocalhostSeccompProfile(podSpec, commonconsts.SeccompProfilePath)
 
 	storageType := configv1alpha1.CheckpointStorageTypePVC
 	var storageConfig *configv1alpha1.CheckpointStorageConfiguration
@@ -213,8 +213,8 @@ func injectCheckpointStorage(
 		if info.Location == "" {
 			info.Location = fmt.Sprintf("%s/%s", storageConfig.PVC.BasePath, info.Hash)
 		}
-		snapshotpodspec.InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
-		snapshotpodspec.InjectCheckpointVolumeMount(mainContainer, storageConfig.PVC.BasePath)
+		snapshotworkload.InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
+		snapshotworkload.InjectCheckpointVolumeMount(mainContainer, storageConfig.PVC.BasePath)
 		return nil
 	}
 }

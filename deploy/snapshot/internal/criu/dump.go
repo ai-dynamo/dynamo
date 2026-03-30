@@ -12,7 +12,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -35,7 +35,7 @@ func BuildDumpOptions(
 		maskedPaths = state.OCISpec.Linux.MaskedPaths
 	}
 
-	externalized, skipped := common.BuildMountPolicy(state.Mounts, state.RootFS, maskedPaths)
+	externalized, skipped := snapshotruntime.BuildMountPolicy(state.Mounts, state.RootFS, maskedPaths)
 	log.V(1).Info("Resolved mount policy for CRIU dump",
 		"externalized_count", len(externalized),
 		"skipped_count", len(skipped),

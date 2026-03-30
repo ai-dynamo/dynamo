@@ -1,6 +1,11 @@
-package podspec
+package workload
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+)
 
 const (
 	CheckpointSourceLabel          = "nvidia.com/snapshot-is-checkpoint-source"
@@ -142,4 +147,57 @@ func InjectRestoreTUN(podSpec *corev1.PodSpec, container *corev1.Container) {
 		Name:      RestoreTUNVolumeName,
 		MountPath: "/dev/net/tun",
 	})
+}
+
+type CheckpointJobOptions struct {
+	Namespace             string
+	Name                  string
+	SnapshotID            string
+	Location              string
+	StorageType           string
+	ActiveDeadlineSeconds *int64
+	TTLSecondsAfterFinish *int32
+}
+
+func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) *batchv1.Job {
+	podTemplate = podTemplate.DeepCopy()
+	if podTemplate.Labels == nil {
+		podTemplate.Labels = map[string]string{}
+	}
+	if podTemplate.Annotations == nil {
+		podTemplate.Annotations = map[string]string{}
+	}
+	ApplyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.SnapshotID, opts.Location, opts.StorageType)
+	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
+
+	return &batchv1.Job{
+		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      opts.Name,
+			Namespace: opts.Namespace,
+			Labels: map[string]string{
+				CheckpointHashLabel: opts.SnapshotID,
+			},
+		},
+		Spec: batchv1.JobSpec{
+			ActiveDeadlineSeconds:   opts.ActiveDeadlineSeconds,
+			BackoffLimit:            ptr.To[int32](0),
+			TTLSecondsAfterFinished: opts.TTLSecondsAfterFinish,
+			Template:                *podTemplate,
+		},
+	}
+}
+
+func NewRestorePod(pod *corev1.Pod, namespace string, snapshotID string, location string, storageType string) *corev1.Pod {
+	pod = pod.DeepCopy()
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, snapshotID, location, storageType)
+	pod.Namespace = namespace
+	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	return pod
 }

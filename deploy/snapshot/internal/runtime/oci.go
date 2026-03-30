@@ -1,6 +1,5 @@
-// Package common provides low-level container, process, and device primitives
-// shared across snapshot packages.
-package common
+// Package runtime provides low-level host and container-runtime primitives for snapshot execution.
+package runtime
 
 import (
 	"context"

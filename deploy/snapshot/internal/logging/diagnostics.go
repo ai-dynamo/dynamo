@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
 // LogProcessDiagnostics logs process state and CRIU restore log for debugging a failed restore.
@@ -30,7 +30,7 @@ func LogProcessDiagnostics(procRoot string, pid int, restoreLogPath string, log 
 
 	// Exit code from /proc/stat
 	if data, err := os.ReadFile(filepath.Join(procRoot, pidStr, "stat")); err == nil {
-		if ws, err := common.ParseProcExitCode(string(data)); err == nil {
+		if ws, err := snapshotruntime.ParseProcExitCode(string(data)); err == nil {
 			entry.Info("Process exit code", "exit_status", ws.ExitStatus(), "term_signal", ws.Signal(), "core_dumped", ws.CoreDump())
 		}
 	}

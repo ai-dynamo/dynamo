@@ -9,9 +9,9 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -59,10 +59,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (int, error) {
 	// Apply rootfs diff inside the namespace (target root is /)
-	if err := common.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
+	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
 		return 0, fmt.Errorf("rootfs diff failed: %w", err)
 	}
-	if err := common.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
+	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
 		log.Error(err, "Failed to apply deleted files")
 	}
 
@@ -71,11 +71,11 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		return 0, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
 	}
 
-	if err := common.RemountProcSys(true); err != nil {
+	if err := snapshotruntime.RemountProcSys(true); err != nil {
 		return 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
 	defer func() {
-		if err := common.RemountProcSys(false); err != nil {
+		if err := snapshotruntime.RemountProcSys(false); err != nil {
 			log.Error(err, "Failed to remount /proc/sys read-only after restore")
 		}
 	}()
@@ -85,7 +85,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if err != nil {
 		return 0, err
 	}
-	processes, err := common.ReadProcessTable("/proc")
+	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
 		return 0, fmt.Errorf("failed to read restored process table: %w", err)
 	}
@@ -109,7 +109,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
 	// current visible restored PIDs before invoking cuda-checkpoint.
 	if !m.CUDA.IsEmpty() {
-		restorePIDs, err := common.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
+		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
 		if err != nil {
 			return 0, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
 		}

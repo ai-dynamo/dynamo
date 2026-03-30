@@ -16,10 +16,10 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -63,7 +63,7 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 
 	// Validate restored process from the host side
 	procRoot := filepath.Join(snap.TargetRoot, "proc")
-	if err := common.ValidateProcessState(procRoot, restoredPID); err != nil {
+	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
 		restoreLogPath := filepath.Join(snap.TargetRoot, "var", "criu-work", criu.RestoreLogFilename)
 		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
 		return 0, fmt.Errorf("restored process failed post-restore validation: %w", err)
@@ -105,13 +105,13 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		containerName = "main"
 	}
 
-	placeholderPID, _, err := common.ResolveContainerByPod(ctx, ctrd, req.PodName, req.PodNamespace, containerName)
+	placeholderPID, _, err := snapshotruntime.ResolveContainerByPod(ctx, ctrd, req.PodName, req.PodNamespace, containerName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.Info("Resolved placeholder container", "pid", placeholderPID)
 
-	cgroupRoot, err := common.ResolveCgroupRootFromHostPID(placeholderPID)
+	cgroupRoot, err := snapshotruntime.ResolveCgroupRootFromHostPID(placeholderPID)
 	if err != nil {
 		log.Error(err, "Failed to resolve placeholder cgroup root; proceeding without explicit cgroup remap")
 		cgroupRoot = ""
@@ -128,7 +128,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		}
 		if len(targetGPUUUIDs) == 0 {
 			log.Info("PodResources API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
-			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, common.HostProcPath, placeholderPID)
+			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, placeholderPID)
 			if err != nil {
 				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed for restore target: %w", err)
 			}
@@ -151,7 +151,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 	return &types.RestoreContainerSnapshot{
 		CheckpointPath: checkpointPath,
 		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", common.HostProcPath, placeholderPID),
+		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
 	}, nil
