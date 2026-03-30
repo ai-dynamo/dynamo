@@ -676,7 +676,19 @@ impl ModelDeploymentCard {
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
             (
                 Some(ModelInfoType::from_disk(local_path)?),
-                Some(TokenizerKind::from_disk(local_path)?),
+                match TokenizerKind::from_disk(local_path) {
+                    Ok(tk) => Some(tk),
+                    Err(e) => {
+                        tracing::warn!(
+                            %e,
+                            "No supported tokenizer found in {} \
+                             (expected tokenizer.json or a tiktoken file). \
+                             Features that depend on the Rust tokenizer will not be available.",
+                            local_path.display()
+                        );
+                        None
+                    }
+                },
                 GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
@@ -996,13 +1008,23 @@ impl PromptFormatterArtifact {
     }
 
     pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
-        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
-            Ok(f) => Ok(Some(Self::HfChatTemplate {
+        // Try chat_template.jinja first (raw Jinja template)
+        if let Ok(f) = CheckedFile::from_disk(directory.join("chat_template.jinja")) {
+            return Ok(Some(Self::HfChatTemplate {
                 file: f,
                 is_custom: false,
-            })),
-            Err(_) => Ok(None),
+            }));
         }
+
+        // Try chat_template.json (JSON file with "chat_template" key, e.g. Qwen3-Omni)
+        if let Ok(f) = CheckedFile::from_disk(directory.join("chat_template.json")) {
+            return Ok(Some(Self::HfChatTemplate {
+                file: f,
+                is_custom: false,
+            }));
+        }
+
+        Ok(None)
     }
 }
 

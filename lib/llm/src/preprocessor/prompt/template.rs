@@ -68,10 +68,35 @@ impl PromptFormatter {
                             mdc.display_name
                         );
                     };
-                    let chat_template =
+                    let raw_content =
                         std::fs::read_to_string(chat_template_file).with_context(|| {
                             format!("fs:read_to_string '{}'", chat_template_file.display())
                         })?;
+
+                    // If the file is JSON (e.g. chat_template.json from Qwen3-Omni),
+                    // extract the "chat_template" field rather than using raw content as Jinja.
+                    let chat_template =
+                        if chat_template_file.extension().is_some_and(|ext| ext == "json") {
+                            let json: serde_json::Value =
+                                serde_json::from_str(&raw_content).with_context(|| {
+                                    format!(
+                                        "Failed to parse '{}' as JSON",
+                                        chat_template_file.display()
+                                    )
+                                })?;
+                            json.get("chat_template")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "'{}' does not contain a 'chat_template' string field",
+                                        chat_template_file.display()
+                                    )
+                                })?
+                                .to_string()
+                        } else {
+                            raw_content
+                        };
+
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
                 }
                 Self::from_parts(
