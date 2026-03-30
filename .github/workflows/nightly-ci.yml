@@ -4,9 +4,6 @@
 name: Nightly CI Pipeline
 
 on:
-  push:
-    branches:
-      - ops-4120/no-cache-nightly # todo remove this after testing
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
   workflow_dispatch:  # Allow manual triggering for testing
@@ -150,7 +147,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, clean-k8s-builder ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:
       contents: read
     steps:
