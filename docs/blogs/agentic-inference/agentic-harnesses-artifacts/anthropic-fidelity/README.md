@@ -5,7 +5,7 @@
 - **Model**: `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4`
 - **Node**: B200 GPU
 - **Access**: SSH tunnel `localhost:8000`
-- **Dynamo flags**: `--enable-anthropic-api`, `--dyn-reasoning-parser nemotron_nas`
+- **Dynamo flags**: `--enable-anthropic-api`, `--dyn-reasoning-parser nemotron_deci`
 - **Date**: 2026-03-19
 
 ## Summary of Findings
