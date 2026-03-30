@@ -260,7 +260,7 @@ class DiffusionEngine:
 
         req = DiffusionRequest(
             request_id=0,
-            prompt=prompt,
+            prompt=[prompt],
             negative_prompt=negative_prompt,
             height=height,
             width=width,

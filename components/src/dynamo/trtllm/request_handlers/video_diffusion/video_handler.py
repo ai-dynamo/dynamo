@@ -239,8 +239,9 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Encode media based on what the pipeline returned
             if output.video is not None:
-                # Video output: torch.Tensor (num_frames, H, W, 3) uint8 → MP4
-                frames_np = output.video.cpu().numpy()
+                # MediaOutput.video is (B, T, H, W, C) uint8 since TRT-LLM rc9;
+                # squeeze the batch dim to get (T, H, W, C) for MP4 encoding.
+                frames_np = output.video[0].cpu().numpy()
                 logger.info(
                     f"Request {request_id}: encoding video output "
                     f"(shape={frames_np.shape}) to MP4 at {fps} fps"
