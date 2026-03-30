@@ -136,7 +136,7 @@ class VirtualConnector(PlannerConnector):
         """Validate the deployment"""
         pass
 
-    async def wait_for_deployment_ready(self):
+    async def wait_for_deployment_ready(self, include_planner: bool = True):
         """Wait for the deployment to be ready"""
         await self._wait_for_scaling_completion()
 

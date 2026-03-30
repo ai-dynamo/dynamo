@@ -17,7 +17,15 @@ class DecodePlanner(BasePlanner):
     component_type = SubComponentType.DECODE
 
     def load_plan_adjustment(self) -> Optional[int]:
-        """Load-based scaling decision for decode. Returns desired_replicas or None."""
+        """Load-based scaling decision for decode using FPM data.
+
+        For each engine, estimates next decode ITL:
+        - Uses scheduled + queued decode KV tokens + avg decode length
+        - Predicts wall time via regression
+
+        Scale up if ALL engines' estimated ITL > SLA.
+        Scale down if ALL engines' estimated ITL < SLA * sensitivity.
+        """
         if not self.itl_regression.has_sufficient_data():
             logger.info(
                 f"ITL regression: insufficient data ({self.itl_regression.num_observations}"
@@ -25,64 +33,38 @@ class DecodePlanner(BasePlanner):
             )
             return None
 
-        x_sla = self.itl_regression.predict_x_from_sla(self.config.itl)
-        if x_sla is None:
+        fpm_stats = self._get_fpm_stats()
+        if not fpm_stats:
             return None
-
-        if x_sla <= 0:
-            logger.warning(
-                f"ITL SLA unachievable: x_sla={x_sla:.1f}, "
-                "skipping load-based decode scaling"
-            )
-            return None
-
-        if not self.cached_load_metrics.recent:
-            return None
-
-        recent = self.cached_load_metrics.recent
 
         num_workers = self.shared_state.num_d_workers
         if num_workers == 0:
             return None
 
-        logger.info(
-            f"Load-based decode: x_sla={x_sla:.1f}, workers={num_workers}, "
-            f"slope={self.itl_regression.slope:.6f}, intercept={self.itl_regression.intercept:.3f}"
-        )
-
-        # Scale up: ALL workers above target (use recent metrics)
-        all_above = all(
-            m.get("active_decode_blocks", 0.0) > x_sla for m in recent.values()
-        )
-        if all_above:
+        estimated_itls: list[float] = []
+        for (wid, dp), fpm in fpm_stats.items():
+            scheduled_kv = fpm.scheduled_requests.sum_decode_kv_tokens
+            queued_kv = fpm.queued_requests.sum_decode_kv_tokens
+            est = self.itl_regression.estimate_next_itl(
+                scheduled_decode_kv=scheduled_kv,
+                queued_decode_kv=queued_kv,
+            )
+            if est is None:
+                continue
+            est_ms = est * 1000
+            estimated_itls.append(est_ms)
             logger.info(
-                f"Load-based decode: ALL workers above target ({x_sla:.1f}), "
-                f"scaling up to {num_workers + 1}"
+                f"Decode engine {wid}:dp{dp}: estimated ITL {est_ms:.2f}ms "
+                f"(sched_kv={scheduled_kv}, queued_kv={queued_kv}, "
+                f"avg_decode_len={self.itl_regression.avg_decode_length:.1f})"
             )
-            return num_workers + 1
 
-        # Scale down: ALL workers below boundary (use recent metrics)
-        if num_workers > 1:
-            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
-            boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
-            all_below = all(
-                m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
-            )
-            if all_below:
-                if num_workers - 1 < self.config.min_endpoint:
-                    logger.info(
-                        f"Load-based decode: ALL workers below boundary ({boundary:.1f}), "
-                        f"but cannot scale down below min_endpoint ({self.config.min_endpoint}); "
-                        f"maintaining {num_workers} decode workers"
-                    )
-                    return num_workers
-                logger.info(
-                    f"Load-based decode: ALL workers below boundary ({boundary:.1f}), "
-                    f"scaling down to {num_workers - 1}"
-                )
-                return num_workers - 1
-
-        return None
+        return self._load_based_scaling_decision_from_estimates(
+            estimates=estimated_itls,
+            sla=self.config.itl,
+            num_workers=num_workers,
+            label="decode ITL",
+        )
 
     def _update_correction_factor(self) -> bool:
         if self.shared_state.num_d_workers == 0:
